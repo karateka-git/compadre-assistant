@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.domain.users.entities import AppUser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -16,9 +19,7 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import Analyze
 from obs_chat_bot.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
 from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
 from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlCommand, ProcessArticleUrlError
-from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse, IncomingResult
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult, should_acknowledge
-from obs_chat_bot.capabilities.obsidian.presentation.responses import EMPTY_MESSAGE_REPLY, format_obsidian_message_result
+from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
 from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
 from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianProposalConfirmationService,
@@ -51,7 +52,7 @@ from obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extr
 )
 from obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
 from obs_chat_bot.capabilities.obsidian.data.http.url_safety import UnsafeUrlError, validate_public_http_url
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubGatewayError
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubConnectionCompletion, GitHubGatewayError
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_article_analyzer import OpenAIArticleAnalyzer
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_obsidian_proposal_generator import (
     OpenAIObsidianProposalGenerator,
@@ -214,30 +215,6 @@ def validate_external_http_url(url: str) -> str | None:
     except (UnsafeUrlError, ValueError) as error:
         return str(error)
     return None
-
-
-def present_obsidian_result(result: IncomingResult) -> IncomingResponse | None:
-    """Преобразует результат Obsidian в нейтральный ответ канала.
-
-    Args:
-        result: Результат общего входа или возможности.
-
-    Returns:
-        Нейтральный ответ либо `None` для чужого результата.
-    """
-    if isinstance(result, ObsidianMessageResult):
-        return IncomingResponse(format_obsidian_message_result(result), result.error)
-    return None
-
-
-def should_acknowledge_obsidian(text: str) -> bool:
-    """Возвращает предикат ранней квитанции обработки Obsidian."""
-    return should_acknowledge(text)
-
-
-def empty_obsidian_message_reply() -> str:
-    """Возвращает текст подсказки для пустого сообщения Obsidian."""
-    return EMPTY_MESSAGE_REPLY
 
 
 def create_obsidian_process_runtime(
@@ -639,7 +616,33 @@ def create_obsidian_entry(
         if gateway is not None and hasattr(gateway, "fetch_vault_snapshot")
         else None
     )
+
+    def complete_github(
+        repository_arguments: str,
+        app_user: AppUser,
+        completion: GitHubConnectionCompletion,
+    ) -> ObsidianMessageResult:
+        """Собирает продолжение фоновой операции на новом коротком соединении."""
+        with connect_database(database_path) as completion_connection:
+            handler = create_obsidian_entry(
+                completion_connection,
+                database_path=database_path,
+                openai_base_url=openai_base_url,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+                runtime=runtime,
+                use_case_factory=use_case_factory,
+                analysis_use_case_factory=analysis_use_case_factory,
+                chunking_config=chunking_config,
+                embedding_config=embedding_config,
+                created_note_tag=created_note_tag,
+            )
+            return handler._complete_github_registration(
+                repository_arguments, app_user, completion
+            )
+
     return ObsidianMessageHandler(
+        github_completion_processor=complete_github,
         article_url_use_case=article_url_use_case,
         article_analysis_use_case=article_analysis_use_case,
         incoming_message_repository=create_incoming_message_repository(connection),

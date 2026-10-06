@@ -14,7 +14,8 @@ from aiogram.exceptions import (
 )
 from aiogram.methods import GetMe
 
-from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse
+from obs_chat_bot.core.presentation.incoming.events import ReplyAddress
+from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
 from obs_chat_bot.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,
@@ -154,10 +155,16 @@ class TelegramMessage:
     chat = Chat()
 
     def __init__(self) -> None:
+        self.bot = self
         self.answers: list[str] = []
 
     async def answer(self, text: str) -> None:
         """Сохраняет отправленный текст."""
+        self.answers.append(text)
+
+    async def send_message(self, *, chat_id: str, text: str) -> None:
+        """Доставляет фоновый ответ по сохранённому адресу fake bot."""
+        self.sent_chat_id = chat_id
         self.answers.append(text)
 
 
@@ -197,18 +204,17 @@ class RateLimitedTelegramMessage(TelegramMessage):
 class TelegramBotHelpersTest(unittest.TestCase):
     """Проверяет helpers, не требующие реального Telegram."""
 
-    def test_handler_uses_injected_ack_before_worker(self) -> None:
+    def test_handler_delivers_general_progress_reply(self) -> None:
         """Telegram отправляет раннюю квитанцию по сигналу возможности."""
         aiogram = FakeAiogram()
         message = TelegramMessage()
         message.text = "долгое действие"
         message.message_id = 7
         message.from_user = None
-        seen_before_processing: list[str] = []
 
         def processor(_event, _completion_handler) -> IncomingResponse:
             """Сохраняет ответы, отправленные до вызова worker."""
-            seen_before_processing.extend(message.answers)
+            _completion_handler(BackgroundReply(_event.reply_address, IncomingResponse("Принял, обрабатываю")))
             return IncomingResponse("Готово")
 
         _register_handlers(
@@ -216,12 +222,11 @@ class TelegramBotHelpersTest(unittest.TestCase):
             aiogram,
             incoming_message_processor=processor,
             logger=logging.getLogger("test.telegram.ack"),
-            should_send_processing_ack=lambda text: text == "долгое действие",
         )
         asyncio.run(aiogram.dispatcher.included_router.handler(message))
 
-        self.assertEqual(len(seen_before_processing), 1)
-        self.assertIn("Принял, обрабатываю", seen_before_processing[0])
+        self.assertEqual(len(message.answers), 2)
+        self.assertIn("Принял, обрабатываю", message.answers[0])
         self.assertEqual(message.answers[-1], "Готово")
 
     def test_split_telegram_message_keeps_chunks_under_limit(self) -> None:
@@ -488,10 +493,10 @@ class TelegramBotHelpersTest(unittest.TestCase):
             )
             await asyncio.to_thread(
                 handler,
-                IncomingResponse(
+                BackgroundReply(ReplyAddress("telegram", "100"), IncomingResponse(
                     "https://github.com/apps/obs-chat-bot/installations/new "
                     "Contents: read and write"
-                ),
+                )),
             )
             for _attempt in range(10):
                 if message.answers:

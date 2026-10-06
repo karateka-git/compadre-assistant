@@ -6,7 +6,8 @@ from unittest.mock import patch
 from urllib.error import URLError
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse
+from obs_chat_bot.core.presentation.incoming.events import ReplyAddress
+from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
 from obs_chat_bot.presentation.vk.bot import (
     LongPollServer,
     VkApiClient,
@@ -165,13 +166,14 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(client.messages[0][0], 22)
         self.assertIn("Пришли ссылку", client.messages[0][1])
 
-    def test_handle_update_uses_injected_ack_before_processing(self) -> None:
+    def test_handle_update_delivers_general_progress_reply(self) -> None:
         """VK отправляет квитанцию по нейтральному сигналу до запуска worker."""
         client = FakeVkClient()
         seen_before_processing: list[str] = []
 
         def processor(_message: IncomingEvent, _handler) -> IncomingResponse:
             """Запоминает уже отправленные ответы к началу обработки."""
+            _handler(BackgroundReply(_message.reply_address, IncomingResponse("Принял, обрабатываю")))
             seen_before_processing.extend(text for _, text in client.messages)
             return IncomingResponse("Готово")
 
@@ -186,7 +188,6 @@ class VkBotTest(unittest.TestCase):
             incoming_message_processor=processor,
             client=client,
             logger=logging.getLogger("test.vk.ack"),
-            should_send_processing_ack=lambda text: text == "долгое действие",
         )
 
         self.assertEqual(len(seen_before_processing), 1)
@@ -272,10 +273,10 @@ class VkBotTest(unittest.TestCase):
             logger=logging.getLogger("test.vk.github_completion"),
         )
         completion_handlers[0](
-            IncomingResponse(
+            BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse(
                 "https://github.com/apps/obs-chat-bot/installations/new "
                 "Contents: read and write"
-            )
+            ))
         )
 
         self.assertEqual(client.messages[-1][0], 22)
@@ -309,8 +310,8 @@ class VkBotTest(unittest.TestCase):
                 logger=logging.getLogger("test.vk.github_completion_routing"),
             )
 
-        completion_handlers[1](IncomingResponse("Второй чат готов."))
-        completion_handlers[0](IncomingResponse("Первый чат готов."))
+        completion_handlers[1](BackgroundReply(ReplyAddress("vk", "44"), IncomingResponse("Второй чат готов.")))
+        completion_handlers[0](BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse("Первый чат готов.")))
         self.assertEqual(
             client.messages[-2:],
             [(44, "Второй чат готов."), (22, "Первый чат готов.")],

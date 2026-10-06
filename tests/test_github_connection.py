@@ -373,8 +373,11 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=lambda _seconds: None,
         )
 
+        self.assertIsNone(coordinator.get_pending(42))
         first = coordinator.start(42)
         self.assertTrue(gateway.polled.wait(timeout=1))
+        observed = coordinator.get_pending(42)
+        self.assertEqual(observed.authorization, first.authorization)
         repeated = coordinator.start(42)
         gateway.release_poll.set()
         self.assertTrue(gateway.finished.wait(timeout=1))
@@ -407,6 +410,8 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
 
         first.start(42)
         self.assertTrue(gateway.polled.wait(timeout=1))
+        observed = second.get_pending(42)
+        self.assertEqual(observed.status, GitHubConnectionStartStatus.IN_PROGRESS)
         blocked = second.start(42)
         gateway.release_poll.set()
         self.assertTrue(gateway.finished.wait(timeout=1))

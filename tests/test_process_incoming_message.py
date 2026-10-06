@@ -19,6 +19,9 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleResult,
 )
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
+from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
+from test_incoming_boundary import MemoryChatModes
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
 from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
@@ -206,7 +209,7 @@ class FakeReviewUseCase:
         self.error = error
         self.commands = []
         self.result = SimpleNamespace(
-            proposal=SimpleNamespace(action=ObsidianProposalAction.ADD)
+            proposal=replace(_proposal(), action=ObsidianProposalAction.ADD, proposed_markdown="Заметка", reasoning="Причина", target_path="Notes/article.md")
         )
 
     def execute(self, command):
@@ -371,6 +374,10 @@ class FakeGitHubConnectionStarter:
         self.error = error
         self.app_user_ids: list[int] = []
         self.completion_handler = None
+
+    def get_pending(self, _app_user_id: int) -> GitHubConnectionStartResult | None:
+        """Не сообщает об авторизации до её запуска тестом."""
+        return None
 
     @property
     def installation_url(self) -> str:
@@ -572,15 +579,50 @@ class FakeVaultSyncManager:
         )
 
 
-def _make_use_case(**dependencies: object) -> IncomingMessageDispatcher:
-    """Собирает отдельные общий вход и Obsidian handler для сценариев теста."""
+class RecordingObsidianHandler(ObsidianMessageHandler):
+    """Наблюдает внутренний результат presentation для детальных предметных проверок."""
+
+    def _process(self, *args, **kwargs):
+        self.subject_result = super()._process(*args, **kwargs)
+        return self.subject_result
+
+
+class PresentationScenario:
+    """Разделяет наблюдение subject-результата и общую маршрутизацию в тестах."""
+
+    def __init__(self, dispatcher, handler, modes) -> None:
+        self.dispatcher = dispatcher
+        self.handler = handler
+        self.modes = modes
+
+    def execute(self, event, completion_handler=None):
+        """Запускает настоящий handle и наблюдает внутренний subject-результат."""
+        user = self.dispatcher._user_identity_service.resolve(IncomingIdentity(event.channel, event.external_user_id or event.chat_id, event.chat_id))
+        if user is not None and user.display_name is not None:
+            # Эти проверки задают уже выбранный Obsidian-сценарий; отсутствие режима
+            # и явный enter проверяются отдельно через публичный API диспетчера.
+            self.modes.save(ChatMode(ChatModeKey(user.id, event.channel, event.chat_id), "obsidian"))
+        self.handler.subject_result = None
+        result = self.dispatcher._execute(event, completion_handler)
+        return self.handler.subject_result or result
+
+
+def _make_use_case(**dependencies: object) -> PresentationScenario:
+    """Собирает новый контракт и наблюдение внутренних результатов Obsidian."""
     identity_service = dependencies.pop("user_identity_service", None)
-    obsidian = ObsidianMessageHandler(**dependencies)
-    return IncomingMessageDispatcher(
-        incoming_capability_id="test-capability",
-        incoming_capability=obsidian,
+    if identity_service is None:
+        identity_service = FakeUserIdentityService()
+        identity_service.app_user = AppUser(id=1, display_name="Тест")
+    obsidian = RecordingObsidianHandler(**dependencies)
+    modes = MemoryChatModes()
+    dispatcher = IncomingMessageDispatcher(
+        registry=CapabilityRegistry((obsidian,)),
         user_identity_service=identity_service,
+        chat_mode_repository=modes,
+        profile_setup=obsidian,
+        registration_capability_id="obsidian",
     )
+    return PresentationScenario(dispatcher, obsidian, modes)
 
 
 class IncomingMessageDispatcherTest(unittest.TestCase):
@@ -833,7 +875,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/status"))
 
-        self.assertEqual(result.type, ObsidianResultType.STATUS)
+        self.assertEqual(result.type, IncomingMessageResultType.PROFILE_STATUS)
         self.assertEqual(result.app_user.id, 42)
 
     def test_repository_url_starts_github_authorization_when_account_is_missing(
@@ -1024,13 +1066,10 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         )
 
         self.assertEqual(started.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
-        self.assertEqual(
-            [completion.type for completion in completions],
-            [
-                ObsidianResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
-                ObsidianResultType.GITHUB_VAULT_SELECTED,
-            ],
-        )
+        self.assertEqual(len(completions), 3)  # Квитанция, авторизация, выбранный vault.
+        self.assertIn("первую синхронизацию", completions[1].response.text)
+        self.assertIn("octocat/notes", completions[2].response.text)
+        self.assertTrue(all(reply.address == _telegram_message("текст").reply_address for reply in completions))
         self.assertEqual(
             manager.calls[-1],
             (42, "https://github.com/octocat/notes", "Vault"),
@@ -1060,14 +1099,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(
-            completions[0].type,
-            ObsidianResultType.GITHUB_APP_REQUIRED,
-        )
-        self.assertEqual(
-            completions[0].installation_url,
-            starter.installation_url,
-        )
+        self.assertIn(starter.installation_url, completions[-1].response.text)
 
     def test_article_is_blocked_until_registration_has_vault(self) -> None:
         """Статьи не обрабатываются до завершения подключения Obsidian vault."""

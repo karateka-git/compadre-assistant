@@ -48,6 +48,12 @@ class ChatCommand(StrEnum):
         "",
         "показать список доступных команд",
     )
+    EXIT = (
+        "/exit",
+        CommandSection.BASIC,
+        "",
+        "выйти из активного режима этого чата",
+    )
     REGISTER = (
         "/register",
         CommandSection.BASIC,

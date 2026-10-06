@@ -10,6 +10,25 @@ from obs_chat_bot.core.data.config import ConfigError, load_config
 class ConfigTest(unittest.TestCase):
     """Проверяет чтение `.env`-настроек."""
 
+    def test_enabled_capabilities_default_and_explicit_disable(self) -> None:
+        """Список входов имеет явное значение по умолчанию и допускает пустую сборку."""
+        with patch.dict(os.environ, _env(), clear=True):
+            self.assertEqual(load_config().enabled_capabilities, ("obsidian",))
+        with patch.dict(os.environ, _env(ENABLED_CAPABILITIES=""), clear=True):
+            self.assertEqual(load_config().enabled_capabilities, ())
+
+    def test_enabled_capabilities_reject_duplicate_and_malformed_ids(self) -> None:
+        """Core проверяет форму ID, а доступные конкретные сборки знает composition root."""
+        for identifiers in ("obsidian,obsidian", "???"):
+            with self.subTest(identifiers=identifiers), patch.dict(os.environ, _env(ENABLED_CAPABILITIES=identifiers), clear=True):
+                with self.assertRaisesRegex(ConfigError, "ENABLED_CAPABILITIES"):
+                    load_config()
+
+    def test_core_config_accepts_arbitrary_capability_id(self) -> None:
+        """Новый ID добавляется в конфигурацию без изменений core."""
+        with patch.dict(os.environ, _env(ENABLED_CAPABILITIES="fake"), clear=True):
+            self.assertEqual(load_config().enabled_capabilities, ("fake",))
+
     def test_load_config_reads_optional_debug_flag(self) -> None:
         """APP_DEBUG включает debug-режим, но остаётся опциональным."""
         with patch.dict(os.environ, _env(APP_DEBUG="true"), clear=True):

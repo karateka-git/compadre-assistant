@@ -12,8 +12,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import ChannelCompletionHandler, IncomingResponse
-from obs_chat_bot.core.presentation.responses import PROCESSING_ACK_TEXT
+from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
 from obs_chat_bot.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send,
@@ -51,8 +50,7 @@ def run_vk_bot(
     group_id: int,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    should_send_processing_ack: Callable[[str], bool] | None = None,
-    empty_message_reply: str = "Пришли текстовое сообщение.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
@@ -64,7 +62,6 @@ def run_vk_bot(
         group_id: ID группы VK.
         incoming_message_processor: Общий обработчик входящих сообщений.
         logger: Логгер runtime-событий.
-        should_send_processing_ack: Признак долгой обработки от возможности.
         empty_message_reply: Ответ на сообщение без текста.
         client: Необязательный VK API-клиент для тестов.
         retry_sleeper: Функция ожидания между повторами.
@@ -114,7 +111,6 @@ def run_vk_bot(
                     incoming_message_processor=incoming_message_processor,
                     client=api_client,
                     logger=logger,
-                    should_send_processing_ack=should_send_processing_ack,
                     empty_message_reply=empty_message_reply,
                 )
             except Exception as error:
@@ -270,8 +266,7 @@ def _handle_update(
     incoming_message_processor: IncomingMessageProcessor,
     client: VkApiClient,
     logger: logging.Logger,
-    should_send_processing_ack: Callable[[str], bool] | None = None,
-    empty_message_reply: str = "Пришли текстовое сообщение.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
 ) -> None:
     if update.get("type") != "message_new":
         return
@@ -294,14 +289,6 @@ def _handle_update(
             logger=logger,
         )
         return
-    if should_send_processing_ack is not None and should_send_processing_ack(text):
-        _safe_send_vk_message(
-            client,
-            peer_id=peer_id,
-            text=PROCESSING_ACK_TEXT,
-            logger=logger,
-        )
-
     incoming_message = IncomingEvent(
         channel="vk",
         chat_id=str(peer_id),
@@ -311,7 +298,6 @@ def _handle_update(
     )
     completion_handler = _create_vk_completion_handler(
         client,
-        peer_id=peer_id,
         logger=logger,
     )
     result = incoming_message_processor(incoming_message, completion_handler)
@@ -320,7 +306,7 @@ def _handle_update(
     _safe_send_vk_message(
         client,
         peer_id=peer_id,
-        text=result.text,
+        text=result.render_text(),
         logger=logger,
     )
 
@@ -379,16 +365,18 @@ def _vk_retry_delay(error: Exception, failed_attempt: int) -> float | None:
 def _create_vk_completion_handler(
     client: Any,
     *,
-    peer_id: int,
     logger: logging.Logger,
 ) -> ChannelCompletionHandler:
     """Создаёт callback фонового результата в исходный VK peer."""
 
-    def notify(result: IncomingResponse) -> None:
+    def notify(reply: BackgroundReply) -> None:
+        """Доставляет нейтральный ответ в сохранённый VK-адрес."""
+        if reply.address.channel != "vk":
+            raise ValueError("VK adapter получил адрес другого канала")
         _safe_send_vk_message(
             client,
-            peer_id=peer_id,
-            text=result.text,
+            peer_id=int(reply.address.chat_id),
+            text=reply.response.render_text(),
             logger=logger,
         )
 

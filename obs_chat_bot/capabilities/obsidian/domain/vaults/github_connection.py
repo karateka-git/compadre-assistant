@@ -79,23 +79,24 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
         """Возвращает challenge немедленно и запускает polling в daemon thread."""
         if app_user_id <= 0:
             raise ValueError("app_user_id must be positive")
-        pending = self._local_pending_result(app_user_id)
+        pending = self.get_pending(app_user_id)
         if pending is not None:
             return pending
 
-        now = self._clock()
-        if self._state_store.has_active_attempt(app_user_id=app_user_id, now=now):
-            return GitHubConnectionStartResult(
-                status=GitHubConnectionStartStatus.IN_PROGRESS,
-                installation_url=self._installation_url,
-            )
         return self._start_device_flow(app_user_id, completion_handler)
 
-    def _local_pending_result(
+    def get_pending(
         self,
         app_user_id: int,
     ) -> GitHubConnectionStartResult | None:
-        """Возвращает challenge текущего процесса, если он уже существует."""
+        """Читает ожидающую авторизацию текущего или соседнего процесса.
+
+        Args:
+            app_user_id: Внутренний пользователь приложения.
+
+        Returns:
+            Текущий challenge или признак незавершённой shared attempt без запуска API.
+        """
         with self._lock:
             if app_user_id in self._sessions:
                 authorization = self._sessions[app_user_id].authorization
@@ -109,6 +110,13 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
                     installation_url=self._installation_url,
                     authorization=authorization,
                 )
+        if self._state_store.has_active_attempt(
+            app_user_id=app_user_id, now=self._clock()
+        ):
+            return GitHubConnectionStartResult(
+                status=GitHubConnectionStartStatus.IN_PROGRESS,
+                installation_url=self._installation_url,
+            )
         return None
 
     def _start_device_flow(

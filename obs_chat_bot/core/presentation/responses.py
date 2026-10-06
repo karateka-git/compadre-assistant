@@ -11,8 +11,12 @@ PROCESSING_ACK_TEXT = "Принял, обрабатываю. Это может �
 def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
     """Формирует только общие ответы регистрации и связывания каналов."""
     match result.type:
+        case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS:
+            return result.capability_reply or "Выбери возможность через `/help`."
+        case IncomingMessageResultType.MODE_EXITED:
+            return f"Режим этого чата завершён.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.MODE_UNAVAILABLE:
-            return "Сохранённый режим этого чата недоступен в текущей сборке. Общие команды доступны через `/help`."
+            return f"Сохранённая возможность этого чата отключена или недоступна. Выйти: `/exit`.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.UNKNOWN_IDENTITY:
             return _format_unknown_identity_response()
         case IncomingMessageResultType.HELP:

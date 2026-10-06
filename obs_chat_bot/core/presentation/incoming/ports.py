@@ -5,13 +5,13 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import Protocol
 
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from obs_chat_bot.core.domain.users.entities import AppUser
 
 
 @dataclass(frozen=True, slots=True)
 class OnboardingState:
-    """Описывает готовность подключаемой возможности для нового пользователя."""
+    """Описывает готовность прежнего сценария настройки профиля до шага 2.3."""
 
     ready: bool
     summary: str | None = None
@@ -27,7 +27,7 @@ class HelpSection:
 
 @dataclass(frozen=True, slots=True)
 class CapabilityHelp:
-    """Дополняет общую справку командами и инструкциями возможности."""
+    """Дополняет общую справку инструкциями возможности."""
 
     sections: tuple[HelpSection, ...] = ()
     registration_description: str | None = None
@@ -35,89 +35,132 @@ class CapabilityHelp:
 
 
 @dataclass(frozen=True, slots=True)
+class ConfirmationAction:
+    """Описывает адресное действие; конкретный сценарий определяет его команду."""
+
+    action_id: str
+    label: str
+    command: str
+
+
+@dataclass(frozen=True, slots=True)
 class IncomingResponse:
-    """Передаёт каналу готовый текст без предметной модели результата."""
+    """Передаёт готовое содержимое и действия без предметных моделей."""
 
     text: str
     error: Exception | None = None
+    actions: tuple[ConfirmationAction, ...] = ()
+
+    def render_text(self) -> str:
+        """Добавляет доступные команды действий для текстовых каналов."""
+        if not self.actions:
+            return self.text
+        return "\n".join(
+            (self.text, *(f"{action.label}: {action.command}" for action in self.actions))
+        )
 
 
-ChannelCompletionHandler = Callable[[IncomingResponse], None]
+@dataclass(frozen=True, slots=True)
+class BackgroundReply:
+    """Связывает последующий общий ответ с сохранённым адресом канала."""
+
+    address: ReplyAddress
+    response: IncomingResponse
 
 
-class OnboardingReplyKind(StrEnum):
-    """Выбирает этап общей регистрации для текста подключённой возможности."""
-
-    START = "start"  # Повторное приветствие готового профиля.
-    REQUIRED = "required"  # Профилю ещё нужна настройка возможности.
-    ALREADY_REGISTERED = "already_registered"  # Повторная регистрация готового профиля.
-    NAME_SAVED = "name_saved"  # Имя сохранено, настройка возможности продолжается.
+ChannelCompletionHandler = Callable[[BackgroundReply], None]
 
 
-class IncomingResult(Protocol):
-    """Описывает минимальный ответ возможности для общего входа."""
+class ReplyDeliveryPort(Protocol):
+    """Доставляет последующий ответ, не раскрывая SDK обработчику возможности."""
 
-    type: StrEnum
-    app_user: AppUser | None
-    error: Exception | None
+    def send(self, address: ReplyAddress, response: IncomingResponse) -> None:
+        """Отправляет готовый ответ по сохранённому адресу канала."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class HandlerContext:
+    """Передаёт проверенного пользователя и независимую фоновую доставку."""
+
+    app_user: AppUser
+    delivery: ReplyDeliveryPort | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityDescriptor:
+    """Объявляет устойчивый ID, команду входа и общую справку возможности."""
+
+    capability_id: str
+    entry_command: str
+    description: str
+    help: CapabilityHelp = CapabilityHelp()
+
+
+class CapabilityMode(StrEnum):
+    """Сообщает ядру, продолжает ли возможность режим конкретного чата."""
+
+    ACTIVE = "active"  # Продолжить или установить длительный режим после успеха.
+    COMPLETE = "complete"  # Завершить текущий сценарий; одноразовый вход сохраняет прежний режим.
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityResult:
+    """Содержит общий ответ и состояние режима без предметного результата."""
+
+    response: IncomingResponse
+    mode: CapabilityMode = CapabilityMode.ACTIVE
 
 
 class IncomingCapabilityPort(Protocol):
-    """Принимает сообщение уже идентифицированного пользователя."""
+    """Задаёт единый вход подключаемой возможности для любого канала."""
 
-    def onboarding_state(self, app_user: AppUser) -> OnboardingState:
-        """Возвращает готовность возможности для завершения регистрации.
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        """Возвращает статическое описание возможности для реестра."""
+        ...
+
+    def enter(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+        """Входит в возможность и показывает актуальное состояние сценария.
 
         Args:
-            app_user: Идентифицированный пользователь приложения.
+            context: Проверенный пользователь и доступная фоновая доставка.
+            event: Исходное событие с командой входа.
 
         Returns:
-            Нейтральную готовность и краткое описание состояния.
+            Общий ответ и признак длительного либо завершённого сценария.
         """
+        ...
+
+    def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+        """Обрабатывает сообщение уже выбранного режима.
+
+        Args:
+            context: Проверенный пользователь и доступная фоновая доставка.
+            event: Исходный текст без предметного анализа в ядре.
+
+        Returns:
+            Общий ответ и признак продолжения либо завершения режима.
+        """
+        ...
+
+
+class OnboardingReplyKind(StrEnum):
+    """Выбирает этап сохраняемого до шага 2.3 сценария настройки профиля."""
+
+    START = "start"  # Приветствие готового профиля.
+    REQUIRED = "required"  # Профилю ещё нужна настройка возможности.
+    ALREADY_REGISTERED = "already_registered"  # Повторная регистрация.
+    NAME_SAVED = "name_saved"  # Первичное имя сохранено.
+
+
+class ProfileSetupPort(Protocol):
+    """Сохраняет прежнюю связь регистрации и настройки до отдельного шага 2.3."""
+
+    def onboarding_state(self, app_user: AppUser) -> OnboardingState:
+        """Возвращает нейтральную готовность настройки профиля."""
         ...
 
     def onboarding_reply(self, kind: OnboardingReplyKind, app_user: AppUser) -> str:
-        """Возвращает готовый текст этапа регистрации или профиля.
-
-        Args:
-            kind: Тип общего сценария регистрации.
-            app_user: Идентифицированный пользователь.
-
-        Returns:
-            Готовый текст ответа для канала.
-        """
-        ...
-
-    def help(self) -> CapabilityHelp:
-        """Возвращает дополнительные разделы общей справки."""
-        ...
-
-    def confirmation_missing_reply(self) -> str:
-        """Возвращает подсказку при подтверждении без зарегистрированного профиля."""
-        ...
-
-    def status(self, app_user: AppUser) -> IncomingResult:
-        """Возвращает состояние возможности для общей команды статуса.
-
-        Args:
-            app_user: Идентифицированный пользователь приложения.
-        """
-        ...
-
-    def handle(
-        self,
-        app_user: AppUser,
-        event: IncomingEvent,
-        completion_handler: Callable[[IncomingResult], None] | None = None,
-    ) -> IncomingResult:
-        """Обрабатывает предметный текст или команду и вызывает callback.
-
-        Args:
-            app_user: Идентифицированный пользователь приложения.
-            event: Нейтральное событие исходного чата.
-            completion_handler: Доставка фонового результата, если она нужна.
-
-        Returns:
-            Структурированный ответ возможности.
-        """
+        """Оформляет этап прежней настройки профиля."""
         ...

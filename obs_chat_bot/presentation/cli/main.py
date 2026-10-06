@@ -14,9 +14,7 @@ from obs_chat_bot.bootstrap import (
     GitHubConnectionStarter,
     ProcessArticleUrlUseCaseFactory,
     create_obsidian_process_runtime,
-    empty_obsidian_message_reply,
     process_url_for_cli,
-    should_acknowledge_obsidian,
     validate_external_http_url,
     validate_github_app_config,
     AnalysisSmokeError,
@@ -150,6 +148,7 @@ def main() -> int:
             chunking_config=config.chunking,
             embedding_config=config.embedding,
             obsidian_created_note_tag=config.obsidian_created_note_tag,
+            enabled_capabilities=config.enabled_capabilities,
             logger=logger,
         )
 
@@ -165,6 +164,7 @@ def main() -> int:
             chunking_config=config.chunking,
             embedding_config=config.embedding,
             obsidian_created_note_tag=config.obsidian_created_note_tag,
+            enabled_capabilities=config.enabled_capabilities,
             logger=logger,
         )
 
@@ -477,6 +477,7 @@ def run_telegram_bot_command(
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     github_connection_starter: GitHubConnectionStarter | None = None,
+    enabled_capabilities: tuple[str, ...] = ("obsidian",),
 ) -> int:
     """Запускает Telegram adapter как CLI-команду.
 
@@ -495,18 +496,20 @@ def run_telegram_bot_command(
         use_case_factory: Factory use case, полезная для тестов без polling.
         analysis_use_case_factory: Factory use case анализа, полезная для тестов.
         github_connection_starter: Готовый coordinator для тестов.
+        enabled_capabilities: Явно подключённые ID возможностей.
 
     Returns:
         Ноль при штатной остановке, иначе единицу.
     """
     try:
+        app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
         if not initialize_database(database_path, logger):
             return 1
         runtime = create_obsidian_process_runtime(
             database_path=database_path,
             github_app_config=github_app_config,
             github_connection_starter=github_connection_starter,
-        )
+        ) if "obsidian" in enabled_capabilities else None
         run_telegram_bot(
             token=token,
             proxy_url=proxy_url,
@@ -524,16 +527,15 @@ def run_telegram_bot_command(
                     embedding_config=embedding_config,
                     obsidian_created_note_tag=obsidian_created_note_tag,
                     completion_handler=completion_handler,
+                    enabled_capabilities=enabled_capabilities,
                 )
             ),
             logger=logger,
-            should_send_processing_ack=should_acknowledge_obsidian,
-            empty_message_reply=empty_obsidian_message_reply(),
         )
     except KeyboardInterrupt:
         logger.info("Telegram bot stopped")
         return 0
-    except (MigrationError, OSError, sqlite3.Error) as error:
+    except (MigrationError, OSError, sqlite3.Error, ValueError) as error:
         logger.error("Could not prepare Telegram bot: %s", error)
         return 1
     except TelegramBotError as error:
@@ -559,6 +561,7 @@ def run_vk_bot_command(
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     github_connection_starter: GitHubConnectionStarter | None = None,
+    enabled_capabilities: tuple[str, ...] = ("obsidian",),
 ) -> int:
     """Запускает VK adapter как CLI-команду.
 
@@ -577,6 +580,7 @@ def run_vk_bot_command(
         use_case_factory: Factory use case для тестов.
         analysis_use_case_factory: Factory analysis use case для тестов.
         github_connection_starter: Готовый coordinator для тестов.
+        enabled_capabilities: Явно подключённые ID возможностей.
 
     Returns:
         Ноль при штатной остановке, иначе единицу.
@@ -585,13 +589,14 @@ def run_vk_bot_command(
         return 2
 
     try:
+        app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
         if not initialize_database(database_path, logger):
             return 1
         runtime = create_obsidian_process_runtime(
             database_path=database_path,
             github_app_config=github_app_config,
             github_connection_starter=github_connection_starter,
-        )
+        ) if "obsidian" in enabled_capabilities else None
         run_vk_bot(
             token=token,
             group_id=group_id,
@@ -609,16 +614,15 @@ def run_vk_bot_command(
                     embedding_config=embedding_config,
                     obsidian_created_note_tag=obsidian_created_note_tag,
                     completion_handler=completion_handler,
+                    enabled_capabilities=enabled_capabilities,
                 )
             ),
             logger=logger,
-            should_send_processing_ack=should_acknowledge_obsidian,
-            empty_message_reply=empty_obsidian_message_reply(),
         )
     except KeyboardInterrupt:
         logger.info("VK bot stopped")
         return 0
-    except (MigrationError, OSError, sqlite3.Error) as error:
+    except (MigrationError, OSError, sqlite3.Error, ValueError) as error:
         logger.error("Could not prepare VK bot: %s", error)
         return 1
     except VkBotError as error:

@@ -147,6 +147,7 @@ class AppConfig:
     github_app: GitHubAppConfig | None = None
     embedding: EmbeddingConfig | None = None
     obsidian_created_note_tag: str | None = _DEFAULT_OBSIDIAN_CREATED_NOTE_TAG
+    enabled_capabilities: tuple[str, ...] = ("obsidian",)
 
     @property
     def data_dir(self) -> Path:
@@ -157,6 +158,7 @@ class AppConfig:
         """Возвращает диагностические настройки без значений credentials."""
         return {
             "app_env": self.app_env,
+            "enabled_capabilities": ",".join(self.enabled_capabilities),
             "database_path": str(self.database_path),
             "telegram_bot_token": _presence(self.telegram_bot_token),
             "telegram_proxy_url": _presence(self.telegram_proxy_url or ""),
@@ -251,6 +253,7 @@ def load_config() -> AppConfig:
         github_app=_load_github_app_config(),
         embedding=_load_embedding_config(),
         obsidian_created_note_tag=_get_obsidian_created_note_tag(),
+        enabled_capabilities=_get_enabled_capabilities(),
     )
 
 
@@ -468,3 +471,17 @@ def _load_embedding_config() -> EmbeddingConfig | None:
         )
     except ValueError as error:
         raise ConfigError(f"Invalid embedding configuration: {error}") from error
+
+
+def _get_enabled_capabilities() -> tuple[str, ...]:
+    """Читает явный список ID; пустая строка отключает все возможности."""
+    identifiers = tuple(
+        part.strip()
+        for part in os.getenv("ENABLED_CAPABILITIES", "obsidian").split(",")
+        if part.strip()
+    )
+    if len(set(identifiers)) != len(identifiers):
+        raise ConfigError("Конфликт ID в ENABLED_CAPABILITIES")
+    if any(re.fullmatch(r"[a-z][a-z0-9_-]*", identifier) is None for identifier in identifiers):
+        raise ConfigError("Некорректный ID в ENABLED_CAPABILITIES")
+    return identifiers

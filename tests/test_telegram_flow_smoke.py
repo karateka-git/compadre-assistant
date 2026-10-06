@@ -11,6 +11,10 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
 from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
+from obs_chat_bot.core.domain.users.entities import AppUser
+from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from test_incoming_boundary import FakeIdentity
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
@@ -26,7 +30,6 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository 
 )
 from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.presentation.responses import format_obsidian_message_result
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -66,20 +69,20 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                 )
                 message_repository = SQLiteIncomingMessageRepository(connection)
 
+                identity = FakeIdentity()
+                identity.user = AppUser(id=1, display_name="Тест")
                 incoming_use_case = IncomingMessageDispatcher(
-                    incoming_capability_id="test-capability",
-                    incoming_capability=ObsidianMessageHandler(
+                    registry=CapabilityRegistry((ObsidianMessageHandler(
                         article_url_use_case=process_use_case,
                         article_analysis_use_case=analysis_use_case,
                         incoming_message_repository=message_repository,
-                    ),
+                    ),)),
+                    user_identity_service=identity,
+                    chat_mode_repository=SQLiteChatModeRepository(connection),
                 )
-                first_reply = format_obsidian_message_result(
-                    incoming_use_case.execute(_message("10"))
-                )
-                second_reply = format_obsidian_message_result(
-                    incoming_use_case.execute(_message("11"))
-                )
+                incoming_use_case.execute(IncomingEvent(channel="telegram", chat_id="100", message_id="9", text="/obsidian"))
+                first_reply = incoming_use_case.execute(_message("10")).text
+                second_reply = incoming_use_case.execute(_message("11")).text
 
                 counts = _read_counts(connection)
 

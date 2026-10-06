@@ -10,12 +10,12 @@ from obs_chat_bot.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
     IncomingCapabilityPort,
     IncomingResponse,
-    IncomingResult,
 )
 from obs_chat_bot.core.presentation.incoming.dispatcher import (
-    ProcessIncomingMessageResult,
     IncomingMessageDispatcher,
 )
+from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
+from obs_chat_bot.core.presentation.incoming.ports import ProfileSetupPort
 from obs_chat_bot.core.domain.users.identity import UserIdentityService
 from obs_chat_bot.capabilities.obsidian.bootstrap import (
     AnalyzeArticleUseCaseFactory,
@@ -24,10 +24,7 @@ from obs_chat_bot.capabilities.obsidian.bootstrap import (
     ProcessArticleUrlUseCaseFactory,
     create_obsidian_entry,
     create_obsidian_process_runtime,
-    empty_obsidian_message_reply,
-    present_obsidian_result,
     process_url_for_cli,
-    should_acknowledge_obsidian,
     validate_external_http_url,
     validate_github_app_config,
 )
@@ -49,7 +46,6 @@ from obs_chat_bot.core.data.sqlite.user_identity_repository import (
     SQLiteIdentityLinkTokenRepository,
     SQLiteIdentityRebindConfirmationRepository,
 )
-from obs_chat_bot.core.presentation.responses import format_incoming_message_result
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -66,42 +62,52 @@ def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentity
 
 def create_incoming_message_dispatcher(
     *,
-    incoming_capability: IncomingCapabilityPort,
-    incoming_capability_id: str,
-    user_identity_service: UserIdentityService | None,
-    chat_mode_repository: ChatModeRepository | None = None,
+    capabilities: tuple[IncomingCapabilityPort, ...],
+    user_identity_service: UserIdentityService,
+    chat_mode_repository: ChatModeRepository,
+    profile_setup: ProfileSetupPort | None = None,
+    registration_capability_id: str | None = None,
 ) -> IncomingMessageDispatcher:
-    """Подключает публичный вход возможности к общему сценарию пользователя.
+    """Явно регистрирует собранные возможности и общий сценарий профиля.
 
     Args:
-        incoming_capability: Вход зарегистрированной возможности.
-        incoming_capability_id: Устойчивый ID подключённой возможности.
-        user_identity_service: Общий сервис identities либо `None` для тестов.
-        chat_mode_repository: Хранилище маршрута конкретного чата.
+        capabilities: Только включённые обработчики, включая пользовательские реализации.
+        user_identity_service: Общий сервис проверенных identities.
+        chat_mode_repository: Хранилище режима конкретного чата.
+        profile_setup: Временный прежний onboarding до шага 2.3.
+        registration_capability_id: Вход для продолжения прежнего onboarding.
 
     Returns:
-        Сценарий обработки сообщений любого канала.
+        Диспетчер с проверенным реестром точек входа.
+
+    Raises:
+        ValueError: Реестр содержит конфликт ID или команд входа.
     """
     return IncomingMessageDispatcher(
-        incoming_capability=incoming_capability,
-        incoming_capability_id=incoming_capability_id,
+        registry=CapabilityRegistry(capabilities),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
+        profile_setup=profile_setup,
+        registration_capability_id=registration_capability_id,
     )
 
 
-def present_channel_result(result: IncomingResult) -> IncomingResponse:
-    """Преобразует общий или зарегистрированный результат в ответ каналу.
+def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None:
+    """Проверяет выбранные ID относительно явно доступных сборок приложения.
+
+    Args:
+        enabled_capabilities: ID из конфигурации запуска.
 
     Raises:
-        TypeError: Если результат не поддерживается текущей сборкой.
+        ValueError: Список содержит повторный или неизвестный ID.
     """
-    if isinstance(result, ProcessIncomingMessageResult):
-        return IncomingResponse(format_incoming_message_result(result), result.error)
-    capability_response = present_obsidian_result(result)
-    if capability_response is not None:
-        return capability_response
-    raise TypeError(f"Unsupported incoming result: {type(result).__name__}")
+    if len(set(enabled_capabilities)) != len(enabled_capabilities):
+        raise ValueError("Конфликт ID включённых возможностей")
+    unknown = set(enabled_capabilities) - {"obsidian"}
+    if unknown:
+        raise ValueError(
+            f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
+        )
 
 
 def process_channel_incoming_message(
@@ -118,6 +124,7 @@ def process_channel_incoming_message(
     embedding_config: EmbeddingConfig | None = None,
     obsidian_created_note_tag: str | None = "knowledge-catcher",
     completion_handler: ChannelCompletionHandler | None = None,
+    enabled_capabilities: tuple[str, ...] = ("obsidian",),
 ) -> IncomingResponse:
     """Обрабатывает одно событие канала с отдельным SQLite-соединением.
 
@@ -133,11 +140,13 @@ def process_channel_incoming_message(
         chunking_config: Настройки разбиения заметок.
         embedding_config: Настройки semantic index.
         obsidian_created_note_tag: Служебный тег новых заметок.
-        completion_handler: Доставка фонового ответа в исходный чат.
+        completion_handler: Доставка фонового ответа в сохранённый адрес канала.
+        enabled_capabilities: Явно включённые ID текущей сборки.
 
     Returns:
         Готовый нейтральный ответ каналу.
     """
+    validate_enabled_capabilities(enabled_capabilities)
     with connect_database(database_path) as connection:
         entry = create_obsidian_entry(
             connection,
@@ -151,21 +160,13 @@ def process_channel_incoming_message(
             chunking_config=chunking_config,
             embedding_config=embedding_config,
             created_note_tag=obsidian_created_note_tag,
-        )
+        ) if "obsidian" in enabled_capabilities else None
         use_case = create_incoming_message_dispatcher(
-            incoming_capability=entry,
-            incoming_capability_id="obsidian",
+            capabilities=(entry,) if entry else (),
+            profile_setup=entry,
+            registration_capability_id="obsidian" if entry else None,
             user_identity_service=create_user_identity_service(connection),
             chat_mode_repository=SQLiteChatModeRepository(connection),
         )
 
-        def present_completion(result: IncomingResult) -> None:
-            """Передаёт фоновой результат каналу после форматирования."""
-            if completion_handler is not None:
-                completion_handler(present_channel_result(result))
-
-        result = use_case.execute(
-            incoming_message,
-            present_completion if completion_handler is not None else None,
-        )
-        return present_channel_result(result)
+        return use_case.execute(incoming_message, completion_handler)

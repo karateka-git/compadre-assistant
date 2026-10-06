@@ -12,7 +12,8 @@ from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.core.data.sqlite.user_identity_repository import SQLiteAppUserRepository, SQLiteExternalIdentityRepository
 from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
 from obs_chat_bot.core.domain.users.entities import IncomingIdentity
-from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher, IncomingMessageResultType
+from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from test_incoming_boundary import FakeCapability, FakeIdentity
 from sqlite_helpers import ensure_app_user
@@ -83,7 +84,9 @@ class ChatModesTest(unittest.TestCase):
             capability = FakeCapability()
             with connect_database(self.database_path) as connection:
                 repository = SQLiteChatModeRepository(connection)
-                dispatcher = IncomingMessageDispatcher(incoming_capability=capability, incoming_capability_id="selected", user_identity_service=identity, chat_mode_repository=repository)
+                dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=identity, chat_mode_repository=repository)
+                if repository.get(ChatModeKey(23, "telegram", "chat")) is None:
+                    dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="0", text="/selected"))
                 dispatcher.execute(event)
                 self.assertEqual(repository.get(ChatModeKey(23, "telegram", "chat")).capability_id, "selected")
             self.assertEqual(capability.calls, [(identity.user, event)])
@@ -95,15 +98,15 @@ class ChatModesTest(unittest.TestCase):
             mode = ChatMode(ChatModeKey(23, "telegram", "chat"), "unavailable")
             repository.save(mode)
             capability = FakeCapability()
-            dispatcher = IncomingMessageDispatcher(incoming_capability=capability, incoming_capability_id="selected", user_identity_service=FakeIdentity(), chat_mode_repository=repository)
+            dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=FakeIdentity(), chat_mode_repository=repository)
             result = dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="1", text="да"))
-            self.assertEqual(result.type, IncomingMessageResultType.MODE_UNAVAILABLE)
+            self.assertIn("отключена", result.text)
             self.assertEqual(capability.calls, [])
             self.assertEqual(repository.get(mode.key), mode)
             help_result = dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="2", text="/help"))
-            self.assertEqual(help_result.type, IncomingMessageResultType.HELP)
+            self.assertIn("/selected", help_result.text)
 
-    def test_composition_root_saves_default_without_general_message_journal(self) -> None:
+    def test_composition_root_requires_explicit_entry_without_general_message_journal(self) -> None:
         """Реальный общий вход подключает SQLite-режим и не журналирует обычный текст."""
         with connect_database(self.database_path) as connection:
             SQLiteExternalIdentityRepository(connection).create(app_user_id=1, identity=IncomingIdentity("telegram", "external", "chat"))
@@ -112,7 +115,7 @@ class ChatModesTest(unittest.TestCase):
         self.assertTrue(response.text)
         with connect_database(self.database_path) as connection:
             mode = SQLiteChatModeRepository(connection).get(ChatModeKey(1, "telegram", "chat"))
-            self.assertEqual(mode.capability_id, "obsidian")
+            self.assertIsNone(mode)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM incoming_messages").fetchone()[0], 0)
 
 

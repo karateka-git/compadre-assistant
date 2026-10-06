@@ -32,9 +32,6 @@ _ARTICLE_STATUS_LABELS: dict[ArticleStatus, str] = {
 }
 
 
-EMPTY_MESSAGE_REPLY = "Пришли текстовое сообщение со ссылкой на статью."
-
-
 def format_article_processing_result(result: ProcessArticleUrlResult) -> str:
     """Формирует человекочитаемый ответ по результату article pipeline.
 
@@ -96,22 +93,6 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> str:
             return (
                 "Сейчас нет действия, которое нужно подтвердить.\n"
                 "Сначала пришли ссылку на другой repository или `/link <код>`."
-            )
-        case ObsidianResultType.STATUS:
-            if result.app_user is None:
-                return "Бот работает, но пользователь не определен."
-            if not _has_selected_vault(result):
-                return (
-                    "Бот работает.\n"
-                    f"Профиль: {_display_name(result)}.\n"
-                    "Obsidian vault ещё не подключён.\n"
-                    "Пришли ссылку на GitHub-репозиторий с vault."
-                )
-            return (
-                "Бот работает.\n"
-                f"Профиль: {_display_name(result)}.\n"
-                f"{_format_selected_vault(result)}\n"
-                "Можно прислать ссылку на статью, `/link_code` или `/reanalyze <ID статьи>`."
             )
         case ObsidianResultType.GITHUB_CONNECT_STARTED:
             return _format_github_connect_response(result, repeated=False)
@@ -497,20 +478,6 @@ def _display_name(result: ObsidianMessageResult) -> str:
     if result.app_user is None or result.app_user.display_name is None:
         return "пользователь"
     return result.app_user.display_name
-
-
-def _format_selected_vault(result: ObsidianMessageResult) -> str:
-    """Форматирует активный vault понятным пользователю образом."""
-    vault = result.selected_vault
-    if vault is None:
-        return "Obsidian vault ещё не подключён."
-    root = f", папка: `{vault.root_path}`" if vault.root_path else ""
-    return f"Подключён vault: `{vault.owner}/{vault.repository}`{root}."
-
-
-def _has_selected_vault(result: ObsidianMessageResult) -> bool:
-    """Проверяет, выбран ли vault для пользовательского статуса."""
-    return result.selected_vault is not None
 
 
 def _article_action_text(result: ProcessArticleUrlResult) -> str:

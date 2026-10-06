@@ -319,6 +319,10 @@ class GitHubConnectionStarter(Protocol):
     def installation_url(self) -> str:
         """Возвращает страницу установки и настройки GitHub App."""
 
+    def get_pending(self, app_user_id: int) -> GitHubConnectionStartResult | None:
+        """Читает актуальную ожидающую авторизацию без запуска нового Device Flow."""
+        ...
+
     def start(
         self,
         app_user_id: int,

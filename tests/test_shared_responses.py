@@ -89,7 +89,7 @@ class TelegramResponsesTest(unittest.TestCase):
         reply = format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.HELP,
-                capability_help=_obsidian_handler().help(),
+                capability_help=_obsidian_handler().descriptor.help,
             )
         )
 
@@ -329,7 +329,7 @@ class TelegramResponsesTest(unittest.TestCase):
             reply,
             "obsChatBot запущен.\n"
             "Рад тебя видеть, Влад.\n"
-            "Можешь прислать ссылку на статью или отправить `/help`.",
+            "Войди через `/obsidian`, чтобы прислать ссылку на статью. Справка: `/help`.",
         )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
@@ -488,19 +488,14 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("поисковый индекс пока не обновлён", reply)
         self.assertIn("/github_sync", reply)
 
-    def test_format_incoming_message_result_reports_status(self) -> None:
-        """Команда статуса сообщает имя и состояние vault без внутреннего ID."""
-        reply = format_obsidian_message_result(
-            ObsidianMessageResult(
-                type=ObsidianResultType.STATUS,
-                app_user=AppUser(id=42, display_name="Влад"),
-            )
-        )
-
-        self.assertIn("Бот работает", reply)
+    def test_format_profile_status_preserves_general_text(self) -> None:
+        """Общий статус профиля не требует модели vault."""
+        reply = format_incoming_message_result(ProcessIncomingMessageResult(
+            type=IncomingMessageResultType.PROFILE_STATUS,
+            capability_reply="Профиль: Влад.\nРежим этого чата: не выбран.",
+        ))
         self.assertIn("Влад", reply)
-        self.assertIn("ещё не подключён", reply)
-        self.assertNotIn("42", reply)
+        self.assertIn("не выбран", reply)
 
     def test_format_github_authorization_returns_device_url_and_code(self) -> None:
         """Оба channel adapters получают безопасную инструкцию Device Flow."""

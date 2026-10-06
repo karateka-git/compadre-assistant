@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from types import SimpleNamespace
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import ChannelCompletionHandler, IncomingResponse
-from obs_chat_bot.core.presentation.responses import PROCESSING_ACK_TEXT
+from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
 from obs_chat_bot.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,
@@ -54,8 +54,7 @@ def run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    should_send_processing_ack: Callable[[str], bool] | None = None,
-    empty_message_reply: str = "Пришли текстовое сообщение.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
 ) -> None:
     """Запускает Telegram-бота в polling-режиме.
 
@@ -64,7 +63,6 @@ def run_telegram_bot(
         proxy_url: Адрес прокси для Bot API или `None` для прямого подключения.
         incoming_message_processor: Обработчик входящих сообщений.
         logger: Логгер безопасных runtime-событий.
-        should_send_processing_ack: Признак долгой обработки от подключённой возможности.
         empty_message_reply: Ответ на сообщение без текста.
     """
     try:
@@ -74,7 +72,6 @@ def run_telegram_bot(
                 proxy_url=proxy_url,
                 incoming_message_processor=incoming_message_processor,
                 logger=logger,
-                should_send_processing_ack=should_send_processing_ack,
                 empty_message_reply=empty_message_reply,
             )
         )
@@ -92,8 +89,7 @@ async def _run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    should_send_processing_ack: Callable[[str], bool] | None = None,
-    empty_message_reply: str = "Пришли текстовое сообщение.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
 ) -> None:
     """Асинхронно запускает polling Telegram-бота."""
     aiogram = _load_aiogram()
@@ -105,7 +101,6 @@ async def _run_telegram_bot(
         aiogram,
         incoming_message_processor=incoming_message_processor,
         logger=logger,
-        should_send_processing_ack=should_send_processing_ack,
         empty_message_reply=empty_message_reply,
     )
 
@@ -248,8 +243,7 @@ def _register_handlers(
     *,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    should_send_processing_ack: Callable[[str], bool] | None = None,
-    empty_message_reply: str = "Пришли текстовое сообщение.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
     router = aiogram.Router()
@@ -271,13 +265,6 @@ def _register_handlers(
             loop=asyncio.get_running_loop(),
             logger=logger,
         )
-        if should_send_processing_ack is not None and should_send_processing_ack(message.text):
-            await safe_send_telegram_reply(
-                message,
-                PROCESSING_ACK_TEXT,
-                logger=logger,
-            )
-
         result = await asyncio.to_thread(
             incoming_message_processor,
             incoming_message,
@@ -285,7 +272,7 @@ def _register_handlers(
         )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
-        await safe_send_telegram_reply(message, result.text, logger=logger)
+        await safe_send_telegram_reply(message, result.render_text(), logger=logger)
 
     dispatcher.include_router(router)
 
@@ -298,20 +285,38 @@ def _create_telegram_completion_handler(
 ) -> ChannelCompletionHandler:
     """Создаёт thread-safe callback фонового результата в исходный Telegram chat."""
 
-    def notify(result: IncomingResponse) -> None:
-        text = result.text
+    bot = message.bot
+
+    def notify(reply: BackgroundReply) -> None:
+        """Планирует доставку нейтрального ответа в сохранённый Telegram-адрес."""
+        if reply.address.channel != "telegram":
+            raise ValueError("Telegram adapter получил адрес другого канала")
+        target = _TelegramReplyTarget(bot, reply.address.chat_id)
+        text = reply.response.render_text()
         try:
             asyncio.run_coroutine_threadsafe(
-                safe_send_telegram_reply(message, text, logger=logger),
+                safe_send_telegram_reply(target, text, logger=logger),
                 loop,
             )
         except RuntimeError as error:
             logger.error(
-                "Telegram GitHub completion scheduling failed: %s",
+                "Telegram background reply scheduling failed: %s",
                 error,
             )
 
     return notify
+
+
+class _TelegramReplyTarget:
+    """Отправляет фоновый ответ через Bot без удержания исходного Message."""
+
+    def __init__(self, bot: Any, chat_id: str) -> None:
+        self.chat = SimpleNamespace(id=chat_id)
+        self._bot = bot
+
+    async def answer(self, text: str) -> None:
+        """Доставляет один фрагмент ответа в сохранённый чат."""
+        await self._bot.send_message(chat_id=self.chat.id, text=text)
 
 
 def _incoming_message_from_telegram(message: Any) -> IncomingEvent:

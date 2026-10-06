@@ -8,7 +8,6 @@ class ObsidianResultType(StrEnum):
 
     # Подтверждение в Obsidian не связано с перепривязкой каналов.
     CONFIRMATION_MISSING = "confirmation_missing"
-    STATUS = "status"
     REANALYZE_COMMAND_INVALID = "reanalyze_command_invalid"
     ARTICLE_REANALYZED = "article_reanalyzed"
     ARTICLE_REANALYSIS_FAILED = "article_reanalysis_failed"
