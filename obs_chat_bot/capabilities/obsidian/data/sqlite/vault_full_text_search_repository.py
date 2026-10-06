@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.search.ports import VaultFullTextSearchRepository
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import VaultFullTextSearchRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.chunk_mappers import (
     vault_chunk_search_hit_dto_from_row,
     vault_chunk_search_hit_from_dto,

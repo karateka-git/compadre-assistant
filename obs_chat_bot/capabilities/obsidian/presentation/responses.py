@@ -2,20 +2,20 @@ from __future__ import annotations
 
 from datetime import UTC
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleResult
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import ProcessArticleUrlResult
-from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.presentation.vault_configuration import load_vault_configuration_example
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageResult
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.capabilities.obsidian.application.search.models import EmbeddingIndexCoverage
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import GitHubConnectionCompletionStatus
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubConnectionCompletionStatus
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
     VAULT_CONFIGURATION_PATH,
     VaultConfigurationError,
     VaultConfigurationErrorCode,
-    load_vault_configuration_example,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import VaultSyncStatus, VaultSyncWarningReason
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncStatus, VaultSyncWarningReason
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import ObsidianProposalAction
 

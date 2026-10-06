@@ -5,22 +5,22 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleUseCase
-from obs_chat_bot.capabilities.obsidian.application.articles.extracted import ExtractedArticle
-from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import ProcessArticleUrlUseCase
-from obs_chat_bot.application.incoming.processing import ProcessIncomingMessageUseCase
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
+from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
+from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
+from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
 )
 from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.incoming_message_repository import (
     SQLiteIncomingMessageRepository,
 )
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository import (
     SQLiteProcessingErrorRecorder,
 )
@@ -66,7 +66,8 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                 )
                 message_repository = SQLiteIncomingMessageRepository(connection)
 
-                incoming_use_case = ProcessIncomingMessageUseCase(
+                incoming_use_case = IncomingMessageDispatcher(
+                    incoming_capability_id="test-capability",
                     incoming_capability=ObsidianMessageHandler(
                         article_url_use_case=process_use_case,
                         article_analysis_use_case=analysis_use_case,

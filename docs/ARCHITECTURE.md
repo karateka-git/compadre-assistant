@@ -10,61 +10,76 @@ Knowledge Catcher принимает ссылки на статьи из мес�
 Каждый пользовательский профиль может быть доступен из нескольких внешних
 каналов; данные профилей изолированы друг от друга. До рефакторинга на VPS
 проверили полный VK-сценарий и ответ на команду в Telegram через отдельный
-исходящий путь WireGuard и SOCKS5. Описанная ниже структура этапа 1 проверена
+исходящий путь WireGuard и SOCKS5. Описанная ниже структура шага 2.1 проверена
 локально и пока не развёрнута на VPS; прежние результаты записаны в
 [истории](HISTORY.md#доступ-telegram-bot-api-с-российских-vps).
 
-## Текущая структура после этапа 1
+## Текущая структура после шага 2.1
 
 ```mermaid
 flowchart LR
     TG[Telegram Bot API] --> TA[Telegram adapter]
     VK[VK Bots Long Poll] --> VA[VK adapter]
     CLI[CLI: process-url и smoke] --> OB[Obsidian bootstrap и smoke]
-    OB --> OA[Obsidian application: статьи, vault, поиск и review]
-    TA --> IN[Общий вход: identity и команды профиля]
+    OB --> OD[Obsidian domain: модели, сценарии и ports]
+    TA --> IN[Core presentation: общий вход и диспетчер]
     VA --> IN
+    IN --> MODE[(Режим пользователя в чате канала)]
     IN --> OP[Obsidian presentation: команды, URL и ответы]
-    OP --> OA
-    OA --> OD[Obsidian domain: модели и правила]
-    ODATA[Obsidian data: SQLite, HTTP, GitHub, LLM и embeddings] -. реализует ports .-> OA
+    OP --> OD
+    ODATA[Obsidian data: SQLite, HTTP, GitHub, LLM и embeddings] -. реализует ports .-> OD
     ODATA --> DB[(Единая SQLite-БД)]
-    IN --> USERS[Общие users и SQLite repositories]
-    USERS --> DB
+    IN --> USERS[Core domain: пользователи и identity use cases]
+    CDATA[Core data: config и SQLite repositories] -. реализует ports .-> USERS
+    CDATA --> MODE
+    CDATA --> DB
     ODATA --> GH[GitHub App и Obsidian vault]
     ODATA --> DC[Независимый document_chunker]
 ```
 
 | Часть | Ответственность |
 | --- | --- |
-| `capabilities/obsidian/domain/` | Модели и правила статей, vault, поиска и proposals. |
-| `capabilities/obsidian/application/` | Временное расположение use cases и ports Obsidian до этапа 2. |
-| `capabilities/obsidian/data/` | Предметные SQLite DTO, mapper-функции и repositories; HTTP, GitHub, LLM, embeddings, extraction и adapter `document_chunker`. |
-| `capabilities/obsidian/presentation/` | Команды, обработка текста и подтверждений, форматирование ответов Obsidian. |
+| `core/domain/` | Пользователи, identities, общие use cases и ports; ключ и ID активного режима чата. |
+| `core/data/` | Конфигурация, SQLite connection/schema lifecycle, отдельные DTO, mappers и repositories профилей и режимов. |
+| `core/presentation/` | Нейтральное событие, общие команды, диспетчер и форматирование общих ответов. |
+| `capabilities/obsidian/domain/` | Модели, правила, use cases и ports статей, vault, поиска и proposals. |
+| `capabilities/obsidian/data/` | Предметные SQLite DTO, mappers и repositories; HTTP, GitHub, LLM, embeddings, extraction, YAML-конфигурация vault и adapter `document_chunker`. |
+| `capabilities/obsidian/presentation/` | Команды, обработка текста и подтверждений, форматирование ответов Obsidian и статический пример правил vault. |
 | `capabilities/obsidian/bootstrap.py` | Сборка зависимостей возможности и её публичного входа. |
-| `application/incoming/`, `application/users/`, `domain/users/` | Общее событие, identity, команды профиля и связывания каналов. |
-| `data/config.py`, `data/sqlite/` | Общая конфигурация, подключение и инициализация SQLite, repositories пользователей. |
-| `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне Obsidian presentation. |
+| `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне presentation возможностей. |
 
-Общий `IncomingEvent` несёт текст и адрес канала. `ProcessIncomingMessageUseCase`
-разрешает identity, обрабатывает команды профиля и приоритет подтверждения
-смены связи каналов, после чего передаёт сообщение публичному входу Obsidian.
-Он не анализирует ссылки или предметные подтверждения. Внутри Obsidian находятся
-`incoming_messages` и `processing_errors`: это журнал и ошибки обработки статьи,
-а не хранилище каждого общего события. Telegram и VK получают готовый
-`IncomingResponse` и доставляют фоновый ответ в исходный чат.
+Общий `IncomingEvent` несёт текст и адрес канала без `article_id` и полей
+хранения. `IncomingMessageDispatcher` разрешает identity, обрабатывает общие
+команды и приоритет подтверждения смены связи каналов, затем передаёт событие
+публичному входу возможности. Конкретный вход и его устойчивый ID внедряет
+composition root; `core` не импортирует Obsidian и не знает его ID.
+`incoming_messages`, `processing_errors` и преобразование события в модель
+статьи находятся внутри Obsidian. Каждое общее сообщение не журналируется.
+Telegram и VK получают готовый `IncomingResponse` и доставляют фоновый ответ
+в исходный чат.
 
-Одна начальная SQL-схема остаётся в
-`obs_chat_bot/data/sqlite/migrations/0001_initial_schema.sql`. Общие подключение
-и порядок инициализации не дублируются внутри возможности. Таблицы
-пользователей и identities общие; таблицы статей, GitHub, vault, индексов,
-proposals и журнала статьи принадлежат Obsidian. Библиотека
-`document_chunker/` остаётся вне возможности, а её adapter — внутри Obsidian.
+Одна начальная SQL-схема находится в
+`obs_chat_bot/core/data/sqlite/migrations/0001_initial_schema.sql`. Ядро владеет
+таблицами пользователей, identities и `active_chat_modes`. Ключ режима —
+`app_user_id`, `channel`, `chat_id`; значение — `capability_id` и технический
+`updated_at`. Состояние vault, GitHub, индексов, proposals и журнала статьи
+принадлежит Obsidian. Отключение возможности не очищает эти данные.
+`document_chunker/` остаётся независимой библиотекой.
 
-Это промежуточная структура: `core`, реестр и сохранённый режим конкретного
-чата появятся на этапе 2. Возможность Ask запланирована на этап 3. Сейчас
-общий вход подключает только Obsidian, поэтому обычный текст после общих
-команд поступает ему.
+Это промежуточная сборка шага 2.1. Пока подключён единственный вход Obsidian:
+первое предметное сообщение атомарно сохраняет маршрут по умолчанию, а
+последующее сообщение читает его из SQLite. Другой процесс Telegram/VK
+получает тот же выбор конкретного чата. Разные каналы, чаты и пользователи
+имеют отдельные режимы. Сохранённый неизвестный ID не заменяется молча:
+диспетчер возвращает нейтральное сообщение о недоступном маршруте; общая
+справка остаётся доступна. Реестр, `enter`/`handle`, `/exit`, `/obsidian` и
+новая семантика регистрации относятся к шагам 2.2–2.4. Конфигурация включения
+возможностей относится к 2.5; Ask — к этапу 3.
+
+Схема расширена таблицей режимов. Уже созданная development-БД требует
+пересоздания перед отдельным запуском по правилам `AGENTS.md`: изменение
+`0001` не обновляет существующую БД. Во время этой реализации рабочая БД
+не открывалась и не очищалась; проверки использовали временные файлы.
 
 ### Composition root
 
@@ -205,7 +220,7 @@ remote Markdown с ожидаемым: если commit уже создан, ло
   диске VPS вне Docker-образа. На сервере выполняется ежедневная SQLite
   backup-копия с проверкой целостности и хранением семи последних экземпляров.
   Резервирование VM вне сервера остаётся отдельной задачей эксплуатации.
-- **Граница проверок.** После выделения Obsidian прошли автономные unittest,
+- **Граница проверок.** После шага 2.1 прошли 436 автономных unittest,
   SQLite/pipeline/analysis smoke и healthcheck на временной БД. Живые каналы,
   GitHub Device Flow, sync/write-back и внешние LLM/embeddings API с новой
   структурой без credentials и тестового vault не проверялись. Прежние

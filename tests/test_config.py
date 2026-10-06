@@ -4,7 +4,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.data.config import ConfigError, load_config
+from obs_chat_bot.core.data.config import ConfigError, load_config
 
 
 class ConfigTest(unittest.TestCase):

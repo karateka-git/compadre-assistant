@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.application.incoming.ports import IncomingResponse
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse
 from obs_chat_bot.presentation.vk.bot import (
     LongPollServer,
     VkApiClient,

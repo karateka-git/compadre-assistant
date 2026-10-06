@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import VaultSyncLeaseRepository
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import VaultSyncLeaseRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import (
     format_utc_timestamp,
     vault_sync_lease_from_row,

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ProcessingErrorRecorder
-from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ProcessingErrorRecorder
+from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_mappers import (
     processing_error_dto_from_record,
 )

@@ -14,7 +14,7 @@ from aiogram.exceptions import (
 )
 from aiogram.methods import GetMe
 
-from obs_chat_bot.application.incoming.ports import IncomingResponse
+from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse
 from obs_chat_bot.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,

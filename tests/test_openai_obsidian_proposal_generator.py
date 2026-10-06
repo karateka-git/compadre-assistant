@@ -5,11 +5,11 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.reviews.ports import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.ports import (
     ObsidianPlanningContext,
     ObsidianWritingContext,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.models import VaultSearchResult
+from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultSearchResult
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_obsidian_proposal_generator import (
     OpenAIObsidianProposalGenerator,
 )

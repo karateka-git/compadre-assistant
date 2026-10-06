@@ -5,18 +5,18 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.application.incoming.ports import (
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
     IncomingCapabilityPort,
     IncomingResponse,
     IncomingResult,
 )
-from obs_chat_bot.application.incoming.processing import (
+from obs_chat_bot.core.presentation.incoming.dispatcher import (
     ProcessIncomingMessageResult,
-    ProcessIncomingMessageUseCase,
+    IncomingMessageDispatcher,
 )
-from obs_chat_bot.application.users.identity import UserIdentityService
+from obs_chat_bot.core.domain.users.identity import UserIdentityService
 from obs_chat_bot.capabilities.obsidian.bootstrap import (
     AnalyzeArticleUseCaseFactory,
     GitHubConnectionStarter,
@@ -39,15 +39,17 @@ from obs_chat_bot.capabilities.obsidian.smoke import (
     run_pipeline_smoke,
     run_sqlite_smoke,
 )
-from obs_chat_bot.data.config import ChunkingConfig, EmbeddingConfig
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.user_identity_repository import (
+from obs_chat_bot.core.data.config import ChunkingConfig, EmbeddingConfig
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from obs_chat_bot.core.domain.chat_modes import ChatModeRepository
+from obs_chat_bot.core.data.sqlite.user_identity_repository import (
     SQLiteAppUserRepository,
     SQLiteExternalIdentityRepository,
     SQLiteIdentityLinkTokenRepository,
     SQLiteIdentityRebindConfirmationRepository,
 )
-from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
+from obs_chat_bot.core.presentation.responses import format_incoming_message_result
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -62,23 +64,29 @@ def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentity
     )
 
 
-def create_process_incoming_message_use_case(
+def create_incoming_message_dispatcher(
     *,
     incoming_capability: IncomingCapabilityPort,
+    incoming_capability_id: str,
     user_identity_service: UserIdentityService | None,
-) -> ProcessIncomingMessageUseCase:
+    chat_mode_repository: ChatModeRepository | None = None,
+) -> IncomingMessageDispatcher:
     """Подключает публичный вход возможности к общему сценарию пользователя.
 
     Args:
         incoming_capability: Вход зарегистрированной возможности.
+        incoming_capability_id: Устойчивый ID подключённой возможности.
         user_identity_service: Общий сервис identities либо `None` для тестов.
+        chat_mode_repository: Хранилище маршрута конкретного чата.
 
     Returns:
         Сценарий обработки сообщений любого канала.
     """
-    return ProcessIncomingMessageUseCase(
+    return IncomingMessageDispatcher(
         incoming_capability=incoming_capability,
+        incoming_capability_id=incoming_capability_id,
         user_identity_service=user_identity_service,
+        chat_mode_repository=chat_mode_repository,
     )
 
 
@@ -86,7 +94,7 @@ def present_channel_result(result: IncomingResult) -> IncomingResponse:
     """Преобразует общий или зарегистрированный результат в ответ каналу.
 
     Raises:
-        TypeError: Если результат неизвестен реестру возможностей.
+        TypeError: Если результат не поддерживается текущей сборкой.
     """
     if isinstance(result, ProcessIncomingMessageResult):
         return IncomingResponse(format_incoming_message_result(result), result.error)
@@ -144,9 +152,11 @@ def process_channel_incoming_message(
             embedding_config=embedding_config,
             created_note_tag=obsidian_created_note_tag,
         )
-        use_case = create_process_incoming_message_use_case(
+        use_case = create_incoming_message_dispatcher(
             incoming_capability=entry,
+            incoming_capability_id="obsidian",
             user_identity_service=create_user_identity_service(connection),
+            chat_mode_repository=SQLiteChatModeRepository(connection),
         )
 
         def present_completion(result: IncomingResult) -> None:

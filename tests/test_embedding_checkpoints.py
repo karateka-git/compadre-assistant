@@ -6,15 +6,15 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.application.search.indexing import VaultEmbeddingIndexer
-from obs_chat_bot.capabilities.obsidian.application.search.models import VaultChunkEmbeddingDraft
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.domain.search.indexing import VaultEmbeddingIndexer
+from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultChunkEmbeddingDraft
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import SQLiteVaultChunkIndexRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_embedding_index_repository import SQLiteVaultEmbeddingIndexRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import SQLiteVaultSyncLeaseRepository
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import VaultSyncService
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncService
 from tests.test_vault_embedding_index_repository import _prepare_indexes, _chunker
 
 

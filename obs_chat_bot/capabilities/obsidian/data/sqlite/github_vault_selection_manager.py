@@ -3,14 +3,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubRepositoryGateway
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubRepositoryGateway
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubVaultSelectionService,
     VaultDisconnectResult,
     VaultSelectionManager,
     VaultSelectionResult,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )

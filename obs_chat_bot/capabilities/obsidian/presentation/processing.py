@@ -4,49 +4,49 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 import logging
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.application.incoming.ports import CapabilityHelp, HelpSection, IncomingCapabilityPort, IncomingResult, OnboardingReplyKind, OnboardingState
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import CapabilityHelp, HelpSection, IncomingCapabilityPort, IncomingResult, OnboardingReplyKind, OnboardingState
 from obs_chat_bot.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from obs_chat_bot.capabilities.obsidian.presentation.commands import help_sections as obsidian_help_sections
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleError,
     AnalyzeArticleResult,
     AnalyzeArticleUseCase,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import (
     ArticleIncomingMessage,
     SavedIncomingMessage,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import IncomingMessageRepository
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
     ProcessArticleUrlUseCase,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.url_extraction import extract_first_supported_url
-from obs_chat_bot.capabilities.obsidian.application.reviews.proposal import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.url_extraction import extract_first_supported_url
+from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import (
     PrepareObsidianReviewCommand,
     PrepareObsidianReviewError,
     PrepareObsidianReviewResult,
     PrepareObsidianReviewUseCase,
 )
-from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
     GitHubConnectionStartStatus,
     GitHubGatewayError,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubConnectionStarter
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubConnectionStarter
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubAccountNotConnectedError,
     GitHubRepositoryNotAccessibleError,
     GitHubVaultPathNotFoundError,
@@ -56,8 +56,8 @@ from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection impor
     VaultDisconnectResult,
     VaultDisconnectStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import VaultConfigurationError
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import VaultConfigurationError
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncManager,
     VaultSyncResult,
@@ -65,7 +65,7 @@ from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
     VaultSyncWarning,
     VaultSyncWarningReason,
 )
-from obs_chat_bot.domain.users.entities import AppUser
+from obs_chat_bot.core.domain.users.entities import AppUser
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 

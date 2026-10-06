@@ -20,7 +20,7 @@ Copy-Item .env.example .env
 
 `.env.example` — шаблон, который нужно заполнить: с `replace-me` и пустым
 embedding key приложение не готово к запуску. Переменные читает
-[`config.py`](../obs_chat_bot/data/config.py).
+[`config.py`](../obs_chat_bot/core/data/config.py).
 
 | Переменные | Назначение и обязательность |
 | --- | --- |

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from obs_chat_bot.capabilities.obsidian.application.reviews.ports import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.ports import (
     ObsidianPlanningContext,
     ObsidianProposalGenerator,
     ObsidianWritingContext,

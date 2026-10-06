@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.application.incoming.commands import (
+from obs_chat_bot.core.presentation.incoming.commands import (
     ChatCommand,
     CommandSection,
     ParsedChatCommand,

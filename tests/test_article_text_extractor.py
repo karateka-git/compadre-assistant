@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleExtractionError
-from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleExtractionError
+from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
 from obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor import (
     TrafilaturaArticleTextExtractor,
 )

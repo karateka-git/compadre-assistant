@@ -6,8 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import (
     PendingObsidianProposalError,
     SQLiteObsidianProposalRepository,

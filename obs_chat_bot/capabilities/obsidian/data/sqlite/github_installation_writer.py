@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubAccountAccessWriter
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubAccountAccessWriter
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import GitHubAccount, GitHubInstallation
 
 

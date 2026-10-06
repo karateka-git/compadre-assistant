@@ -29,21 +29,31 @@ Knowledge Catcher — бот, который помогает превращат
 ```mermaid
 flowchart LR
     Channels[VK / Telegram] --> Adapters[Адаптеры каналов]
-    Adapters --> Incoming[Общий вход: identity и команды профиля]
+    Adapters --> Incoming[Core presentation: identity и диспетчер]
+    Incoming --> Modes[(Режим конкретного чата)]
     Incoming --> Obsidian[Obsidian presentation: команды и ответы]
-    Obsidian --> UseCases[Obsidian application: сценарии и ports]
+    Obsidian --> Domain[Obsidian domain: модели, сценарии и ports]
     CLI[CLI: диагностика и process-url] --> Bootstrap[Общий bootstrap.py]
     Bootstrap --> ObsidianBootstrap[Obsidian bootstrap и smoke]
-    ObsidianBootstrap --> UseCases
-    UseCases --> Domain[Obsidian domain: модели и правила]
-    ObsidianData[Obsidian data: SQLite, GitHub, HTTP, LLM, embeddings] -. реализует ports .-> UseCases
-    Incoming --> Users[Общие users, config и SQLite lifecycle]
+    ObsidianBootstrap --> Domain
+    ObsidianData[Obsidian data: SQLite, GitHub, HTTP, LLM, embeddings] -. реализует ports .-> Domain
+    Incoming --> Users[Core domain: пользователи и identities]
+    CoreData[Core data: config и SQLite] -. реализует ports .-> Users
+    CoreData --> Modes
     ObsidianData --> SQLite[(Единая SQLite-БД)]
     ObsidianData --> GitHub[GitHub App и Obsidian vault]
     ObsidianData --> Chunker[Независимый document_chunker]
 ```
 
-Это промежуточная структура этапа 1: Obsidian уже выделен в `capabilities/obsidian/`, а его use cases и ports временно находятся в `application`. Общие пользователи, вход и конфигурация пока остаются в прежних каталогах. Режимы чатов, общий диспетчер и возможность Ask запланированы на следующие этапы. Подробная схема компонентов и сценариев находится в [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Шаг 2.1 перехода завершён: ядро собрано в `core/`, use cases и ports находятся
+в `domain` своих модулей, прежние каталоги `application` удалены. Режим чата
+хранится по пользователю, каналу и ID чата и читается новым процессом из SQLite.
+Пока composition root подключает один вход Obsidian: при первом предметном
+сообщении сохраняется прежний маршрут по умолчанию. Реестр, команды входа и
+выхода, отделение регистрации от настройки vault и возможность Ask остаются
+следующими шагами. Автономно прошли 436 тестов, SQLite/pipeline/analysis smoke
+и healthcheck на временной БД. Живые внешние интеграции после переноса не
+проверялись. Подробная схема находится в [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Быстрый старт
 

@@ -6,8 +6,8 @@ from collections.abc import Callable
 from math import isfinite
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.search.models import VaultChunkEmbeddingDraft
-from obs_chat_bot.capabilities.obsidian.application.search.ports import VaultEmbeddingIndexRepository
+from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultChunkEmbeddingDraft
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import VaultEmbeddingIndexRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.embedding_mappers import (
     encode_float32_vector,
     vault_chunk_embedding_dto_from_row,

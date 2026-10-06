@@ -7,9 +7,9 @@ from threading import Barrier
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-import obs_chat_bot.data.sqlite.migration_runner as migration_runner
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+import obs_chat_bot.core.data.sqlite.migration_runner as migration_runner
 
 
 class MigrationRunnerTest(unittest.TestCase):

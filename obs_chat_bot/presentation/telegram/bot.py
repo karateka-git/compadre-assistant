@@ -6,9 +6,9 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.application.incoming.ports import ChannelCompletionHandler, IncomingResponse
-from obs_chat_bot.presentation.shared.responses import PROCESSING_ACK_TEXT
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import ChannelCompletionHandler, IncomingResponse
+from obs_chat_bot.core.presentation.responses import PROCESSING_ACK_TEXT
 from obs_chat_bot.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,

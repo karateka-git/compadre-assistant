@@ -12,37 +12,37 @@ from document_chunker import (
     MarkdownDocumentParser,
 )
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleUseCase
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import IncomingMessageRepository
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import ProcessArticleUrlUseCase
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import ProcessArticleUrlCommand, ProcessArticleUrlError
-from obs_chat_bot.application.incoming.ports import IncomingResponse, IncomingResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlCommand, ProcessArticleUrlError
+from obs_chat_bot.core.presentation.incoming.ports import IncomingResponse, IncomingResult
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult, should_acknowledge
 from obs_chat_bot.capabilities.obsidian.presentation.responses import EMPTY_MESSAGE_REPLY, format_obsidian_message_result
-from obs_chat_bot.capabilities.obsidian.application.reviews.proposal import PrepareObsidianReviewUseCase
-from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
+from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.full_text import VaultFullTextSearchService
-from obs_chat_bot.capabilities.obsidian.application.search.hybrid import (
+from obs_chat_bot.capabilities.obsidian.domain.search.full_text import VaultFullTextSearchService
+from obs_chat_bot.capabilities.obsidian.domain.search.hybrid import (
     VaultFtsFallbackSearchService,
     VaultHybridSearchService,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.ports import EmbeddingProvider, VaultNoteChunker
-from obs_chat_bot.capabilities.obsidian.application.search.vector import VaultVectorSearchService
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_connection import (
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import EmbeddingProvider, VaultNoteChunker
+from obs_chat_bot.capabilities.obsidian.domain.search.vector import VaultVectorSearchService
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_connection import (
     GitHubConnectionCoordinator,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
     GitHubConnectionStarter,
     GitHubRepositoryGateway,
     GitHubVaultGateway,
     GitHubVaultWriteGateway,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import VaultSelectionManager
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import VaultSyncManager
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import VaultSelectionManager
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncManager
 from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.data.config import ChunkingConfig, EmbeddingConfig, GitHubAppConfig
+from obs_chat_bot.core.data.config import ChunkingConfig, EmbeddingConfig, GitHubAppConfig
 from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import (
     OpenAICompatibleEmbeddingProvider,
 )
@@ -51,7 +51,7 @@ from obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extr
 )
 from obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
 from obs_chat_bot.capabilities.obsidian.data.http.url_safety import UnsafeUrlError, validate_public_http_url
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import GitHubGatewayError
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubGatewayError
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_article_analyzer import OpenAIArticleAnalyzer
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_obsidian_proposal_generator import (
     OpenAIObsidianProposalGenerator,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from ipaddress import ip_address
 
-from obs_chat_bot.capabilities.obsidian.application.articles.url_utils import parse_supported_article_url
+from obs_chat_bot.capabilities.obsidian.domain.articles.url_utils import parse_supported_article_url
 
 
 class UnsafeUrlError(ValueError):

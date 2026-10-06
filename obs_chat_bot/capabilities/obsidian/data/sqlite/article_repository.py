@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ArticleRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.article_mappers import (
     article_dto_from_article,
     article_from_row,

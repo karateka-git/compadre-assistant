@@ -13,14 +13,14 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
 from zipfile import ZipFile
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubDevicePollStatus,
     GitHubGatewayError,
     GitHubInstallationAccessToken,
     GitHubUserAccessToken,
     GitHubVaultSnapshotStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )

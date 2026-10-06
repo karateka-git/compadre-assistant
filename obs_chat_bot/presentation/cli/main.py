@@ -26,7 +26,7 @@ from obs_chat_bot.bootstrap import (
     run_sqlite_smoke,
     run_pipeline_smoke,
 )
-from obs_chat_bot.data.config import (
+from obs_chat_bot.core.data.config import (
     AppConfig,
     ChunkingConfig,
     ConfigError,
@@ -34,8 +34,8 @@ from obs_chat_bot.data.config import (
     GitHubAppConfig,
     load_config,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import MigrationError, apply_migrations
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import MigrationError, apply_migrations
 from obs_chat_bot.presentation.telegram.bot import TelegramBotError, run_telegram_bot
 from obs_chat_bot.presentation.vk.bot import VkBotError, run_vk_bot
 

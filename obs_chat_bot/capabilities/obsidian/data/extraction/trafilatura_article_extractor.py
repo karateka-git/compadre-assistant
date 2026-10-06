@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleExtractionError
-from obs_chat_bot.capabilities.obsidian.application.articles.extracted import ExtractedArticle
-from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ArticleTextExtractor
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleExtractionError
+from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
+from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleTextExtractor
 
 
 class TrafilaturaArticleTextExtractor(ArticleTextExtractor):

@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import GitHubRepositoryInspection
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubRepositoryInspection
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubRepositoryNotAccessibleError,
     GitHubVaultPathNotFoundError,
     GitHubVaultSelectionService,
@@ -17,14 +17,14 @@ from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection impor
     normalize_vault_root_path,
     parse_github_repository_url,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_vault_selection_manager import (
     SQLiteGitHubVaultSelectionManager,
 )
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )

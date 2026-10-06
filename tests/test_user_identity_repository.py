@@ -5,16 +5,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.application.users.identity import UserIdentityService
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.data.sqlite.user_identity_repository import (
+from obs_chat_bot.core.domain.users.identity import UserIdentityService
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.user_identity_repository import (
     SQLiteAppUserRepository,
     SQLiteExternalIdentityRepository,
     SQLiteIdentityRebindConfirmationRepository,
     SQLiteIdentityLinkTokenRepository,
 )
-from obs_chat_bot.domain.users.entities import IncomingIdentity
+from obs_chat_bot.core.domain.users.entities import IncomingIdentity
 
 
 class SQLiteUserIdentityRepositoryTest(unittest.TestCase):

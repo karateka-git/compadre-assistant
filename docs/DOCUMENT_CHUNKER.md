@@ -45,9 +45,9 @@ document_chunker/
 data-adapter:
 
 ```text
-obs_chat_bot/application/search/ports.py
-obs_chat_bot/application/search/indexing.py
-obs_chat_bot/data/chunking/document_note_chunker.py
+obs_chat_bot/capabilities/obsidian/domain/search/ports.py
+obs_chat_bot/capabilities/obsidian/domain/search/indexing.py
+obs_chat_bot/capabilities/obsidian/data/chunking/document_note_chunker.py
 ```
 
 Направление зависимости:

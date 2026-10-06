@@ -12,9 +12,9 @@ from numbers import Real
 from typing import Any
 from uuid import uuid4
 
-from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.application.search.models import EmbeddingCallContext
-from obs_chat_bot.capabilities.obsidian.application.search.ports import EmbeddingProvider
+from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingCallContext
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import EmbeddingProvider
 from obs_chat_bot.capabilities.obsidian.data.embeddings.dtos import EmbeddingResponseItemDto
 from obs_chat_bot.capabilities.obsidian.data.embeddings.mappers import embedding_vector_from_dto
 from obs_chat_bot.capabilities.obsidian.domain.search.entities import EmbeddingVector

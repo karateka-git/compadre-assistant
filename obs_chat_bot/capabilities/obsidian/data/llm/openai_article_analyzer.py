@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleAnalysisError
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ArticleAnalyzer
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleAnalysisError
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleAnalyzer
 from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 

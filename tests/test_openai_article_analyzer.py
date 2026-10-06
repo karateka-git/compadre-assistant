@@ -3,7 +3,7 @@
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleAnalysisError
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleAnalysisError
 from obs_chat_bot.capabilities.obsidian.data.llm.openai_article_analyzer import (
     MAX_ANALYSIS_RESPONSE_CHARS,
     MAX_ANALYSIS_RESPONSE_TOKENS,

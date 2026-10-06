@@ -17,7 +17,8 @@ from zipfile import BadZipFile, ZipFile
 
 import httpx
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.data.configuration.vault_configuration import parse_vault_configuration
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubAuthenticatedAccount,
     GitHubDeviceAuthorization,
     GitHubDevicePollResult,
@@ -33,13 +34,12 @@ from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import 
     GitHubVaultCommitResult,
     GitHubVaultTargetState,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
     VAULT_CONFIGURATION_PATH,
     VaultConfigurationError,
     VaultConfigurationErrorCode,
-    parse_vault_configuration,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
     GitHubDeviceFlowGateway,
     GitHubInstallationTokenProvider,
     GitHubRepositoryGateway,

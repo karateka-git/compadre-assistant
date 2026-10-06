@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubInstallationRepository
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubInstallationRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import github_installation_from_row
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import GitHubInstallation
 

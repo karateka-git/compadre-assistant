@@ -11,7 +11,7 @@ except ImportError:
     httpx = None
     OpenAI = None
 
-from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
 from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import OpenAICompatibleEmbeddingProvider
 
 LOGGER = "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible"

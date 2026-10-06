@@ -6,13 +6,13 @@ import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleUseCase,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.extracted import ExtractedArticle
-from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
+from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlUseCase,
 )
@@ -24,8 +24,8 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import (
     ArticleRepositoryError,
     SQLiteArticleRepository,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import MigrationError, apply_migrations
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import MigrationError, apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository import (
     SQLiteProcessingErrorRecorder,
 )

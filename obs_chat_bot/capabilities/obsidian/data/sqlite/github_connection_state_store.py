@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubConnectionStateStore
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubConnectionStateStore
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import format_utc_timestamp
 
 

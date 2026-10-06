@@ -11,16 +11,16 @@ from document_chunker import (
     DocumentFormat,
     MarkdownDocumentParser,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.application.search.indexing import (
+from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.domain.search.indexing import (
     VaultChunkIndexer,
     VaultEmbeddingIndexer,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.full_text import VaultFullTextSearchService
-from obs_chat_bot.capabilities.obsidian.application.search.hybrid import VaultHybridSearchService
-from obs_chat_bot.capabilities.obsidian.application.search.vector import VaultVectorSearchService
+from obs_chat_bot.capabilities.obsidian.domain.search.full_text import VaultFullTextSearchService
+from obs_chat_bot.capabilities.obsidian.domain.search.hybrid import VaultHybridSearchService
+from obs_chat_bot.capabilities.obsidian.domain.search.vector import VaultVectorSearchService
 from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.embedding_mappers import (
     decode_float32_vector,
     encode_float32_vector,
@@ -28,7 +28,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.embedding_mappers import (
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )

@@ -3,19 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.search.indexing import (
+from obs_chat_bot.capabilities.obsidian.domain.search.indexing import (
     VaultChunkIndexer,
     VaultEmbeddingIndexer,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.ports import EmbeddingProvider, VaultNoteChunker
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import GitHubVaultGateway
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import EmbeddingProvider, VaultNoteChunker
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubVaultGateway
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncManager,
     VaultSyncResult,
     VaultSyncService,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )

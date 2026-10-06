@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ArticleAnalysisResultRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleAnalysisResultRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_mappers import (
     analysis_result_dto_from_result,
     analysis_result_from_row,

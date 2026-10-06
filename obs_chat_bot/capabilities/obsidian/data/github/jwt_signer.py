@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import GitHubGatewayError
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubGatewayError
 
 
 class PyJwtGitHubAppSigner:

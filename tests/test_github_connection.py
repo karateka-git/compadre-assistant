@@ -6,10 +6,10 @@ from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_connection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_connection import (
     GitHubConnectionCoordinator,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubAuthenticatedAccount,
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
@@ -28,8 +28,8 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_reposito
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_writer import (
     SQLiteGitHubAccountAccessWriter,
 )
-from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from tests.sqlite_helpers import ensure_app_user
 
 

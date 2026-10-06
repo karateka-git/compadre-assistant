@@ -5,11 +5,11 @@ from __future__ import annotations
 import json
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.search.models import (
+from obs_chat_bot.capabilities.obsidian.domain.search.models import (
     ChunkIndexUpdate,
     VaultNoteChunkDraft,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.ports import VaultChunkIndexRepository
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import VaultChunkIndexRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.chunk_mappers import (
     vault_chunk_index_state_dto_from_row,
     vault_chunk_index_state_from_dto,

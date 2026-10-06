@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.search.article_query import (
+from obs_chat_bot.capabilities.obsidian.domain.search.article_query import (
     MAX_LEXICAL_QUERY_CHARS,
     MAX_SEMANTIC_QUERY_CHARS,
     ArticleSearchQueryBuilder,

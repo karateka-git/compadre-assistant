@@ -4,50 +4,50 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleResult
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
-from obs_chat_bot.application.incoming.processing import (
+from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
-from obs_chat_bot.application.incoming.ports import OnboardingReplyKind
+from obs_chat_bot.core.presentation.incoming.ports import OnboardingReplyKind
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.application.incoming.commands import ChatCommand
-from obs_chat_bot.capabilities.obsidian.application.search.models import EmbeddingIndexCoverage
-from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
+from obs_chat_bot.core.presentation.incoming.commands import ChatCommand
+from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
+from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
     GitHubConnectionStartStatus,
     GitHubDeviceAuthorization,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
     VaultSyncWarning,
     VaultSyncWarningReason,
 )
-from obs_chat_bot.application.users.identity import CreatedLinkCode
+from obs_chat_bot.core.domain.users.identity import CreatedLinkCode
 from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
@@ -56,14 +56,14 @@ from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.domain.users.entities import AppUser
+from obs_chat_bot.core.domain.users.entities import AppUser
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 from obs_chat_bot.capabilities.obsidian.presentation.responses import (
     format_article_analysis_result,
     format_article_processing_result,
     format_obsidian_message_result,
 )
-from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
+from obs_chat_bot.core.presentation.responses import format_incoming_message_result
 
 
 def _obsidian_handler(vault: ObsidianVault | None = None) -> ObsidianMessageHandler:

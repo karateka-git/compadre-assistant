@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from document_chunker import DocumentChunker, DocumentFormat, SourceDocument
 
-from obs_chat_bot.capabilities.obsidian.application.search.models import VaultNoteChunkDraft
-from obs_chat_bot.capabilities.obsidian.application.search.ports import VaultNoteChunker
+from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultNoteChunkDraft
+from obs_chat_bot.capabilities.obsidian.domain.search.ports import VaultNoteChunker
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
 
 

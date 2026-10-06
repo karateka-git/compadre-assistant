@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import (
     ArticleIncomingMessage,
     SavedIncomingMessage,
 )

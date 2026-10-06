@@ -3,14 +3,14 @@
 from dataclasses import fields
 import unittest
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.application.incoming.ports import CapabilityHelp, IncomingCapabilityPort, OnboardingReplyKind, OnboardingState
-from obs_chat_bot.application.incoming.processing import (
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import CapabilityHelp, IncomingCapabilityPort, OnboardingReplyKind, OnboardingState
+from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
-    ProcessIncomingMessageUseCase,
+    IncomingMessageDispatcher,
 )
-from obs_chat_bot.domain.users.entities import AppUser
+from obs_chat_bot.core.domain.users.entities import AppUser
 
 
 class FakeCapability(IncomingCapabilityPort):
@@ -99,7 +99,8 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_general_help_stays_before_capability(self) -> None:
         """Общая справка не вызывает предметный обработчик."""
         capability = FakeCapability()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = IncomingMessageDispatcher(
+            incoming_capability_id="test-capability",
             incoming_capability=capability, user_identity_service=FakeIdentity()
         )
 
@@ -113,7 +114,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         capability = FakeCapability()
         identity = FakeIdentity()
         identity.pending = True
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = IncomingMessageDispatcher(
+            incoming_capability_id="test-capability",
             incoming_capability=capability, user_identity_service=identity
         )
 
@@ -127,7 +129,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Возможность получает пользователя и неизменённое событие канала."""
         capability = FakeCapability()
         identity = FakeIdentity()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = IncomingMessageDispatcher(
+            incoming_capability_id="test-capability",
             incoming_capability=capability, user_identity_service=identity
         )
         event = _event("произвольный текст")

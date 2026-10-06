@@ -4,13 +4,13 @@ import sqlite3
 import unittest
 from unittest.mock import Mock, patch
 
-from obs_chat_bot.data.sqlite.connection import _enable_wal
+from obs_chat_bot.core.data.sqlite.connection import _enable_wal
 
 
 class SQLiteConnectionTest(unittest.TestCase):
     """Проверяет устойчивость настройки SQLite при параллельном старте."""
 
-    @patch("obs_chat_bot.data.sqlite.connection.time.sleep")
+    @patch("obs_chat_bot.core.data.sqlite.connection.time.sleep")
     def test_enable_wal_retries_temporary_lock(self, sleep: Mock) -> None:
         """Повторяет WAL PRAGMA после кратковременной блокировки другой копией."""
         connection = Mock()
@@ -27,7 +27,7 @@ class SQLiteConnectionTest(unittest.TestCase):
         self.assertEqual(connection.execute.call_count, 2)
         sleep.assert_called_once()
 
-    @patch("obs_chat_bot.data.sqlite.connection.time.sleep")
+    @patch("obs_chat_bot.core.data.sqlite.connection.time.sleep")
     def test_enable_wal_does_not_hide_other_errors(self, sleep: Mock) -> None:
         """Не повторяет ошибки SQLite, не связанные с конкурентным lock."""
         connection = Mock()

@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleFetchError
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleFetchError
 from obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
 
 

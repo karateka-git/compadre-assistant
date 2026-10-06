@@ -13,12 +13,49 @@ ROOT = Path(__file__).resolve().parents[1] / "obs_chat_bot"
 class PresentationBoundaryTest(unittest.TestCase):
     """Проверяет разделение предметных и транспортных обязанностей."""
 
+    def test_domain_imports_only_standard_library_and_domain(self) -> None:
+        """Чистые сценарии и ports не импортируют SDK, SQL или конкретные слои."""
+        import sys
+
+        for legacy in (ROOT / "application", ROOT / "domain", ROOT / "data", ROOT / "capabilities" / "obsidian" / "application"):
+            self.assertFalse(legacy.exists(), str(legacy))
+
+        for directory in (ROOT / "core" / "domain", ROOT / "capabilities" / "obsidian" / "domain"):
+            for path in directory.rglob("*.py"):
+                with self.subTest(path=str(path.relative_to(ROOT))):
+                    syntax = ast.parse(path.read_text(encoding="utf-8"))
+                    for node in ast.walk(syntax):
+                        modules = []
+                        if isinstance(node, ast.ImportFrom) and node.module:
+                            modules = [node.module]
+                        elif isinstance(node, ast.Import):
+                            modules = [alias.name for alias in node.names]
+                        for module in modules:
+                            if module.startswith("obs_chat_bot."):
+                                self.assertIn("domain", module.split("."))
+                                self.assertNotIn("data", module.split("."))
+                                self.assertNotIn("presentation", module.split("."))
+                            elif not isinstance(node, ast.ImportFrom) or node.level == 0:
+                                self.assertIn(module.split(".")[0], sys.stdlib_module_names)
+                                self.assertNotEqual(module.split(".")[0], "sqlite3")
+
+    def test_all_core_layers_are_independent_from_capabilities(self) -> None:
+        """Ядро не знает конкретную возможность, даже при выборе режима."""
+        for path in (ROOT / "core").rglob("*.py"):
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                syntax = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(syntax):
+                    if isinstance(node, ast.ImportFrom):
+                        self.assertFalse(node.module and node.module.startswith("obs_chat_bot.capabilities"))
+                    elif isinstance(node, ast.Import):
+                        self.assertFalse(any(alias.name.startswith("obs_chat_bot.capabilities") for alias in node.names))
+
     def test_core_and_channels_do_not_import_obsidian(self) -> None:
         """Общий вход и адаптеры не зависят от внутренних модулей Obsidian."""
         paths = (
-            ROOT / "application" / "incoming" / "processing.py",
-            ROOT / "application" / "incoming" / "commands.py",
-            ROOT / "presentation" / "shared" / "responses.py",
+            ROOT / "core" / "presentation" / "incoming" / "dispatcher.py",
+            ROOT / "core" / "presentation" / "incoming" / "commands.py",
+            ROOT / "core" / "presentation" / "responses.py",
             ROOT / "presentation" / "telegram" / "bot.py",
             ROOT / "presentation" / "vk" / "bot.py",
         )

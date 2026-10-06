@@ -6,11 +6,11 @@ from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationStatus,
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubGatewayError,
     GitHubVaultCommitResult,
     GitHubVaultTargetState,

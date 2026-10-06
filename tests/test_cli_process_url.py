@@ -5,21 +5,21 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.application.incoming.processing import IncomingMessageResultType
+from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageResultType
 from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.data.config import AppConfig, GitHubAppConfig
+from obs_chat_bot.core.data.config import AppConfig, GitHubAppConfig
 from obs_chat_bot.bootstrap import process_channel_incoming_message
 from obs_chat_bot.presentation.cli.main import (
     check_github_config,

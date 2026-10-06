@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import (
     ArticleIncomingMessage,
     SavedIncomingMessage,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import IncomingMessageRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.incoming_message_mappers import (
     incoming_message_dto_from_message,
     saved_incoming_message_from_row,

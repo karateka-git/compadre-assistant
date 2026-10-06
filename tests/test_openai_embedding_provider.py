@@ -5,8 +5,8 @@ from decimal import Decimal
 import unittest
 import json
 
-from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.application.search.models import EmbeddingCallContext
+from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingCallContext
 from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import (
     OpenAICompatibleEmbeddingProvider,
 )

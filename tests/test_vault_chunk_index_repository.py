@@ -11,13 +11,13 @@ from document_chunker import (
     DocumentFormat,
     MarkdownDocumentParser,
 )
-from obs_chat_bot.capabilities.obsidian.application.search.indexing import VaultChunkIndexer
+from obs_chat_bot.capabilities.obsidian.domain.search.indexing import VaultChunkIndexer
 from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )

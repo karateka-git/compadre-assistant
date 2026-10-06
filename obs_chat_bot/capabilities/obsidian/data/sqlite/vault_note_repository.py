@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from obs_chat_bot.capabilities.obsidian.application.vaults.ports import VaultNoteRepository
+from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import VaultNoteRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import (
     vault_note_dto_from_row,
     vault_note_from_dto,

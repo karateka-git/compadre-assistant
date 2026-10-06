@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_dtos import (
     ProcessingErrorDto,
 )

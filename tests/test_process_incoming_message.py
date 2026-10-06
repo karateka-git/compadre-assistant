@@ -5,31 +5,31 @@ from types import SimpleNamespace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.application.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import (
     ArticleIncomingMessage,
     SavedIncomingMessage,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.application.incoming.processing import (
+from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
-    ProcessIncomingMessageUseCase,
+    IncomingMessageDispatcher,
 )
-from obs_chat_bot.capabilities.obsidian.application.reviews.proposal import PrepareObsidianReviewError
-from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewError
+from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
@@ -37,18 +37,18 @@ from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import 
     GitHubDeviceAuthorization,
     GitHubGatewayError,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubAccountNotConnectedError,
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
@@ -62,8 +62,8 @@ from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.application.users.identity import IdentityAlreadyBoundError
-from obs_chat_bot.domain.users.entities import AppUser, IncomingIdentity
+from obs_chat_bot.core.domain.users.identity import IdentityAlreadyBoundError
+from obs_chat_bot.core.domain.users.entities import AppUser, IncomingIdentity
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 
 
@@ -572,17 +572,18 @@ class FakeVaultSyncManager:
         )
 
 
-def _make_use_case(**dependencies: object) -> ProcessIncomingMessageUseCase:
+def _make_use_case(**dependencies: object) -> IncomingMessageDispatcher:
     """Собирает отдельные общий вход и Obsidian handler для сценариев теста."""
     identity_service = dependencies.pop("user_identity_service", None)
     obsidian = ObsidianMessageHandler(**dependencies)
-    return ProcessIncomingMessageUseCase(
+    return IncomingMessageDispatcher(
+        incoming_capability_id="test-capability",
         incoming_capability=obsidian,
         user_identity_service=identity_service,
     )
 
 
-class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
+class IncomingMessageDispatcherTest(unittest.TestCase):
     """Проверяет общий application-flow без Telegram adapter."""
 
     def test_execute_help_is_available_without_registered_identity(self) -> None:

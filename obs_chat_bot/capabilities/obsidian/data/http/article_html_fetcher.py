@@ -7,9 +7,9 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleFetchError
-from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
-from obs_chat_bot.capabilities.obsidian.application.articles.ports import ArticleHtmlFetcher
+from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleFetchError
+from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleHtmlFetcher
 from obs_chat_bot.capabilities.obsidian.data.http.url_safety import UnsafeUrlError, validate_public_http_url
 
 

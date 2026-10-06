@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
-from obs_chat_bot.capabilities.obsidian.application.reviews.ports import ObsidianProposalRepository
+from obs_chat_bot.capabilities.obsidian.domain.reviews.ports import ObsidianProposalRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.proposal_mappers import (
     proposal_dto_from_domain,
     proposal_dto_from_row,
