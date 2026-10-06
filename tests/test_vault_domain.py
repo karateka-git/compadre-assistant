@@ -3,7 +3,7 @@
 from datetime import UTC, datetime, timedelta
 import unittest
 
-from obs_chat_bot.domain.vaults.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
     GitHubInstallation,
     ObsidianVault,
     VaultActionConfirmation,

@@ -1,40 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
 import logging
 
-from obs_chat_bot.application.articles.analysis import (
-    AnalyzeArticleCommand,
-    AnalyzeArticleError,
-    AnalyzeArticleResult,
-    AnalyzeArticleUseCase,
-)
-from obs_chat_bot.application.articles.incoming_messages import (
-    IncomingMessage,
-    SavedIncomingMessage,
-)
-from obs_chat_bot.application.articles.ports import IncomingMessageRepository
-from obs_chat_bot.application.articles.processing import (
-    ProcessArticleUrlCommand,
-    ProcessArticleUrlError,
-    ProcessArticleUrlResult,
-    ProcessArticleUrlUseCase,
-)
-from obs_chat_bot.application.articles.url_extraction import extract_first_supported_url
 from obs_chat_bot.application.incoming.commands import ChatCommand, ParsedChatCommand
-from obs_chat_bot.application.reviews.proposal import (
-    PrepareObsidianReviewCommand,
-    PrepareObsidianReviewError,
-    PrepareObsidianReviewResult,
-    PrepareObsidianReviewUseCase,
-)
-from obs_chat_bot.application.reviews.confirmation import (
-    ObsidianConfirmationResult,
-    ObsidianConfirmationStatus,
-    ObsidianProposalConfirmationService,
-)
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.application.incoming.ports import CapabilityHelp, IncomingCapabilityPort, IncomingResult, OnboardingReplyKind, OnboardingState
 from obs_chat_bot.application.users.identity import (
     CreatedLinkCode,
     IdentityAlreadyBoundError,
@@ -42,38 +15,7 @@ from obs_chat_bot.application.users.identity import (
     InvalidLinkCodeError,
     UserIdentityService,
 )
-from obs_chat_bot.application.vaults.github_models import (
-    GitHubConnectionCompletion,
-    GitHubConnectionCompletionStatus,
-    GitHubConnectionStartResult,
-    GitHubConnectionStartStatus,
-    GitHubGatewayError,
-)
-from obs_chat_bot.application.vaults.ports import GitHubConnectionStarter
-from obs_chat_bot.application.vaults.vault_selection import (
-    GitHubAccountNotConnectedError,
-    GitHubRepositoryNotAccessibleError,
-    GitHubVaultPathNotFoundError,
-    VaultSelectionManager,
-    VaultSelectionResult,
-    VaultSelectionStatus,
-    VaultDisconnectResult,
-    VaultDisconnectStatus,
-)
-from obs_chat_bot.application.vaults.vault_configuration import (
-    VaultConfigurationError,
-)
-from obs_chat_bot.application.vaults.vault_sync import (
-    VaultStatus,
-    VaultSyncManager,
-    VaultSyncResult,
-    VaultSyncStatus,
-    VaultSyncWarning,
-    VaultSyncWarningReason,
-)
 from obs_chat_bot.domain.users.entities import AppUser, IncomingIdentity
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.domain.vaults.entities import ObsidianVault
 
 
 LOGGER = logging.getLogger(__name__)
@@ -103,550 +45,91 @@ class IncomingMessageResultType(StrEnum):
     LINK_REBIND_CANCELLED = "link_rebind_cancelled"
     LINK_REBIND_CONFIRMATION_MISSING = "link_rebind_confirmation_missing"
     LINK_REBIND_CONFIRMATION_PENDING = "link_rebind_confirmation_pending"
-    STATUS = "status"
-    REANALYZE_COMMAND_INVALID = "reanalyze_command_invalid"
-    ARTICLE_REANALYZED = "article_reanalyzed"
-    ARTICLE_REANALYSIS_FAILED = "article_reanalysis_failed"
-    ARTICLE_URL_MISSING = "article_url_missing"
-    ARTICLE_PROCESSED = "article_processed"
-    ARTICLE_ANALYZED = "article_analyzed"
-    ARTICLE_PROCESSING_FAILED = "article_processing_failed"
-    ARTICLE_ANALYSIS_FAILED = "article_analysis_failed"
-    ARTICLE_REVIEW_PREPARED = "article_review_prepared"
-    ARTICLE_REVIEW_FAILED = "article_review_failed"
-    ARTICLE_REVIEW_CONFIRMATION_PENDING = "article_review_confirmation_pending"
-    ARTICLE_REVIEW_CANCELLED = "article_review_cancelled"
-    ARTICLE_REVIEW_APPLIED = "article_review_applied"
-    ARTICLE_REVIEW_CONFLICT = "article_review_conflict"
-    ARTICLE_REVIEW_IN_PROGRESS = "article_review_in_progress"
-    ARTICLE_REVIEW_APPLY_FAILED = "article_review_apply_failed"
-    ARTICLE_REVIEWED_RESULT = "article_reviewed_result"
-    GITHUB_CONNECT_STARTED = "github_connect_started"
-    GITHUB_CONNECT_ALREADY_PENDING = "github_connect_already_pending"
-    GITHUB_CONNECT_PREPARING = "github_connect_preparing"
-    GITHUB_CONNECT_UNAVAILABLE = "github_connect_unavailable"
-    GITHUB_CONNECT_FAILED = "github_connect_failed"
-    GITHUB_CONNECT_IN_PROGRESS = "github_connect_in_progress"
-    GITHUB_AUTHORIZED_SYNC_STARTED = "github_authorized_sync_started"
-    REGISTRATION_VAULT_REQUIRED = "registration_vault_required"
-    GITHUB_APP_REQUIRED = "github_app_required"
-    GITHUB_VAULT_COMMAND_INVALID = "github_vault_command_invalid"
-    GITHUB_VAULT_SELECTED = "github_vault_selected"
-    GITHUB_VAULT_ALREADY_SELECTED = "github_vault_already_selected"
-    GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED = (
-        "github_vault_replacement_confirmation_required"
-    )
-    GITHUB_VAULT_REPLACED = "github_vault_replaced"
-    GITHUB_VAULT_REPLACEMENT_CANCELLED = "github_vault_replacement_cancelled"
-    GITHUB_VAULT_CONFIRMATION_MISSING = "github_vault_confirmation_missing"
-    GITHUB_VAULT_GITHUB_REQUIRED = "github_vault_github_required"
-    GITHUB_VAULT_REPOSITORY_UNAVAILABLE = "github_vault_repository_unavailable"
-    GITHUB_VAULT_PATH_NOT_FOUND = "github_vault_path_not_found"
-    GITHUB_VAULT_FAILED = "github_vault_failed"
-    GITHUB_SYNC_COMPLETED = "github_sync_completed"
-    GITHUB_SYNC_FAILED = "github_sync_failed"
-    GITHUB_VAULT_CONFIGURATION_REQUIRED = "github_vault_configuration_required"
-    GITHUB_STATUS = "github_status"
-    GITHUB_DISCONNECT_NOT_CONNECTED = "github_disconnect_not_connected"
-    GITHUB_DISCONNECT_CONFIRMATION_REQUIRED = (
-        "github_disconnect_confirmation_required"
-    )
-    GITHUB_DISCONNECTED = "github_disconnected"
-    GITHUB_DISCONNECT_CANCELLED = "github_disconnect_cancelled"
-    GITHUB_DISCONNECT_CONFIRMATION_MISSING = (
-        "github_disconnect_confirmation_missing"
-    )
+    ONBOARDING_REQUIRED = "onboarding_required"
 
 
 @dataclass(frozen=True, slots=True)
 class ProcessIncomingMessageResult:
-    """Структурированный результат обработки входящего сообщения."""
+    """Хранит ответ общего входа без моделей подключённых возможностей."""
 
     type: IncomingMessageResultType
     app_user: AppUser | None = None
-    saved_message: SavedIncomingMessage | None = None
     link_code: CreatedLinkCode | None = None
-    article_result: ProcessArticleUrlResult | None = None
-    analysis_result: AnalyzeArticleResult | None = None
-    review_result: PrepareObsidianReviewResult | None = None
-    obsidian_confirmation: ObsidianConfirmationResult | None = None
-    github_connection: GitHubConnectionStartResult | None = None
-    github_completion: GitHubConnectionCompletion | None = None
-    vault_selection: VaultSelectionResult | None = None
-    selected_vault: ObsidianVault | None = None
-    installation_url: str | None = None
-    vault_sync_result: VaultSyncResult | None = None
-    vault_status: VaultStatus | None = None
-    vault_disconnect: VaultDisconnectResult | None = None
-    vault_sync_warning: VaultSyncWarning | None = None
+    onboarding: OnboardingState | None = None
     error: Exception | None = None
+    capability_reply: str | None = None
+    capability_help: CapabilityHelp | None = None
 
 
-IncomingCompletionHandler = Callable[[ProcessIncomingMessageResult], None]
+IncomingCompletionHandler = Callable[[IncomingResult], None]
 
 
 class ProcessIncomingMessageUseCase:
-    """Обрабатывает входящее сообщение без привязки к конкретному каналу."""
+    """Разрешает identity, общие команды и приоритет перепривязки канала."""
 
     def __init__(
         self,
         *,
-        article_url_use_case: ProcessArticleUrlUseCase,
-        article_analysis_use_case: AnalyzeArticleUseCase | None = None,
-        incoming_message_repository: IncomingMessageRepository | None = None,
+        incoming_capability: IncomingCapabilityPort,
         user_identity_service: UserIdentityService | None = None,
-        github_connection_starter: GitHubConnectionStarter | None = None,
-        vault_selection_manager: VaultSelectionManager | None = None,
-        vault_sync_manager: VaultSyncManager | None = None,
-        obsidian_review_use_case: PrepareObsidianReviewUseCase | None = None,
-        obsidian_confirmation_service: (
-            ObsidianProposalConfirmationService | None
-        ) = None,
     ) -> None:
-        self._article_url_use_case = article_url_use_case
-        self._article_analysis_use_case = article_analysis_use_case
-        self._incoming_message_repository = incoming_message_repository
+        self._incoming_capability = incoming_capability
         self._user_identity_service = user_identity_service
-        self._github_connection_starter = github_connection_starter
-        self._vault_selection_manager = vault_selection_manager
-        self._vault_sync_manager = vault_sync_manager
-        self._obsidian_review_use_case = obsidian_review_use_case
-        self._obsidian_confirmation_service = obsidian_confirmation_service
 
     def execute(
         self,
-        incoming_message: IncomingMessage,
+        event: IncomingEvent,
         completion_handler: IncomingCompletionHandler | None = None,
-    ) -> ProcessIncomingMessageResult:
-        """Выполняет общий flow регистрации, сохранения статьи и анализа.
+    ) -> IncomingResult:
+        """Обрабатывает общую часть сообщения и передаёт предметный текст.
 
         Args:
-            incoming_message: Нормализованное сообщение внешнего канала.
-            completion_handler: Callback итогового ответа фоновой регистрации в
-                исходный чат или `None`, если фоновый ответ не поддерживается.
+            event: Нормализованное событие канала без внутреннего ID пользователя.
+            completion_handler: Доставка результата фоновой операции в исходный чат.
 
         Returns:
-            Структурированный результат синхронной части обработки.
+            Общий ответ или ответ зарегистрированной возможности.
         """
-        LOGGER.debug(
-            "Incoming message received: channel=%s chat_id=%s message_id=%s "
-            "external_user_id=%s text_kind=%s",
-            incoming_message.channel,
-            incoming_message.chat_id,
-            incoming_message.message_id,
-            incoming_message.external_user_id,
-            _text_kind(incoming_message.text),
-        )
-        app_user_result = self._resolve_app_user(
-            incoming_message,
-            completion_handler=completion_handler,
-        )
-        if isinstance(app_user_result, ProcessIncomingMessageResult):
-            _log_result(app_user_result)
-            return app_user_result
-
-        incoming_message = _with_app_user(incoming_message, app_user_result)
-        LOGGER.debug(
-            "Incoming identity resolved: app_user_id=%s channel=%s chat_id=%s",
-            app_user_result.id,
-            incoming_message.channel,
-            incoming_message.chat_id,
-        )
-        url = extract_first_supported_url(incoming_message.text)
-        if url is None:
-            result = ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_URL_MISSING,
-                app_user=app_user_result,
-            )
-            _log_result(result)
-            return result
-
-        auto_sync_result = self._auto_sync_vault(app_user_result)
-        if isinstance(auto_sync_result, ProcessIncomingMessageResult):
-            _log_result(auto_sync_result)
-            return auto_sync_result
-        vault_sync_warning = (
-            auto_sync_result
-            if isinstance(auto_sync_result, VaultSyncWarning)
-            else (
-                self._vault_sync_warning(
-                    app_user_result.id,
-                    VaultSyncWarningReason.EMBEDDING_UPDATE_FAILED,
-                )
-                if (
-                    isinstance(auto_sync_result, VaultSyncResult)
-                    and auto_sync_result.embedding_update_failed
-                )
-                else None
-            )
-        )
-        vault_sync_result = (
-            auto_sync_result
-            if isinstance(auto_sync_result, VaultSyncResult)
-            else None
-        )
-
-        saved_message = self._save_incoming_message(incoming_message)
-        incoming_message_id = saved_message.id if saved_message is not None else None
-        if saved_message is not None:
-            LOGGER.debug(
-                "Incoming message saved: incoming_message_id=%s app_user_id=%s "
-                "channel=%s chat_id=%s message_id=%s",
-                saved_message.id,
-                saved_message.app_user_id,
-                saved_message.channel,
-                saved_message.chat_id,
-                saved_message.message_id,
-            )
-
-        try:
-            article_result = self._article_url_use_case.execute(
-                ProcessArticleUrlCommand(
-                    source_url=url,
-                    app_user_id=incoming_message.app_user_id,
-                    incoming_message_id=incoming_message_id,
-                )
-            )
-        except ProcessArticleUrlError as error:
-            result = ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_PROCESSING_FAILED,
-                app_user=app_user_result,
-                saved_message=saved_message,
-                vault_sync_result=vault_sync_result,
-                vault_sync_warning=vault_sync_warning,
-                error=error,
-            )
-            _log_result(result)
-            return result
-
-        self._link_message_to_article(saved_message, article_result)
-        LOGGER.debug(
-            "Article flow completed: article_id=%s app_user_id=%s created=%s "
-            "extracted=%s status=%s",
-            article_result.article.id,
-            article_result.article.app_user_id,
-            article_result.created,
-            article_result.extracted,
-            article_result.article.status.value,
-        )
-
-        if (
-            article_result.article.status is ArticleStatus.REVIEWED
-            and self._obsidian_confirmation_service is not None
-            and article_result.article.id is not None
-        ):
-            applied = self._obsidian_confirmation_service.get_latest_applied(
-                app_user_id=app_user_result.id,
-                article_id=article_result.article.id,
-            )
-            if applied is not None:
-                saved_analysis = (
-                    self._article_analysis_use_case.execute(
-                        AnalyzeArticleCommand(
-                            article_id=article_result.article.id,
-                            app_user_id=app_user_result.id,
-                            incoming_message_id=incoming_message_id,
-                        )
-                    )
-                    if self._article_analysis_use_case is not None
-                    else None
-                )
-                result = ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.ARTICLE_REVIEWED_RESULT,
-                    app_user=app_user_result,
-                    saved_message=saved_message,
-                    article_result=article_result,
-                    analysis_result=saved_analysis,
-                    obsidian_confirmation=ObsidianConfirmationResult(
-                        status=ObsidianConfirmationStatus.APPLIED,
-                        proposal=applied,
-                    ),
-                    vault_sync_result=vault_sync_result,
-                    vault_sync_warning=vault_sync_warning,
-                )
-                _log_result(result)
-                return result
-
-        if self._article_analysis_use_case is None or article_result.article.id is None:
-            result = ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_PROCESSED,
-                app_user=app_user_result,
-                saved_message=saved_message,
-                article_result=article_result,
-                vault_sync_result=vault_sync_result,
-                vault_sync_warning=vault_sync_warning,
-            )
-            _log_result(result)
-            return result
-
-        try:
-            analysis_result = self._article_analysis_use_case.execute(
-                AnalyzeArticleCommand(
-                    article_id=article_result.article.id,
-                    app_user_id=incoming_message.app_user_id,
-                    incoming_message_id=incoming_message_id,
-                )
-            )
-        except AnalyzeArticleError as error:
-            result = ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_ANALYSIS_FAILED,
-                app_user=app_user_result,
-                saved_message=saved_message,
-                article_result=article_result,
-                vault_sync_result=vault_sync_result,
-                vault_sync_warning=vault_sync_warning,
-                error=error,
-            )
-            _log_result(result)
-            return result
-
-        LOGGER.debug(
-            "Article analysis completed: article_id=%s analysis_id=%s created=%s "
-            "model=%s",
-            analysis_result.article.id,
-            analysis_result.analysis.id,
-            analysis_result.created,
-            analysis_result.analysis.llm_model,
-        )
-        if self._obsidian_review_use_case is not None:
-            try:
-                review_result = self._obsidian_review_use_case.execute(
-                    PrepareObsidianReviewCommand(
-                        article_id=article_result.article.id,
-                        analysis=analysis_result.analysis,
-                        app_user_id=incoming_message.app_user_id,
-                        incoming_message_id=incoming_message_id,
-                    )
-                )
-            except PrepareObsidianReviewError as error:
-                result = ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.ARTICLE_REVIEW_FAILED,
-                    app_user=app_user_result,
-                    saved_message=saved_message,
-                    article_result=article_result,
-                    analysis_result=analysis_result,
-                    vault_sync_result=vault_sync_result,
-                    vault_sync_warning=vault_sync_warning,
-                    error=error,
-                )
-                _log_result(result)
-                return result
-            result = ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REVIEW_PREPARED,
-                app_user=app_user_result,
-                saved_message=saved_message,
-                article_result=article_result,
-                analysis_result=analysis_result,
-                review_result=review_result,
-                vault_sync_result=vault_sync_result,
-                vault_sync_warning=vault_sync_warning,
-            )
-            _log_result(result)
-            return result
-
-        result = ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.ARTICLE_ANALYZED,
-            app_user=app_user_result,
-            saved_message=saved_message,
-            article_result=article_result,
-            analysis_result=analysis_result,
-            vault_sync_result=vault_sync_result,
-            vault_sync_warning=vault_sync_warning,
-        )
-        _log_result(result)
-        return result
-
-    def _auto_sync_vault(
-        self,
-        app_user: AppUser,
-    ) -> VaultSyncResult | VaultSyncWarning | ProcessIncomingMessageResult | None:
-        """Проверяет устаревший vault перед обработкой URL статьи."""
-        if self._vault_sync_manager is None:
-            return None
-        try:
-            sync_result = self._vault_sync_manager.sync_if_stale(app_user.id)
-        except VaultConfigurationError as error:
-            return ProcessIncomingMessageResult(
-                type=(
-                    IncomingMessageResultType
-                    .GITHUB_VAULT_CONFIGURATION_REQUIRED
-                ),
-                app_user=app_user,
-                error=error,
-            )
-        except (GitHubGatewayError, OSError, ValueError, RuntimeError) as error:
-            LOGGER.warning(
-                "Automatic vault check failed: "
-                "app_user_id=%s error_type=%s",
-                app_user.id,
-                type(error).__name__,
-            )
-            status = self._get_vault_status_safe(app_user.id)
-            if not _has_usable_local_snapshot(status):
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.GITHUB_SYNC_FAILED,
-                    app_user=app_user,
-                    vault_status=status,
-                    error=error,
-                )
-            return self._vault_sync_warning(
-                app_user.id,
-                VaultSyncWarningReason.UPDATE_FAILED,
-                status=status,
-            )
-        LOGGER.debug(
-            "Automatic vault check completed: app_user_id=%s status=%s "
-            "downloaded_notes=%s total_notes=%s",
-            app_user.id,
-            sync_result.status.value,
-            sync_result.downloaded_notes,
-            sync_result.total_notes,
-        )
-        if sync_result.status is VaultSyncStatus.NO_VAULT:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.REGISTRATION_VAULT_REQUIRED,
-                app_user=app_user,
-            )
-        if sync_result.status is VaultSyncStatus.IN_PROGRESS:
-            status = self._get_vault_status_safe(app_user.id)
-            if not _has_usable_local_snapshot(status):
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.GITHUB_SYNC_FAILED,
-                    app_user=app_user,
-                    vault_status=status,
-                    error=RuntimeError(
-                        "Vault synchronization is in progress without a usable snapshot"
-                    ),
-                )
-            return self._vault_sync_warning(
-                app_user.id,
-                VaultSyncWarningReason.IN_PROGRESS,
-                status=status,
-            )
-        return sync_result
-
-    def _vault_sync_warning(
-        self,
-        app_user_id: int,
-        reason: VaultSyncWarningReason,
-        *,
-        status: VaultStatus | None = None,
-    ) -> VaultSyncWarning:
-        """Дополняет fallback доступным состоянием локальной копии."""
-        status = status or self._get_vault_status_safe(app_user_id)
-        if status is None:
-            return VaultSyncWarning(reason=reason)
-        return VaultSyncWarning(
-            reason=reason,
-            note_count=status.note_count,
-            last_checked_at=(
-                status.vault.last_checked_at
-                if status.vault is not None
-                else None
-            ),
-        )
-
-    def _get_vault_status_safe(self, app_user_id: int) -> VaultStatus | None:
-        """Читает readiness локального vault без подмены исходной sync-ошибки."""
-        if self._vault_sync_manager is None:
-            return None
-        try:
-            return self._vault_sync_manager.get_status(app_user_id)
-        except (OSError, ValueError, RuntimeError):
-            return None
-
-    def _resolve_app_user(
-        self,
-        incoming_message: IncomingMessage,
-        *,
-        completion_handler: IncomingCompletionHandler | None,
-    ) -> AppUser | ProcessIncomingMessageResult:
-        """Определяет пользователя приложения или возвращает результат onboarding."""
-        text = incoming_message.text.strip()
-        parsed_command = ParsedChatCommand.parse(text)
-        command = parsed_command.command if parsed_command is not None else None
+        text = event.text.strip()
+        parsed = ParsedChatCommand.parse(text)
+        command = parsed.command if parsed is not None else None
         if command is ChatCommand.HELP:
-            return ProcessIncomingMessageResult(type=IncomingMessageResultType.HELP)
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.HELP,
+                capability_help=self._incoming_capability.help(),
+            )
         if self._user_identity_service is None:
-            return AppUser(id=incoming_message.app_user_id)
+            return self._incoming_capability.handle(
+                AppUser(id=1), event, completion_handler
+            )
 
-        identity = _incoming_identity_from_message(incoming_message)
-        normalized_text = text.lower()
-
-        if normalized_text in {"да", "yes", "y"}:
+        identity = _incoming_identity_from_event(event)
+        normalized = text.lower()
+        if normalized in {"да", "yes", "y", "нет", "no", "n"}:
             if self._user_identity_service.has_pending_rebind(identity):
-                try:
-                    app_user = self._user_identity_service.confirm_rebind(identity)
+                if normalized in {"да", "yes", "y"}:
+                    try:
+                        user = self._user_identity_service.confirm_rebind(identity)
+                    except InvalidLinkCodeError as error:
+                        return ProcessIncomingMessageResult(
+                            type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_MISSING,
+                            error=error,
+                        )
                     return ProcessIncomingMessageResult(
                         type=IncomingMessageResultType.LINK_REBOUND,
-                        app_user=app_user,
+                        app_user=user,
                     )
-                except InvalidLinkCodeError as error:
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_MISSING,
-                        error=error,
-                    )
-            app_user = self._user_identity_service.resolve(identity)
-            if (
-                app_user is not None
-                and self._vault_selection_manager is not None
-                and self._vault_selection_manager.has_replacement_confirmation(
-                    app_user.id
-                )
-            ):
-                return self._confirm_vault_replacement(app_user)
-            if (
-                app_user is not None
-                and self._vault_selection_manager is not None
-                and self._vault_selection_manager.has_disconnect_confirmation(
-                    app_user.id
-                )
-            ):
-                return self._confirm_vault_disconnect(app_user)
-            if app_user is not None and self._obsidian_confirmation_service is not None:
-                confirmation = self._obsidian_confirmation_service.confirm(app_user.id)
-                if confirmation.status is not ObsidianConfirmationStatus.NO_PENDING:
-                    return self._review_confirmation_result(app_user, confirmation)
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.CONFIRMATION_MISSING
-            )
-
-        if normalized_text in {"нет", "no", "n"}:
-            if self._user_identity_service.has_pending_rebind(identity):
                 self._user_identity_service.cancel_rebind(identity)
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINK_REBIND_CANCELLED
                 )
-            app_user = self._user_identity_service.resolve(identity)
-            if app_user is not None and self._vault_selection_manager is not None:
-                cancelled = self._vault_selection_manager.cancel_replacement(
-                    app_user.id
+            user = self._user_identity_service.resolve(identity)
+            if user is None:
+                return ProcessIncomingMessageResult(
+                    type=IncomingMessageResultType.CONFIRMATION_MISSING,
+                    capability_reply=self._incoming_capability.confirmation_missing_reply(),
                 )
-                if cancelled is not None:
-                    return ProcessIncomingMessageResult(
-                        type=(
-                            IncomingMessageResultType
-                            .GITHUB_VAULT_REPLACEMENT_CANCELLED
-                        ),
-                        app_user=app_user,
-                        vault_selection=cancelled,
-                    )
-                disconnect_cancelled = (
-                    self._vault_selection_manager.cancel_disconnect(app_user.id)
-                )
-                if disconnect_cancelled is not None:
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.GITHUB_DISCONNECT_CANCELLED,
-                        app_user=app_user,
-                        vault_disconnect=disconnect_cancelled,
-                    )
-            if app_user is not None and self._obsidian_confirmation_service is not None:
-                confirmation = self._obsidian_confirmation_service.cancel(app_user.id)
-                if confirmation.status is not ObsidianConfirmationStatus.NO_PENDING:
-                    return self._review_confirmation_result(app_user, confirmation)
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.CONFIRMATION_MISSING
-            )
+            return self._incoming_capability.handle(user, event, completion_handler)
 
         if self._user_identity_service.has_pending_rebind(identity):
             return ProcessIncomingMessageResult(
@@ -654,142 +137,82 @@ class ProcessIncomingMessageUseCase:
             )
 
         if command is ChatCommand.START:
-            app_user = self._user_identity_service.resolve(identity)
-            if app_user is None:
+            user = self._user_identity_service.resolve(identity)
+            if user is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.START_UNREGISTERED
                 )
-            if app_user.display_name is None:
+            if user.display_name is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=app_user,
+                    app_user=user,
                 )
-            selected_vault = (
-                self._vault_selection_manager.get_selected(app_user.id)
-                if self._vault_selection_manager is not None
-                else None
-            )
-            if (
-                self._vault_selection_manager is not None
-                and selected_vault is None
-            ):
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.REGISTRATION_VAULT_REQUIRED,
-                    app_user=app_user,
-                )
+            state = self._incoming_capability.onboarding_state(user)
             return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.START_REGISTERED,
-                app_user=app_user,
-                selected_vault=selected_vault,
+                type=(
+                    IncomingMessageResultType.START_REGISTERED
+                    if state.ready
+                    else IncomingMessageResultType.ONBOARDING_REQUIRED
+                ),
+                app_user=user,
+                onboarding=state,
+                capability_reply=self._incoming_capability.onboarding_reply(
+                    OnboardingReplyKind.START if state.ready else OnboardingReplyKind.REQUIRED,
+                    user,
+                ),
             )
 
         if command is ChatCommand.REGISTER:
             existing = self._user_identity_service.resolve(identity)
-            if existing is not None:
-                selected_vault = (
-                    self._vault_selection_manager.get_selected(existing.id)
-                    if (
-                        existing.display_name is not None
-                        and self._vault_selection_manager is not None
-                    )
-                    else None
-                )
-                LOGGER.debug(
-                    "User already registered: app_user_id=%s channel=%s "
-                    "external_user_id=%s external_chat_id=%s username=%s",
-                    existing.id,
-                    identity.channel,
-                    identity.external_user_id,
-                    identity.external_chat_id,
-                    identity.username,
-                )
+            if existing is None:
+                user = self._user_identity_service.register(identity)
                 return ProcessIncomingMessageResult(
-                    type=(
-                        IncomingMessageResultType.REGISTRATION_NAME_REQUIRED
-                        if existing.display_name is None
-                        else (
-                            IncomingMessageResultType.REGISTRATION_VAULT_REQUIRED
-                            if (
-                                self._vault_selection_manager is not None
-                                and selected_vault is None
-                            )
-                            else IncomingMessageResultType.ALREADY_REGISTERED
-                        )
-                    ),
-                    app_user=existing,
-                    selected_vault=selected_vault,
+                    type=IncomingMessageResultType.REGISTERED,
+                    app_user=user,
                 )
-
-            app_user = self._user_identity_service.register(identity)
-            LOGGER.debug(
-                "User registered: app_user_id=%s channel=%s "
-                "external_user_id=%s external_chat_id=%s username=%s",
-                app_user.id,
-                identity.channel,
-                identity.external_user_id,
-                identity.external_chat_id,
-                identity.username,
-            )
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.REGISTERED,
-                app_user=app_user,
-            )
-
-        if command is ChatCommand.LINK_CODE:
-            app_user = self._user_identity_service.resolve(identity)
-            if app_user is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.UNKNOWN_IDENTITY
-                )
-            if app_user.display_name is None:
+            if existing.display_name is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=app_user,
+                    app_user=existing,
                 )
-            link_code = self._user_identity_service.create_link_code(app_user.id)
-            LOGGER.debug(
-                "Identity link code created: app_user_id=%s expires_at=%s",
-                app_user.id,
-                link_code.expires_at.isoformat(),
-            )
+            state = self._incoming_capability.onboarding_state(existing)
             return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.LINK_CODE_CREATED,
-                app_user=app_user,
-                link_code=link_code,
+                type=(
+                    IncomingMessageResultType.ALREADY_REGISTERED
+                    if state.ready
+                    else IncomingMessageResultType.ONBOARDING_REQUIRED
+                ),
+                app_user=existing,
+                onboarding=state,
+                capability_reply=self._incoming_capability.onboarding_reply(
+                    OnboardingReplyKind.ALREADY_REGISTERED
+                    if state.ready
+                    else OnboardingReplyKind.REQUIRED,
+                    existing,
+                ),
             )
 
         if command is ChatCommand.LINK:
-            if parsed_command is None or not parsed_command.arguments:
+            if parsed is None or not parsed.arguments:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINK_COMMAND_INVALID
                 )
             try:
-                app_user = self._user_identity_service.link(
-                    code=parsed_command.arguments,
-                    identity=identity,
-                )
-                LOGGER.debug(
-                    "Identity linked: app_user_id=%s channel=%s external_user_id=%s "
-                    "external_chat_id=%s username=%s",
-                    app_user.id,
-                    identity.channel,
-                    identity.external_user_id,
-                    identity.external_chat_id,
-                    identity.username,
+                user = self._user_identity_service.link(
+                    code=parsed.arguments, identity=identity
                 )
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINKED,
-                    app_user=app_user,
+                    app_user=user,
                 )
             except IdentityAlreadyBoundError as error:
                 try:
-                    target_user = self._user_identity_service.request_rebind_confirmation(
-                        code=parsed_command.arguments,
-                        identity=identity,
+                    target = self._user_identity_service.request_rebind_confirmation(
+                        code=parsed.arguments, identity=identity
                     )
                     return ProcessIncomingMessageResult(
                         type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_REQUIRED,
-                        app_user=target_user,
+                        app_user=target,
                     )
                 except IdentityAlreadyBoundError:
                     return ProcessIncomingMessageResult(
@@ -807,691 +230,83 @@ class ProcessIncomingMessageUseCase:
                     error=error,
                 )
 
-        app_user = self._user_identity_service.resolve(identity)
-        if app_user is None:
+        user = self._user_identity_service.resolve(identity)
+        if user is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.UNKNOWN_IDENTITY
             )
-        if command is ChatCommand.NAME:
-            return self._update_display_name(
-                parsed_command.arguments if parsed_command is not None else "",
-                app_user,
+        if command is ChatCommand.LINK_CODE:
+            if user.display_name is None:
+                return ProcessIncomingMessageResult(
+                    type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
+                    app_user=user,
+                )
+            link_code = self._user_identity_service.create_link_code(user.id)
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.LINK_CODE_CREATED,
+                app_user=user,
+                link_code=link_code,
             )
-        if app_user.display_name is None:
+        if command is ChatCommand.NAME:
+            return self._save_name(
+                parsed.arguments if parsed is not None else "", user,
+                registration=False,
+            )
+        if user.display_name is None:
             if command is not None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=app_user,
+                    app_user=user,
                 )
-            return self._save_registration_name(text, app_user)
-        pending_proposal = (
-            self._obsidian_confirmation_service.get_pending(app_user.id)
-            if self._obsidian_confirmation_service is not None
-            else None
-        )
-        if pending_proposal is not None and command not in {
-            ChatCommand.STATUS,
-            ChatCommand.GITHUB_STATUS,
-        }:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
-                app_user=app_user,
-                obsidian_confirmation=ObsidianConfirmationResult(
-                    status=ObsidianConfirmationStatus.PENDING,
-                    proposal=pending_proposal,
-                ),
-            )
+            return self._save_name(text, user, registration=True)
         if command is ChatCommand.STATUS:
-            selected_vault = (
-                self._vault_selection_manager.get_selected(app_user.id)
-                if self._vault_selection_manager is not None
+            return self._incoming_capability.status(user)
+        return self._incoming_capability.handle(user, event, completion_handler)
+
+    def _save_name(
+        self,
+        display_name: str,
+        user: AppUser,
+        *,
+        registration: bool,
+    ) -> ProcessIncomingMessageResult:
+        """Сохраняет имя и запрашивает готовность выбранной возможности."""
+        try:
+            updated = self._user_identity_service.update_display_name(
+                app_user_id=user.id, display_name=display_name
+            )
+        except (InvalidDisplayNameError, ValueError) as error:
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.NAME_COMMAND_INVALID,
+                app_user=user,
+                error=error,
+            )
+        return ProcessIncomingMessageResult(
+            type=(
+                IncomingMessageResultType.REGISTRATION_NAME_SAVED
+                if registration
+                else IncomingMessageResultType.NAME_UPDATED
+            ),
+            app_user=updated,
+            onboarding=(
+                self._incoming_capability.onboarding_state(updated)
+                if registration
                 else None
-            )
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.STATUS,
-                app_user=app_user,
-                selected_vault=selected_vault,
-            )
-        if command is ChatCommand.GITHUB_STATUS:
-            if self._vault_sync_manager is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                    app_user=app_user,
-                )
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_STATUS,
-                app_user=app_user,
-                vault_status=self._vault_sync_manager.get_status(app_user.id),
-            )
-        if command is ChatCommand.GITHUB_SYNC:
-            return self._sync_vault(app_user)
-        if command is ChatCommand.GITHUB_DISCONNECT:
-            return self._request_vault_disconnect(app_user)
-        repository_arguments = _github_repository_arguments(text)
-        if repository_arguments is not None:
-            return self._connect_registration_vault(
-                repository_arguments,
-                app_user,
-                completion_handler=completion_handler,
-            )
-        if command is ChatCommand.REANALYZE:
-            return self._reanalyze_article(
-                parsed_command.arguments if parsed_command is not None else "",
-                incoming_message,
-                app_user,
-            )
-        if (
-            self._vault_selection_manager is not None
-            and self._vault_selection_manager.get_selected(app_user.id) is None
-        ):
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.REGISTRATION_VAULT_REQUIRED,
-                app_user=app_user,
-            )
-        return app_user
-
-    def _review_confirmation_result(
-        self,
-        app_user: AppUser,
-        confirmation: ObsidianConfirmationResult,
-    ) -> ProcessIncomingMessageResult:
-        """Преобразует итог review-сервиса в channel-agnostic result type."""
-        result_types = {
-            ObsidianConfirmationStatus.PENDING: (
-                IncomingMessageResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING
             ),
-            ObsidianConfirmationStatus.CANCELLED: (
-                IncomingMessageResultType.ARTICLE_REVIEW_CANCELLED
+            capability_reply=(
+                self._incoming_capability.onboarding_reply(OnboardingReplyKind.NAME_SAVED, updated)
+                if registration
+                else None
             ),
-            ObsidianConfirmationStatus.APPLIED: (
-                IncomingMessageResultType.ARTICLE_REVIEW_APPLIED
-            ),
-            ObsidianConfirmationStatus.CONFLICT: (
-                IncomingMessageResultType.ARTICLE_REVIEW_CONFLICT
-            ),
-            ObsidianConfirmationStatus.IN_PROGRESS: (
-                IncomingMessageResultType.ARTICLE_REVIEW_IN_PROGRESS
-            ),
-            ObsidianConfirmationStatus.FAILED: (
-                IncomingMessageResultType.ARTICLE_REVIEW_APPLY_FAILED
-            ),
-            ObsidianConfirmationStatus.NO_PENDING: (
-                IncomingMessageResultType.CONFIRMATION_MISSING
-            ),
-        }
-        return ProcessIncomingMessageResult(
-            type=result_types[confirmation.status],
-            app_user=app_user,
-            obsidian_confirmation=confirmation,
-            error=confirmation.error,
-        )
-
-    def _save_registration_name(
-        self,
-        display_name: str,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Сохраняет обязательное имя и переводит onboarding к выбору vault."""
-        try:
-            updated = self._user_identity_service.update_display_name(
-                app_user_id=app_user.id,
-                display_name=display_name,
-            )
-        except (InvalidDisplayNameError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.NAME_COMMAND_INVALID,
-                app_user=app_user,
-                error=error,
-            )
-        selected_vault = (
-            self._vault_selection_manager.get_selected(updated.id)
-            if self._vault_selection_manager is not None
-            else None
-        )
-        return ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.REGISTRATION_NAME_SAVED,
-            app_user=updated,
-            selected_vault=selected_vault,
-        )
-
-    def _update_display_name(
-        self,
-        display_name: str,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Изменяет имя уже зарегистрированного внутреннего пользователя."""
-        try:
-            updated = self._user_identity_service.update_display_name(
-                app_user_id=app_user.id,
-                display_name=display_name,
-            )
-        except (InvalidDisplayNameError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.NAME_COMMAND_INVALID,
-                app_user=app_user,
-                error=error,
-            )
-        return ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.NAME_UPDATED,
-            app_user=updated,
-        )
-
-    def _connect_registration_vault(
-        self,
-        arguments: str,
-        app_user: AppUser,
-        *,
-        completion_handler: IncomingCompletionHandler | None,
-    ) -> ProcessIncomingMessageResult:
-        """Подключает vault либо запускает необходимую GitHub-авторизацию."""
-        result = self._select_github_vault(arguments, app_user)
-        if result.type is IncomingMessageResultType.GITHUB_VAULT_GITHUB_REQUIRED:
-            return self._start_github_connection(
-                arguments,
-                app_user,
-                completion_handler=completion_handler,
-            )
-        if (
-            result.type
-            is IncomingMessageResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
-            and self._github_connection_starter is not None
-        ):
-            return _with_installation_url(
-                result,
-                self._github_connection_starter.installation_url,
-            )
-        return result
-
-    def _start_github_connection(
-        self,
-        repository_arguments: str,
-        app_user: AppUser,
-        *,
-        completion_handler: IncomingCompletionHandler | None,
-    ) -> ProcessIncomingMessageResult:
-        """Запускает Device Flow и продолжает выбор исходного vault после него."""
-        if self._github_connection_starter is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-
-        def complete_github(completion: GitHubConnectionCompletion) -> None:
-            if (
-                completion.status is GitHubConnectionCompletionStatus.CONNECTED
-                and completion_handler is not None
-            ):
-                completion_handler(
-                    ProcessIncomingMessageResult(
-                        type=(
-                            IncomingMessageResultType
-                            .GITHUB_AUTHORIZED_SYNC_STARTED
-                        ),
-                        app_user=app_user,
-                        github_completion=completion,
-                    )
-                )
-            result = self._complete_github_registration(
-                repository_arguments,
-                app_user,
-                completion,
-            )
-            if completion_handler is not None:
-                completion_handler(result)
-
-        try:
-            connection = self._github_connection_starter.start(
-                app_user.id,
-                complete_github,
-            )
-        except (GitHubGatewayError, OSError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        result_types = {
-            GitHubConnectionStartStatus.STARTED: (
-                IncomingMessageResultType.GITHUB_CONNECT_STARTED
-            ),
-            GitHubConnectionStartStatus.ALREADY_PENDING: (
-                IncomingMessageResultType.GITHUB_CONNECT_ALREADY_PENDING
-            ),
-            GitHubConnectionStartStatus.PREPARING: (
-                IncomingMessageResultType.GITHUB_CONNECT_PREPARING
-            ),
-            GitHubConnectionStartStatus.IN_PROGRESS: (
-                IncomingMessageResultType.GITHUB_CONNECT_IN_PROGRESS
-            ),
-        }
-        return ProcessIncomingMessageResult(
-            type=result_types[connection.status],
-            app_user=app_user,
-            github_connection=connection,
-        )
-
-    def _complete_github_registration(
-        self,
-        repository_arguments: str,
-        app_user: AppUser,
-        completion: GitHubConnectionCompletion,
-    ) -> ProcessIncomingMessageResult:
-        """Продолжает регистрацию после завершения фонового Device Flow."""
-        if completion.status is GitHubConnectionCompletionStatus.CONNECTED:
-            result = self._select_github_vault(repository_arguments, app_user)
-            if (
-                result.type
-                is IncomingMessageResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
-                and self._github_connection_starter is not None
-            ):
-                return _with_installation_url(
-                    result,
-                    self._github_connection_starter.installation_url,
-                )
-            return result
-        if completion.status is GitHubConnectionCompletionStatus.NO_INSTALLATIONS:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_APP_REQUIRED,
-                app_user=app_user,
-                github_completion=completion,
-                installation_url=(
-                    self._github_connection_starter.installation_url
-                    if self._github_connection_starter is not None
-                    else None
-                ),
-            )
-        return ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.GITHUB_CONNECT_FAILED,
-            app_user=app_user,
-            github_completion=completion,
-        )
-
-    def _select_github_vault(
-        self,
-        arguments: str,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Проверяет GitHub URL из регистрации и запускает выбор vault."""
-        parts = arguments.split(maxsplit=1)
-        if not parts:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_COMMAND_INVALID,
-                app_user=app_user,
-            )
-        if self._vault_selection_manager is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            selection = self._vault_selection_manager.select(
-                app_user_id=app_user.id,
-                repository_url=parts[0],
-                root_path=parts[1] if len(parts) == 2 else "",
-            )
-        except GitHubAccountNotConnectedError as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_GITHUB_REQUIRED,
-                app_user=app_user,
-                error=error,
-            )
-        except GitHubRepositoryNotAccessibleError as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE,
-                app_user=app_user,
-                error=error,
-            )
-        except GitHubVaultPathNotFoundError as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_PATH_NOT_FOUND,
-                app_user=app_user,
-                error=error,
-            )
-        except ValueError as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_COMMAND_INVALID,
-                app_user=app_user,
-                error=error,
-            )
-        except (GitHubGatewayError, OSError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        result_types = {
-            VaultSelectionStatus.SELECTED: (
-                IncomingMessageResultType.GITHUB_VAULT_SELECTED
-            ),
-            VaultSelectionStatus.ALREADY_SELECTED: (
-                IncomingMessageResultType.GITHUB_VAULT_ALREADY_SELECTED
-            ),
-            VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED: (
-                IncomingMessageResultType
-                .GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
-            ),
-        }
-        result = ProcessIncomingMessageResult(
-            type=result_types[selection.status],
-            app_user=app_user,
-            vault_selection=selection,
-        )
-        if selection.status is VaultSelectionStatus.SELECTED:
-            return self._sync_vault(app_user, base_result=result)
-        return result
-
-    def _confirm_vault_replacement(
-        self,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Применяет ожидающую замену vault после ответа `да`."""
-        if self._vault_selection_manager is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            selection = self._vault_selection_manager.confirm_replacement(app_user.id)
-        except (OSError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        if selection is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_CONFIRMATION_MISSING,
-                app_user=app_user,
-            )
-        result = ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.GITHUB_VAULT_REPLACED,
-            app_user=app_user,
-            vault_selection=selection,
-        )
-        return self._sync_vault(app_user, base_result=result)
-
-    def _sync_vault(
-        self,
-        app_user: AppUser,
-        *,
-        base_result: ProcessIncomingMessageResult | None = None,
-    ) -> ProcessIncomingMessageResult:
-        """Запускает ручную или первую синхронизацию выбранного vault."""
-        if self._vault_sync_manager is None:
-            return base_result or ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            sync_result = self._vault_sync_manager.sync(app_user.id)
-        except (GitHubGatewayError, OSError, ValueError, RuntimeError) as error:
-            if base_result is not None:
-                return replace(base_result, error=error)
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_SYNC_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        if base_result is not None:
-            return replace(base_result, vault_sync_result=sync_result)
-        return ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.GITHUB_SYNC_COMPLETED,
-            app_user=app_user,
-            vault_sync_result=sync_result,
-        )
-
-    def _request_vault_disconnect(
-        self,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Запрашивает явное подтверждение отключения активного vault."""
-        if self._vault_selection_manager is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            disconnect = self._vault_selection_manager.request_disconnect(app_user.id)
-        except (OSError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        result_type = (
-            IncomingMessageResultType.GITHUB_DISCONNECT_NOT_CONNECTED
-            if disconnect.status is VaultDisconnectStatus.NOT_CONNECTED
-            else IncomingMessageResultType.GITHUB_DISCONNECT_CONFIRMATION_REQUIRED
-        )
-        return ProcessIncomingMessageResult(
-            type=result_type,
-            app_user=app_user,
-            vault_disconnect=disconnect,
-        )
-
-    def _confirm_vault_disconnect(
-        self,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Удаляет vault и локальную копию после ответа пользователя `да`."""
-        if self._vault_selection_manager is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            disconnect = self._vault_selection_manager.confirm_disconnect(app_user.id)
-        except (OSError, ValueError) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        if disconnect is None:
-            return ProcessIncomingMessageResult(
-                type=(
-                    IncomingMessageResultType
-                    .GITHUB_DISCONNECT_CONFIRMATION_MISSING
-                ),
-                app_user=app_user,
-            )
-        result_type = (
-            IncomingMessageResultType.GITHUB_DISCONNECT_NOT_CONNECTED
-            if disconnect.status is VaultDisconnectStatus.NOT_CONNECTED
-            else IncomingMessageResultType.GITHUB_DISCONNECTED
-        )
-        return ProcessIncomingMessageResult(
-            type=result_type,
-            app_user=app_user,
-            vault_disconnect=disconnect,
-        )
-
-    def _reanalyze_article(
-        self,
-        arguments: str,
-        incoming_message: IncomingMessage,
-        app_user: AppUser,
-    ) -> ProcessIncomingMessageResult:
-        """Повторно анализирует сохранённую статью по команде пользователя."""
-        if not arguments.isdigit():
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.REANALYZE_COMMAND_INVALID,
-                app_user=app_user,
-            )
-        if self._article_analysis_use_case is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REANALYSIS_FAILED,
-                app_user=app_user,
-                error=AnalyzeArticleError("Article analysis use case is not configured"),
-            )
-
-        try:
-            article_result = self._article_url_use_case.reprocess_existing(
-                article_id=int(arguments),
-                app_user_id=app_user.id,
-                incoming_message_id=None,
-            )
-            analysis_result = self._article_analysis_use_case.execute(
-                AnalyzeArticleCommand(
-                    article_id=int(arguments),
-                    app_user_id=app_user.id,
-                    incoming_message_id=None,
-                    force=True,
-                )
-            )
-            review_result = None
-            if self._obsidian_review_use_case is not None:
-                review_result = self._obsidian_review_use_case.execute(
-                    PrepareObsidianReviewCommand(
-                        article_id=int(arguments),
-                        analysis=analysis_result.analysis,
-                        app_user_id=app_user.id,
-                        incoming_message_id=None,
-                    )
-                )
-        except (
-            ProcessArticleUrlError,
-            AnalyzeArticleError,
-            PrepareObsidianReviewError,
-        ) as error:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REANALYSIS_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-
-        return ProcessIncomingMessageResult(
-            type=IncomingMessageResultType.ARTICLE_REANALYZED,
-            app_user=app_user,
-            article_result=article_result,
-            analysis_result=analysis_result,
-            review_result=review_result,
-        )
-
-    def _save_incoming_message(
-        self,
-        incoming_message: IncomingMessage,
-    ) -> SavedIncomingMessage | None:
-        """Сохраняет сообщение, если repository передан в use case."""
-        if self._incoming_message_repository is None:
-            return None
-        return self._incoming_message_repository.save(incoming_message)
-
-    def _link_message_to_article(
-        self,
-        saved_message: SavedIncomingMessage | None,
-        article_result: ProcessArticleUrlResult,
-    ) -> None:
-        """Связывает сохраненное сообщение со статьей после успешной обработки."""
-        if (
-            self._incoming_message_repository is None
-            or saved_message is None
-            or article_result.article.id is None
-        ):
-            return
-        self._incoming_message_repository.link_to_article(
-            incoming_message_id=saved_message.id,
-            article_id=article_result.article.id,
         )
 
 
-def _incoming_identity_from_message(incoming_message: IncomingMessage) -> IncomingIdentity:
-    """Преобразует входящее сообщение в identity внешнего канала."""
-    external_user_id = incoming_message.external_user_id or incoming_message.chat_id
+def _incoming_identity_from_event(event: IncomingEvent) -> IncomingIdentity:
+    """Преобразует адрес события в общую модель identity."""
     return IncomingIdentity(
-        channel=incoming_message.channel,
-        external_user_id=external_user_id,
-        external_chat_id=incoming_message.chat_id,
-        username=incoming_message.username,
-        display_name=incoming_message.display_name,
-    )
-
-
-def _github_repository_arguments(text: str) -> str | None:
-    """Возвращает GitHub repository URL с optional path из обычного сообщения."""
-    stripped = text.strip()
-    if not stripped:
-        return None
-    first_part = stripped.split(maxsplit=1)[0].lower()
-    if first_part.startswith(("https://github.com/", "http://github.com/")):
-        return stripped
-    return None
-
-
-def _with_installation_url(
-    result: ProcessIncomingMessageResult,
-    installation_url: str,
-) -> ProcessIncomingMessageResult:
-    """Добавляет безопасную ссылку настройки App к готовому результату."""
-    return replace(result, installation_url=installation_url)
-
-
-def _with_app_user(incoming_message: IncomingMessage, app_user: AppUser) -> IncomingMessage:
-    """Возвращает копию входящего сообщения с ID пользователя приложения."""
-    return IncomingMessage(
-        channel=incoming_message.channel,
-        chat_id=incoming_message.chat_id,
-        message_id=incoming_message.message_id,
-        text=incoming_message.text,
-        app_user_id=app_user.id,
-        external_user_id=incoming_message.external_user_id,
-        username=incoming_message.username,
-        display_name=incoming_message.display_name,
-    )
-
-
-def _has_usable_local_snapshot(status: VaultStatus | None) -> bool:
-    """Проверяет readiness локального source/FTS до платного article pipeline."""
-    if status is None or status.vault is None:
-        return False
-    return bool(
-        status.vault.head_commit_sha
-        and status.vault.tree_sha
-        and status.chunk_index_current
-    )
-
-
-def _text_kind(text: str) -> str:
-    stripped_text = text.strip()
-    if not stripped_text:
-        return "empty"
-    parsed_command = ParsedChatCommand.parse(stripped_text)
-    if parsed_command is not None:
-        return f"command:{parsed_command.command.value}"
-    if stripped_text.startswith("/"):
-        return "command:unknown"
-    if extract_first_supported_url(stripped_text) is not None:
-        return "url"
-    return "text"
-
-
-def _log_result(result: ProcessIncomingMessageResult) -> None:
-    LOGGER.debug(
-        "Incoming message processed: result=%s app_user_id=%s "
-        "incoming_message_id=%s article_id=%s analysis_id=%s "
-        "proposal_action=%s vault_warning=%s error_type=%s",
-        result.type.value,
-        result.app_user.id if result.app_user is not None else None,
-        result.saved_message.id if result.saved_message is not None else None,
-        (
-            result.article_result.article.id
-            if result.article_result is not None
-            else None
-        ),
-        (
-            result.analysis_result.analysis.id
-            if result.analysis_result is not None
-            else None
-        ),
-        (
-            result.review_result.proposal.action.value
-            if result.review_result is not None
-            else None
-        ),
-        (
-            result.vault_sync_warning.reason.value
-            if result.vault_sync_warning is not None
-            else None
-        ),
-        type(result.error).__name__ if result.error is not None else None,
+        channel=event.channel,
+        external_user_id=event.external_user_id or event.chat_id,
+        external_chat_id=event.chat_id,
+        username=event.username,
+        display_name=event.display_name,
     )

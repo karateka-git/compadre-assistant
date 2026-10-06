@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.application.articles.url_utils import (
+from obs_chat_bot.capabilities.obsidian.application.articles.url_utils import (
     InvalidUrlError,
     is_supported_article_url,
     normalize_article_url,

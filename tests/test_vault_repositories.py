@@ -7,24 +7,24 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.github_installation_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
 from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.data.sqlite.obsidian_vault_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
-from obs_chat_bot.data.sqlite.vault_instruction_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_instruction_repository import (
     SQLiteVaultInstructionRepository,
 )
-from obs_chat_bot.data.sqlite.vault_confirmation_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
     SQLiteVaultActionConfirmationRepository,
 )
-from obs_chat_bot.data.sqlite.vault_sync_lease_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import (
     SQLiteVaultSyncLeaseRepository,
 )
-from obs_chat_bot.domain.vaults.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultActionConfirmation,
     VaultConfirmationAction,

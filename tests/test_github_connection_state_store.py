@@ -6,7 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.github_connection_state_store import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_connection_state_store import (
     SQLiteGitHubConnectionStateStore,
 )
 from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
@@ -47,6 +47,50 @@ class GitHubConnectionStateStoreTest(unittest.TestCase):
 
             first.release_attempt(app_user_id=1, owner="tg-catcher")
             self.assertFalse(second.has_active_attempt(app_user_id=1, now=now))
+
+    def test_expired_attempt_can_be_restarted_after_process_loss(self) -> None:
+        """Новый процесс повторно захватывает claim после истечения старого."""
+        now = datetime.now(UTC)
+        with TemporaryDirectory(prefix="obs-chat-bot-github-restart-") as directory:
+            database_path = Path(directory) / "test.db"
+            with connect_database(database_path) as connection:
+                apply_migrations(connection)
+                ensure_app_user(connection)
+
+            previous_process = SQLiteGitHubConnectionStateStore(database_path)
+            self.assertTrue(
+                previous_process.acquire_attempt(
+                    app_user_id=1,
+                    owner="old-process",
+                    now=now,
+                    expires_at=now + timedelta(minutes=20),
+                )
+            )
+
+            restarted_process = SQLiteGitHubConnectionStateStore(database_path)
+            self.assertFalse(
+                restarted_process.acquire_attempt(
+                    app_user_id=1,
+                    owner="new-process",
+                    now=now + timedelta(minutes=19),
+                    expires_at=now + timedelta(minutes=39),
+                )
+            )
+            self.assertTrue(
+                restarted_process.acquire_attempt(
+                    app_user_id=1,
+                    owner="new-process",
+                    now=now + timedelta(minutes=20),
+                    expires_at=now + timedelta(minutes=40),
+                )
+            )
+            previous_process.release_attempt(app_user_id=1, owner="old-process")
+            self.assertTrue(
+                restarted_process.has_active_attempt(
+                    app_user_id=1,
+                    now=now + timedelta(minutes=20),
+                )
+            )
 
 
 if __name__ == "__main__":

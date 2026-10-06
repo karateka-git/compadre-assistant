@@ -28,19 +28,22 @@ Knowledge Catcher — бот, который помогает превращат
 
 ```mermaid
 flowchart LR
-    Channels[VK / Telegram] --> Presentation[Presentation\nадаптеры каналов и команды]
-    Presentation --> Application[Application\nрегистрация, incoming flow,\nsync и review]
-    Application --> Domain[Domain\nсущности и правила]
-    Application --> Ports[Порты application]
-    Data[Data\nреализации портов] -. реализует .-> Ports
-    Data --> SQLite[(SQLite\nпользователи, статьи,\nvault и индексы)]
-    Data --> GitHub[GitHub App\nDevice Flow, sync, commit]
-    Data --> LLM[LLM и embeddings]
-    Data --> Chunker[Document chunker\nразбиение Markdown]
-    GitHub <--> Vault[Obsidian vault\nв GitHub]
+    Channels[VK / Telegram] --> Adapters[Адаптеры каналов]
+    Adapters --> Incoming[Общий вход: identity и команды профиля]
+    Incoming --> Obsidian[Obsidian presentation: команды и ответы]
+    Obsidian --> UseCases[Obsidian application: сценарии и ports]
+    CLI[CLI: диагностика и process-url] --> Bootstrap[Общий bootstrap.py]
+    Bootstrap --> ObsidianBootstrap[Obsidian bootstrap и smoke]
+    ObsidianBootstrap --> UseCases
+    UseCases --> Domain[Obsidian domain: модели и правила]
+    ObsidianData[Obsidian data: SQLite, GitHub, HTTP, LLM, embeddings] -. реализует ports .-> UseCases
+    Incoming --> Users[Общие users, config и SQLite lifecycle]
+    ObsidianData --> SQLite[(Единая SQLite-БД)]
+    ObsidianData --> GitHub[GitHub App и Obsidian vault]
+    ObsidianData --> Chunker[Независимый document_chunker]
 ```
 
-Слои зависят внутрь: `presentation` вызывает `application`; `application` использует правила `domain` и порты; `data` реализует порты для SQLite, GitHub и AI-провайдеров. Подробная схема компонентов и сценариев находится в [ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Это промежуточная структура этапа 1: Obsidian уже выделен в `capabilities/obsidian/`, а его use cases и ports временно находятся в `application`. Общие пользователи, вход и конфигурация пока остаются в прежних каталогах. Режимы чатов, общий диспетчер и возможность Ask запланированы на следующие этапы. Подробная схема компонентов и сценариев находится в [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Быстрый старт
 
@@ -52,6 +55,7 @@ flowchart LR
 
 ## Документация
 
+- [ASSISTANT REBIRTH ROADMAP](docs/ASSISTANT_REBIRTH_ROADMAP.md) — план перехода к модульному личному ассистенту.
 - [Архитектура](docs/ARCHITECTURE.md) — слои, компоненты и потоки данных.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.

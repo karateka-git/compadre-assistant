@@ -5,11 +5,8 @@ import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.incoming.processing import (
-    IncomingMessageResultType,
-    ProcessIncomingMessageResult,
-)
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.application.incoming.ports import IncomingResponse
 from obs_chat_bot.presentation.vk.bot import (
     LongPollServer,
     VkApiClient,
@@ -133,18 +130,16 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(" ".join(chunks), "alpha beta gamma delta")
 
     def test_handle_update_converts_vk_message_to_incoming_message(self) -> None:
-        """VK update превращается в channel-agnostic IncomingMessage."""
+        """VK update превращается в channel-agnostic IncomingEvent."""
         client = FakeVkClient()
-        processed: list[IncomingMessage] = []
+        processed: list[IncomingEvent] = []
 
         def processor(
-            message: IncomingMessage,
+            message: IncomingEvent,
             _completion_handler,
-        ) -> ProcessIncomingMessageResult:
+        ) -> IncomingResponse:
             processed.append(message)
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_URL_MISSING
-            )
+            return IncomingResponse("Пришли ссылку на статью.")
 
         _handle_update(
             {
@@ -170,18 +165,44 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(client.messages[0][0], 22)
         self.assertIn("Пришли ссылку", client.messages[0][1])
 
+    def test_handle_update_uses_injected_ack_before_processing(self) -> None:
+        """VK отправляет квитанцию по нейтральному сигналу до запуска worker."""
+        client = FakeVkClient()
+        seen_before_processing: list[str] = []
+
+        def processor(_message: IncomingEvent, _handler) -> IncomingResponse:
+            """Запоминает уже отправленные ответы к началу обработки."""
+            seen_before_processing.extend(text for _, text in client.messages)
+            return IncomingResponse("Готово")
+
+        _handle_update(
+            {
+                "type": "message_new",
+                "object": {"message": {
+                    "id": 11, "peer_id": 22, "from_id": 33,
+                    "text": "долгое действие",
+                }},
+            },
+            incoming_message_processor=processor,
+            client=client,
+            logger=logging.getLogger("test.vk.ack"),
+            should_send_processing_ack=lambda text: text == "долгое действие",
+        )
+
+        self.assertEqual(len(seen_before_processing), 1)
+        self.assertIn("Принял, обрабатываю", seen_before_processing[0])
+        self.assertEqual(client.messages[-1], (22, "Готово"))
+
     def test_handle_update_does_not_raise_when_vk_send_fails(self) -> None:
         """Ошибка отправки VK-сообщения логируется и не роняет adapter."""
         client = FailingVkClient()
         logger = logging.getLogger("test.vk.safe_send")
 
         def processor(
-            _message: IncomingMessage,
+            _message: IncomingEvent,
             _completion_handler,
-        ) -> ProcessIncomingMessageResult:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_URL_MISSING
-            )
+        ) -> IncomingResponse:
+            return IncomingResponse("Пришли ссылку на статью.")
 
         with self.assertLogs(logger, level="ERROR") as logs:
             _handle_update(
@@ -232,9 +253,7 @@ class VkBotTest(unittest.TestCase):
 
         def processor(_message, completion_handler):
             completion_handlers.append(completion_handler)
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_STARTED
-            )
+            return IncomingResponse("Авторизация GitHub запускается.")
 
         _handle_update(
             {
@@ -253,17 +272,49 @@ class VkBotTest(unittest.TestCase):
             logger=logging.getLogger("test.vk.github_completion"),
         )
         completion_handlers[0](
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_APP_REQUIRED,
-                installation_url=(
-                    "https://github.com/apps/obs-chat-bot/installations/new"
-                ),
+            IncomingResponse(
+                "https://github.com/apps/obs-chat-bot/installations/new "
+                "Contents: read and write"
             )
         )
 
         self.assertEqual(client.messages[-1][0], 22)
         self.assertIn("installations/new", client.messages[-1][1])
         self.assertIn("read and write", client.messages[-1][1])
+
+    def test_completion_callbacks_keep_original_peers(self) -> None:
+        """Фоновые ответы двух чатов доходят до их исходных VK peer."""
+        client = FakeVkClient()
+        completion_handlers = []
+
+        def processor(_message, completion_handler):
+            completion_handlers.append(completion_handler)
+            return IncomingResponse("Подключение запущено.")
+
+        for message_id, peer_id in ((11, 22), (12, 44)):
+            _handle_update(
+                {
+                    "type": "message_new",
+                    "object": {
+                        "message": {
+                            "id": message_id,
+                            "peer_id": peer_id,
+                            "from_id": 33,
+                            "text": "https://github.com/octocat/notes",
+                        }
+                    },
+                },
+                incoming_message_processor=processor,
+                client=client,
+                logger=logging.getLogger("test.vk.github_completion_routing"),
+            )
+
+        completion_handlers[1](IncomingResponse("Второй чат готов."))
+        completion_handlers[0](IncomingResponse("Первый чат готов."))
+        self.assertEqual(
+            client.messages[-2:],
+            [(44, "Второй чат готов."), (22, "Первый чат готов.")],
+        )
 
     def test_api_call_sends_vk_method_params_in_post_body(self) -> None:
         """VK API methods send params in POST body, not in request URI."""
@@ -398,11 +449,11 @@ class VkBotTest(unittest.TestCase):
 
 
 def _unused_processor(
-    _message: IncomingMessage,
+    _message: IncomingEvent,
     _completion_handler,
-) -> ProcessIncomingMessageResult:
+) -> IncomingResponse:
     """Возвращает результат для сценариев Long Poll без входящих updates."""
-    return ProcessIncomingMessageResult(type=IncomingMessageResultType.ARTICLE_URL_MISSING)
+    return IncomingResponse("Пришли ссылку на статью.")
 
 
 def _network_transient_error() -> VkTransientError:

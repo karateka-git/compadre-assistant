@@ -5,28 +5,31 @@ from types import SimpleNamespace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.application.articles.incoming_messages import (
-    IncomingMessage,
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+    ArticleIncomingMessage,
     SavedIncomingMessage,
 )
-from obs_chat_bot.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
+from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
 from obs_chat_bot.application.incoming.processing import (
     IncomingMessageResultType,
     ProcessIncomingMessageUseCase,
 )
-from obs_chat_bot.application.reviews.proposal import PrepareObsidianReviewError
-from obs_chat_bot.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.application.reviews.proposal import PrepareObsidianReviewError
+from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
@@ -34,34 +37,34 @@ from obs_chat_bot.application.vaults.github_models import (
     GitHubDeviceAuthorization,
     GitHubGatewayError,
 )
-from obs_chat_bot.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
     GitHubAccountNotConnectedError,
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
     VaultSyncWarningReason,
 )
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.domain.reviews.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
 from obs_chat_bot.application.users.identity import IdentityAlreadyBoundError
 from obs_chat_bot.domain.users.entities import AppUser, IncomingIdentity
-from obs_chat_bot.domain.vaults.entities import ObsidianVault
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 
 
 class FakeArticleUrlUseCase:
@@ -129,10 +132,10 @@ class FakeIncomingMessageRepository:
     """Fake repository входящих сообщений для общего incoming-flow."""
 
     def __init__(self) -> None:
-        self.messages: list[IncomingMessage] = []
+        self.messages: list[ArticleIncomingMessage] = []
         self.links: list[tuple[int, int]] = []
 
-    def save(self, message: IncomingMessage) -> SavedIncomingMessage:
+    def save(self, message: ArticleIncomingMessage) -> SavedIncomingMessage:
         """Сохраняет сообщение в памяти."""
         self.messages.append(message)
         return SavedIncomingMessage(
@@ -569,12 +572,22 @@ class FakeVaultSyncManager:
         )
 
 
+def _make_use_case(**dependencies: object) -> ProcessIncomingMessageUseCase:
+    """Собирает отдельные общий вход и Obsidian handler для сценариев теста."""
+    identity_service = dependencies.pop("user_identity_service", None)
+    obsidian = ObsidianMessageHandler(**dependencies)
+    return ProcessIncomingMessageUseCase(
+        incoming_capability=obsidian,
+        user_identity_service=identity_service,
+    )
+
+
 class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     """Проверяет общий application-flow без Telegram adapter."""
 
     def test_execute_help_is_available_without_registered_identity(self) -> None:
         """`/help` возвращает список команд до регистрации пользователя."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeRegisteringIdentityService(),
         )
@@ -588,14 +601,13 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         """Сообщение со ссылкой проходит общий flow и возвращает structured result."""
         article_use_case = FakeArticleUrlUseCase()
         message_repository = FakeIncomingMessageRepository()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             incoming_message_repository=message_repository,
         )
 
         result = use_case.execute(
-            IncomingMessage(
-                app_user_id=5,
+            IncomingEvent(
                 channel="vk",
                 chat_id="chat-1",
                 message_id="msg-1",
@@ -603,24 +615,23 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_PROCESSED)
-        self.assertEqual(article_use_case.commands[0].app_user_id, 5)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_PROCESSED)
+        self.assertEqual(article_use_case.commands[0].app_user_id, 1)
         self.assertEqual(article_use_case.commands[0].incoming_message_id, 1)
-        self.assertEqual(message_repository.messages[0].app_user_id, 5)
+        self.assertEqual(message_repository.messages[0].app_user_id, 1)
         self.assertEqual(message_repository.links, [(1, 7)])
 
     def test_execute_prepares_obsidian_review_after_analysis(self) -> None:
         """Обычный URL-flow подключает 10.9 сразу после LLM-анализа."""
         review_use_case = FakeReviewUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             article_analysis_use_case=FakeAnalysisUseCase(),
             obsidian_review_use_case=review_use_case,
         )
 
         result = use_case.execute(
-            IncomingMessage(
-                app_user_id=5,
+            IncomingEvent(
                 channel="vk",
                 chat_id="chat-1",
                 message_id="msg-1",
@@ -630,7 +641,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.ARTICLE_REVIEW_PREPARED,
+            ObsidianResultType.ARTICLE_REVIEW_PREPARED,
         )
         self.assertIs(result.review_result, review_use_case.result)
         self.assertEqual(review_use_case.commands[0].article_id, 7)
@@ -641,15 +652,14 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         review_use_case = FakeReviewUseCase(
             error=PrepareObsidianReviewError("search failed")
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             article_analysis_use_case=FakeAnalysisUseCase(),
             obsidian_review_use_case=review_use_case,
         )
 
         result = use_case.execute(
-            IncomingMessage(
-                app_user_id=5,
+            IncomingEvent(
                 channel="telegram",
                 chat_id="chat-1",
                 message_id="msg-1",
@@ -657,14 +667,14 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_REVIEW_FAILED)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_REVIEW_FAILED)
         self.assertIsInstance(result.error, PrepareObsidianReviewError)
 
     def test_execute_checks_stale_vault_before_article_in_common_flow(self) -> None:
         """Telegram/VK-независимый flow проверяет vault до article use case."""
         article_use_case = FakeArticleUrlUseCase()
         sync_manager = FakeVaultSyncManager()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_sync_manager=sync_manager,
@@ -684,7 +694,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         sync_manager = FakeVaultSyncManager(
             error=GitHubGatewayError("GitHub request failed with HTTP 503")
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_sync_manager=sync_manager,
@@ -694,7 +704,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _telegram_message("https://example.com/article")
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_PROCESSED)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_PROCESSED)
         self.assertEqual(len(article_use_case.commands), 1)
         self.assertIsNone(result.error)
         self.assertEqual(
@@ -711,7 +721,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             error=GitHubGatewayError("GitHub unavailable"),
             usable_local_snapshot=False,
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             article_analysis_use_case=analysis_use_case,
             user_identity_service=FakeUserIdentityService(),
@@ -720,7 +730,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("https://example.com/article"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.GITHUB_SYNC_FAILED)
+        self.assertEqual(result.type, ObsidianResultType.GITHUB_SYNC_FAILED)
         self.assertEqual(article_use_case.commands, [])
         self.assertEqual(analysis_use_case.commands, [])
         self.assertIsNotNone(result.error)
@@ -729,7 +739,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         """Semantic-сбой не блокирует статью при готовых source SHA и FTS."""
         article_use_case = FakeArticleUrlUseCase()
         sync_manager = FakeVaultSyncManager(embedding_update_failed=True)
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_sync_manager=sync_manager,
@@ -737,7 +747,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("https://example.com/article"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_PROCESSED)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_PROCESSED)
         self.assertEqual(len(article_use_case.commands), 1)
         self.assertEqual(
             result.vault_sync_warning.reason,
@@ -749,7 +759,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     ) -> None:
         """Ошибка обязательной конфигурации не маскируется GitHub fallback."""
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_sync_manager=FakeVaultSyncManager(
@@ -765,14 +775,14 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.GITHUB_VAULT_CONFIGURATION_REQUIRED,
+            ObsidianResultType.GITHUB_VAULT_CONFIGURATION_REQUIRED,
         )
         self.assertEqual(article_use_case.commands, [])
 
     def test_execute_uses_local_vault_while_other_channel_syncs(self) -> None:
         """Активный lease не останавливает статью и объясняется предупреждением."""
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_sync_manager=FakeVaultSyncManager(
@@ -784,7 +794,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _telegram_message("https://example.com/article")
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_PROCESSED)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_PROCESSED)
         self.assertEqual(len(article_use_case.commands), 1)
         self.assertIsNone(result.error)
         self.assertEqual(
@@ -796,13 +806,13 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     def test_execute_returns_missing_url_without_saving_message(self) -> None:
         """Сообщение без URL не сохраняется и возвращает structured result."""
         message_repository = FakeIncomingMessageRepository()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             incoming_message_repository=message_repository,
         )
 
         result = use_case.execute(
-            IncomingMessage(
+            IncomingEvent(
                 channel="vk",
                 chat_id="chat-1",
                 message_id="msg-1",
@@ -810,19 +820,19 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_URL_MISSING)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_URL_MISSING)
         self.assertEqual(message_repository.messages, [])
 
     def test_execute_returns_status_for_registered_identity(self) -> None:
         """Команда `/status` возвращает structured result текущего пользователя."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
         )
 
         result = use_case.execute(_telegram_message("/status"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.STATUS)
+        self.assertEqual(result.type, ObsidianResultType.STATUS)
         self.assertEqual(result.app_user.id, 42)
 
     def test_repository_url_starts_github_authorization_when_account_is_missing(
@@ -833,7 +843,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         manager = FakeVaultSelectionManager(
             error=GitHubAccountNotConnectedError("GitHub is not authorized")
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             github_connection_starter=starter,
@@ -844,13 +854,13 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _telegram_message("https://github.com/octocat/notes")
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.GITHUB_CONNECT_STARTED)
+        self.assertEqual(result.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(result.github_connection.authorization.user_code, "ABCD-EFGH")
         self.assertEqual(starter.app_user_ids, [42])
 
     def test_execute_reports_unconfigured_github_connector(self) -> None:
         """Repository URL сообщает об отключённой GitHub App конфигурации."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=FakeVaultSelectionManager(
@@ -864,13 +874,13 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.GITHUB_CONNECT_UNAVAILABLE,
+            ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE,
         )
 
     def test_execute_selects_github_vault_for_shared_app_user(self) -> None:
         """Обычная GitHub-ссылка передаёт repository и path общему сервису."""
         manager = FakeVaultSelectionManager()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
@@ -882,7 +892,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.GITHUB_VAULT_SELECTED)
+        self.assertEqual(result.type, ObsidianResultType.GITHUB_VAULT_SELECTED)
         self.assertEqual(
             manager.calls,
             [(42, "https://github.com/octocat/notes", "Vault/Personal")],
@@ -893,7 +903,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         manager = FakeVaultSelectionManager(
             VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
@@ -908,22 +918,22 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             pending.type,
-            IncomingMessageResultType
+            ObsidianResultType
             .GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED,
         )
         self.assertEqual(
             confirmed.type,
-            IncomingMessageResultType.GITHUB_VAULT_REPLACED,
+            ObsidianResultType.GITHUB_VAULT_REPLACED,
         )
         self.assertEqual(
             cancelled.type,
-            IncomingMessageResultType.GITHUB_VAULT_REPLACEMENT_CANCELLED,
+            ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CANCELLED,
         )
 
     def test_execute_disconnects_vault_only_after_confirmation(self) -> None:
         """Команда создаёт подтверждение, `нет` отменяет, а `да` удаляет vault."""
         manager = FakeVaultSelectionManager(selected=_test_vault(42))
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
@@ -936,21 +946,21 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             requested.type,
-            IncomingMessageResultType.GITHUB_DISCONNECT_CONFIRMATION_REQUIRED,
+            ObsidianResultType.GITHUB_DISCONNECT_CONFIRMATION_REQUIRED,
         )
         self.assertEqual(
             cancelled.type,
-            IncomingMessageResultType.GITHUB_DISCONNECT_CANCELLED,
+            ObsidianResultType.GITHUB_DISCONNECT_CANCELLED,
         )
         self.assertEqual(
             confirmed.type,
-            IncomingMessageResultType.GITHUB_DISCONNECTED,
+            ObsidianResultType.GITHUB_DISCONNECTED,
         )
         self.assertIsNone(manager.selected)
 
     def test_execute_disconnect_reports_missing_vault(self) -> None:
         """Команда без активного vault не создаёт подтверждение."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=FakeVaultSelectionManager(),
@@ -960,7 +970,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.GITHUB_DISCONNECT_NOT_CONNECTED,
+            ObsidianResultType.GITHUB_DISCONNECT_NOT_CONNECTED,
         )
 
     def test_execute_hides_github_gateway_failure_behind_typed_result(self) -> None:
@@ -969,7 +979,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             error=GitHubGatewayError("GitHub request failed with HTTP 503")
         )
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             github_connection_starter=starter,
@@ -982,7 +992,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _telegram_message("https://github.com/octocat/notes")
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.GITHUB_CONNECT_FAILED)
+        self.assertEqual(result.type, ObsidianResultType.GITHUB_CONNECT_FAILED)
         self.assertEqual(article_use_case.commands, [])
 
     def test_authorization_completion_continues_original_vault_selection(self) -> None:
@@ -992,7 +1002,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             error=GitHubAccountNotConnectedError("GitHub is not authorized")
         )
         completions = []
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             github_connection_starter=starter,
@@ -1012,12 +1022,12 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual(started.type, IncomingMessageResultType.GITHUB_CONNECT_STARTED)
+        self.assertEqual(started.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(
             [completion.type for completion in completions],
             [
-                IncomingMessageResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
-                IncomingMessageResultType.GITHUB_VAULT_SELECTED,
+                ObsidianResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
+                ObsidianResultType.GITHUB_VAULT_SELECTED,
             ],
         )
         self.assertEqual(
@@ -1032,7 +1042,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             error=GitHubAccountNotConnectedError("GitHub is not authorized")
         )
         completions = []
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             github_connection_starter=starter,
@@ -1051,7 +1061,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             completions[0].type,
-            IncomingMessageResultType.GITHUB_APP_REQUIRED,
+            ObsidianResultType.GITHUB_APP_REQUIRED,
         )
         self.assertEqual(
             completions[0].installation_url,
@@ -1061,7 +1071,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     def test_article_is_blocked_until_registration_has_vault(self) -> None:
         """Статьи не обрабатываются до завершения подключения Obsidian vault."""
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=FakeVaultSelectionManager(),
@@ -1073,14 +1083,14 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.REGISTRATION_VAULT_REQUIRED,
+            ObsidianResultType.REGISTRATION_VAULT_REQUIRED,
         )
         self.assertEqual(article_use_case.commands, [])
 
     def test_execute_registers_new_identity(self) -> None:
         """Команда `/register` создаёт пользователя и запрашивает имя."""
         identity_service = FakeRegisteringIdentityService()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1095,7 +1105,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     def test_execute_saves_registration_name_before_vault(self) -> None:
         """Обычный текст после `/register` становится общим именем профиля."""
         identity_service = FakeRegisteringIdentityService()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
             vault_selection_manager=FakeVaultSelectionManager(),
@@ -1109,13 +1119,13 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             IncomingMessageResultType.REGISTRATION_NAME_SAVED,
         )
         self.assertEqual(result.app_user.display_name, "Влад Ерофеев")
-        self.assertIsNone(result.selected_vault)
+        self.assertFalse(result.onboarding.ready)
 
     def test_execute_saves_name_without_reselecting_existing_vault(self) -> None:
         """Переходный профиль с vault завершает onboarding только вводом имени."""
         identity_service = FakeRegisteringIdentityService(existing=AppUser(id=42))
         selected_vault = _test_vault(42)
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
             vault_selection_manager=FakeVaultSelectionManager(
@@ -1129,12 +1139,12 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             result.type,
             IncomingMessageResultType.REGISTRATION_NAME_SAVED,
         )
-        self.assertEqual(result.selected_vault, selected_vault)
+        self.assertTrue(result.onboarding.ready)
 
     def test_execute_name_command_changes_profile_name(self) -> None:
         """`/name` меняет общее имя пользователя всех связанных каналов."""
         identity_service = FakeUserIdentityService()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1146,7 +1156,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
     def test_execute_no_without_confirmation_reports_missing_action(self) -> None:
         """`нет` без pending-действия не сообщает о несуществующей отмене."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=FakeVaultSelectionManager(
@@ -1166,7 +1176,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         identity_service = FakeRegisteringIdentityService(
             existing=AppUser(id=42, display_name="Test User")
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1182,7 +1192,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         identity_service = FakeRegisteringIdentityService(
             existing=AppUser(id=42, display_name="Test User")
         )
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1194,7 +1204,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
     def test_execute_start_reports_unknown_identity(self) -> None:
         """`/start` для нового канала возвращает onboarding result."""
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeRegisteringIdentityService(),
         )
@@ -1206,7 +1216,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     def test_execute_link_requests_rebind_confirmation_for_bound_identity(self) -> None:
         """`/link <код>` для привязанного канала просит подтвердить перепривязку."""
         identity_service = FakeRebindIdentityService()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1224,7 +1234,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         """Ответ `да` подтверждает ожидающую перепривязку канала."""
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1239,7 +1249,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         """Ответ `нет` отменяет ожидающую перепривязку канала."""
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
         )
@@ -1254,7 +1264,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=identity_service,
         )
@@ -1270,7 +1280,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
     def test_execute_reanalyze_forces_article_analysis(self) -> None:
         """Команда `/reanalyze` запускает анализ с force=True."""
         analysis_use_case = FakeAnalysisUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             article_analysis_use_case=analysis_use_case,
             user_identity_service=FakeUserIdentityService(),
@@ -1278,7 +1288,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/reanalyze 7"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_REANALYZED)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_REANALYZED)
         self.assertEqual(analysis_use_case.commands[0].article_id, 7)
         self.assertEqual(analysis_use_case.commands[0].app_user_id, 42)
         self.assertTrue(analysis_use_case.commands[0].force)
@@ -1288,7 +1298,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
         proposal = _proposal()
         confirmation = FakeConfirmationService(proposal)
         article_use_case = FakeArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             user_identity_service=FakeUserIdentityService(),
             obsidian_confirmation_service=confirmation,
@@ -1299,9 +1309,9 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
 
         self.assertEqual(
             pending.type,
-            IncomingMessageResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
+            ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
         )
-        self.assertEqual(applied.type, IncomingMessageResultType.ARTICLE_REVIEW_APPLIED)
+        self.assertEqual(applied.type, ObsidianResultType.ARTICLE_REVIEW_APPLIED)
         self.assertEqual(confirmation.confirm_calls, 1)
         self.assertEqual(article_use_case.commands, [])
 
@@ -1312,7 +1322,7 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _proposal(status=ObsidianProposalStatus.APPLIED)
         )
         article_use_case = ReviewedArticleUrlUseCase()
-        use_case = ProcessIncomingMessageUseCase(
+        use_case = _make_use_case(
             article_url_use_case=article_use_case,
             article_analysis_use_case=analysis,
             user_identity_service=FakeUserIdentityService(),
@@ -1323,16 +1333,16 @@ class ProcessIncomingMessageUseCaseTest(unittest.TestCase):
             _telegram_message("https://example.com/article")
         )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_REVIEWED_RESULT)
+        self.assertEqual(result.type, ObsidianResultType.ARTICLE_REVIEWED_RESULT)
         self.assertEqual(len(article_use_case.commands), 1)
         self.assertEqual(len(analysis.commands), 1)
         self.assertFalse(analysis.commands[0].force)
         self.assertIsNotNone(result.analysis_result)
 
 
-def _telegram_message(text: str) -> IncomingMessage:
+def _telegram_message(text: str) -> IncomingEvent:
     """Создаёт входящее Telegram-сообщение для команд incoming-flow."""
-    return IncomingMessage(
+    return IncomingEvent(
         channel="telegram",
         chat_id="chat-1",
         message_id="msg-1",

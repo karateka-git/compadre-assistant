@@ -3,16 +3,16 @@
 from dataclasses import replace
 import unittest
 
-from obs_chat_bot.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
     AnalyzeArticleCommand,
     AnalyzeArticleError,
     AnalyzeArticleUseCase,
 )
-from obs_chat_bot.application.articles.errors import ArticleAnalysisError
-from obs_chat_bot.application.articles.stages import ProcessingStage
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleAnalysisError
+from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 
 
 class AnalyzeArticleUseCaseTest(unittest.TestCase):

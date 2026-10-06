@@ -5,22 +5,22 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.application.reviews.ports import (
+from obs_chat_bot.capabilities.obsidian.application.reviews.ports import (
     ObsidianPlanningContext,
     ObsidianWritingContext,
 )
-from obs_chat_bot.application.search.models import VaultSearchResult
-from obs_chat_bot.data.llm.openai_obsidian_proposal_generator import (
+from obs_chat_bot.capabilities.obsidian.application.search.models import VaultSearchResult
+from obs_chat_bot.capabilities.obsidian.data.llm.openai_obsidian_proposal_generator import (
     OpenAIObsidianProposalGenerator,
 )
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.reviews.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposalAction,
     ObsidianReviewPlan,
 )
-from obs_chat_bot.domain.search.entities import ArticleSearchQuery
-from obs_chat_bot.domain.vaults.entities import VaultInstruction, VaultNote
+from obs_chat_bot.capabilities.obsidian.domain.search.entities import ArticleSearchQuery
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultInstruction, VaultNote
 
 
 class OpenAIObsidianProposalGeneratorTests(unittest.TestCase):

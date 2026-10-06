@@ -6,13 +6,9 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from obs_chat_bot.application.articles.url_extraction import extract_first_supported_url
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.incoming.processing import (
-    IncomingCompletionHandler,
-    ProcessIncomingMessageResult,
-)
-from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.application.incoming.ports import ChannelCompletionHandler, IncomingResponse
+from obs_chat_bot.presentation.shared.responses import PROCESSING_ACK_TEXT
 from obs_chat_bot.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,
@@ -24,10 +20,9 @@ TELEGRAM_POLLING_RETRY_BASE_SECONDS = 0.5
 TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 # При этой степени базовая задержка уже достигает установленного потолка.
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
-PROCESSING_ACK_TEXT = "Принял, обрабатываю. Это может занять немного времени."
 IncomingMessageProcessor = Callable[
-    [IncomingMessage, IncomingCompletionHandler | None],
-    ProcessIncomingMessageResult,
+    [IncomingEvent, ChannelCompletionHandler | None],
+    IncomingResponse,
 ]
 
 
@@ -59,6 +54,8 @@ def run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
+    should_send_processing_ack: Callable[[str], bool] | None = None,
+    empty_message_reply: str = "Пришли текстовое сообщение.",
 ) -> None:
     """Запускает Telegram-бота в polling-режиме.
 
@@ -67,6 +64,8 @@ def run_telegram_bot(
         proxy_url: Адрес прокси для Bot API или `None` для прямого подключения.
         incoming_message_processor: Обработчик входящих сообщений.
         logger: Логгер безопасных runtime-событий.
+        should_send_processing_ack: Признак долгой обработки от подключённой возможности.
+        empty_message_reply: Ответ на сообщение без текста.
     """
     try:
         asyncio.run(
@@ -75,6 +74,8 @@ def run_telegram_bot(
                 proxy_url=proxy_url,
                 incoming_message_processor=incoming_message_processor,
                 logger=logger,
+                should_send_processing_ack=should_send_processing_ack,
+                empty_message_reply=empty_message_reply,
             )
         )
     except TelegramBotError:
@@ -91,6 +92,8 @@ async def _run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
+    should_send_processing_ack: Callable[[str], bool] | None = None,
+    empty_message_reply: str = "Пришли текстовое сообщение.",
 ) -> None:
     """Асинхронно запускает polling Telegram-бота."""
     aiogram = _load_aiogram()
@@ -102,6 +105,8 @@ async def _run_telegram_bot(
         aiogram,
         incoming_message_processor=incoming_message_processor,
         logger=logger,
+        should_send_processing_ack=should_send_processing_ack,
+        empty_message_reply=empty_message_reply,
     )
 
     logger.info("Telegram bot polling started")
@@ -243,17 +248,19 @@ def _register_handlers(
     *,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
+    should_send_processing_ack: Callable[[str], bool] | None = None,
+    empty_message_reply: str = "Пришли текстовое сообщение.",
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
     router = aiogram.Router()
 
     @router.message()
     async def handle_text(message: Any) -> None:
-        """Обрабатывает текстовое сообщение через article pipeline."""
+        """Передаёт текстовое сообщение общему входу приложения."""
         if not message.text:
             await safe_send_telegram_reply(
                 message,
-                "Пришли текстовое сообщение со ссылкой на статью.",
+                empty_message_reply,
                 logger=logger,
             )
             return
@@ -264,7 +271,7 @@ def _register_handlers(
             loop=asyncio.get_running_loop(),
             logger=logger,
         )
-        if _should_send_processing_ack(message.text):
+        if should_send_processing_ack is not None and should_send_processing_ack(message.text):
             await safe_send_telegram_reply(
                 message,
                 PROCESSING_ACK_TEXT,
@@ -278,8 +285,7 @@ def _register_handlers(
         )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
-        reply = format_incoming_message_result(result)
-        await safe_send_telegram_reply(message, reply, logger=logger)
+        await safe_send_telegram_reply(message, result.text, logger=logger)
 
     dispatcher.include_router(router)
 
@@ -289,11 +295,11 @@ def _create_telegram_completion_handler(
     *,
     loop: asyncio.AbstractEventLoop,
     logger: logging.Logger,
-) -> IncomingCompletionHandler:
+) -> ChannelCompletionHandler:
     """Создаёт thread-safe callback фонового результата в исходный Telegram chat."""
 
-    def notify(result: ProcessIncomingMessageResult) -> None:
-        text = format_incoming_message_result(result)
+    def notify(result: IncomingResponse) -> None:
+        text = result.text
         try:
             asyncio.run_coroutine_threadsafe(
                 safe_send_telegram_reply(message, text, logger=logger),
@@ -308,7 +314,7 @@ def _create_telegram_completion_handler(
     return notify
 
 
-def _incoming_message_from_telegram(message: Any) -> IncomingMessage:
+def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
     """Преобразует Telegram message в application-модель."""
     telegram_user = getattr(message, "from_user", None)
     display_name = None
@@ -318,7 +324,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingMessage:
             or getattr(telegram_user, "first_name", None)
         )
 
-    return IncomingMessage(
+    return IncomingEvent(
         channel="telegram",
         chat_id=str(message.chat.id),
         message_id=str(message.message_id),
@@ -456,14 +462,6 @@ def _find_split_position(text: str, limit: int) -> int:
         if position > 0:
             return position + len(separator)
     return limit
-
-
-def _should_send_processing_ack(text: str) -> bool:
-    """Определяет, будет ли сообщение запускать долгую обработку."""
-    stripped_text = text.strip()
-    return stripped_text.startswith("/reanalyze") or (
-        extract_first_supported_url(stripped_text) is not None
-    )
 
 
 def _load_aiogram() -> Any:

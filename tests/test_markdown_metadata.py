@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.application.vaults.markdown import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.markdown import (
     ensure_frontmatter_tag,
     normalize_updated_markdown,
     parse_markdown,

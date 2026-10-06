@@ -5,22 +5,22 @@ from __future__ import annotations
 from dataclasses import replace
 import unittest
 
-from obs_chat_bot.application.articles.stages import ProcessingStage
-from obs_chat_bot.application.reviews.proposal import (
+from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.application.reviews.proposal import (
     PrepareObsidianReviewCommand,
     PrepareObsidianReviewError,
     PrepareObsidianReviewUseCase,
 )
-from obs_chat_bot.application.search.models import VaultSearchResult
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.domain.reviews.entities import (
+from obs_chat_bot.capabilities.obsidian.application.search.models import VaultSearchResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianReviewPlan,
 )
-from obs_chat_bot.domain.vaults.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultInstruction,
     VaultNote,

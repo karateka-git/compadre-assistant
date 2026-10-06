@@ -11,10 +11,10 @@ except ImportError:
     httpx = None
     OpenAI = None
 
-from obs_chat_bot.application.search.errors import EmbeddingProviderError
-from obs_chat_bot.data.embeddings.openai_compatible import OpenAICompatibleEmbeddingProvider
+from obs_chat_bot.capabilities.obsidian.application.search.errors import EmbeddingProviderError
+from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import OpenAICompatibleEmbeddingProvider
 
-LOGGER = "obs_chat_bot.data.embeddings.openai_compatible"
+LOGGER = "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible"
 
 
 @unittest.skipIf(OpenAI is None, "SDK проверяется в Docker с runtime-зависимостями")

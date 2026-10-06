@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.application.articles.url_extraction import extract_first_supported_url
+from obs_chat_bot.capabilities.obsidian.application.articles.url_extraction import extract_first_supported_url
 
 
 class UrlExtractionTest(unittest.TestCase):

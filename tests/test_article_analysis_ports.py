@@ -3,14 +3,14 @@
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.application.articles.errors import ArticleAnalysisError
-from obs_chat_bot.application.articles.ports import (
+from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleAnalysisError
+from obs_chat_bot.capabilities.obsidian.application.articles.ports import (
     ArticleAnalysisResultRepository,
     ArticleAnalyzer,
 )
-from obs_chat_bot.application.articles.stages import ProcessingStage
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 
 
 class ArticleAnalysisPortsTest(unittest.TestCase):

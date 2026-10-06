@@ -5,27 +5,28 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from obs_chat_bot.application.articles.analysis import AnalyzeArticleUseCase
-from obs_chat_bot.application.articles.extracted import ExtractedArticle
-from obs_chat_bot.application.articles.html import ArticleHtml
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.articles.processing import ProcessArticleUrlUseCase
+from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleUseCase
+from obs_chat_bot.capabilities.obsidian.application.articles.extracted import ExtractedArticle
+from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.application.articles.processing import ProcessArticleUrlUseCase
 from obs_chat_bot.application.incoming.processing import ProcessIncomingMessageUseCase
-from obs_chat_bot.data.sqlite.analysis_result_repository import (
+from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
 )
-from obs_chat_bot.data.sqlite.article_repository import SQLiteArticleRepository
+from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
 from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.incoming_message_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.incoming_message_repository import (
     SQLiteIncomingMessageRepository,
 )
 from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.data.sqlite.processing_error_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository import (
     SQLiteProcessingErrorRecorder,
 )
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.presentation.responses import format_obsidian_message_result
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -66,14 +67,16 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                 message_repository = SQLiteIncomingMessageRepository(connection)
 
                 incoming_use_case = ProcessIncomingMessageUseCase(
-                    article_url_use_case=process_use_case,
-                    article_analysis_use_case=analysis_use_case,
-                    incoming_message_repository=message_repository,
+                    incoming_capability=ObsidianMessageHandler(
+                        article_url_use_case=process_use_case,
+                        article_analysis_use_case=analysis_use_case,
+                        incoming_message_repository=message_repository,
+                    ),
                 )
-                first_reply = format_incoming_message_result(
+                first_reply = format_obsidian_message_result(
                     incoming_use_case.execute(_message("10"))
                 )
-                second_reply = format_incoming_message_result(
+                second_reply = format_obsidian_message_result(
                     incoming_use_case.execute(_message("11"))
                 )
 
@@ -139,9 +142,9 @@ class FakeArticleAnalyzer:
         )
 
 
-def _message(message_id: str) -> IncomingMessage:
+def _message(message_id: str) -> IncomingEvent:
     """Создаёт входящее Telegram-сообщение со ссылкой."""
-    return IncomingMessage(
+    return IncomingEvent(
         channel="telegram",
         chat_id="100",
         message_id=message_id,

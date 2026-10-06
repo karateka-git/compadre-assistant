@@ -2,8 +2,8 @@
 
 import unittest
 
-from obs_chat_bot.application.articles.incoming_messages import (
-    IncomingMessage,
+from obs_chat_bot.capabilities.obsidian.application.articles.incoming_messages import (
+    ArticleIncomingMessage,
     SavedIncomingMessage,
 )
 
@@ -13,7 +13,7 @@ class IncomingMessageTest(unittest.TestCase):
 
     def test_incoming_message_accepts_text_message(self) -> None:
         """Корректное сообщение создаётся без ошибки."""
-        message = IncomingMessage(
+        message = ArticleIncomingMessage(
             channel="telegram",
             chat_id="100",
             message_id="200",
@@ -25,7 +25,7 @@ class IncomingMessageTest(unittest.TestCase):
     def test_incoming_message_rejects_empty_text(self) -> None:
         """Пустой текст не подходит для текущего сценария обработки ссылок."""
         with self.assertRaises(ValueError):
-            IncomingMessage(
+            ArticleIncomingMessage(
                 channel="telegram",
                 chat_id="100",
                 message_id="200",

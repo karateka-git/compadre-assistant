@@ -5,21 +5,22 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.application.articles.analysis import (
+from obs_chat_bot.capabilities.obsidian.application.articles.analysis import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.articles.processing import (
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
 from obs_chat_bot.application.incoming.processing import IncomingMessageResultType
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from obs_chat_bot.data.config import AppConfig, GitHubAppConfig
+from obs_chat_bot.bootstrap import process_channel_incoming_message
 from obs_chat_bot.presentation.cli.main import (
     check_github_config,
     check_llm_config,
@@ -28,7 +29,6 @@ from obs_chat_bot.presentation.cli.main import (
     configure_debug_logging,
     configure_logging,
     parse_args,
-    process_channel_incoming_message,
     initialize_database,
     run_healthcheck,
     run_process_url_command,
@@ -389,7 +389,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             private_key_path=Path("data/github-app.pem"),
         )
         with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot"), patch(
-            "obs_chat_bot.presentation.cli.main.create_github_connection_coordinator"
+            "obs_chat_bot.capabilities.obsidian.bootstrap.create_github_connection_coordinator"
         ) as coordinator_factory:
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as directory:
                 exit_code = run_telegram_bot_command(
@@ -474,14 +474,14 @@ class ProcessUrlCliTest(unittest.TestCase):
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
 
-        self.assertEqual(result.type, IncomingMessageResultType.ARTICLE_PROCESSED)
+        self.assertIn("Готово: статья сохранена", result.text)
         self.assertEqual(fake_use_case.commands[0].source_url, "https://example.com/article")
         self.assertEqual(fake_analysis_use_case.commands, [])
 
 
-def _telegram_message(text: str, message_id: str = "msg-1") -> IncomingMessage:
+def _telegram_message(text: str, message_id: str = "msg-1") -> IncomingEvent:
     """Создаёт Telegram incoming message для CLI processor-тестов."""
-    return IncomingMessage(
+    return IncomingEvent(
         channel="telegram",
         chat_id="chat-1",
         message_id=message_id,

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 
 
 class ArticleAnalysisResultTest(unittest.TestCase):

@@ -4,40 +4,43 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.application.articles.analysis import AnalyzeArticleResult
-from obs_chat_bot.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.application.articles.analysis import AnalyzeArticleResult
+from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
 from obs_chat_bot.application.incoming.processing import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
+from obs_chat_bot.application.incoming.ports import OnboardingReplyKind
+from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
 from obs_chat_bot.application.incoming.commands import ChatCommand
-from obs_chat_bot.application.search.models import EmbeddingIndexCoverage
-from obs_chat_bot.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.application.search.models import EmbeddingIndexCoverage
+from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
     GitHubConnectionStartStatus,
     GitHubDeviceAuthorization,
 )
-from obs_chat_bot.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.application.vaults.vault_sync import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
@@ -45,21 +48,37 @@ from obs_chat_bot.application.vaults.vault_sync import (
     VaultSyncWarningReason,
 )
 from obs_chat_bot.application.users.identity import CreatedLinkCode
-from obs_chat_bot.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.domain.reviews.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
 from obs_chat_bot.domain.users.entities import AppUser
-from obs_chat_bot.domain.vaults.entities import ObsidianVault
-from obs_chat_bot.presentation.shared.responses import (
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
+from obs_chat_bot.capabilities.obsidian.presentation.responses import (
     format_article_analysis_result,
     format_article_processing_result,
-    format_incoming_message_result,
+    format_obsidian_message_result,
 )
+from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
+
+
+def _obsidian_handler(vault: ObsidianVault | None = None) -> ObsidianMessageHandler:
+    """Собирает presentation-слой с заданным vault для текстов онбординга."""
+    class VaultSelection:
+        """Возвращает выбранный vault без обращения к БД."""
+
+        def get_selected(self, _app_user_id: int) -> ObsidianVault | None:
+            """Возвращает vault тестового пользователя."""
+            return vault
+
+    return ObsidianMessageHandler(
+        article_url_use_case=object(),
+        vault_selection_manager=VaultSelection() if vault is not None else None,
+    )
 
 
 class TelegramResponsesTest(unittest.TestCase):
@@ -68,15 +87,22 @@ class TelegramResponsesTest(unittest.TestCase):
     def test_format_help_lists_only_currently_available_commands(self) -> None:
         """`/help` перечисляет общий набор реализованных Telegram/VK-команд."""
         reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(type=IncomingMessageResultType.HELP)
+            ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.HELP,
+                capability_help=_obsidian_handler().help(),
+            )
         )
 
         for command in ChatCommand:
             with self.subTest(command=command.value):
-                self.assertIn(str(command), reply)
+                self.assertIn(f"`{command.usage}`", reply)
         self.assertIn("/github_sync", reply)
         self.assertIn("/github_status", reply)
         self.assertIn("/github_disconnect", reply)
+        self.assertIn("`/register` — зарегистрироваться и подключить Obsidian vault", reply)
+        self.assertLess(reply.index("Основные:"), reply.index("Связь Telegram и VK:"))
+        self.assertLess(reply.index("Связь Telegram и VK:"), reply.index("Obsidian vault:"))
+        self.assertLess(reply.index("Obsidian vault:"), reply.index("Статьи:"))
         self.assertNotIn("/github_connect", reply)
         self.assertNotIn("/github_vault", reply)
 
@@ -84,9 +110,9 @@ class TelegramResponsesTest(unittest.TestCase):
         self,
     ) -> None:
         """Ошибка первой синхронизации объясняет ручное создание YAML."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_SYNC_FAILED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_SYNC_FAILED,
                 error=VaultConfigurationError(
                     VaultConfigurationErrorCode.MISSING
                 ),
@@ -99,9 +125,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_missing_instruction_names_required_path(self) -> None:
         """Ошибка перечисленного файла показывает исправляемый path."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_SYNC_FAILED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_SYNC_FAILED,
                 error=VaultConfigurationError(
                     VaultConfigurationErrorCode.INSTRUCTION_MISSING,
                     path="memory-bank/docs/workflows.md.txt",
@@ -113,9 +139,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_sync_reports_optional_embedding_failure(self) -> None:
         """Частичный semantic index показывает точное покрытие и fallback."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_SYNC_COMPLETED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_SYNC_COMPLETED,
                 vault_sync_result=VaultSyncResult(
                     status=VaultSyncStatus.SYNCED,
                     total_notes=173,
@@ -135,9 +161,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_sync_reports_embedding_retry_counts(self) -> None:
         """Повторное построение отличает новые embeddings от переиспользованных."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_SYNC_COMPLETED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_SYNC_COMPLETED,
                 vault_sync_result=VaultSyncResult(
                     status=VaultSyncStatus.UNCHANGED,
                     total_notes=173,
@@ -166,9 +192,9 @@ class TelegramResponsesTest(unittest.TestCase):
             id=1,
         )
 
-        ready = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_STATUS,
+        ready = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_STATUS,
                 vault_status=VaultStatus(
                     vault=vault,
                     embedding_index_current=True,
@@ -179,9 +205,9 @@ class TelegramResponsesTest(unittest.TestCase):
                 ),
             )
         )
-        partial = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_STATUS,
+        partial = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_STATUS,
                 vault_status=VaultStatus(
                     vault=vault,
                     embedding_index_current=False,
@@ -279,9 +305,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_missing_url(self) -> None:
         """Общий результат без URL получает пользовательскую подсказку."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_URL_MISSING
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_URL_MISSING
             )
         )
 
@@ -293,11 +319,18 @@ class TelegramResponsesTest(unittest.TestCase):
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
+                capability_reply=_obsidian_handler().onboarding_reply(
+                    OnboardingReplyKind.START, AppUser(id=42, display_name="Влад")
+                ),
             )
         )
 
-        self.assertIn("Влад", reply)
-        self.assertNotIn("42", reply)
+        self.assertEqual(
+            reply,
+            "obsChatBot запущен.\n"
+            "Рад тебя видеть, Влад.\n"
+            "Можешь прислать ссылку на статью или отправить `/help`.",
+        )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
         """`/start` для нового канала объясняет регистрацию и привязку."""
@@ -312,18 +345,16 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_already_registered(self) -> None:
         """Повторный `/register` получает честный ответ."""
+        vault = ObsidianVault(
+            id=1, app_user_id=42, installation_id=10, repository_id=20,
+            owner="karateka-git", repository="my_obs_data", branch="main",
+        )
         reply = format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
-                selected_vault=ObsidianVault(
-                    id=1,
-                    app_user_id=42,
-                    installation_id=10,
-                    repository_id=20,
-                    owner="karateka-git",
-                    repository="my_obs_data",
-                    branch="main",
+                capability_reply=_obsidian_handler(vault).onboarding_reply(
+                    OnboardingReplyKind.ALREADY_REGISTERED, AppUser(id=42, display_name="Влад")
                 ),
             )
         )
@@ -335,18 +366,16 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_name_completion_preserves_existing_vault(self) -> None:
         """После ввода имени уже подключённый vault не требуется выбирать снова."""
+        vault = ObsidianVault(
+            id=1, app_user_id=42, installation_id=10, repository_id=20,
+            owner="karateka-git", repository="my_obs_data", branch="main",
+        )
         reply = format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.REGISTRATION_NAME_SAVED,
                 app_user=AppUser(id=42, display_name="Влад"),
-                selected_vault=ObsidianVault(
-                    id=1,
-                    app_user_id=42,
-                    installation_id=10,
-                    repository_id=20,
-                    owner="karateka-git",
-                    repository="my_obs_data",
-                    branch="main",
+                capability_reply=_obsidian_handler(vault).onboarding_reply(
+                    OnboardingReplyKind.NAME_SAVED, AppUser(id=42, display_name="Влад")
                 ),
             )
         )
@@ -411,9 +440,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_processing_error(self) -> None:
         """Ошибка article pipeline получает понятный текст ответа."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_PROCESSING_FAILED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_PROCESSING_FAILED,
                 error=ProcessArticleUrlError(
                     "Could not fetch article HTML: failed",
                     stage=ProcessingStage.FETCHING,
@@ -443,9 +472,9 @@ class TelegramResponsesTest(unittest.TestCase):
         )
         error = RuntimeError("embedding unavailable")
 
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REVIEW_APPLIED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_REVIEW_APPLIED,
                 obsidian_confirmation=ObsidianConfirmationResult(
                     status=ObsidianConfirmationStatus.APPLIED,
                     proposal=proposal,
@@ -461,9 +490,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_status(self) -> None:
         """Команда статуса сообщает имя и состояние vault без внутреннего ID."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.STATUS,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.STATUS,
                 app_user=AppUser(id=42, display_name="Влад"),
             )
         )
@@ -475,9 +504,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_github_authorization_returns_device_url_and_code(self) -> None:
         """Оба channel adapters получают безопасную инструкцию Device Flow."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_CONNECT_STARTED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_CONNECT_STARTED,
                 app_user=AppUser(id=42),
                 github_connection=GitHubConnectionStartResult(
                     status=GitHubConnectionStartStatus.STARTED,
@@ -510,9 +539,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
         for status, expected_text in cases.items():
             with self.subTest(status=status):
-                reply = format_incoming_message_result(
-                    ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.GITHUB_CONNECT_FAILED,
+                reply = format_obsidian_message_result(
+                    ObsidianMessageResult(
+                        type=ObsidianResultType.GITHUB_CONNECT_FAILED,
                         github_completion=GitHubConnectionCompletion(status),
                     )
                 )
@@ -521,9 +550,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_github_app_required_returns_installation_url(self) -> None:
         """После OAuth без installation бот предлагает настроить App."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_APP_REQUIRED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_APP_REQUIRED,
                 installation_url=(
                     "https://github.com/apps/obs-chat-bot/installations/new"
                 ),
@@ -535,9 +564,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_github_authorized_announces_first_sync(self) -> None:
         """После Device Flow пользователь сразу видит начало первой синхронизации."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
             )
         )
 
@@ -546,9 +575,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_vault_selection_shows_repository_branch_and_path(self) -> None:
         """Успешный выбор vault возвращает понятные проверенные параметры."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_SELECTED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_VAULT_SELECTED,
                 app_user=AppUser(id=42),
                 vault_selection=VaultSelectionResult(
                     VaultSelectionStatus.SELECTED,
@@ -573,9 +602,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_unavailable_vault_explains_required_write_access(self) -> None:
         """Ошибка выбора объясняет требование чтения и записи repository."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE,
             )
         )
 
@@ -584,11 +613,10 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_vault_replacement_requests_yes_or_no(self) -> None:
         """Предложение замены явно предупреждает об удалении локальных данных."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
                 type=(
-                    IncomingMessageResultType
-                    .GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
+                    ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
                 ),
                 vault_selection=VaultSelectionResult(
                     VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED,
@@ -610,11 +638,10 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_vault_disconnect_explains_scope_and_confirmation(self) -> None:
         """Отключение предупреждает об очистке локальных, но не пользовательских данных."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
                 type=(
-                    IncomingMessageResultType
-                    .GITHUB_DISCONNECT_CONFIRMATION_REQUIRED
+                    ObsidianResultType.GITHUB_DISCONNECT_CONFIRMATION_REQUIRED
                 ),
                 vault_disconnect=VaultDisconnectResult(
                     VaultDisconnectStatus.CONFIRMATION_REQUIRED,
@@ -641,9 +668,9 @@ class TelegramResponsesTest(unittest.TestCase):
         self,
     ) -> None:
         """Сбой GitHub сохраняет основной ответ и поясняет локальный fallback."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_PROCESSED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_PROCESSED,
                 article_result=ProcessArticleUrlResult(
                     article=_article(),
                     created=True,
@@ -671,9 +698,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_sync_in_progress_warns_about_current_local_copy(self) -> None:
         """Параллельная синхронизация не скрывает успешный результат статьи."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_PROCESSED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_PROCESSED,
                 article_result=ProcessArticleUrlResult(
                     article=_article(),
                     created=True,
@@ -692,9 +719,9 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_reanalysis(self) -> None:
         """Повторный анализ форматируется как полезный Markdown-ответ."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.ARTICLE_REANALYZED,
+        reply = format_obsidian_message_result(
+            ObsidianMessageResult(
+                type=ObsidianResultType.ARTICLE_REANALYZED,
                 analysis_result=AnalyzeArticleResult(
                     article=replace(_article(), status=ArticleStatus.ANALYZED),
                     analysis=ArticleAnalysisResult(

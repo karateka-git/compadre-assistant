@@ -11,16 +11,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.articles.url_extraction import extract_first_supported_url
-from obs_chat_bot.application.incoming.processing import (
-    IncomingCompletionHandler,
-    ProcessIncomingMessageResult,
-)
-from obs_chat_bot.presentation.telegram.bot import PROCESSING_ACK_TEXT
-from obs_chat_bot.presentation.shared.responses import (
-    format_incoming_message_result,
-)
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.application.incoming.ports import ChannelCompletionHandler, IncomingResponse
+from obs_chat_bot.presentation.shared.responses import PROCESSING_ACK_TEXT
 from obs_chat_bot.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send,
@@ -39,8 +32,8 @@ VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
 IncomingMessageProcessor = Callable[
-    [IncomingMessage, IncomingCompletionHandler | None],
-    ProcessIncomingMessageResult,
+    [IncomingEvent, ChannelCompletionHandler | None],
+    IncomingResponse,
 ]
 
 
@@ -58,6 +51,8 @@ def run_vk_bot(
     group_id: int,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
+    should_send_processing_ack: Callable[[str], bool] | None = None,
+    empty_message_reply: str = "Пришли текстовое сообщение.",
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
@@ -69,6 +64,8 @@ def run_vk_bot(
         group_id: ID группы VK.
         incoming_message_processor: Общий обработчик входящих сообщений.
         logger: Логгер runtime-событий.
+        should_send_processing_ack: Признак долгой обработки от возможности.
+        empty_message_reply: Ответ на сообщение без текста.
         client: Необязательный VK API-клиент для тестов.
         retry_sleeper: Функция ожидания между повторами.
         retry_jitter: Генератор случайного смещения задержки.
@@ -117,6 +114,8 @@ def run_vk_bot(
                     incoming_message_processor=incoming_message_processor,
                     client=api_client,
                     logger=logger,
+                    should_send_processing_ack=should_send_processing_ack,
+                    empty_message_reply=empty_message_reply,
                 )
             except Exception as error:
                 logger.error("VK update handling failed: %s", error)
@@ -271,6 +270,8 @@ def _handle_update(
     incoming_message_processor: IncomingMessageProcessor,
     client: VkApiClient,
     logger: logging.Logger,
+    should_send_processing_ack: Callable[[str], bool] | None = None,
+    empty_message_reply: str = "Пришли текстовое сообщение.",
 ) -> None:
     if update.get("type") != "message_new":
         return
@@ -289,11 +290,11 @@ def _handle_update(
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
-            text="Пришли текстовое сообщение со ссылкой на статью.",
+            text=empty_message_reply,
             logger=logger,
         )
         return
-    if _should_send_processing_ack(text):
+    if should_send_processing_ack is not None and should_send_processing_ack(text):
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
@@ -301,7 +302,7 @@ def _handle_update(
             logger=logger,
         )
 
-    incoming_message = IncomingMessage(
+    incoming_message = IncomingEvent(
         channel="vk",
         chat_id=str(peer_id),
         message_id=str(message_id),
@@ -319,7 +320,7 @@ def _handle_update(
     _safe_send_vk_message(
         client,
         peer_id=peer_id,
-        text=format_incoming_message_result(result),
+        text=result.text,
         logger=logger,
     )
 
@@ -380,14 +381,14 @@ def _create_vk_completion_handler(
     *,
     peer_id: int,
     logger: logging.Logger,
-) -> IncomingCompletionHandler:
+) -> ChannelCompletionHandler:
     """Создаёт callback фонового результата в исходный VK peer."""
 
-    def notify(result: ProcessIncomingMessageResult) -> None:
+    def notify(result: IncomingResponse) -> None:
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
-            text=format_incoming_message_result(result),
+            text=result.text,
             logger=logger,
         )
 
@@ -553,13 +554,6 @@ def _safe_network_error_details(error: VkTransientError) -> str:
     if isinstance(errno, int) and not isinstance(errno, bool):
         details.append(f"errno={errno}")
     return " ".join(details)
-
-
-def _should_send_processing_ack(text: str) -> bool:
-    stripped_text = text.strip()
-    return stripped_text.startswith("/reanalyze") or (
-        extract_first_supported_url(stripped_text) is not None
-    )
 
 
 def _find_split_position(text: str, limit: int) -> int:

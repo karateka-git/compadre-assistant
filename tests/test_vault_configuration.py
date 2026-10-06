@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.application.vaults.vault_configuration import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
     load_vault_configuration_example,

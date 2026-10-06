@@ -1,13 +1,15 @@
 """Тесты фонового application-сценария GitHub Device Flow."""
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from threading import Event
+from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.application.vaults.github_connection import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_connection import (
     GitHubConnectionCoordinator,
 )
-from obs_chat_bot.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
     GitHubAuthenticatedAccount,
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
@@ -17,6 +19,20 @@ from obs_chat_bot.application.vaults.github_models import (
     GitHubDevicePollStatus,
     GitHubUserAccessToken,
 )
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_connection_state_store import (
+    SQLiteGitHubConnectionStateStore,
+)
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+    SQLiteGitHubInstallationRepository,
+)
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_writer import (
+    SQLiteGitHubAccountAccessWriter,
+)
+from obs_chat_bot.data.sqlite.connection import connect_database
+from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
+from tests.sqlite_helpers import ensure_app_user
+
+
 class FakeClock:
     """Управляет временем и ожиданием background worker без реального sleep."""
 
@@ -210,6 +226,46 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             ],
         )
 
+    def test_background_completion_uses_connection_after_message_closes(self) -> None:
+        """Фоновый worker сохраняет installations после закрытия входного соединения."""
+        with TemporaryDirectory(prefix="obs-chat-bot-github-worker-") as directory:
+            database_path = Path(directory) / "test.db"
+            with connect_database(database_path) as connection:
+                apply_migrations(connection)
+                ensure_app_user(connection)
+
+            clock = FakeClock()
+            completed = Event()
+            completions: list[GitHubConnectionCompletion] = []
+
+            def notify(completion: GitHubConnectionCompletion) -> None:
+                completions.append(completion)
+                completed.set()
+
+            coordinator = GitHubConnectionCoordinator(
+                gateway=FakeGateway([GitHubDevicePollStatus.AUTHORIZED]),
+                account_writer=SQLiteGitHubAccountAccessWriter(database_path),
+                state_store=SQLiteGitHubConnectionStateStore(database_path),
+                installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+                clock=clock,
+                sleeper=clock.sleep,
+            )
+            self.assertEqual(
+                coordinator.start(1, notify).status,
+                GitHubConnectionStartStatus.STARTED,
+            )
+            self.assertTrue(completed.wait(timeout=1))
+            with connect_database(database_path) as connection:
+                installations = SQLiteGitHubInstallationRepository(
+                    connection
+                ).list_for_user(1)
+
+            self.assertEqual(completions[0].status, GitHubConnectionCompletionStatus.CONNECTED)
+            self.assertEqual(
+                [item.installation_id for item in installations],
+                [101, 102],
+            )
+
     def test_denied_authorization_does_not_save_installations(self) -> None:
         """Отказ пользователя очищает session без записи в SQLite writer."""
         clock = FakeClock()
@@ -356,6 +412,46 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
         self.assertTrue(gateway.finished.wait(timeout=1))
 
         self.assertEqual(blocked.status, GitHubConnectionStartStatus.IN_PROGRESS)
+
+    def test_restarted_coordinator_starts_after_orphan_claim_expires(self) -> None:
+        """После утраты процесса новый coordinator ждёт TTL и начинает flow."""
+        with TemporaryDirectory(prefix="obs-chat-bot-github-retry-") as directory:
+            database_path = Path(directory) / "test.db"
+            with connect_database(database_path) as connection:
+                apply_migrations(connection)
+                ensure_app_user(connection)
+
+            clock = FakeClock()
+            state_store = SQLiteGitHubConnectionStateStore(database_path)
+            self.assertTrue(
+                state_store.acquire_attempt(
+                    app_user_id=1,
+                    owner="lost-process",
+                    now=clock.now,
+                    expires_at=clock.now + timedelta(minutes=20),
+                )
+            )
+            gateway = FakeGateway([GitHubDevicePollStatus.DENIED])
+            completion_sent = Event()
+            restarted = GitHubConnectionCoordinator(
+                gateway=gateway,
+                account_writer=SQLiteGitHubAccountAccessWriter(database_path),
+                state_store=SQLiteGitHubConnectionStateStore(database_path),
+                installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+                clock=clock,
+                sleeper=clock.sleep,
+            )
+            self.assertEqual(
+                restarted.start(1).status,
+                GitHubConnectionStartStatus.IN_PROGRESS,
+            )
+            clock.now += timedelta(minutes=20)
+            self.assertEqual(
+                restarted.start(1, lambda _completion: completion_sent.set()).status,
+                GitHubConnectionStartStatus.STARTED,
+            )
+            self.assertTrue(completion_sent.wait(timeout=1))
+            self.assertEqual(gateway.device_codes, ["device-secret"])
 
 
 if __name__ == "__main__":

@@ -6,21 +6,21 @@ from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.application.reviews.confirmation import (
+from obs_chat_bot.capabilities.obsidian.application.reviews.confirmation import (
     ObsidianConfirmationStatus,
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.application.vaults.github_models import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import (
     GitHubGatewayError,
     GitHubVaultCommitResult,
     GitHubVaultTargetState,
 )
-from obs_chat_bot.domain.reviews.entities import (
+from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.domain.vaults.entities import ObsidianVault, VaultNote, VaultSyncLease
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote, VaultSyncLease
 
 
 class ObsidianProposalConfirmationTests(unittest.TestCase):

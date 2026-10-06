@@ -7,6 +7,11 @@ from obs_chat_bot.application.incoming.commands import (
     CommandSection,
     ParsedChatCommand,
 )
+from obs_chat_bot.capabilities.obsidian.presentation.commands import (
+    ObsidianCommand,
+    ParsedObsidianCommand,
+    help_sections,
+)
 
 
 class IncomingCommandsTest(unittest.TestCase):
@@ -49,6 +54,27 @@ class IncomingCommandsTest(unittest.TestCase):
             )
         )
         self.assertIsNone(ParsedChatCommand.parse("обычный текст"))
+
+    def test_obsidian_commands_do_not_enter_common_parser(self) -> None:
+        """Предметные команды распознаёт только parser возможности."""
+        for command in ObsidianCommand:
+            with self.subTest(command=command.value):
+                self.assertIsNone(ParsedChatCommand.parse(command.value))
+                self.assertEqual(
+                    ParsedObsidianCommand.parse(command.value).command, command
+                )
+        parsed = ParsedObsidianCommand.parse("/reanalyze 42")
+        self.assertEqual(parsed.arguments, "42")
+        self.assertIsNone(ParsedObsidianCommand.parse("/reanalyze_extra 42"))
+
+    def test_obsidian_help_sections_keep_existing_order(self) -> None:
+        """Разделы vault и статей идут после общих разделов в прежнем порядке."""
+        sections = help_sections()
+        self.assertEqual([section[0] for section in sections], ["Obsidian vault", "Статьи"])
+        self.assertEqual(
+            [line.split("`")[1] for _, lines in sections for line in lines],
+            ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze <ID статьи>"],
+        )
 
 
 if __name__ == "__main__":

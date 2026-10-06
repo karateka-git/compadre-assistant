@@ -1,339 +1,53 @@
+"""Собирает общие зависимости приложения и регистрирует возможность Obsidian."""
+
 from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Callable
 
-from document_chunker import (
-    ChunkingPolicy,
-    DocumentChunker,
-    DocumentFormat,
-    MarkdownDocumentParser,
+from obs_chat_bot.application.incoming.events import IncomingEvent
+from obs_chat_bot.application.incoming.ports import (
+    ChannelCompletionHandler,
+    IncomingCapabilityPort,
+    IncomingResponse,
+    IncomingResult,
 )
-
-from obs_chat_bot.application.articles.analysis import AnalyzeArticleUseCase
-from obs_chat_bot.application.articles.ports import IncomingMessageRepository
-from obs_chat_bot.application.articles.processing import ProcessArticleUrlUseCase
-from obs_chat_bot.application.incoming.processing import ProcessIncomingMessageUseCase
-from obs_chat_bot.application.reviews.proposal import PrepareObsidianReviewUseCase
-from obs_chat_bot.application.reviews.confirmation import (
-    ObsidianProposalConfirmationService,
+from obs_chat_bot.application.incoming.processing import (
+    ProcessIncomingMessageResult,
+    ProcessIncomingMessageUseCase,
 )
-from obs_chat_bot.application.search.full_text import VaultFullTextSearchService
-from obs_chat_bot.application.search.hybrid import (
-    VaultFtsFallbackSearchService,
-    VaultHybridSearchService,
-)
-from obs_chat_bot.application.search.ports import EmbeddingProvider, VaultNoteChunker
-from obs_chat_bot.application.search.vector import VaultVectorSearchService
 from obs_chat_bot.application.users.identity import UserIdentityService
-from obs_chat_bot.application.vaults.github_connection import (
-    GitHubConnectionCoordinator,
-)
-from obs_chat_bot.application.vaults.ports import (
+from obs_chat_bot.capabilities.obsidian.bootstrap import (
+    AnalyzeArticleUseCaseFactory,
     GitHubConnectionStarter,
-    GitHubRepositoryGateway,
-    GitHubVaultGateway,
-    GitHubVaultWriteGateway,
+    ObsidianProcessRuntime,
+    ProcessArticleUrlUseCaseFactory,
+    create_obsidian_entry,
+    create_obsidian_process_runtime,
+    empty_obsidian_message_reply,
+    present_obsidian_result,
+    process_url_for_cli,
+    should_acknowledge_obsidian,
+    validate_external_http_url,
+    validate_github_app_config,
 )
-from obs_chat_bot.application.vaults.vault_selection import VaultSelectionManager
-from obs_chat_bot.application.vaults.vault_sync import VaultSyncManager
-from obs_chat_bot.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.data.config import ChunkingConfig, EmbeddingConfig, GitHubAppConfig
-from obs_chat_bot.data.embeddings.openai_compatible import (
-    OpenAICompatibleEmbeddingProvider,
+from obs_chat_bot.capabilities.obsidian.smoke import (
+    AnalysisSmokeError,
+    PipelineSmokeError,
+    SQLiteSmokeError,
+    run_analysis_smoke,
+    run_pipeline_smoke,
+    run_sqlite_smoke,
 )
-from obs_chat_bot.data.extraction.trafilatura_article_extractor import (
-    TrafilaturaArticleTextExtractor,
-)
-from obs_chat_bot.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
-from obs_chat_bot.data.llm.openai_article_analyzer import OpenAIArticleAnalyzer
-from obs_chat_bot.data.llm.openai_obsidian_proposal_generator import (
-    OpenAIObsidianProposalGenerator,
-)
-from obs_chat_bot.data.github.github_app_client import HttpxGitHubAppClient
-from obs_chat_bot.data.github.jwt_signer import PyJwtGitHubAppSigner
-from obs_chat_bot.data.sqlite.analysis_result_repository import (
-    SQLiteArticleAnalysisResultRepository,
-)
-from obs_chat_bot.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.data.sqlite.incoming_message_repository import (
-    SQLiteIncomingMessageRepository,
-)
-from obs_chat_bot.data.sqlite.github_installation_writer import (
-    SQLiteGitHubAccountAccessWriter,
-)
-from obs_chat_bot.data.sqlite.github_connection_state_store import (
-    SQLiteGitHubConnectionStateStore,
-)
-from obs_chat_bot.data.sqlite.github_vault_selection_manager import (
-    SQLiteGitHubVaultSelectionManager,
-)
-from obs_chat_bot.data.sqlite.github_vault_sync_manager import (
-    SQLiteGitHubVaultSyncManager,
-)
-from obs_chat_bot.data.sqlite.processing_error_repository import (
-    SQLiteProcessingErrorRecorder,
-)
-from obs_chat_bot.data.sqlite.obsidian_vault_repository import (
-    SQLiteObsidianVaultRepository,
-)
-from obs_chat_bot.data.sqlite.obsidian_proposal_repository import (
-    SQLiteObsidianProposalRepository,
-)
-from obs_chat_bot.data.sqlite.vault_sync_lease_repository import (
-    SQLiteVaultSyncLeaseRepository,
-)
-from obs_chat_bot.data.sqlite.vault_full_text_search_repository import (
-    SQLiteVaultFullTextSearchRepository,
-)
-from obs_chat_bot.data.sqlite.vault_chunk_index_repository import (
-    SQLiteVaultChunkIndexRepository,
-)
-from obs_chat_bot.data.sqlite.vault_embedding_index_repository import (
-    SQLiteVaultEmbeddingIndexRepository,
-)
-from obs_chat_bot.data.sqlite.vault_instruction_repository import (
-    SQLiteVaultInstructionRepository,
-)
-from obs_chat_bot.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
+from obs_chat_bot.data.config import ChunkingConfig, EmbeddingConfig
+from obs_chat_bot.data.sqlite.connection import connect_database
 from obs_chat_bot.data.sqlite.user_identity_repository import (
     SQLiteAppUserRepository,
     SQLiteExternalIdentityRepository,
-    SQLiteIdentityRebindConfirmationRepository,
     SQLiteIdentityLinkTokenRepository,
+    SQLiteIdentityRebindConfirmationRepository,
 )
-
-
-ProcessArticleUrlUseCaseFactory = Callable[
-    [sqlite3.Connection],
-    ProcessArticleUrlUseCase,
-]
-AnalyzeArticleUseCaseFactory = Callable[
-    [sqlite3.Connection],
-    AnalyzeArticleUseCase,
-]
-
-
-def create_vault_note_chunker(config: ChunkingConfig) -> VaultNoteChunker:
-    """Собирает project adapter независимого Markdown document chunker.
-
-    Args:
-        config: Технические размеры chunks из конфигурации приложения.
-
-    Returns:
-        Adapter, добавляющий к универсальным chunks project IDs заметки.
-    """
-    engine = DocumentChunker(
-        parsers={
-            DocumentFormat.MARKDOWN: MarkdownDocumentParser(),
-        },
-        policy=ChunkingPolicy(
-            minimum_size_chars=config.minimum_size_chars,
-            target_size_chars=config.target_size_chars,
-            maximum_size_chars=config.maximum_size_chars,
-        ),
-    )
-    return DocumentVaultNoteChunker(engine)
-
-
-def create_vault_full_text_search_service(
-    connection: sqlite3.Connection,
-    *,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-) -> VaultFullTextSearchService:
-    """Собирает поиск FTS5 с проверкой текущей chunking signature.
-
-    Args:
-        connection: Открытое SQLite-соединение приложения.
-        chunking_config: Policy, определяющая допустимое поколение chunks.
-
-    Returns:
-        Application-сервис изолированного полнотекстового поиска по vault.
-    """
-    return VaultFullTextSearchService(
-        repository=SQLiteVaultFullTextSearchRepository(connection),
-        chunker=create_vault_note_chunker(chunking_config),
-    )
-
-
-def create_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
-    """Собирает OpenAI-compatible embedding adapter.
-
-    Args:
-        config: Отдельная конфигурация semantic embedding provider.
-
-    Returns:
-        Adapter embedding API за application-owned port.
-    """
-    return OpenAICompatibleEmbeddingProvider(
-        base_url=config.base_url,
-        api_key=config.api_key,
-        document_model=config.document_model,
-        query_model=config.query_model,
-        price_per_million_tokens=config.price_per_million_tokens,
-        price_currency=config.price_currency,
-        tariff_version=config.tariff_version,
-    )
-
-
-def create_vault_hybrid_search_service(
-    connection: sqlite3.Connection,
-    *,
-    embedding_config: EmbeddingConfig,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-) -> VaultHybridSearchService:
-    """Собирает BM25, cosine search и RRF поверх одного SQLite connection.
-
-    Args:
-        connection: Открытое SQLite-соединение приложения.
-        embedding_config: Обязательный provider semantic query.
-        chunking_config: Policy допустимого поколения chunks.
-
-    Returns:
-        Hybrid retrieval service с явным FTS5 fallback ожидаемых semantic ошибок.
-    """
-    chunker = create_vault_note_chunker(chunking_config)
-    provider = create_embedding_provider(embedding_config)
-    return VaultHybridSearchService(
-        lexical_search=VaultFullTextSearchService(
-            repository=SQLiteVaultFullTextSearchRepository(connection),
-            chunker=chunker,
-        ),
-        vector_search=VaultVectorSearchService(
-            chunk_repository=SQLiteVaultChunkIndexRepository(connection),
-            embedding_repository=SQLiteVaultEmbeddingIndexRepository(connection),
-            embedding_provider=provider,
-            chunker=chunker,
-        ),
-    )
-
-
-def create_process_article_url_use_case(
-    connection: sqlite3.Connection,
-) -> ProcessArticleUrlUseCase:
-    """Собирает concrete dependencies для обработки URL статьи.
-
-    Args:
-        connection: Открытое соединение SQLite.
-
-    Returns:
-        Use case с SQLite, HTTP и trafilatura-реализациями ports.
-    """
-    return ProcessArticleUrlUseCase(
-        article_repository=SQLiteArticleRepository(connection),
-        html_fetcher=UrllibArticleHtmlFetcher(),
-        text_extractor=TrafilaturaArticleTextExtractor(),
-        error_recorder=SQLiteProcessingErrorRecorder(connection),
-    )
-
-
-def create_analyze_article_use_case(
-    connection: sqlite3.Connection,
-    *,
-    openai_base_url: str,
-    openai_api_key: str,
-    openai_model: str,
-) -> AnalyzeArticleUseCase:
-    """Собирает concrete dependencies для LLM-анализа статьи.
-
-    Args:
-        connection: Открытое соединение SQLite.
-        openai_base_url: Базовый URL OpenAI-compatible API.
-        openai_api_key: API key провайдера LLM.
-        openai_model: Имя модели для анализа статей.
-
-    Returns:
-        Use case с SQLite-хранилищем и OpenAI-compatible analyzer.
-    """
-    return AnalyzeArticleUseCase(
-        article_repository=SQLiteArticleRepository(connection),
-        analyzer=OpenAIArticleAnalyzer(
-            base_url=openai_base_url,
-            api_key=openai_api_key,
-            model=openai_model,
-        ),
-        analysis_result_repository=SQLiteArticleAnalysisResultRepository(connection),
-        error_recorder=SQLiteProcessingErrorRecorder(connection),
-    )
-
-
-def create_prepare_obsidian_review_use_case(
-    connection: sqlite3.Connection,
-    *,
-    openai_base_url: str,
-    openai_api_key: str,
-    openai_model: str,
-    embedding_config: EmbeddingConfig | None,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-    created_note_tag: str | None = "knowledge-catcher",
-) -> PrepareObsidianReviewUseCase:
-    """Собирает retrieval, preflight и двухфазную LLM-генерацию 10.9.
-
-    Args:
-        connection: Открытое SQLite-соединение одного incoming worker.
-        openai_base_url: Базовый URL Chat Completions API.
-        openai_api_key: API key LLM-провайдера.
-        openai_model: Модель планирования и написания Markdown.
-        embedding_config: Semantic provider либо `None` для явного FTS fallback.
-        chunking_config: Ожидаемая signature локального chunk index.
-        created_note_tag: Служебный тег новых заметок или `None` для отключения.
-
-    Returns:
-        Полностью собранный use case подготовки Obsidian review.
-    """
-    lexical_search = create_vault_full_text_search_service(
-        connection,
-        chunking_config=chunking_config,
-    )
-    search = (
-        create_vault_hybrid_search_service(
-            connection,
-            embedding_config=embedding_config,
-            chunking_config=chunking_config,
-        )
-        if embedding_config is not None
-        else VaultFtsFallbackSearchService(lexical_search=lexical_search)
-    )
-    return PrepareObsidianReviewUseCase(
-        article_repository=SQLiteArticleRepository(connection),
-        vault_repository=SQLiteObsidianVaultRepository(connection),
-        instruction_repository=SQLiteVaultInstructionRepository(connection),
-        note_repository=SQLiteVaultNoteRepository(connection),
-        search=search,
-        generator=OpenAIObsidianProposalGenerator(
-            base_url=openai_base_url,
-            api_key=openai_api_key,
-            model=openai_model,
-        ),
-        proposal_repository=SQLiteObsidianProposalRepository(connection),
-        error_recorder=SQLiteProcessingErrorRecorder(connection),
-        created_note_tag=created_note_tag,
-    )
-
-
-def create_obsidian_proposal_confirmation_service(
-    connection: sqlite3.Connection,
-    *,
-    github_gateway: GitHubVaultWriteGateway,
-    vault_sync_manager: VaultSyncManager | None = None,
-) -> ObsidianProposalConfirmationService:
-    """Собирает подтверждение proposal, SHA preflight и GitHub write-back."""
-    return ObsidianProposalConfirmationService(
-        proposal_repository=SQLiteObsidianProposalRepository(connection),
-        vault_repository=SQLiteObsidianVaultRepository(connection),
-        lease_repository=SQLiteVaultSyncLeaseRepository(connection),
-        github_gateway=github_gateway,
-        vault_sync_manager=vault_sync_manager,
-        error_recorder=SQLiteProcessingErrorRecorder(connection),
-    )
-
-
-def create_incoming_message_repository(
-    connection: sqlite3.Connection,
-) -> IncomingMessageRepository:
-    """Создаёт repository входящих сообщений для adapters каналов."""
-    return SQLiteIncomingMessageRepository(connection)
+from obs_chat_bot.presentation.shared.responses import format_incoming_message_result
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -350,134 +64,98 @@ def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentity
 
 def create_process_incoming_message_use_case(
     *,
-    article_url_use_case: ProcessArticleUrlUseCase,
-    article_analysis_use_case: AnalyzeArticleUseCase | None,
-    incoming_message_repository: IncomingMessageRepository | None,
+    incoming_capability: IncomingCapabilityPort,
     user_identity_service: UserIdentityService | None,
-    github_connection_starter: GitHubConnectionStarter | None = None,
-    vault_selection_manager: VaultSelectionManager | None = None,
-    vault_sync_manager: VaultSyncManager | None = None,
-    obsidian_review_use_case: PrepareObsidianReviewUseCase | None = None,
-    obsidian_confirmation_service: ObsidianProposalConfirmationService | None = None,
 ) -> ProcessIncomingMessageUseCase:
-    """Собирает общий сценарий обработки входящего сообщения из любого канала.
+    """Подключает публичный вход возможности к общему сценарию пользователя.
 
     Args:
-        article_url_use_case: Сценарий загрузки и сохранения статьи.
-        article_analysis_use_case: Сценарий LLM-анализа или `None`.
-        incoming_message_repository: Хранилище входящих сообщений или `None`.
-        user_identity_service: Сервис пользователей и identities или `None`.
-        github_connection_starter: Coordinator GitHub Device Flow или `None`.
-        vault_selection_manager: Сценарий выбора GitHub vault или `None`.
-        vault_sync_manager: Сценарий синхронизации GitHub vault или `None`.
-        obsidian_review_use_case: Сценарий предложения 10.9 или `None`.
-        obsidian_confirmation_service: Хранилище и применение pending proposal.
+        incoming_capability: Вход зарегистрированной возможности.
+        user_identity_service: Общий сервис identities либо `None` для тестов.
 
     Returns:
-        Настроенный channel-agnostic incoming use case.
+        Сценарий обработки сообщений любого канала.
     """
     return ProcessIncomingMessageUseCase(
-        article_url_use_case=article_url_use_case,
-        article_analysis_use_case=article_analysis_use_case,
-        incoming_message_repository=incoming_message_repository,
+        incoming_capability=incoming_capability,
         user_identity_service=user_identity_service,
-        github_connection_starter=github_connection_starter,
-        vault_selection_manager=vault_selection_manager,
-        vault_sync_manager=vault_sync_manager,
-        obsidian_review_use_case=obsidian_review_use_case,
-        obsidian_confirmation_service=obsidian_confirmation_service,
     )
 
 
-def create_github_app_client(config: GitHubAppConfig) -> HttpxGitHubAppClient:
-    """Создаёт общий HTTP adapter зарегистрированного GitHub App.
+def present_channel_result(result: IncomingResult) -> IncomingResponse:
+    """Преобразует общий или зарегистрированный результат в ответ каналу.
 
-    Args:
-        config: Полная конфигурация GitHub App.
-
-    Returns:
-        Client для Device Flow, installation tokens и чтения repositories.
+    Raises:
+        TypeError: Если результат неизвестен реестру возможностей.
     """
-    signer = PyJwtGitHubAppSigner(
-        client_id=config.client_id,
-        private_key_path=config.private_key_path,
-    )
-    return HttpxGitHubAppClient(
-        client_id=config.client_id,
-        app_jwt_factory=signer.create,
-    )
+    if isinstance(result, ProcessIncomingMessageResult):
+        return IncomingResponse(format_incoming_message_result(result), result.error)
+    capability_response = present_obsidian_result(result)
+    if capability_response is not None:
+        return capability_response
+    raise TypeError(f"Unsupported incoming result: {type(result).__name__}")
 
 
-def create_vault_selection_manager(
+def process_channel_incoming_message(
     *,
     database_path: Path,
-    github_gateway: GitHubRepositoryGateway,
-) -> VaultSelectionManager:
-    """Собирает application-сценарий выбора vault для одного сообщения.
-
-    Args:
-        database_path: Путь к общей SQLite-базе adapters.
-        github_gateway: Процессный GitHub App HTTP adapter.
-
-    Returns:
-        Сервис с общими SQLite repositories пользователя.
-    """
-    return SQLiteGitHubVaultSelectionManager(
-        database_path=database_path,
-        github_gateway=github_gateway,
-    )
-
-
-def create_vault_sync_manager(
-    *,
-    database_path: Path,
-    github_gateway: GitHubVaultGateway,
+    incoming_message: IncomingEvent,
+    openai_base_url: str,
+    openai_api_key: str,
+    openai_model: str,
+    runtime: ObsidianProcessRuntime | None = None,
+    use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
+    analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     chunking_config: ChunkingConfig = ChunkingConfig(),
     embedding_config: EmbeddingConfig | None = None,
-) -> VaultSyncManager:
-    """Собирает GitHub/SQLite-сценарий синхронизации vault.
+    obsidian_created_note_tag: str | None = "knowledge-catcher",
+    completion_handler: ChannelCompletionHandler | None = None,
+) -> IncomingResponse:
+    """Обрабатывает одно событие канала с отдельным SQLite-соединением.
 
     Args:
-        database_path: Путь к общей SQLite-базе adapters.
-        github_gateway: GitHub App gateway чтения Git trees и blobs.
-        chunking_config: Policy разбиения Markdown-заметок на chunks.
-        embedding_config: Настройки semantic index либо `None` для FTS-only.
+        database_path: Путь к общей SQLite-БД.
+        incoming_message: Нормализованное событие канала.
+        openai_base_url: Базовый URL OpenAI-compatible API.
+        openai_api_key: API key LLM.
+        openai_model: Модель анализа и proposal.
+        runtime: Процессные зависимости Obsidian.
+        use_case_factory: Тестовая фабрика article pipeline.
+        analysis_use_case_factory: Тестовая фабрика анализа.
+        chunking_config: Настройки разбиения заметок.
+        embedding_config: Настройки semantic index.
+        obsidian_created_note_tag: Служебный тег новых заметок.
+        completion_handler: Доставка фонового ответа в исходный чат.
 
     Returns:
-        Менеджер с отдельным соединением для каждой операции.
+        Готовый нейтральный ответ каналу.
     """
-    return SQLiteGitHubVaultSyncManager(
-        database_path=database_path,
-        github_gateway=github_gateway,
-        note_chunker=create_vault_note_chunker(chunking_config),
-        embedding_provider=(
-            create_embedding_provider(embedding_config)
-            if embedding_config is not None
-            else None
-        ),
-    )
+    with connect_database(database_path) as connection:
+        entry = create_obsidian_entry(
+            connection,
+            database_path=database_path,
+            openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            runtime=runtime,
+            use_case_factory=use_case_factory,
+            analysis_use_case_factory=analysis_use_case_factory,
+            chunking_config=chunking_config,
+            embedding_config=embedding_config,
+            created_note_tag=obsidian_created_note_tag,
+        )
+        use_case = create_process_incoming_message_use_case(
+            incoming_capability=entry,
+            user_identity_service=create_user_identity_service(connection),
+        )
 
+        def present_completion(result: IncomingResult) -> None:
+            """Передаёт фоновой результат каналу после форматирования."""
+            if completion_handler is not None:
+                completion_handler(present_channel_result(result))
 
-def create_github_connection_coordinator(
-    *,
-    database_path: Path,
-    config: GitHubAppConfig,
-    gateway: HttpxGitHubAppClient | None = None,
-) -> GitHubConnectionCoordinator:
-    """Собирает процессный coordinator GitHub Device Flow.
-
-    Args:
-        database_path: Путь к общей SQLite-базе adapters.
-        config: Полная конфигурация зарегистрированного GitHub App.
-        gateway: Общий процессный GitHub client или `None` для создания нового.
-
-    Returns:
-        Coordinator, хранящий временные Device Flow sessions только в памяти.
-    """
-    runtime_gateway = gateway or create_github_app_client(config)
-    return GitHubConnectionCoordinator(
-        gateway=runtime_gateway,
-        account_writer=SQLiteGitHubAccountAccessWriter(database_path),
-        state_store=SQLiteGitHubConnectionStateStore(database_path),
-        installation_url=config.installation_url,
-    )
+        result = use_case.execute(
+            incoming_message,
+            present_completion if completion_handler is not None else None,
+        )
+        return present_channel_result(result)

@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
 
-from obs_chat_bot.application.articles.errors import ArticleFetchError
-from obs_chat_bot.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
+from obs_chat_bot.capabilities.obsidian.application.articles.errors import ArticleFetchError
+from obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher import UrllibArticleHtmlFetcher
 
 
 class FakeHttpResponse:
@@ -53,7 +53,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             return_value=FakeHttpResponse(),
         ):
             result = fetcher.fetch("https://example.com/article")
@@ -68,7 +68,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             return_value=FakeHttpResponse(status=500),
         ):
             with self.assertRaises(ArticleFetchError):
@@ -79,7 +79,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             return_value=FakeHttpResponse(content_type="application/json"),
         ):
             with self.assertRaises(ArticleFetchError):
@@ -90,7 +90,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             return_value=FakeHttpResponse(content=b"   "),
         ):
             with self.assertRaises(ArticleFetchError):
@@ -105,7 +105,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         )
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             side_effect=HTTPError(
                 url="https://example.com/article",
                 code=404,
@@ -130,7 +130,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         )
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             side_effect=URLError("offline"),
         ) as opener:
             with self.assertRaises(ArticleFetchError):
@@ -149,7 +149,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         )
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             side_effect=[URLError("temporary"), FakeHttpResponse()],
         ) as opener:
             result = fetcher.fetch("https://example.com/article")
@@ -162,7 +162,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         """Локальный URL отклоняется до HTTP-запроса."""
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
-        with patch("obs_chat_bot.data.http.article_html_fetcher.urlopen") as opener:
+        with patch("obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen") as opener:
             with self.assertRaises(ArticleFetchError):
                 fetcher.fetch("http://127.0.0.1/admin")
 
@@ -173,7 +173,7 @@ class UrllibArticleHtmlFetcherTest(unittest.TestCase):
         fetcher = UrllibArticleHtmlFetcher(timeout_seconds=1)
 
         with patch(
-            "obs_chat_bot.data.http.article_html_fetcher.urlopen",
+            "obs_chat_bot.capabilities.obsidian.data.http.article_html_fetcher.urlopen",
             return_value=FakeHttpResponse(final_url="http://localhost/internal"),
         ):
             with self.assertRaises(ArticleFetchError):

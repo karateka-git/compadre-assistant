@@ -8,34 +8,23 @@ import tempfile
 from pathlib import Path
 
 from obs_chat_bot import __version__
-from obs_chat_bot.application.articles.processing import (
-    ProcessArticleUrlCommand,
-    ProcessArticleUrlError,
-)
-from obs_chat_bot.application.articles.incoming_messages import IncomingMessage
-from obs_chat_bot.application.incoming.processing import (
-    IncomingCompletionHandler,
-    ProcessIncomingMessageResult,
-)
-from obs_chat_bot.application.vaults.ports import (
-    GitHubConnectionStarter,
-    GitHubRepositoryGateway,
-)
-from obs_chat_bot.application.vaults.github_models import GitHubGatewayError
+import obs_chat_bot.bootstrap as app_bootstrap
 from obs_chat_bot.bootstrap import (
     AnalyzeArticleUseCaseFactory,
+    GitHubConnectionStarter,
     ProcessArticleUrlUseCaseFactory,
-    create_analyze_article_use_case,
-    create_github_app_client,
-    create_github_connection_coordinator,
-    create_incoming_message_repository,
-    create_obsidian_proposal_confirmation_service,
-    create_process_incoming_message_use_case,
-    create_process_article_url_use_case,
-    create_prepare_obsidian_review_use_case,
-    create_user_identity_service,
-    create_vault_selection_manager,
-    create_vault_sync_manager,
+    create_obsidian_process_runtime,
+    empty_obsidian_message_reply,
+    process_url_for_cli,
+    should_acknowledge_obsidian,
+    validate_external_http_url,
+    validate_github_app_config,
+    AnalysisSmokeError,
+    SQLiteSmokeError,
+    PipelineSmokeError,
+    run_analysis_smoke,
+    run_sqlite_smoke,
+    run_pipeline_smoke,
 )
 from obs_chat_bot.data.config import (
     AppConfig,
@@ -45,19 +34,10 @@ from obs_chat_bot.data.config import (
     GitHubAppConfig,
     load_config,
 )
-from obs_chat_bot.data.github.jwt_signer import PyJwtGitHubAppSigner
-from obs_chat_bot.data.http.url_safety import UnsafeUrlError, validate_public_http_url
 from obs_chat_bot.data.sqlite.connection import connect_database
 from obs_chat_bot.data.sqlite.migration_runner import MigrationError, apply_migrations
 from obs_chat_bot.presentation.telegram.bot import TelegramBotError, run_telegram_bot
 from obs_chat_bot.presentation.vk.bot import VkBotError, run_vk_bot
-from obs_chat_bot.presentation.cli.smoke import (
-    AnalysisSmokeError,
-    SQLiteSmokeError,
-    run_analysis_smoke,
-    run_sqlite_smoke,
-)
-from obs_chat_bot.presentation.cli.smoke import PipelineSmokeError, run_pipeline_smoke
 
 
 def configure_logging() -> None:
@@ -268,9 +248,8 @@ def check_llm_config(
     if not model.strip():
         logger.error("LLM model is empty")
         return False
-    try:
-        validate_public_http_url(base_url)
-    except (UnsafeUrlError, ValueError) as error:
+    error = validate_external_http_url(base_url)
+    if error is not None:
         logger.error("LLM base URL is not safe: %s", error)
         return False
     logger.info("LLM configuration is ready")
@@ -302,12 +281,8 @@ def check_github_config(
     if config is None:
         logger.info("GitHub App configuration is disabled")
         return True
-    try:
-        PyJwtGitHubAppSigner(
-            client_id=config.client_id,
-            private_key_path=config.private_key_path,
-        ).create()
-    except GitHubGatewayError as error:
+    error = validate_github_app_config(config)
+    if error is not None:
         logger.error("GitHub App configuration is invalid: %s", error)
         return False
     logger.info("GitHub App configuration is ready")
@@ -330,9 +305,8 @@ def check_embedding_config(
     if config is None:
         logger.info("Embedding provider configuration is disabled")
         return True
-    try:
-        validate_public_http_url(config.base_url)
-    except (UnsafeUrlError, ValueError) as error:
+    error = validate_external_http_url(config.base_url)
+    if error is not None:
         logger.error("Embedding base URL is not safe: %s", error)
         return False
     logger.info("Embedding provider configuration is ready")
@@ -463,28 +437,25 @@ def run_process_url_command(
         Ноль при успешной обработке, иначе единицу.
     """
     try:
-        factory = use_case_factory or create_process_article_url_use_case
         with connect_database(database_path) as connection:
             apply_migrations(connection)
-            use_case = factory(connection)
-            result = use_case.execute(ProcessArticleUrlCommand(source_url=source_url))
+            result = process_url_for_cli(connection, source_url, use_case_factory)
     except (MigrationError, OSError, sqlite3.Error) as error:
         logger.error("Could not prepare article pipeline: %s", error)
         return 1
-    except ProcessArticleUrlError as error:
-        logger.error("Article pipeline failed: %s", error)
+    if result.error is not None:
+        logger.error("Article pipeline failed: %s", result.error)
         return 1
 
-    article = result.article
     logger.info("Article pipeline passed")
-    logger.info("Article id: %s", article.id)
-    logger.info("Article status: %s", article.status.value)
+    logger.info("Article id: %s", result.article_id)
+    logger.info("Article status: %s", result.status)
     logger.info("Article created: %s", result.created)
     logger.info("Article extracted: %s", result.extracted)
-    logger.info("Article title: %s", article.title or "missing")
+    logger.info("Article title: %s", result.title or "missing")
     logger.info(
         "Article cleaned text length: %s",
-        len(article.cleaned_text or ""),
+        result.cleaned_text_length,
     )
 
     return 0
@@ -531,23 +502,16 @@ def run_telegram_bot_command(
     try:
         if not initialize_database(database_path, logger):
             return 1
-        connection_starter = github_connection_starter
-        github_gateway = (
-            create_github_app_client(github_app_config)
-            if github_app_config is not None
-            else None
+        runtime = create_obsidian_process_runtime(
+            database_path=database_path,
+            github_app_config=github_app_config,
+            github_connection_starter=github_connection_starter,
         )
-        if connection_starter is None and github_app_config is not None:
-            connection_starter = create_github_connection_coordinator(
-                database_path=database_path,
-                config=github_app_config,
-                gateway=github_gateway,
-            )
         run_telegram_bot(
             token=token,
             proxy_url=proxy_url,
             incoming_message_processor=lambda incoming_message, completion_handler: (
-                process_channel_incoming_message(
+                app_bootstrap.process_channel_incoming_message(
                     database_path=database_path,
                     incoming_message=incoming_message,
                     openai_base_url=openai_base_url,
@@ -555,8 +519,7 @@ def run_telegram_bot_command(
                     openai_model=openai_model,
                     use_case_factory=use_case_factory,
                     analysis_use_case_factory=analysis_use_case_factory,
-                    github_connection_starter=connection_starter,
-                    github_repository_gateway=github_gateway,
+                    runtime=runtime,
                     chunking_config=chunking_config,
                     embedding_config=embedding_config,
                     obsidian_created_note_tag=obsidian_created_note_tag,
@@ -564,6 +527,8 @@ def run_telegram_bot_command(
                 )
             ),
             logger=logger,
+            should_send_processing_ack=should_acknowledge_obsidian,
+            empty_message_reply=empty_obsidian_message_reply(),
         )
     except KeyboardInterrupt:
         logger.info("Telegram bot stopped")
@@ -622,23 +587,16 @@ def run_vk_bot_command(
     try:
         if not initialize_database(database_path, logger):
             return 1
-        connection_starter = github_connection_starter
-        github_gateway = (
-            create_github_app_client(github_app_config)
-            if github_app_config is not None
-            else None
+        runtime = create_obsidian_process_runtime(
+            database_path=database_path,
+            github_app_config=github_app_config,
+            github_connection_starter=github_connection_starter,
         )
-        if connection_starter is None and github_app_config is not None:
-            connection_starter = create_github_connection_coordinator(
-                database_path=database_path,
-                config=github_app_config,
-                gateway=github_gateway,
-            )
         run_vk_bot(
             token=token,
             group_id=group_id,
             incoming_message_processor=lambda incoming_message, completion_handler: (
-                process_channel_incoming_message(
+                app_bootstrap.process_channel_incoming_message(
                     database_path=database_path,
                     incoming_message=incoming_message,
                     openai_base_url=openai_base_url,
@@ -646,8 +604,7 @@ def run_vk_bot_command(
                     openai_model=openai_model,
                     use_case_factory=use_case_factory,
                     analysis_use_case_factory=analysis_use_case_factory,
-                    github_connection_starter=connection_starter,
-                    github_repository_gateway=github_gateway,
+                    runtime=runtime,
                     chunking_config=chunking_config,
                     embedding_config=embedding_config,
                     obsidian_created_note_tag=obsidian_created_note_tag,
@@ -655,6 +612,8 @@ def run_vk_bot_command(
                 )
             ),
             logger=logger,
+            should_send_processing_ack=should_acknowledge_obsidian,
+            empty_message_reply=empty_obsidian_message_reply(),
         )
     except KeyboardInterrupt:
         logger.info("VK bot stopped")
@@ -667,112 +626,3 @@ def run_vk_bot_command(
         return 1
 
     return 0
-
-
-def process_channel_incoming_message(
-    *,
-    database_path: Path,
-    incoming_message: IncomingMessage,
-    openai_base_url: str,
-    openai_api_key: str,
-    openai_model: str,
-    use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
-    analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
-    github_connection_starter: GitHubConnectionStarter | None = None,
-    github_repository_gateway: GitHubRepositoryGateway | None = None,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-    embedding_config: EmbeddingConfig | None = None,
-    obsidian_created_note_tag: str | None = "knowledge-catcher",
-    completion_handler: IncomingCompletionHandler | None = None,
-) -> ProcessIncomingMessageResult:
-    """Обрабатывает одно сообщение внешнего канала внутри worker thread.
-
-    Args:
-        database_path: Путь к рабочему файлу SQLite.
-        incoming_message: Нормализованное сообщение внешнего канала.
-        openai_base_url: Базовый URL OpenAI-compatible API.
-        openai_api_key: API key провайдера LLM.
-        openai_model: Имя модели для анализа статей.
-        use_case_factory: Factory article use case для тестов.
-        analysis_use_case_factory: Factory analysis use case для тестов.
-        github_connection_starter: Процессный coordinator GitHub Device Flow.
-        github_repository_gateway: GitHub App gateway чтения repository.
-        chunking_config: Policy разбиения заметок на chunks.
-        embedding_config: Настройки semantic index либо `None`.
-        obsidian_created_note_tag: Служебный тег новых заметок или `None`.
-        completion_handler: Callback итогового ответа в исходный чат.
-
-    Returns:
-        Структурированный результат общего incoming-flow.
-    """
-    with connect_database(database_path) as connection:
-        article_url_use_case = (
-            use_case_factory(connection)
-            if use_case_factory is not None
-            else create_process_article_url_use_case(connection)
-        )
-        article_analysis_use_case = (
-            analysis_use_case_factory(connection)
-            if analysis_use_case_factory is not None
-            else create_analyze_article_use_case(
-                connection,
-                openai_base_url=openai_base_url,
-                openai_api_key=openai_api_key,
-                openai_model=openai_model,
-            )
-        )
-        vault_sync_manager = (
-            create_vault_sync_manager(
-                database_path=database_path,
-                github_gateway=github_repository_gateway,
-                chunking_config=chunking_config,
-                embedding_config=embedding_config,
-            )
-            if (
-                github_repository_gateway is not None
-                and hasattr(github_repository_gateway, "fetch_vault_snapshot")
-            )
-            else None
-        )
-        incoming_message_use_case = create_process_incoming_message_use_case(
-            article_url_use_case=article_url_use_case,
-            article_analysis_use_case=article_analysis_use_case,
-            incoming_message_repository=create_incoming_message_repository(connection),
-            user_identity_service=create_user_identity_service(connection),
-            github_connection_starter=github_connection_starter,
-            vault_selection_manager=(
-                create_vault_selection_manager(
-                    database_path=database_path,
-                    github_gateway=github_repository_gateway,
-                )
-                if github_repository_gateway is not None
-                else None
-            ),
-            vault_sync_manager=vault_sync_manager,
-            obsidian_review_use_case=create_prepare_obsidian_review_use_case(
-                connection,
-                openai_base_url=openai_base_url,
-                openai_api_key=openai_api_key,
-                openai_model=openai_model,
-                embedding_config=embedding_config,
-                chunking_config=chunking_config,
-                created_note_tag=obsidian_created_note_tag,
-            ),
-            obsidian_confirmation_service=(
-                create_obsidian_proposal_confirmation_service(
-                    connection,
-                    github_gateway=github_repository_gateway,
-                    vault_sync_manager=vault_sync_manager,
-                )
-                if (
-                    github_repository_gateway is not None
-                    and hasattr(github_repository_gateway, "inspect_vault_target")
-                    and hasattr(github_repository_gateway, "commit_vault_markdown")
-                )
-                else None
-            ),
-        )
-        return incoming_message_use_case.execute(
-            incoming_message,
-            completion_handler,
-        )

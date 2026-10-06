@@ -4,10 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.data.sqlite.article_repository import SQLiteArticleRepository
+from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
 from obs_chat_bot.data.sqlite.connection import connect_database
 from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from tests.sqlite_helpers import ensure_app_user
 
 

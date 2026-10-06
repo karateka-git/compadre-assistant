@@ -7,8 +7,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 
-from obs_chat_bot.application.vaults.github_models import GitHubRepositoryInspection
-from obs_chat_bot.application.vaults.vault_selection import (
+from obs_chat_bot.capabilities.obsidian.application.vaults.github_models import GitHubRepositoryInspection
+from obs_chat_bot.capabilities.obsidian.application.vaults.vault_selection import (
     GitHubRepositoryNotAccessibleError,
     GitHubVaultPathNotFoundError,
     GitHubVaultSelectionService,
@@ -18,17 +18,17 @@ from obs_chat_bot.application.vaults.vault_selection import (
     parse_github_repository_url,
 )
 from obs_chat_bot.data.sqlite.connection import connect_database
-from obs_chat_bot.data.sqlite.github_installation_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.data.sqlite.github_vault_selection_manager import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.github_vault_selection_manager import (
     SQLiteGitHubVaultSelectionManager,
 )
 from obs_chat_bot.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.data.sqlite.obsidian_vault_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.data.sqlite.vault_confirmation_repository import (
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
     SQLiteVaultActionConfirmationRepository,
 )
 from tests.sqlite_helpers import ensure_app_user

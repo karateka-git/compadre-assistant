@@ -4,20 +4,20 @@ from dataclasses import replace
 from hashlib import sha256
 import unittest
 
-from obs_chat_bot.application.articles.errors import (
+from obs_chat_bot.capabilities.obsidian.application.articles.errors import (
     ArticleExtractionError,
     ArticleFetchError,
 )
-from obs_chat_bot.application.articles.extracted import ExtractedArticle
-from obs_chat_bot.application.articles.html import ArticleHtml
-from obs_chat_bot.application.articles.processing import (
+from obs_chat_bot.capabilities.obsidian.application.articles.extracted import ExtractedArticle
+from obs_chat_bot.capabilities.obsidian.application.articles.html import ArticleHtml
+from obs_chat_bot.capabilities.obsidian.application.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
     ProcessArticleUrlUseCase,
 )
-from obs_chat_bot.application.articles.stages import ProcessingStage
-from obs_chat_bot.domain.articles.entities import Article
-from obs_chat_bot.domain.articles.statuses import ArticleStatus
+from obs_chat_bot.capabilities.obsidian.application.articles.stages import ProcessingStage
+from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 
 
 class FakeArticleRepository:
