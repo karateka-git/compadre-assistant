@@ -379,12 +379,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             return ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE, app_user=app_user
             )
-        if self._selected_vault(app_user.id) is None:
-            return ObsidianMessageResult(type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user)
         if not self._llm_configured:
             return ObsidianMessageResult(
                 type=ObsidianResultType.LLM_NOT_CONFIGURED, app_user=app_user
             )
+        if self._selected_vault(app_user.id) is None:
+            return ObsidianMessageResult(type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user)
         if command is ObsidianCommand.REANALYZE:
             return self._reanalyze_article(
                 parsed.arguments if parsed is not None else "",

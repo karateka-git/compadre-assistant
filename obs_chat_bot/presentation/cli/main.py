@@ -31,6 +31,7 @@ from obs_chat_bot.core.data.config import (
     EmbeddingConfig,
     GitHubAppConfig,
     load_config,
+    parse_channels,
 )
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.data.sqlite.migration_runner import MigrationError, apply_migrations
@@ -89,7 +90,17 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Start VK bot long polling.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--channels", type=parse_channels,
+        help="Channels to validate: telegram, vk or telegram,vk (healthcheck/configuration).",
+    )
+    args = parser.parse_args()
+    if args.channels is not None and any((
+        args.telegram_bot, args.vk_bot, args.process_url,
+        args.sqlite_smoke, args.pipeline_smoke, args.analysis_smoke,
+    )):
+        parser.error("--channels applies only to --healthcheck or configuration checks")
+    return args
 
 
 def main() -> int:
@@ -110,16 +121,32 @@ def main() -> int:
         return run_analysis_smoke_command(logger)
 
     try:
-        config = load_config()
-    except ConfigError as error:
+        channels = (
+            ("telegram",) if args.telegram_bot else
+            ("vk",) if args.vk_bot else
+            () if args.process_url else args.channels
+        )
+        config = load_config(
+            channels=channels,
+            include_capability_settings=not bool(args.process_url),
+        )
+        app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
+    except (ConfigError, ValueError) as error:
         logger.error("Configuration error: %s", error)
         return 2
     configure_debug_logging(config.app_debug)
 
-    config.data_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        logger.error("Data directory is not available: %s", error)
+        return 1
 
     if args.healthcheck:
         return run_healthcheck(config, logger)
+
+    if not args.process_url and not check_runtime_configuration(config, logger):
+        return 2
 
     for key, value in config.safe_summary().items():
         logger.info("Config %s: %s", key, value)
@@ -205,24 +232,95 @@ def run_healthcheck(config: AppConfig, logger: logging.Logger) -> int:
         logger.error("Health check failed: data directory is not writable: %s", error)
         return 1
 
-    if not check_database(config.database_path, logger):
-        return 1
-    if not check_telegram_config(config.telegram_bot_token, logger):
-        return 1
-    if not check_llm_config(
-        base_url=config.openai_base_url,
-        api_key=config.openai_api_key,
-        model=config.openai_model,
-        logger=logger,
-    ):
-        return 1
-    if not check_github_config(config.github_app, logger):
-        return 1
-    if not check_embedding_config(config.embedding, logger):
+    # Выполняем независимые проверки целиком, чтобы первый сбой не скрывал другие.
+    configuration_ready = check_runtime_configuration(config, logger)
+    database_ready = check_database(config.database_path, logger)
+    if not configuration_ready or not database_ready:
         return 1
 
     logger.info("Health check passed")
     return 0
+
+
+def check_runtime_configuration(config: AppConfig, logger: logging.Logger) -> bool:
+    """Проверяет выбранные каналы и включённые возможности без внешних API.
+
+    Args:
+        config: Настройки текущего запуска.
+        logger: Logger отдельных результатов каналов и провайдеров.
+
+    Returns:
+        `True`, если запуск выбранной конфигурации разрешён.
+    """
+    try:
+        app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
+    except ValueError as error:
+        logger.error("Capability configuration is invalid: %s", error)
+        return False
+    results = []
+    for channel in config.selected_channels:
+        if channel == "telegram":
+            results.append(check_telegram_config(config.telegram_bot_token, logger))
+        elif channel == "vk":
+            results.append(check_vk_config(token=config.vk_bot_token, group_id=config.vk_group_id, logger=logger))
+        else:
+            logger.error("Unknown selected channel: %s", channel)
+            results.append(False)
+    results.append(check_capability_configuration(
+        enabled_capabilities=config.enabled_capabilities,
+        openai_base_url=config.openai_base_url,
+        openai_api_key=config.openai_api_key,
+        openai_model=config.openai_model,
+        github_app_config=config.github_app,
+        embedding_config=config.embedding,
+        logger=logger,
+    ))
+    return all(results)
+
+
+def check_capability_configuration(
+    *,
+    enabled_capabilities: tuple[str, ...],
+    openai_base_url: str,
+    openai_api_key: str,
+    openai_model: str,
+    github_app_config: GitHubAppConfig | None,
+    embedding_config: EmbeddingConfig | None,
+    logger: logging.Logger,
+) -> bool:
+    """Проверяет провайдеры включённого Obsidian и сообщает доступность функций.
+
+    Полностью пустые группы GitHub/LLM сохраняют доступность общих команд;
+    обработчик Obsidian сообщает о ненастроенном провайдере. Частичные или
+    некорректные группы блокируют запуск. Отсутствие embeddings включает FTS.
+
+    Args:
+        enabled_capabilities: ID возможностей текущей сборки.
+        openai_base_url: Endpoint анализа/review Obsidian.
+        openai_api_key: Отдельный ключ LLM.
+        openai_model: Модель анализа/review.
+        github_app_config: Полная группа GitHub либо `None`.
+        embedding_config: Полная группа embeddings либо `None` для FTS.
+        logger: Logger безопасных диагностических сообщений.
+
+    Returns:
+        `True`, если конфигурация провайдеров допускает запуск.
+    """
+    if "obsidian" not in enabled_capabilities:
+        logger.info("Obsidian is disabled; provider configuration is not checked")
+        return True
+    llm_values = (openai_base_url.strip(), openai_api_key.strip(), openai_model.strip())
+    if not any(llm_values):
+        logger.info("Obsidian LLM is not configured; article analysis/review unavailable")
+        llm_ready = True
+    else:
+        llm_ready = check_llm_config(
+            base_url=openai_base_url, api_key=openai_api_key,
+            model=openai_model, logger=logger,
+        )
+    github_ready = check_github_config(github_app_config, logger)
+    embedding_ready = check_embedding_config(embedding_config, logger)
+    return llm_ready and github_ready and embedding_ready
 
 
 def check_telegram_config(token: str, logger: logging.Logger) -> bool:
@@ -243,14 +341,14 @@ def check_llm_config(
 ) -> bool:
     """Проверяет базовую LLM-конфигурацию без реального запроса к модели."""
     if not api_key.strip():
-        logger.error("LLM API key is empty")
+        logger.error("LLM API key (OPENAI_API_KEY) is empty")
         return False
     if not model.strip():
-        logger.error("LLM model is empty")
+        logger.error("LLM model (OPENAI_MODEL) is empty")
         return False
     error = validate_external_http_url(base_url)
     if error is not None:
-        logger.error("LLM base URL is not safe: %s", error)
+        logger.error("LLM base URL (OPENAI_BASE_URL) is not safe: %s", error)
         return False
     logger.info("LLM configuration is ready")
     return True
@@ -279,7 +377,7 @@ def check_github_config(
 ) -> bool:
     """Проверяет наличие PEM GitHub App без вывода ключа или пути."""
     if config is None:
-        logger.info("GitHub App configuration is disabled")
+        logger.info("Obsidian GitHub is not configured; vault connection/sync/write unavailable")
         return True
     error = validate_github_app_config(config)
     if error is not None:
@@ -303,11 +401,11 @@ def check_embedding_config(
         `True`, если группа отключена или полностью корректна.
     """
     if config is None:
-        logger.info("Embedding provider configuration is disabled")
+        logger.info("Obsidian embeddings are not configured; FTS fallback is active")
         return True
     error = validate_external_http_url(config.base_url)
     if error is not None:
-        logger.error("Embedding base URL is not safe: %s", error)
+        logger.error("Embedding base URL (EMBEDDING_BASE_URL) is not safe: %s", error)
         return False
     logger.info("Embedding provider configuration is ready")
     return True
@@ -501,6 +599,15 @@ def run_telegram_bot_command(
     Returns:
         Ноль при штатной остановке, иначе единицу.
     """
+    if not check_telegram_config(token, logger):
+        return 2
+    if not check_capability_configuration(
+        enabled_capabilities=enabled_capabilities,
+        openai_base_url=openai_base_url, openai_api_key=openai_api_key,
+        openai_model=openai_model, github_app_config=github_app_config,
+        embedding_config=embedding_config, logger=logger,
+    ):
+        return 2
     try:
         app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
         if not initialize_database(database_path, logger):
@@ -586,6 +693,13 @@ def run_vk_bot_command(
         Ноль при штатной остановке, иначе единицу.
     """
     if not check_vk_config(token=token, group_id=group_id, logger=logger):
+        return 2
+    if not check_capability_configuration(
+        enabled_capabilities=enabled_capabilities,
+        openai_base_url=openai_base_url, openai_api_key=openai_api_key,
+        openai_model=openai_model, github_app_config=github_app_config,
+        embedding_config=embedding_config, logger=logger,
+    ):
         return 2
 
     try:

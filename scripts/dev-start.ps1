@@ -34,4 +34,10 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {
     Start-Sleep -Seconds 2
 }
 
-docker compose up --build --remove-orphans --menu=false
+. (Join-Path $PSScriptRoot "common.ps1")
+$services = @(Get-ConfiguredBotServices)
+$inactiveServices = @(@('tg_catcher', 'vk_catcher') | Where-Object { $_ -notin $services })
+if ($inactiveServices.Count -gt 0) {
+    Invoke-ProjectCompose -ComposeArguments (@('stop') + $inactiveServices)
+}
+Invoke-ProjectCompose -ComposeArguments (@('up', '--build', '--remove-orphans', '--menu=false') + $services)

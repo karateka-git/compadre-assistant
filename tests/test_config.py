@@ -10,6 +10,12 @@ from obs_chat_bot.core.data.config import ConfigError, load_config
 class ConfigTest(unittest.TestCase):
     """Проверяет чтение `.env`-настроек."""
 
+    def setUp(self) -> None:
+        """Изолирует окружение теста от credentials локального `.env`."""
+        self.dotenv = patch("obs_chat_bot.core.data.config.load_dotenv", None)
+        self.dotenv.start()
+        self.addCleanup(self.dotenv.stop)
+
     def test_enabled_capabilities_default_and_explicit_disable(self) -> None:
         """Список входов имеет явное значение по умолчанию и допускает пустую сборку."""
         with patch.dict(os.environ, _env(), clear=True):
@@ -41,7 +47,7 @@ class ConfigTest(unittest.TestCase):
         """VK token и group id остаются опциональными, но читаются из окружения."""
         with patch.dict(
             os.environ,
-            _env(VK_BOT_TOKEN="vk-token", VK_GROUP_ID="123"),
+            _env(ENABLED_CHANNELS="vk", VK_BOT_TOKEN="vk-token", VK_GROUP_ID="123"),
             clear=True,
         ):
             config = load_config()
@@ -325,7 +331,7 @@ class ConfigTest(unittest.TestCase):
 
     def test_load_config_rejects_invalid_vk_group_id(self) -> None:
         """Некорректный VK_GROUP_ID считается ошибкой конфига."""
-        with patch.dict(os.environ, _env(VK_GROUP_ID="bad"), clear=True):
+        with patch.dict(os.environ, _env(ENABLED_CHANNELS="vk", VK_BOT_TOKEN="vk-token", VK_GROUP_ID="bad"), clear=True):
             with self.assertRaises(ConfigError):
                 load_config()
 
@@ -333,6 +339,7 @@ class ConfigTest(unittest.TestCase):
 def _env(**overrides: str) -> dict[str, str]:
     values = {
         "APP_ENV": "test",
+        "ENABLED_CHANNELS": "telegram",
         "DATABASE_PATH": "data/test.db",
         "TELEGRAM_BOT_TOKEN": "123456789:abcdefghijklmnopqrstuvwxyz",
         "OPENAI_BASE_URL": "https://llm.example/v1",

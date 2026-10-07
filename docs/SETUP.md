@@ -18,35 +18,37 @@ Copy-Item .env.example .env
 
 ## Заполнить конфигурацию
 
-`.env.example` — шаблон, который нужно заполнить: с `replace-me` и пустым
-embedding key приложение не готово к запуску. Переменные читает
+`.env.example` — шаблон, который нужно заполнить: с `replace-me` или пустыми
+токенами выбранных каналов приложение не готово к запуску. Переменные читает
 [`config.py`](../obs_chat_bot/core/data/config.py).
 
 | Переменные | Назначение и обязательность |
 | --- | --- |
 | `APP_ENV`, `DATABASE_PATH` | Обязательны; в шаблоне `local` и `data/app.db`. Путь отсчитывается от рабочей папки процесса; в Docker она `/app`. |
-| `ENABLED_CAPABILITIES` | Явный список ID через запятую, по умолчанию `obsidian`. Пустая строка отключает все входы. Изменение применяется после перезапуска. Текущие обязательные credentials и проверки конфигурации пока сохраняются; их разделение — шаг 2.5. |
+| `ENABLED_CAPABILITIES` | Явный список ID через запятую, по умолчанию `obsidian`. Пустая строка отключает все входы и чтение их настроек. Изменение применяется после перезапуска. |
+| `ENABLED_CHANNELS` | `telegram`, `vk` или `telegram,vk` (по умолчанию оба). Выбирает сервисы для scripts и проверки общего healthcheck. Явный флаг бота/`--channels` выбирает канал текущей команды. |
 | `APP_DEBUG` | Необязателен, по умолчанию `false`. |
-| `TELEGRAM_BOT_TOKEN` | Токен от BotFather. Сейчас общий загрузчик требует его даже в режиме VK; healthcheck также проверяет его формат. |
+| `TELEGRAM_BOT_TOKEN` | Токен от BotFather; обязателен только для выбранного Telegram. Startup и healthcheck проверяют его форму. |
 | `TELEGRAM_PROXY_URL` | Необязательный URL SOCKS5/SOCKS4/HTTP-прокси для запросов Telegram Bot API, например `socks5://10.77.77.1:1080`. Пустое значение сохраняет прямой доступ; VK, GitHub и AI Gateway эту настройку не используют. Если прокси требует пароль, храните URL только в `.env`, вне Git. |
 | `VK_BOT_TOKEN`, `VK_GROUP_ID` | Токен сообщества и положительный ID группы для VK. Для бота нужно настроить сообщения сообщества и Bots Long Poll. |
-| `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | Обязательная конфигурация OpenAI-compatible LLM. Значения провайдера и моделей в шаблоне — настройки проекта, доступность нужно проверять у своего провайдера. |
+| `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | LLM Obsidian: заполнить все три для анализа/review или оставить все пустыми. Пустая группа разрешает общие команды; Obsidian сообщает о ненастроенном LLM. Частичная группа — ошибка startup. При выключенном Obsidian не читается. |
 | `EMBEDDING_BASE_URL`, `EMBEDDING_API_KEY`, `EMBEDDING_DOCUMENT_MODEL`, `EMBEDDING_QUERY_MODEL` | Для semantic search заполнить все четыре. Частично заполненная группа вызывает ошибку. |
 | `EMBEDDING_PRICE_PER_MILLION_TOKENS`, `EMBEDDING_PRICE_CURRENCY`, `EMBEDDING_TARIFF_VERSION` | Необязательная группа оценки стоимости: заполнить все три или оставить все пустыми. Цена конечная и неотрицательная, валюта — три заглавные латинские буквы. |
 | `CHUNK_MINIMUM_SIZE_CHARS`, `CHUNK_TARGET_SIZE_CHARS`, `CHUNK_MAXIMUM_SIZE_CHARS` | Необязательные положительные целые, по умолчанию `300`, `3000`, `6000`; требуется `minimum <= target <= maximum`. |
 | `OBSIDIAN_CREATED_NOTE_TAG` | Необязательное имя служебного Obsidian-тега без `#`. Если переменная отсутствует, используется `knowledge-catcher`; значение `off` без учёта регистра отключает маркировку. Пустое или некорректное заданное значение вызывает ошибку конфигурации. |
 | `GITHUB_APP_ID`, `GITHUB_CLIENT_ID`, `GITHUB_APP_SLUG`, `GITHUB_PRIVATE_KEY_PATH` | Заполнить все четыре для работы с vault или оставить всю группу пустой. Для полного сценария бота GitHub App необходима. |
 
-**Особенность текущего Compose:** `docker-compose.yml` переопределяет
-`OPENAI_API_KEY` значением `EMBEDDING_API_KEY`. Поэтому для штатного Docker-запуска
-заполните `EMBEDDING_API_KEY` общим ключом AI Gateway; значение `OPENAI_API_KEY`
-из `.env` внутри контейнера будет заменено. При прямом запуске Python ключи
-независимы, `OPENAI_API_KEY` нужно заполнить отдельно.
+Compose и прямой Python используют независимые `OPENAI_API_KEY` и
+`EMBEDDING_API_KEY`; одинаковые значения при общем Gateway задаются явно.
+См. примеры endpoint/model в [RUN.md](RUN.md#настройки-embeddings).
 
-Для отключения semantic search при прямом Python-запуске очистите все семь
-`EMBEDDING_*` переменных, включая URL и модели из шаблона. Останется FTS-поиск.
-При запуске через текущий Compose сначала потребуется изменить его
-переопределение `OPENAI_API_KEY`, иначе пустой embedding key обнулит ключ LLM.
+Для отключения semantic search оставьте все семь `EMBEDDING_*` пустыми.
+Останется FTS-поиск; это начальное значение нового шаблона. При выключенном
+Obsidian не читаются GitHub, LLM, embeddings, chunking и тег заметок, включая
+неверные значения. При включённом Obsidian частичные группы и неверные настройки
+блокируют запуск с конкретной диагностикой; полностью пустой GitHub допустим,
+но подключение/sync/write-back будут недоступны. Отсутствующие providers не
+превращаются в сообщение об отсутствии vault пользователя.
 
 Создание GitHub App и получение PEM описаны в [GITHUB_APP.md](GITHUB_APP.md).
 Поместите PEM в `data/github-app.pem`, а в `.env` задайте
@@ -73,6 +75,9 @@ docker compose up --build tg_catcher
 Для VK используйте `docker compose up --build vk_catcher`. Для обоих каналов —
 `docker compose up --build`; оба набора channel credentials должны быть заполнены.
 Compose не отключает сервис автоматически, если его токен отсутствует.
+Для привычных `open-*.cmd` задайте `ENABLED_CHANNELS=telegram` или `vk`;
+scripts запускают выбранные сервисы. Отдельные bot-флаги и контейнерный healthcheck
+проверяют только канал соответствующего сервиса.
 Каталог `data/` хранит рабочую SQLite и PEM вне образа.
 
 Дальнейшие проверки, пользовательские команды и диагностика — в

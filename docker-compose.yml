@@ -6,24 +6,29 @@ x-catcher-base: &catcher-base
     - .env
   environment:
     APP_DEBUG: ${APP_DEBUG:-false}
-    # Один AI Gateway key используется для LLM и embeddings.
-    OPENAI_API_KEY: ${EMBEDDING_API_KEY}
+    ENABLED_CHANNELS: ${ENABLED_CHANNELS-telegram,vk}
   volumes:
     - ./data:/app/data
-  healthcheck:
-    test: ["CMD", "python", "-m", "obs_chat_bot", "--healthcheck"]
-    interval: 30s
-    timeout: 5s
-    retries: 3
-    start_period: 5s
 
 services:
   tg_catcher:
     <<: *catcher-base
     restart: unless-stopped
     command: ["python", "-m", "obs_chat_bot", "--telegram-bot"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "obs_chat_bot", "--healthcheck", "--channels", "telegram"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   vk_catcher:
     <<: *catcher-base
     restart: unless-stopped
     command: ["python", "-m", "obs_chat_bot", "--vk-bot"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "obs_chat_bot", "--healthcheck", "--channels", "vk"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

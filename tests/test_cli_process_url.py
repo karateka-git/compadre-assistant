@@ -210,7 +210,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             check_vk_config(token="", group_id=123, logger=SilentLogger())
         )
         self.assertFalse(
-            check_vk_config(token="token", group_id=None, logger=SilentLogger())
+            check_vk_config(token="123456789:abcdefghijklmnopqrstuvwxyz", group_id=None, logger=SilentLogger())
         )
 
     def test_check_github_config_validates_private_key_file(self) -> None:
@@ -319,7 +319,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
-                    token="token",
+                    token="123456789:abcdefghijklmnopqrstuvwxyz",
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -337,7 +337,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
-                    token="token",
+                    token="123456789:abcdefghijklmnopqrstuvwxyz",
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -352,7 +352,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
-                    token="token",
+                    token="123456789:abcdefghijklmnopqrstuvwxyz",
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                     analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
@@ -369,7 +369,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(directory) / "test.db",
-                    token="token",
+                    token="123456789:abcdefghijklmnopqrstuvwxyz",
                     proxy_url="socks5://10.77.77.1:1080",
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
@@ -390,13 +390,13 @@ class ProcessUrlCliTest(unittest.TestCase):
             app_slug="obs-chat-bot",
             private_key_path=Path("data/github-app.pem"),
         )
-        with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot"), patch(
+        with patch("obs_chat_bot.presentation.cli.main.validate_github_app_config", return_value=None), patch("obs_chat_bot.presentation.cli.main.run_telegram_bot"), patch(
             "obs_chat_bot.capabilities.obsidian.bootstrap.create_github_connection_coordinator"
         ) as coordinator_factory:
             with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(directory) / "test.db",
-                    token="token",
+                    token="123456789:abcdefghijklmnopqrstuvwxyz",
                     github_app_config=github_config,
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,

@@ -3,5 +3,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $projectRoot
 
-docker compose build tg_catcher
-docker compose run --rm tg_catcher python -m obs_chat_bot --healthcheck
+. (Join-Path $PSScriptRoot "common.ps1")
+$services = @(Get-ConfiguredBotServices)
+Invoke-ProjectCompose -ComposeArguments @('build', $services[0])
+Invoke-ProjectCompose -ComposeArguments @('run', '--rm', $services[0], 'python', '-m', 'obs_chat_bot', '--healthcheck')

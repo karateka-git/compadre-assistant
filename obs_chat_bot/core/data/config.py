@@ -16,10 +16,6 @@ except ModuleNotFoundError:
 REQUIRED_ENV_VARS = (
     "APP_ENV",
     "DATABASE_PATH",
-    "TELEGRAM_BOT_TOKEN",
-    "OPENAI_BASE_URL",
-    "OPENAI_API_KEY",
-    "OPENAI_MODEL",
 )
 
 _DEFAULT_OBSIDIAN_CREATED_NOTE_TAG = "knowledge-catcher"
@@ -148,6 +144,7 @@ class AppConfig:
     embedding: EmbeddingConfig | None = None
     obsidian_created_note_tag: str | None = _DEFAULT_OBSIDIAN_CREATED_NOTE_TAG
     enabled_capabilities: tuple[str, ...] = ("obsidian",)
+    selected_channels: tuple[str, ...] = ("telegram",)
 
     @property
     def data_dir(self) -> Path:
@@ -159,6 +156,7 @@ class AppConfig:
         return {
             "app_env": self.app_env,
             "enabled_capabilities": ",".join(self.enabled_capabilities),
+            "selected_channels": ",".join(self.selected_channels),
             "database_path": str(self.database_path),
             "telegram_bot_token": _presence(self.telegram_bot_token),
             "telegram_proxy_url": _presence(self.telegram_proxy_url or ""),
@@ -221,11 +219,20 @@ class AppConfig:
         }
 
 
-def load_config() -> AppConfig:
+def load_config(
+    *,
+    channels: tuple[str, ...] | None = None,
+    include_capability_settings: bool = True,
+) -> AppConfig:
     """Читает настройки окружения и локальный `.env`, если доступен dotenv.
 
+    Args:
+        channels: Каналы текущей команды; `None` читает ENABLED_CHANNELS.
+        include_capability_settings: Читать провайдеры возможностей; CLI extraction
+            использует только общую конфигурацию и не требует этих настроек.
+
     Returns:
-        Проверенную конфигурацию текущей промежуточной сборки.
+        Настройки выбранных каналов и включённых возможностей.
 
     Raises:
         ConfigError: Обязательные настройки отсутствуют или некорректны.
@@ -233,28 +240,89 @@ def load_config() -> AppConfig:
     if load_dotenv is not None:
         load_dotenv()
 
-    missing = [name for name in REQUIRED_ENV_VARS if not os.getenv(name)]
+    selected_channels = (
+        parse_channels(os.getenv("ENABLED_CHANNELS", "telegram,vk"))
+        if channels is None else channels
+    )
+    if len(set(selected_channels)) != len(selected_channels) or any(
+        channel not in {"telegram", "vk"} for channel in selected_channels
+    ):
+        raise ConfigError("Некорректный список выбранных каналов")
+    required = list(REQUIRED_ENV_VARS)
+    if "telegram" in selected_channels:
+        required.append("TELEGRAM_BOT_TOKEN")
+    if "vk" in selected_channels:
+        required.extend(("VK_BOT_TOKEN", "VK_GROUP_ID"))
+    missing = [name for name in required if not os.getenv(name, "").strip()]
     if missing:
         joined = ", ".join(missing)
         raise ConfigError(f"Missing required environment variables: {joined}")
 
+    enabled_capabilities = _get_enabled_capabilities()
+    obsidian_enabled = include_capability_settings and "obsidian" in enabled_capabilities
+    llm = _load_obsidian_llm_settings() if obsidian_enabled else ("", "", "")
     return AppConfig(
         app_env=_get_required("APP_ENV"),
         database_path=Path(_get_required("DATABASE_PATH")),
-        telegram_bot_token=_get_required("TELEGRAM_BOT_TOKEN"),
-        telegram_proxy_url=_get_optional_telegram_proxy_url(),
-        openai_base_url=_get_required("OPENAI_BASE_URL").rstrip("/"),
-        openai_api_key=_get_required("OPENAI_API_KEY"),
-        openai_model=_get_required("OPENAI_MODEL"),
-        chunking=_load_chunking_config(),
+        telegram_bot_token=(
+            os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            if "telegram" in selected_channels else ""
+        ),
+        telegram_proxy_url=(
+            _get_optional_telegram_proxy_url()
+            if "telegram" in selected_channels else None
+        ),
+        openai_base_url=llm[0],
+        openai_api_key=llm[1],
+        openai_model=llm[2],
+        chunking=_load_chunking_config() if obsidian_enabled else ChunkingConfig(),
         app_debug=_get_bool("APP_DEBUG", default=False),
-        vk_bot_token=os.getenv("VK_BOT_TOKEN", ""),
-        vk_group_id=_get_optional_int("VK_GROUP_ID"),
-        github_app=_load_github_app_config(),
-        embedding=_load_embedding_config(),
-        obsidian_created_note_tag=_get_obsidian_created_note_tag(),
-        enabled_capabilities=_get_enabled_capabilities(),
+        vk_bot_token=(
+            os.getenv("VK_BOT_TOKEN", "").strip()
+            if "vk" in selected_channels else ""
+        ),
+        vk_group_id=_get_optional_int("VK_GROUP_ID") if "vk" in selected_channels else None,
+        github_app=_load_github_app_config() if obsidian_enabled else None,
+        embedding=_load_embedding_config() if obsidian_enabled else None,
+        obsidian_created_note_tag=(
+            _get_obsidian_created_note_tag() if obsidian_enabled else None
+        ),
+        enabled_capabilities=enabled_capabilities,
+        selected_channels=selected_channels,
     )
+
+
+def parse_channels(value: str) -> tuple[str, ...]:
+    """Разбирает непустой список явно выбранных адаптеров.
+
+    Args:
+        value: Имена каналов, разделённые запятыми.
+
+    Returns:
+        Выбранные каналы в порядке запуска.
+
+    Raises:
+        ConfigError: Список пуст, содержит повтор или неизвестный канал.
+    """
+    channels = tuple(part.strip() for part in value.split(",") if part.strip())
+    if not channels or len(set(channels)) != len(channels) or any(
+        channel not in {"telegram", "vk"} for channel in channels
+    ):
+        raise ConfigError(
+            "ENABLED_CHANNELS/--channels: ожидаются telegram и/или vk без повторов"
+        )
+    return channels
+
+
+def _load_obsidian_llm_settings() -> tuple[str, str, str]:
+    names = ("OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL")
+    values = tuple(os.getenv(name, "").strip() for name in names)
+    if any(values) and not all(values):
+        missing = [name for name, value in zip(names, values) if not value]
+        raise ConfigError(
+            "Obsidian LLM configuration is incomplete; missing: " + ", ".join(missing)
+        )
+    return values[0].rstrip("/"), values[1], values[2]
 
 
 def _get_required(name: str) -> str:
