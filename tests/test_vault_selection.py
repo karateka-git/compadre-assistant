@@ -1,4 +1,5 @@
 """Тесты application-сценария выбора Obsidian vault из GitHub."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime
 from contextlib import contextmanager
@@ -14,6 +15,7 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubVaultSelectionService,
     VaultDisconnectStatus,
     VaultSelectionStatus,
+    VaultConfirmationAction,
     normalize_vault_root_path,
     parse_github_repository_url,
 )
@@ -76,6 +78,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             service = _service(connection, gateway)
 
             result = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/Octocat/Notes.git/",
                 root_path="/Vault/Personal/",
@@ -99,12 +102,14 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             gateway = FakeGitHubRepositoryGateway({101: _inspection()})
             service = _service(connection, gateway)
             first = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
                 root_path="Vault",
             )
 
             repeated = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
                 root_path="Vault",
@@ -124,6 +129,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             )
             service = _service(connection, gateway)
             original = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
                 root_path="Vault",
@@ -134,14 +140,20 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             )
 
             pending = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/second",
                 root_path="Second",
             )
-            current_before_cancel = SQLiteObsidianVaultRepository(
-                connection
-            ).get_for_user(1)
-            cancelled = service.cancel_replacement(1)
+            current_before_cancel = SQLiteObsidianVaultRepository(connection).get_for_user(1)
+            cancelled = service.decide(
+                1,
+                confirmation_id=service.get_pending(1, PendingOrigin("telegram", "chat")).id,
+                origin=PendingOrigin("telegram", "chat"),
+                version=1,
+                action=VaultConfirmationAction.REPLACE,
+                approve=False,
+            )
 
             self.assertEqual(
                 pending.status,
@@ -158,6 +170,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             gateway = FakeGitHubRepositoryGateway({101: _inspection()})
             service = _service(connection, gateway)
             first = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
                 root_path="Vault",
@@ -167,16 +180,24 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
                 repository="second",
             )
             service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/second",
             )
 
-            replaced = service.confirm_replacement(1)
+            replaced = service.decide(
+                1,
+                confirmation_id=service.get_pending(1, PendingOrigin("telegram", "chat")).id,
+                origin=PendingOrigin("telegram", "chat"),
+                version=1,
+                action=VaultConfirmationAction.REPLACE,
+                approve=True,
+            )
 
             self.assertEqual(replaced.status, VaultSelectionStatus.REPLACED)
             self.assertEqual(replaced.vault.repository, "second")
             self.assertNotEqual(replaced.vault.id, first.vault.id)
-            self.assertFalse(service.has_replacement_confirmation(1))
+            self.assertFalse(service.get_pending(1, PendingOrigin("telegram", "chat")) is not None)
 
     def test_disconnect_requires_confirmation_and_preserves_user_data(self) -> None:
         """Подтверждение удаляет только vault-каталог, сохраняя профиль и статьи."""
@@ -187,6 +208,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
                 FakeGitHubRepositoryGateway({101: _inspection()}),
             )
             selected = service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
             )
@@ -199,8 +221,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
                 """,
                 (selected.vault.id,),
             )
-            connection.execute(
-                """
+            connection.execute("""
                 INSERT INTO articles (
                     app_user_id, source_url, normalized_url, status
                 )
@@ -210,12 +231,18 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
                     'https://example.com/article',
                     'new'
                 )
-                """
-            )
+                """)
             connection.commit()
 
-            requested = service.request_disconnect(1)
-            disconnected = service.confirm_disconnect(1)
+            requested = service.request_disconnect(1, PendingOrigin("telegram", "chat"))
+            disconnected = service.decide(
+                1,
+                confirmation_id=service.get_pending(1, PendingOrigin("telegram", "chat")).id,
+                origin=PendingOrigin("telegram", "chat"),
+                version=1,
+                action=VaultConfirmationAction.DISCONNECT,
+                approve=True,
+            )
 
             self.assertEqual(
                 requested.status,
@@ -252,16 +279,24 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
                 FakeGitHubRepositoryGateway({101: _inspection()}),
             )
             service.select(
+                origin=PendingOrigin("telegram", "chat"),
                 app_user_id=1,
                 repository_url="https://github.com/octocat/notes",
             )
 
-            service.request_disconnect(1)
-            cancelled = service.cancel_disconnect(1)
+            service.request_disconnect(1, PendingOrigin("telegram", "chat"))
+            cancelled = service.decide(
+                1,
+                confirmation_id=service.get_pending(1, PendingOrigin("telegram", "chat")).id,
+                origin=PendingOrigin("telegram", "chat"),
+                version=1,
+                action=VaultConfirmationAction.DISCONNECT,
+                approve=False,
+            )
 
             self.assertEqual(cancelled.status, VaultDisconnectStatus.CANCELLED)
             self.assertIsNotNone(service.get_selected(1))
-            self.assertFalse(service.has_disconnect_confirmation(1))
+            self.assertFalse(service.get_pending(1, PendingOrigin("telegram", "chat")) is not None)
 
     def test_select_distinguishes_repository_and_path_failures(self) -> None:
         """Недоступный repository и отсутствующий каталог имеют разные ошибки."""
@@ -271,6 +306,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             service = _service(connection, gateway)
             with self.assertRaises(GitHubRepositoryNotAccessibleError):
                 service.select(
+                    origin=PendingOrigin("telegram", "chat"),
                     app_user_id=1,
                     repository_url="https://github.com/octocat/missing",
                 )
@@ -278,6 +314,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             gateway.inspections[101] = _inspection(root_path_is_directory=False)
             with self.assertRaises(GitHubVaultPathNotFoundError):
                 service.select(
+                    origin=PendingOrigin("telegram", "chat"),
                     app_user_id=1,
                     repository_url="https://github.com/octocat/notes",
                     root_path="missing",
@@ -322,6 +359,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
             worker = Thread(
                 target=lambda: results.append(
                     manager.select(
+                        origin=PendingOrigin("telegram", "chat"),
                         app_user_id=1,
                         repository_url="https://github.com/octocat/notes",
                     )

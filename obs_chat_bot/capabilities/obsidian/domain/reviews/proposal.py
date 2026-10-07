@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import PurePosixPath
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from obs_chat_bot.capabilities.obsidian.domain.articles.ports import (
     ArticleRepository,
     ProcessingErrorRecorder,
@@ -50,6 +51,7 @@ class PrepareObsidianReviewCommand:
     article_id: int
     analysis: ArticleAnalysisResult
     app_user_id: int
+    origin: PendingOrigin
     incoming_message_id: int | None = None
 
 
@@ -176,10 +178,7 @@ class PrepareObsidianReviewUseCase:
                 vault_id=vault.id,
             )
         )
-        if any(
-            note.app_user_id != command.app_user_id or note.vault_id != vault.id
-            for note in notes
-        ):
+        if any(note.app_user_id != command.app_user_id or note.vault_id != vault.id for note in notes):
             raise PrepareObsidianReviewError("Vault notes escaped requested scope")
         notes_by_path = {note.path: note for note in notes}
         relevant_notes = _relevant_notes(search_result, notes_by_path)
@@ -227,10 +226,7 @@ class PrepareObsidianReviewUseCase:
                     raise PrepareObsidianReviewError(
                         "Generator returned invalid created-note marker placement"
                     ) from error
-            elif (
-                plan.action is ObsidianProposalAction.UPDATE
-                and target_note is not None
-            ):
+            elif plan.action is ObsidianProposalAction.UPDATE and target_note is not None:
                 try:
                     proposed_markdown = normalize_updated_markdown(
                         target_note.markdown,
@@ -244,6 +240,7 @@ class PrepareObsidianReviewUseCase:
 
         proposal = ObsidianProposal(
             app_user_id=article.app_user_id,
+            origin=command.origin,
             article_id=article.id,
             analysis_id=analysis.id,
             vault_id=vault.id,
@@ -276,8 +273,7 @@ class PrepareObsidianReviewUseCase:
                     current_markdown=target_note.markdown,
                     proposed_markdown=proposed_markdown or "",
                 )
-                if proposal.action is ObsidianProposalAction.UPDATE
-                and target_note is not None
+                if proposal.action is ObsidianProposalAction.UPDATE and target_note is not None
                 else None
             ),
         )

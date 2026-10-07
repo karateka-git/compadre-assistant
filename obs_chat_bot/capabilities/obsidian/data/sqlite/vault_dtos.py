@@ -81,6 +81,12 @@ class VaultSyncLeaseDto:
 class VaultActionConfirmationDto:
     """Представляет ожидающее действие над vault в форме SQLite."""
 
+    id: int | None
+    origin_channel: str
+    origin_chat_id: str
+    base_vault_id: int
+    version: int
+    status: str
     app_user_id: int
     action: str
     expires_at: str

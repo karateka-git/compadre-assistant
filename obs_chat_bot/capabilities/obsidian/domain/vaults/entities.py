@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -170,10 +172,23 @@ class VaultActionConfirmation:
     app_user_id: int
     action: VaultConfirmationAction
     expires_at: datetime
+    origin: PendingOrigin
+    base_vault_id: int
+    id: int | None = None
+    version: int = 1
+    status: str = "pending"  # Решение ещё не захвачено или уже завершено.
     replacement: ObsidianVault | None = None
     created_at: datetime | None = None
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.origin, PendingOrigin)
+            or self.base_vault_id <= 0
+            or self.version <= 0
+        ):
+            raise ValueError(
+                "vault confirmation must contain origin, base vault and positive version"
+            )
         if self.app_user_id <= 0:
             raise ValueError("app_user_id must be positive")
         if not isinstance(self.action, VaultConfirmationAction):

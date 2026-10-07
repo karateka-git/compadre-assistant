@@ -18,6 +18,10 @@ class ObsidianProposalDto:
     base_commit_sha: str
     base_tree_sha: str
     status: str
+    origin_channel: str
+    origin_chat_id: str
+    version: int = 1
+    execution_expires_at: str | None = None
     target_path: str | None = None
     proposed_markdown: str | None = None
     target_blob_sha: str | None = None

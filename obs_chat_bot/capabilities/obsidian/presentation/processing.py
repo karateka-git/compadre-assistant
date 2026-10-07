@@ -2,11 +2,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 import logging
+from uuid import uuid4
+
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin, PendingOperationError, VaultResourceBusyError
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
+from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ArticleFlowLeaseRepository
+from obs_chat_bot.capabilities.obsidian.domain.articles.url_utils import normalize_article_url
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
-    CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
+    ConfirmationAction, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
     HelpSection, IncomingCapabilityPort, IncomingResponse,
 )
 from obs_chat_bot.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
@@ -81,6 +88,8 @@ class ObsidianMessageResult:
     """Хранит предметные сведения ответа для представления Obsidian."""
 
     type: ObsidianResultType
+    text_override: str | None = None
+    pending_operation: VaultActionConfirmation | None = None
     app_user: AppUser | None = None
     error: Exception | None = None
     saved_message: SavedIncomingMessage | None = None
@@ -99,7 +108,7 @@ class ObsidianMessageResult:
 
 
 ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
-GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion], ObsidianMessageResult]
+GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
 
 class ObsidianMessageHandler(IncomingCapabilityPort):
@@ -118,6 +127,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         obsidian_confirmation_service: ObsidianProposalConfirmationService | None = None,
         github_completion_processor: GitHubCompletionProcessor | None = None,
         llm_configured: bool = True,
+        article_flow_lease_repository: ArticleFlowLeaseRepository | None = None,
     ) -> None:
         """Внедряет предметные use cases и продолжение фоновой авторизации.
 
@@ -131,9 +141,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             obsidian_review_use_case: Подготовка предложения изменения заметки.
             obsidian_confirmation_service: Подтверждение сохранённого proposal.
             llm_configured: Наличие обязательной конфигурации LLM в текущей сборке.
+            article_flow_lease_repository: Координация полного цикла одной ссылки
+                между worker; другие URL обрабатываются независимо.
             github_completion_processor: Продолжение с собственным соединением;
                 при отсутствии используется текущее предметное окружение.
         """
+        self._article_flow_lease_repository = article_flow_lease_repository
         self._llm_configured = llm_configured
         self._github_completion_processor = github_completion_processor
         self._article_url_use_case = article_url_use_case
@@ -168,23 +181,24 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         if arguments:
             return self._handle(context, event, arguments)
         user = context.app_user
+        origin = PendingOrigin(event.channel, event.chat_id)
         pending = (
-            self._obsidian_confirmation_service.get_pending(user.id)
+            self._obsidian_confirmation_service.list_pending(user.id, origin)
             if self._obsidian_confirmation_service
-            else None
+            else ()
         )
-        if pending is not None:
-            result = ObsidianMessageResult(
-                type=ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
-                app_user=user,
-                obsidian_confirmation=ObsidianConfirmationResult(
-                    status=ObsidianConfirmationStatus.PENDING, proposal=pending
-                ),
+        pending_responses = tuple(
+            _present_result(
+                ObsidianMessageResult(
+                    type=ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
+                    app_user=user,
+                    obsidian_confirmation=ObsidianConfirmationResult(
+                        ObsidianConfirmationStatus.PENDING, proposal=item
+                    ),
+                )
             )
-            response = _present_result(result)
-            return CapabilityResult(
-                replace(response, text=f"Режим Obsidian. Выход: `/exit`.\n{response.text}")
-            )
+            for item in pending
+        )
         vault = self._selected_vault(user.id)
         lines = [
             "Режим Obsidian. Выход: `/exit`.",
@@ -195,19 +209,30 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         if self._vault_selection_manager is None:
             lines.append("Провайдер GitHub не настроен на сервере.")
         elif vault is None:
-            lines.append("Твой Obsidian vault не подключён. Пришли ссылку на GitHub-репозиторий с vault.")
+            lines.append(
+                "Твой Obsidian vault не подключён. Пришли ссылку на GitHub-репозиторий с vault."
+            )
         else:
             root = f", папка: `{vault.root_path}`" if vault.root_path else ""
             lines.append(f"Подключён vault: `{vault.owner}/{vault.repository}`{root}.")
         if not self._llm_configured:
             lines.append("Провайдер LLM не настроен на сервере; анализ статей пока недоступен.")
+        actions = tuple(action for response in pending_responses for action in response.actions)
+        lines.extend(response.text for response in pending_responses)
         if self._vault_selection_manager is not None:
-            if self._vault_selection_manager.has_replacement_confirmation(user.id):
-                lines.append("Ожидается подтверждение замены vault: ответь `да` или `нет`.")
-            if self._vault_selection_manager.has_disconnect_confirmation(user.id):
-                lines.append("Ожидается подтверждение отключения vault: ответь `да` или `нет`.")
+            config_pending = self._vault_selection_manager.get_pending(user.id, origin)
+            if config_pending is not None:
+                label = (
+                    "замены"
+                    if config_pending.action is VaultConfirmationAction.REPLACE
+                    else "отключения"
+                )
+                lines.append(f"Ожидается подтверждение {label} vault (ID {config_pending.id}).")
+                actions += _operation_actions(
+                    config_pending.action.value, config_pending.id or 0, config_pending.version
+                )
         if self._github_connection_starter is not None:
-            connection = self._github_connection_starter.get_pending(user.id)
+            connection = self._github_connection_starter.get_pending(user.id, origin)
             if connection is not None:
                 result = ObsidianMessageResult(
                     type=(
@@ -219,7 +244,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                     github_connection=connection,
                 )
                 lines.append(_present_result(result).text)
-        return CapabilityResult(IncomingResponse("\n".join(lines)))
+        return CapabilityResult(IncomingResponse("\n".join(lines), actions=actions))
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Выполняет use cases Obsidian и переводит их результат в общий ответ.
@@ -253,11 +278,16 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         result = self._process(
             context.app_user, event, complete if delivery else None, text=arguments
         )
-        if arguments is not None and result.error is None and result.type in {
-            ObsidianResultType.ARTICLE_URL_MISSING,
-            ObsidianResultType.REANALYZE_COMMAND_INVALID,
-            ObsidianResultType.GITHUB_VAULT_COMMAND_INVALID,
-        }:
+        if (
+            arguments is not None
+            and result.error is None
+            and result.type
+            in {
+                ObsidianResultType.ARTICLE_URL_MISSING,
+                ObsidianResultType.REANALYZE_COMMAND_INVALID,
+                ObsidianResultType.GITHUB_VAULT_COMMAND_INVALID,
+            }
+        ):
             # Ошибочный аргумент входа не должен заменять ранее выбранный режим чата.
             result = replace(result, error=ValueError("Некорректный аргумент входа Obsidian"))
         return CapabilityResult(_present_result(result))
@@ -266,14 +296,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         """Описывает команды и подсказки Obsidian для общей справки."""
         return CapabilityHelp(
             sections=tuple(
-                HelpSection(title, commands)
-                for title, commands in obsidian_help_sections()
+                HelpSection(title, commands) for title, commands in obsidian_help_sections()
             ),
             instructions=(
                 "Войди через `/obsidian [текст или URL]`. Подключение vault выполняется внутри этого режима.",
                 "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
                 "",
-                "Ответы `да` и `нет` используются, когда бот просит подтвердить перепривязку или замену.",
+                "Ответы `да` и `нет` выбирают единственное ожидание этого чата; при нескольких используй адресную команду `/confirm`.",
             ),
         )
 
@@ -305,57 +334,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         text = (event.text if text is None else text).strip()
         parsed = ParsedObsidianCommand.parse(text)
         command = parsed.command if parsed is not None else None
-        normalized = text.lower()
-        if normalized in {"да", "yes", "y"}:
-            if (
-                self._vault_selection_manager is not None
-                and self._vault_selection_manager.has_replacement_confirmation(app_user.id)
-            ):
-                return self._confirm_vault_replacement(app_user)
-            if (
-                self._vault_selection_manager is not None
-                and self._vault_selection_manager.has_disconnect_confirmation(app_user.id)
-            ):
-                return self._confirm_vault_disconnect(app_user)
-            if self._obsidian_confirmation_service is not None:
-                confirmation = self._obsidian_confirmation_service.confirm(app_user.id)
-                if confirmation.status is not ObsidianConfirmationStatus.NO_PENDING:
-                    return self._review_confirmation_result(app_user, confirmation)
-            return ObsidianMessageResult(type=ObsidianResultType.CONFIRMATION_MISSING)
-        if normalized in {"нет", "no", "n"}:
-            if self._vault_selection_manager is not None:
-                cancelled = self._vault_selection_manager.cancel_replacement(app_user.id)
-                if cancelled is not None:
-                    return ObsidianMessageResult(
-                        type=ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CANCELLED,
-                        app_user=app_user,
-                        vault_selection=cancelled,
-                    )
-                disconnected = self._vault_selection_manager.cancel_disconnect(app_user.id)
-                if disconnected is not None:
-                    return ObsidianMessageResult(
-                        type=ObsidianResultType.GITHUB_DISCONNECT_CANCELLED,
-                        app_user=app_user,
-                        vault_disconnect=disconnected,
-                    )
-            if self._obsidian_confirmation_service is not None:
-                confirmation = self._obsidian_confirmation_service.cancel(app_user.id)
-                if confirmation.status is not ObsidianConfirmationStatus.NO_PENDING:
-                    return self._review_confirmation_result(app_user, confirmation)
-            return ObsidianMessageResult(type=ObsidianResultType.CONFIRMATION_MISSING)
-
-        pending = (
-            self._obsidian_confirmation_service.get_pending(app_user.id)
-            if self._obsidian_confirmation_service is not None
-            else None
-        )
-        if pending is not None and command is not ObsidianCommand.GITHUB_STATUS:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
-                app_user=app_user,
-                obsidian_confirmation=ObsidianConfirmationResult(
-                    status=ObsidianConfirmationStatus.PENDING, proposal=pending
-                ),
+        origin = PendingOrigin(event.channel, event.chat_id)
+        decision = self._decision(text, app_user, origin)
+        if decision is not None:
+            return decision
+        if text.startswith("/") and parsed is None:
+            return _operation_message(
+                "Неизвестная команда Obsidian. Доступные команды: /help.", app_user
             )
         if command is ObsidianCommand.GITHUB_STATUS:
             if self._vault_sync_manager is None:
@@ -371,12 +356,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         if command is ObsidianCommand.GITHUB_SYNC:
             return self._sync_vault(app_user)
         if command is ObsidianCommand.GITHUB_DISCONNECT:
-            return self._request_vault_disconnect(app_user)
+            return self._request_vault_disconnect(app_user, origin)
         repository_arguments = _github_repository_arguments(text)
         if repository_arguments is not None:
             return self._connect_vault(
                 repository_arguments,
                 app_user,
+                origin,
                 completion_handler=completion_handler,
             )
         incoming_message = ArticleIncomingMessage(
@@ -394,9 +380,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 type=ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE, app_user=app_user
             )
         if self._selected_vault(app_user.id) is None:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user
-            )
+            return ObsidianMessageResult(type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user)
         if not self._llm_configured:
             return ObsidianMessageResult(
                 type=ObsidianResultType.LLM_NOT_CONFIGURED, app_user=app_user
@@ -409,7 +393,131 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             )
         return self._process_article_url(incoming_message, app_user)
 
+    def _decision(
+        self, text: str, app_user: AppUser, origin: PendingOrigin
+    ) -> ObsidianMessageResult | None:
+        """Разрешает локальный ответ либо проверяет адресную текстовую команду."""
+        normalized = text.lower()
+        simple = normalized in {"да", "yes", "y", "нет", "no", "n"}
+        parts = text.split()
+        if not simple and (not parts or parts[0] != "/confirm"):
+            return None
+        if simple:
+            proposals = (
+                self._obsidian_confirmation_service.list_pending(app_user.id, origin)
+                if self._obsidian_confirmation_service
+                else ()
+            )
+            config = (
+                self._vault_selection_manager.get_pending(app_user.id, origin)
+                if self._vault_selection_manager
+                else None
+            )
+            if len(proposals) + int(config is not None) != 1:
+                return _operation_message(
+                    (
+                        "Ответ неоднозначен: укажи ID и версию операции командой /confirm из актуального ответа."
+                        if proposals or config
+                        else "В этом чате нет ожидающего действия."
+                    ),
+                    app_user,
+                )
+            item = config if config else proposals[0]
+            operation = config.action.value if config else "proposal"
+            operation_id, version = item.id or 0, item.version
+            approve = normalized in {"да", "yes", "y"}
+        else:
+            if (
+                len(parts) != 6
+                or parts[1] != "obsidian"
+                or parts[2] not in {"proposal", "replace", "disconnect"}
+                or not parts[3].isdigit()
+                or not parts[4].isdigit()
+                or parts[5].lower() not in {"yes", "no"}
+            ):
+                return _operation_message(
+                    "Используй /confirm obsidian <proposal|replace|disconnect> <id> <версия> <yes|no>.",
+                    app_user,
+                )
+            operation, operation_id, version = parts[2], int(parts[3]), int(parts[4])
+            approve = parts[5].lower() == "yes"
+        if operation == "proposal":
+            if self._obsidian_confirmation_service is None:
+                return _operation_message("Подтверждение Obsidian недоступно.", app_user)
+            method = (
+                self._obsidian_confirmation_service.confirm
+                if approve
+                else self._obsidian_confirmation_service.cancel
+            )
+            return self._review_confirmation_result(
+                app_user,
+                method(app_user.id, proposal_id=operation_id, origin=origin, version=version),
+            )
+        if self._vault_selection_manager is None:
+            return _operation_message("Подключение GitHub недоступно.", app_user)
+        try:
+            result = self._vault_selection_manager.decide(
+                app_user.id,
+                confirmation_id=operation_id,
+                origin=origin,
+                version=version,
+                action=VaultConfirmationAction(operation),
+                approve=approve,
+            )
+        except (PendingOperationError, VaultResourceBusyError) as error:
+            return _operation_message(str(error), app_user)
+        if isinstance(result, VaultSelectionResult):
+            message = ObsidianMessageResult(
+                type=(
+                    ObsidianResultType.GITHUB_VAULT_REPLACED
+                    if approve
+                    else ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CANCELLED
+                ),
+                app_user=app_user,
+                vault_selection=result,
+            )
+            return self._sync_vault(app_user, base_result=message) if approve else message
+        return ObsidianMessageResult(
+            type=(
+                ObsidianResultType.GITHUB_DISCONNECTED
+                if approve
+                else ObsidianResultType.GITHUB_DISCONNECT_CANCELLED
+            ),
+            app_user=app_user,
+            vault_disconnect=result,
+        )
+
     def _process_article_url(
+        self, incoming_message: ArticleIncomingMessage, app_user_result: AppUser
+    ) -> ObsidianMessageResult:
+        """Резервирует один URL на весь fetch/analysis/review между TG/VK."""
+        url = extract_first_supported_url(incoming_message.text)
+        if url is None or self._article_flow_lease_repository is None:
+            return self._run_article_url(incoming_message, app_user_result)
+        try:
+            normalized_url = normalize_article_url(url)
+        except ValueError:
+            return self._run_article_url(incoming_message, app_user_result)
+        owner = uuid4().hex
+        now = datetime.now(UTC)
+        if not self._article_flow_lease_repository.acquire(
+            app_user_id=app_user_result.id,
+            normalized_url=normalized_url,
+            owner=owner,
+            now=now,
+            expires_at=now + timedelta(minutes=30),
+        ):
+            return _operation_message(
+                "Эта статья уже обрабатывается. Повтори ссылку после завершения.", app_user_result
+            )
+        try:
+            return self._run_article_url(incoming_message, app_user_result)
+        finally:
+            self._article_flow_lease_repository.release(
+                app_user_id=app_user_result.id, normalized_url=normalized_url, owner=owner
+            )
+
+    def _run_article_url(
         self, incoming_message: ArticleIncomingMessage, app_user_result: AppUser
     ) -> ObsidianMessageResult:
         """Сохраняет только article-сообщение и запускает его pipeline."""
@@ -442,9 +550,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             )
         )
         vault_sync_result = (
-            auto_sync_result
-            if isinstance(auto_sync_result, VaultSyncResult)
-            else None
+            auto_sync_result if isinstance(auto_sync_result, VaultSyncResult) else None
         )
 
         saved_message = self._save_incoming_message(incoming_message)
@@ -480,6 +586,24 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             _log_result(result)
             return result
 
+        if (
+            self._obsidian_confirmation_service is not None
+            and article_result.article.id is not None
+        ):
+            active = self._obsidian_confirmation_service.get_active_for_article(
+                app_user_id=app_user_result.id, article_id=article_result.article.id
+            )
+            if active is not None:
+                origin = PendingOrigin(incoming_message.channel, incoming_message.chat_id)
+                if active.origin != origin:
+                    return _operation_message(
+                        "Эта статья уже обрабатывается. Заверши действие в исходном чате.",
+                        app_user_result,
+                    )
+                return self._review_confirmation_result(
+                    app_user_result,
+                    ObsidianConfirmationResult(ObsidianConfirmationStatus.PENDING, proposal=active),
+                )
         self._link_message_to_article(saved_message, article_result)
         LOGGER.debug(
             "Article flow completed: article_id=%s app_user_id=%s created=%s "
@@ -562,8 +686,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             return result
 
         LOGGER.debug(
-            "Article analysis completed: article_id=%s analysis_id=%s created=%s "
-            "model=%s",
+            "Article analysis completed: article_id=%s analysis_id=%s created=%s " "model=%s",
             analysis_result.article.id,
             analysis_result.analysis.id,
             analysis_result.created,
@@ -577,6 +700,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                         analysis=analysis_result.analysis,
                         app_user_id=incoming_message.app_user_id,
                         incoming_message_id=incoming_message_id,
+                        origin=PendingOrigin(incoming_message.channel, incoming_message.chat_id),
                     )
                 )
             except PrepareObsidianReviewError as error:
@@ -628,17 +752,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             sync_result = self._vault_sync_manager.sync_if_stale(app_user.id)
         except VaultConfigurationError as error:
             return ObsidianMessageResult(
-                type=(
-                    ObsidianResultType
-                    .GITHUB_VAULT_CONFIGURATION_REQUIRED
-                ),
+                type=(ObsidianResultType.GITHUB_VAULT_CONFIGURATION_REQUIRED),
                 app_user=app_user,
                 error=error,
             )
         except (GitHubGatewayError, OSError, ValueError, RuntimeError) as error:
             LOGGER.warning(
-                "Automatic vault check failed: "
-                "app_user_id=%s error_type=%s",
+                "Automatic vault check failed: " "app_user_id=%s error_type=%s",
                 app_user.id,
                 type(error).__name__,
             )
@@ -700,11 +820,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         return VaultSyncWarning(
             reason=reason,
             note_count=status.note_count,
-            last_checked_at=(
-                status.vault.last_checked_at
-                if status.vault is not None
-                else None
-            ),
+            last_checked_at=(status.vault.last_checked_at if status.vault is not None else None),
         )
 
     def _get_vault_status_safe(self, app_user_id: int) -> VaultStatus | None:
@@ -722,28 +838,24 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         confirmation: ObsidianConfirmationResult,
     ) -> ObsidianMessageResult:
         """Преобразует итог review-сервиса в channel-agnostic result type."""
+        if confirmation.status is ObsidianConfirmationStatus.FOREIGN_ORIGIN:
+            return _operation_message(
+                "Заверши действие в исходном чате; операция здесь недоступна.", app_user
+            )
+        if confirmation.status is ObsidianConfirmationStatus.STALE:
+            return _operation_message(
+                "Действие устарело. Войди снова в /obsidian для актуального ожидания.", app_user
+            )
         result_types = {
             ObsidianConfirmationStatus.PENDING: (
                 ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING
             ),
-            ObsidianConfirmationStatus.CANCELLED: (
-                ObsidianResultType.ARTICLE_REVIEW_CANCELLED
-            ),
-            ObsidianConfirmationStatus.APPLIED: (
-                ObsidianResultType.ARTICLE_REVIEW_APPLIED
-            ),
-            ObsidianConfirmationStatus.CONFLICT: (
-                ObsidianResultType.ARTICLE_REVIEW_CONFLICT
-            ),
-            ObsidianConfirmationStatus.IN_PROGRESS: (
-                ObsidianResultType.ARTICLE_REVIEW_IN_PROGRESS
-            ),
-            ObsidianConfirmationStatus.FAILED: (
-                ObsidianResultType.ARTICLE_REVIEW_APPLY_FAILED
-            ),
-            ObsidianConfirmationStatus.NO_PENDING: (
-                ObsidianResultType.CONFIRMATION_MISSING
-            ),
+            ObsidianConfirmationStatus.CANCELLED: (ObsidianResultType.ARTICLE_REVIEW_CANCELLED),
+            ObsidianConfirmationStatus.APPLIED: (ObsidianResultType.ARTICLE_REVIEW_APPLIED),
+            ObsidianConfirmationStatus.CONFLICT: (ObsidianResultType.ARTICLE_REVIEW_CONFLICT),
+            ObsidianConfirmationStatus.IN_PROGRESS: (ObsidianResultType.ARTICLE_REVIEW_IN_PROGRESS),
+            ObsidianConfirmationStatus.FAILED: (ObsidianResultType.ARTICLE_REVIEW_APPLY_FAILED),
+            ObsidianConfirmationStatus.NO_PENDING: (ObsidianResultType.CONFIRMATION_MISSING),
         }
         return ObsidianMessageResult(
             type=result_types[confirmation.status],
@@ -756,20 +868,21 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         self,
         arguments: str,
         app_user: AppUser,
+        origin: PendingOrigin,
         *,
         completion_handler: ObsidianCompletionHandler | None,
     ) -> ObsidianMessageResult:
         """Подключает vault либо запускает необходимую GitHub-авторизацию."""
-        result = self._select_github_vault(arguments, app_user)
+        result = self._select_github_vault(arguments, app_user, origin)
         if result.type is ObsidianResultType.GITHUB_VAULT_GITHUB_REQUIRED:
             return self._start_github_connection(
                 arguments,
                 app_user,
+                origin,
                 completion_handler=completion_handler,
             )
         if (
-            result.type
-            is ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
+            result.type is ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
             and self._github_connection_starter is not None
         ):
             return _with_installation_url(
@@ -782,6 +895,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         self,
         repository_arguments: str,
         app_user: AppUser,
+        origin: PendingOrigin,
         *,
         completion_handler: ObsidianCompletionHandler | None,
     ) -> ObsidianMessageResult:
@@ -802,10 +916,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             ):
                 completion_handler(
                     ObsidianMessageResult(
-                        type=(
-                            ObsidianResultType
-                            .GITHUB_AUTHORIZED_SYNC_STARTED
-                        ),
+                        type=(ObsidianResultType.GITHUB_AUTHORIZED_SYNC_STARTED),
                         app_user=app_user,
                         github_completion=completion,
                     )
@@ -814,6 +925,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 repository_arguments,
                 app_user,
                 completion,
+                origin,
             )
             if completion_handler is not None:
                 completion_handler(result)
@@ -821,6 +933,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         try:
             connection = self._github_connection_starter.start(
                 app_user.id,
+                origin,
                 complete_github,
             )
         except (GitHubGatewayError, OSError, ValueError) as error:
@@ -830,15 +943,11 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 error=error,
             )
         result_types = {
-            GitHubConnectionStartStatus.STARTED: (
-                ObsidianResultType.GITHUB_CONNECT_STARTED
-            ),
+            GitHubConnectionStartStatus.STARTED: (ObsidianResultType.GITHUB_CONNECT_STARTED),
             GitHubConnectionStartStatus.ALREADY_PENDING: (
                 ObsidianResultType.GITHUB_CONNECT_ALREADY_PENDING
             ),
-            GitHubConnectionStartStatus.PREPARING: (
-                ObsidianResultType.GITHUB_CONNECT_PREPARING
-            ),
+            GitHubConnectionStartStatus.PREPARING: (ObsidianResultType.GITHUB_CONNECT_PREPARING),
             GitHubConnectionStartStatus.IN_PROGRESS: (
                 ObsidianResultType.GITHUB_CONNECT_IN_PROGRESS
             ),
@@ -854,13 +963,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         repository_arguments: str,
         app_user: AppUser,
         completion: GitHubConnectionCompletion,
+        origin: PendingOrigin,
     ) -> ObsidianMessageResult:
         """Продолжает подключение vault после завершения фонового Device Flow."""
         if completion.status is GitHubConnectionCompletionStatus.CONNECTED:
-            result = self._select_github_vault(repository_arguments, app_user)
+            result = self._select_github_vault(repository_arguments, app_user, origin)
             if (
-                result.type
-                is ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
+                result.type is ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE
                 and self._github_connection_starter is not None
             ):
                 return _with_installation_url(
@@ -889,6 +998,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         self,
         arguments: str,
         app_user: AppUser,
+        origin: PendingOrigin,
     ) -> ObsidianMessageResult:
         """Проверяет GitHub URL внутри режима и запускает выбор vault."""
         parts = arguments.split(maxsplit=1)
@@ -905,9 +1015,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         try:
             selection = self._vault_selection_manager.select(
                 app_user_id=app_user.id,
+                origin=origin,
                 repository_url=parts[0],
                 root_path=parts[1] if len(parts) == 2 else "",
             )
+        except (PendingOperationError, VaultResourceBusyError) as error:
+            return _operation_message(str(error), app_user)
         except GitHubAccountNotConnectedError as error:
             return ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_VAULT_GITHUB_REQUIRED,
@@ -939,55 +1052,23 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 error=error,
             )
         result_types = {
-            VaultSelectionStatus.SELECTED: (
-                ObsidianResultType.GITHUB_VAULT_SELECTED
-            ),
+            VaultSelectionStatus.SELECTED: (ObsidianResultType.GITHUB_VAULT_SELECTED),
             VaultSelectionStatus.ALREADY_SELECTED: (
                 ObsidianResultType.GITHUB_VAULT_ALREADY_SELECTED
             ),
             VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED: (
-                ObsidianResultType
-                .GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
+                ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
             ),
         }
         result = ObsidianMessageResult(
             type=result_types[selection.status],
             app_user=app_user,
             vault_selection=selection,
+            pending_operation=selection.confirmation,
         )
         if selection.status is VaultSelectionStatus.SELECTED:
             return self._sync_vault(app_user, base_result=result)
         return result
-
-    def _confirm_vault_replacement(
-        self,
-        app_user: AppUser,
-    ) -> ObsidianMessageResult:
-        """Применяет ожидающую замену vault после ответа `да`."""
-        if self._vault_selection_manager is None:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            selection = self._vault_selection_manager.confirm_replacement(app_user.id)
-        except (OSError, ValueError) as error:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        if selection is None:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.GITHUB_VAULT_CONFIRMATION_MISSING,
-                app_user=app_user,
-            )
-        result = ObsidianMessageResult(
-            type=ObsidianResultType.GITHUB_VAULT_REPLACED,
-            app_user=app_user,
-            vault_selection=selection,
-        )
-        return self._sync_vault(app_user, base_result=result)
 
     def _sync_vault(
         self,
@@ -1022,6 +1103,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
     def _request_vault_disconnect(
         self,
         app_user: AppUser,
+        origin: PendingOrigin,
     ) -> ObsidianMessageResult:
         """Запрашивает явное подтверждение отключения активного vault."""
         if self._vault_selection_manager is None:
@@ -1030,7 +1112,9 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 app_user=app_user,
             )
         try:
-            disconnect = self._vault_selection_manager.request_disconnect(app_user.id)
+            disconnect = self._vault_selection_manager.request_disconnect(app_user.id, origin)
+        except (PendingOperationError, VaultResourceBusyError) as error:
+            return _operation_message(str(error), app_user)
         except (OSError, ValueError) as error:
             return ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_VAULT_FAILED,
@@ -1046,46 +1130,50 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             type=result_type,
             app_user=app_user,
             vault_disconnect=disconnect,
-        )
-
-    def _confirm_vault_disconnect(
-        self,
-        app_user: AppUser,
-    ) -> ObsidianMessageResult:
-        """Удаляет vault и локальную копию после ответа пользователя `да`."""
-        if self._vault_selection_manager is None:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE,
-                app_user=app_user,
-            )
-        try:
-            disconnect = self._vault_selection_manager.confirm_disconnect(app_user.id)
-        except (OSError, ValueError) as error:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.GITHUB_VAULT_FAILED,
-                app_user=app_user,
-                error=error,
-            )
-        if disconnect is None:
-            return ObsidianMessageResult(
-                type=(
-                    ObsidianResultType
-                    .GITHUB_DISCONNECT_CONFIRMATION_MISSING
-                ),
-                app_user=app_user,
-            )
-        result_type = (
-            ObsidianResultType.GITHUB_DISCONNECT_NOT_CONNECTED
-            if disconnect.status is VaultDisconnectStatus.NOT_CONNECTED
-            else ObsidianResultType.GITHUB_DISCONNECTED
-        )
-        return ObsidianMessageResult(
-            type=result_type,
-            app_user=app_user,
-            vault_disconnect=disconnect,
+            pending_operation=disconnect.confirmation,
         )
 
     def _reanalyze_article(
+        self, arguments: str, incoming_message: ArticleIncomingMessage, app_user: AppUser
+    ) -> ObsidianMessageResult:
+        """Повторно анализирует статью, не подменяя активный proposal её цикла."""
+        if not arguments.isdigit():
+            return self._run_reanalyze_article(arguments, incoming_message, app_user)
+        article = self._article_url_use_case.get_saved_for_user(int(arguments), app_user.id)
+        if article is None:
+            return _operation_message("Статья недоступна в этом профиле.", app_user)
+        if self._obsidian_confirmation_service is not None:
+            active = self._obsidian_confirmation_service.get_active_for_article(
+                app_user_id=app_user.id, article_id=article.id or 0
+            )
+            if active is not None:
+                return _operation_message(
+                    "У этой статьи есть активное действие. Заверши его в исходном чате перед повторным анализом.",
+                    app_user,
+                )
+        repository = self._article_flow_lease_repository
+        if repository is None:
+            return self._run_reanalyze_article(arguments, incoming_message, app_user)
+        owner = uuid4().hex
+        now = datetime.now(UTC)
+        if not repository.acquire(
+            app_user_id=app_user.id,
+            normalized_url=article.normalized_url,
+            owner=owner,
+            now=now,
+            expires_at=now + timedelta(minutes=30),
+        ):
+            return _operation_message(
+                "Эта статья уже обрабатывается. Повтори команду после завершения.", app_user
+            )
+        try:
+            return self._run_reanalyze_article(arguments, incoming_message, app_user)
+        finally:
+            repository.release(
+                app_user_id=app_user.id, normalized_url=article.normalized_url, owner=owner
+            )
+
+    def _run_reanalyze_article(
         self,
         arguments: str,
         incoming_message: ArticleIncomingMessage,
@@ -1126,6 +1214,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                         analysis=analysis_result.analysis,
                         app_user_id=app_user.id,
                         incoming_message_id=None,
+                        origin=PendingOrigin(incoming_message.channel, incoming_message.chat_id),
                     )
                 )
         except (
@@ -1265,6 +1354,42 @@ def _log_result(result: ObsidianMessageResult) -> None:
 
 def _present_result(result: ObsidianMessageResult) -> IncomingResponse:
     """Оставляет преобразование предметных моделей в presentation Obsidian."""
-    from obs_chat_bot.capabilities.obsidian.presentation.responses import format_obsidian_message_result
+    from obs_chat_bot.capabilities.obsidian.presentation.responses import (
+        format_obsidian_message_result,
+    )
 
-    return IncomingResponse(format_obsidian_message_result(result), result.error)
+    actions = ()
+    proposal = (
+        result.review_result.proposal
+        if result.review_result
+        else (result.obsidian_confirmation.proposal if result.obsidian_confirmation else None)
+    )
+    if proposal is not None and proposal.status.value == "pending":
+        actions = _operation_actions("proposal", proposal.id or 0, proposal.version)
+    if result.pending_operation is not None:
+        pending = result.pending_operation
+        actions += _operation_actions(pending.action.value, pending.id or 0, pending.version)
+    return IncomingResponse(
+        result.text_override or format_obsidian_message_result(result), result.error, actions
+    )
+
+
+def _operation_actions(
+    operation: str, operation_id: int, version: int
+) -> tuple[ConfirmationAction, ...]:
+    """Создаёт команды с неизменными ID операции и показанной пользователю версией."""
+    return tuple(
+        ConfirmationAction(
+            f"obsidian:{operation}:{operation_id}:{version}:{decision}",
+            label,
+            f"/confirm obsidian {operation} {operation_id} {version} {decision}",
+        )
+        for decision, label in (("yes", "Подтвердить"), ("no", "Отменить"))
+    )
+
+
+def _operation_message(text: str, user: AppUser) -> ObsidianMessageResult:
+    """Оформляет краткий ответ о доступности операции без её содержимого."""
+    return ObsidianMessageResult(
+        type=ObsidianResultType.CONFIRMATION_MISSING, app_user=user, text_override=text
+    )

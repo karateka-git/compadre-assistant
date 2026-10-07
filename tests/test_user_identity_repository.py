@@ -72,14 +72,14 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                     identity=_identity("telegram", "tg-1", "chat-1"),
                 )
                 rebound_user = service.confirm_rebind(
-                    _identity("telegram", "tg-1", "chat-1")
+                    _identity("telegram", "tg-1", "chat-1"),
+                    confirmation_id=target_user.id,
+                    version=target_user.version,
                 )
                 resolved = service.resolve(_identity("telegram", "tg-1", "chat-1"))
-                old_user_row = SQLiteAppUserRepository(connection).get_by_id(
-                    old_user.id
-                )
+                old_user_row = SQLiteAppUserRepository(connection).get_by_id(old_user.id)
 
-        self.assertEqual(target_user, new_user)
+        self.assertEqual(target_user.target_app_user_id, new_user.id)
         self.assertEqual(rebound_user, new_user)
         self.assertEqual(resolved, new_user)
         self.assertIsNone(old_user_row)

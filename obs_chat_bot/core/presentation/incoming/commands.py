@@ -36,6 +36,12 @@ class ChatCommand(StrEnum):
         member.description = description
         return member
 
+    CONFIRM = (
+        "/confirm",
+        CommandSection.BASIC,
+        "<модуль> <операция> <id> <версия> <yes|no>",
+        "подтвердить конкретное действие",
+    )
     START = (
         "/start",
         CommandSection.BASIC,

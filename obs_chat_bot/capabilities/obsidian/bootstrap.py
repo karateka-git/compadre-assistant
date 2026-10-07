@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import sqlite3
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from obs_chat_bot.capabilities.obsidian.data.sqlite.article_flow_lease_repository import SQLiteArticleFlowLeaseRepository
+
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.domain.users.entities import AppUser
 from dataclasses import dataclass
@@ -591,11 +594,10 @@ def create_obsidian_entry(
     Returns:
         Подключаемый вход Obsidian через общий protocol.
     """
-    article_url_use_case = (
-        use_case_factory or create_process_article_url_use_case
-    )(connection)
+    article_url_use_case = (use_case_factory or create_process_article_url_use_case)(connection)
     llm_configured = bool(
-        openai_api_key.strip() and openai_model.strip()
+        openai_api_key.strip()
+        and openai_model.strip()
         and validate_external_http_url(openai_base_url) is None
     )
     article_analysis_use_case = (
@@ -629,6 +631,7 @@ def create_obsidian_entry(
         repository_arguments: str,
         app_user: AppUser,
         completion: GitHubConnectionCompletion,
+        origin: PendingOrigin,
     ) -> ObsidianMessageResult:
         """Собирает продолжение фоновой операции на новом коротком соединении."""
         with connect_database(database_path) as completion_connection:
@@ -646,10 +649,11 @@ def create_obsidian_entry(
                 created_note_tag=created_note_tag,
             )
             return handler._complete_github_connection(
-                repository_arguments, app_user, completion
+                repository_arguments, app_user, completion, origin
             )
 
     return ObsidianMessageHandler(
+        article_flow_lease_repository=SQLiteArticleFlowLeaseRepository(connection),
         github_completion_processor=complete_github,
         llm_configured=llm_configured or analysis_use_case_factory is not None,
         article_url_use_case=article_url_use_case,
@@ -665,15 +669,19 @@ def create_obsidian_entry(
             else None
         ),
         vault_sync_manager=vault_sync_manager,
-        obsidian_review_use_case=create_prepare_obsidian_review_use_case(
-            connection,
-            openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key,
-            openai_model=openai_model,
-            embedding_config=embedding_config,
-            chunking_config=chunking_config,
-            created_note_tag=created_note_tag,
-        ) if llm_configured else None,
+        obsidian_review_use_case=(
+            create_prepare_obsidian_review_use_case(
+                connection,
+                openai_base_url=openai_base_url,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+                embedding_config=embedding_config,
+                chunking_config=chunking_config,
+                created_note_tag=created_note_tag,
+            )
+            if llm_configured
+            else None
+        ),
         obsidian_confirmation_service=(
             create_obsidian_proposal_confirmation_service(
                 connection,

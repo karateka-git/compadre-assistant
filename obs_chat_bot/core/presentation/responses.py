@@ -76,17 +76,6 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
             return "Этот канал уже привязан к пользователю."
         case IncomingMessageResultType.LINK_CODE_INVALID:
             return "Код привязки не найден или уже истек. Создай новый через `/link_code`."
-        case IncomingMessageResultType.LINK_REBIND_CONFIRMATION_REQUIRED:
-            if result.app_user is None:
-                return (
-                    "Этот канал уже привязан к другому пользователю.\n"
-                    "Чтобы перепривязать его, ответь `да`. Чтобы оставить как есть, ответь `нет`."
-                )
-            return (
-                "Этот канал уже привязан к другому пользователю.\n"
-                f"Перепривязать его к профилю «{_display_name(result)}»?\n"
-                "Ответь `да` или `нет`."
-            )
         case IncomingMessageResultType.LINK_REBOUND:
             if result.app_user is None:
                 return "Готово, я перепривязал этот канал."
@@ -96,16 +85,6 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
             )
         case IncomingMessageResultType.LINK_REBIND_CANCELLED:
             return "Ок, оставляю текущую привязку без изменений."
-        case IncomingMessageResultType.LINK_REBIND_CONFIRMATION_MISSING:
-            return (
-                "Не нашел ожидающую перепривязку. Если хочешь привязать этот канал "
-                "к другому пользователю, снова отправь `/link <код>`."
-            )
-        case IncomingMessageResultType.LINK_REBIND_CONFIRMATION_PENDING:
-            return (
-                "Я жду ответ `да` или `нет` по перепривязке канала.\n"
-                "Ответь `да`, чтобы перепривязать канал, или `нет`, чтобы оставить как есть."
-            )
 
 
 def _display_name(result: ProcessIncomingMessageResult) -> str:

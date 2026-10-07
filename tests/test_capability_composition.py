@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 import sqlite3
 import tempfile
 import unittest
@@ -167,9 +168,17 @@ class ObsidianEntryStateTest(unittest.TestCase):
 
     def test_enter_reports_pending_review_without_confirmation(self) -> None:
         """Вход напоминает о proposal без его применения или отмены."""
-        confirmation = FakeConfirmationService(_proposal())
-        handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(), obsidian_confirmation_service=confirmation)
-        response = handler.enter(HandlerContext(AppUser(42, display_name="Тест")), IncomingEvent("telegram", "chat", "1", "/obsidian"), "").response
+        confirmation = FakeConfirmationService(
+            replace(_proposal(), origin=PendingOrigin("telegram", "chat"))
+        )
+        handler = ObsidianMessageHandler(
+            article_url_use_case=FakeArticleUrlUseCase(), obsidian_confirmation_service=confirmation
+        )
+        response = handler.enter(
+            HandlerContext(AppUser(42, display_name="Тест")),
+            IncomingEvent("telegram", "chat", "1", "/obsidian"),
+            "",
+        ).response
         self.assertIn("да", response.text)
         self.assertIn("нет", response.text)
         self.assertEqual(confirmation.confirm_calls, 0)
@@ -178,19 +187,21 @@ class ObsidianEntryStateTest(unittest.TestCase):
     def test_enter_refreshes_vault_and_pending_actions_without_executing_them(self) -> None:
         """Повторный вход читает новое состояние vault и сохранённых действий."""
         manager = FakeVaultSelectionManager(selected=_test_vault(42))
-        handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(), vault_selection_manager=manager)
+        handler = ObsidianMessageHandler(
+            article_url_use_case=FakeArticleUrlUseCase(), vault_selection_manager=manager
+        )
         event = IncomingEvent("telegram", "chat", "1", "/obsidian")
         context = HandlerContext(AppUser(42, display_name="Тест"))
         self.assertIn("octocat/notes", handler.enter(context, event, "").response.text)
         manager.selected = replace(manager.selected, repository="changed")
+        manager.pending_origin = PendingOrigin("telegram", "chat")
         manager.disconnect_pending = True
-        manager.replacement_pending = True
         response = handler.enter(context, event, "").response
         self.assertIn("octocat/changed", response.text)
-        self.assertIn("замены", response.text)
         self.assertIn("отключения", response.text)
+        self.assertEqual(len(response.actions), 2)
         self.assertTrue(manager.disconnect_pending)
-        self.assertTrue(manager.replacement_pending)
+        self.assertFalse(manager.replacement_pending)
 
 
 if __name__ == "__main__":

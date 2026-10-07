@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 from datetime import UTC, datetime
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
 from obs_chat_bot.capabilities.obsidian.domain.reviews.ports import ObsidianProposalRepository
 from obs_chat_bot.capabilities.obsidian.data.sqlite.proposal_mappers import (
     proposal_dto_from_domain,
@@ -20,7 +22,7 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
 
 
 PROPOSAL_COLUMNS = """
-    id, app_user_id, article_id, analysis_id, vault_id, action, reasoning,
+    id, origin_channel, origin_chat_id, version, execution_expires_at, app_user_id, article_id, analysis_id, vault_id, action, reasoning,
     target_path, proposed_markdown, base_commit_sha, base_tree_sha,
     target_blob_sha, status, applied_commit_sha, created_at, updated_at,
     completed_at
@@ -28,7 +30,7 @@ PROPOSAL_COLUMNS = """
 
 
 class PendingObsidianProposalError(RuntimeError):
-    """У пользователя уже существует ожидающее решение."""
+    """Для этой статьи уже существует активный цикл review."""
 
 
 class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
@@ -49,12 +51,14 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
                 cursor = self._connection.execute(
                     """
                     INSERT INTO obsidian_proposals (
-                        app_user_id, article_id, analysis_id, vault_id, action,
+                        origin_channel, origin_chat_id, app_user_id, article_id, analysis_id, vault_id, action,
                         reasoning, target_path, proposed_markdown,
                         base_commit_sha, base_tree_sha, target_blob_sha, status
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
+                        dto.origin_channel,
+                        dto.origin_chat_id,
                         dto.app_user_id,
                         dto.article_id,
                         dto.analysis_id,
@@ -81,7 +85,12 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
                 if article_cursor.rowcount != 1:
                     raise ValueError("proposal article escaped requested scope")
         except sqlite3.IntegrityError as error:
-            if self.get_pending(proposal.app_user_id) is not None:
+            if (
+                self.get_active_for_article(
+                    app_user_id=proposal.app_user_id, article_id=proposal.article_id
+                )
+                is not None
+            ):
                 raise PendingObsidianProposalError(
                     "User already has a pending Obsidian proposal"
                 ) from error
@@ -91,16 +100,91 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             raise RuntimeError("Saved Obsidian proposal could not be read")
         return saved
 
-    def get_pending(self, app_user_id: int) -> ObsidianProposal | None:
-        """Возвращает единственное ожидающее предложение пользователя."""
+    def list_pending(self, app_user_id: int, origin: PendingOrigin) -> tuple[ObsidianProposal, ...]:
+        """Возвращает только активные предложения указанного исходного чата."""
+        rows = self._connection.execute(
+            f"""SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals
+            WHERE app_user_id = ? AND origin_channel = ? AND origin_chat_id = ?
+              AND status IN ('pending', 'executing') ORDER BY id""",
+            (app_user_id, origin.channel, origin.chat_id),
+        ).fetchall()
+        return tuple(_proposal_from_row(row) for row in rows)
+
+    def get_by_id(self, proposal_id: int, app_user_id: int) -> ObsidianProposal | None:
+        """Читает конкретную операцию в области её внутреннего владельца."""
         row = self._connection.execute(
-            f"""
-            SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals
-            WHERE app_user_id = ? AND status = 'pending'
-            """,
-            (app_user_id,),
+            f"SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals WHERE id = ? AND app_user_id = ?",
+            (proposal_id, app_user_id),
         ).fetchone()
         return _proposal_from_row(row) if row is not None else None
+
+    def get_active_for_article(
+        self, *, app_user_id: int, article_id: int
+    ) -> ObsidianProposal | None:
+        """Находит активный цикл статьи для dedup, без смены исходного чата."""
+        row = self._connection.execute(
+            f"""SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals
+            WHERE app_user_id = ? AND article_id = ? AND status IN ('pending', 'executing')""",
+            (app_user_id, article_id),
+        ).fetchone()
+        return _proposal_from_row(row) if row is not None else None
+
+    def claim(
+        self,
+        *,
+        proposal_id: int,
+        app_user_id: int,
+        origin: PendingOrigin,
+        version: int,
+        now: datetime,
+        expires_at: datetime,
+    ) -> ObsidianProposal | None:
+        """Атомарно проверяет адрес и версию и захватывает выполнение.
+
+        Истёкший execution claim можно восстановить только с актуальной версией.
+        Для записи caller предварительно захватывает общий lease vault.
+
+        Args:
+            proposal_id: Устойчивый ID операции.
+            app_user_id: Внутренний владелец операции.
+            origin: Исходный адрес, проверенный по текущему событию.
+            version: Версия, показанная пользователю при выборе решения.
+            now: Текущее UTC-время проверки execution claim.
+            expires_at: Срок нового claim, после которого допустимо восстановление.
+
+        Returns:
+            Захваченная операция с новой версией либо `None` при несовпадении CAS.
+        """
+        with self._connection:
+            cursor = self._connection.execute(
+                """UPDATE obsidian_proposals
+                SET status = 'executing', version = version + 1, execution_expires_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND app_user_id = ? AND origin_channel = ? AND origin_chat_id = ?
+                    AND version = ? AND (status = 'pending' OR
+                      (status = 'executing' AND execution_expires_at <= ?))""",
+                (
+                    _format_timestamp(expires_at),
+                    proposal_id,
+                    app_user_id,
+                    origin.channel,
+                    origin.chat_id,
+                    version,
+                    _format_timestamp(now),
+                ),
+            )
+        return self.get_by_id(proposal_id, app_user_id) if cursor.rowcount else None
+
+    def release_claim(self, proposal: ObsidianProposal) -> ObsidianProposal | None:
+        """Возвращает незавершённую операцию в pending после ошибки внешней записи."""
+        with self._connection:
+            cursor = self._connection.execute(
+                """UPDATE obsidian_proposals SET status = 'pending', version = version + 1,
+                    execution_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?""",
+                (proposal.id, proposal.app_user_id, proposal.version),
+            )
+        return self.get_by_id(proposal.id or 0, proposal.app_user_id) if cursor.rowcount else None
 
     def get_latest_applied_for_article(
         self,
@@ -124,12 +208,16 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         *,
         proposal_id: int,
         app_user_id: int,
+        origin: PendingOrigin,
+        version: int,
     ) -> ObsidianProposal | None:
         """Отменяет предложение только пока оно ожидает ответа."""
         return self._finish_without_apply(
             proposal_id=proposal_id,
             app_user_id=app_user_id,
             status=ObsidianProposalStatus.CANCELLED,
+            origin=origin,
+            version=version,
         )
 
     def mark_conflict(
@@ -137,12 +225,14 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         *,
         proposal_id: int,
         app_user_id: int,
+        version: int,
     ) -> ObsidianProposal | None:
         """Закрывает устаревшее предложение без изменения статьи и vault."""
         return self._finish_without_apply(
             proposal_id=proposal_id,
             app_user_id=app_user_id,
             status=ObsidianProposalStatus.CONFLICT,
+            version=version,
         )
 
     def complete_applied(
@@ -150,6 +240,7 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         *,
         proposal_id: int,
         app_user_id: int,
+        version: int,
         applied_commit_sha: str | None,
         head_commit_sha: str | None,
         tree_sha: str | None,
@@ -161,9 +252,9 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             pending = self._connection.execute(
                 """
                 SELECT action, article_id, vault_id FROM obsidian_proposals
-                WHERE id = ? AND app_user_id = ? AND status = 'pending'
+                WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?
                 """,
-                (proposal_id, app_user_id),
+                (proposal_id, app_user_id, version),
             ).fetchone()
             if pending is None:
                 return None
@@ -187,10 +278,7 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
                     or note is None
                 ):
                     raise ValueError("add/update completion requires GitHub result")
-                if (
-                    note.app_user_id != app_user_id
-                    or note.vault_id != pending["vault_id"]
-                ):
+                if note.app_user_id != app_user_id or note.vault_id != pending["vault_id"]:
                     raise ValueError("committed note escaped proposal scope")
                 self._upsert_note(note)
                 vault_cursor = self._connection.execute(
@@ -239,11 +327,11 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             cursor = self._connection.execute(
                 """
                 UPDATE obsidian_proposals
-                SET status = 'applied', applied_commit_sha = ?,
+                SET status = 'applied', version = version + 1, execution_expires_at = NULL, applied_commit_sha = ?,
                     completed_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND app_user_id = ? AND status = 'pending'
+                WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?
                 """,
-                (applied_commit_sha, now, proposal_id, app_user_id),
+                (applied_commit_sha, now, proposal_id, app_user_id, version),
             )
             if cursor.rowcount != 1:
                 raise RuntimeError("Pending proposal changed during completion")
@@ -255,16 +343,21 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         proposal_id: int,
         app_user_id: int,
         status: ObsidianProposalStatus,
+        version: int,
+        origin: PendingOrigin | None = None,
     ) -> ObsidianProposal | None:
         now = _format_timestamp(datetime.now(UTC))
+        expected_status = "pending" if origin is not None else "executing"
+        address_clause = " AND origin_channel = ? AND origin_chat_id = ?" if origin else ""
+        params = (status.value, now, proposal_id, app_user_id, expected_status, version)
+        if origin is not None:
+            params += (origin.channel, origin.chat_id)
         with self._connection:
             cursor = self._connection.execute(
-                """
-                UPDATE obsidian_proposals
-                SET status = ?, completed_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND app_user_id = ? AND status = 'pending'
-                """,
-                (status.value, now, proposal_id, app_user_id),
+                """UPDATE obsidian_proposals SET status = ?, version = version + 1,
+                    execution_expires_at = NULL, completed_at = ?, updated_at = CURRENT_TIMESTAMP
+                WHERE id = ? AND app_user_id = ? AND status = ? AND version = ?""" + address_clause,
+                params,
             )
         return self._get_by_id(proposal_id) if cursor.rowcount else None
 
@@ -323,10 +416,7 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             INSERT INTO obsidian_note_tags (app_user_id, note_id, tag, position)
             VALUES (?, ?, ?, ?)
             """,
-            (
-                (note.app_user_id, note_id, tag, position)
-                for position, tag in enumerate(note.tags)
-            ),
+            ((note.app_user_id, note_id, tag, position) for position, tag in enumerate(note.tags)),
         )
         self._connection.executemany(
             """

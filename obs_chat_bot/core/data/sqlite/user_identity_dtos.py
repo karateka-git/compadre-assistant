@@ -48,5 +48,13 @@ class IdentityLinkTokenDto:
 class IdentityRebindConfirmationDto:
     """Передаёт активное ожидание перепривязки из SQL."""
 
-    token_hash: str
+    id: int
+    source_app_user_id: int
     target_app_user_id: int
+    channel: str
+    external_user_id: str
+    origin_chat_id: str
+    token_hash: str
+    expires_at: str
+    version: int
+    status: str

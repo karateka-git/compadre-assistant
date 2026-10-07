@@ -9,7 +9,8 @@ from obs_chat_bot.core.domain.users.ports import (
     IdentityRebindConfirmationRepository,
     IdentityLinkTokenRepository,
 )
-from obs_chat_bot.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity
+from obs_chat_bot.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation
+from obs_chat_bot.core.domain.users.identity import IdentityAlreadyBoundError, InvalidLinkCodeError
 from obs_chat_bot.core.data.sqlite.user_identity_dtos import (
     AppUserDto, ExternalIdentityDto, IdentityLinkTokenDto, IdentityRebindConfirmationDto,
 )
@@ -313,74 +314,168 @@ class SQLiteIdentityRebindConfirmationRepository(IdentityRebindConfirmationRepos
         *,
         identity: IncomingIdentity,
         token_hash: str,
+        source_app_user_id: int,
         target_app_user_id: int,
         expires_at: datetime,
-    ) -> None:
-        """Сохраняет ожидающее подтверждение перепривязки канала."""
-        dto = incoming_identity_to_dto(identity)
+        now: datetime,
+    ) -> IdentityRebindConfirmation:
+        """Создаёт новый ID, завершая прежнее ожидание только того же чата."""
         with self._connection:
             self._connection.execute(
-                """
-                INSERT INTO identity_rebind_confirmations (
-                    channel,
-                    external_user_id,
-                    token_hash,
-                    target_app_user_id,
-                    expires_at
-                )
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(channel, external_user_id) DO UPDATE SET
-                    token_hash = excluded.token_hash,
-                    target_app_user_id = excluded.target_app_user_id,
-                    expires_at = excluded.expires_at,
-                    created_at = CURRENT_TIMESTAMP
-                """,
+                """UPDATE identity_rebind_confirmations SET status = 'cancelled', version = version + 1
+                WHERE channel = ? AND external_user_id = ? AND status = 'pending'
+                    AND (origin_chat_id = ? OR expires_at <= ?)""",
                 (
-                    dto.channel,
-                    dto.external_user_id,
+                    identity.channel,
+                    identity.external_user_id,
+                    identity.external_chat_id,
+                    _format_timestamp(now),
+                ),
+            )
+            busy = self._connection.execute(
+                """SELECT 1 FROM identity_rebind_confirmations WHERE channel = ? AND external_user_id = ?
+                    AND status = 'pending' AND expires_at > ?""",
+                (identity.channel, identity.external_user_id, _format_timestamp(now)),
+            ).fetchone()
+            if busy:
+                raise IdentityAlreadyBoundError(
+                    "Identity transfer is already pending in its origin chat"
+                )
+            current = self._connection.execute(
+                "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                (identity.channel, identity.external_user_id),
+            ).fetchone()
+            if current is None or current["app_user_id"] != source_app_user_id:
+                raise InvalidLinkCodeError("Identity owner changed before confirmation request")
+            cursor = self._connection.execute(
+                """INSERT INTO identity_rebind_confirmations (channel, external_user_id, origin_chat_id,
+                source_app_user_id, token_hash, target_app_user_id, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    identity.channel,
+                    identity.external_user_id,
+                    identity.external_chat_id,
+                    source_app_user_id,
                     token_hash,
                     target_app_user_id,
                     _format_timestamp(expires_at),
                 ),
             )
+            row = self._connection.execute(
+                "SELECT * FROM identity_rebind_confirmations WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+        return rebind_confirmation_from_dto(
+            IdentityRebindConfirmationDto(
+                **{name: row[name] for name in IdentityRebindConfirmationDto.__dataclass_fields__}
+            )
+        )
 
-    def find(
-        self,
-        *,
-        identity: IncomingIdentity,
-        now: datetime,
-    ) -> tuple[str, int] | None:
-        """Возвращает активное подтверждение перепривязки канала."""
-        dto = incoming_identity_to_dto(identity)
+    def find(self, *, identity: IncomingIdentity, now: datetime) -> IdentityRebindConfirmation | None:
+        """Возвращает активное ожидание только текущего исходного чата."""
         row = self._connection.execute(
-            """
-            SELECT token_hash, target_app_user_id
-            FROM identity_rebind_confirmations
-            WHERE channel = ?
-                AND external_user_id = ?
-                AND expires_at > ?
-            """,
+            """SELECT * FROM identity_rebind_confirmations WHERE channel = ? AND external_user_id = ?
+            AND origin_chat_id = ? AND status = 'pending' AND expires_at > ?""",
             (
-                dto.channel,
-                dto.external_user_id,
+                identity.channel,
+                identity.external_user_id,
+                identity.external_chat_id,
                 _format_timestamp(now),
             ),
         ).fetchone()
-        if row is None:
-            return None
-        return rebind_confirmation_from_dto(IdentityRebindConfirmationDto(**dict(row)))
-
-    def delete(self, *, identity: IncomingIdentity) -> None:
-        """Удаляет ожидающее подтверждение перепривязки канала."""
-        dto = incoming_identity_to_dto(identity)
-        with self._connection:
-            self._connection.execute(
-                """
-                DELETE FROM identity_rebind_confirmations
-                WHERE channel = ? AND external_user_id = ?
-                """,
-                (dto.channel, dto.external_user_id),
+        return (
+            rebind_confirmation_from_dto(
+                IdentityRebindConfirmationDto(
+                    **{name: row[name] for name in IdentityRebindConfirmationDto.__dataclass_fields__}
+                )
             )
+            if row
+            else None
+        )
+
+    def decide(
+        self,
+        *,
+        identity: IncomingIdentity,
+        confirmation_id: int,
+        version: int,
+        approve: bool,
+        now: datetime
+    ) -> int | None:
+        """Атомарно завершает конкретный перенос вместе с погашением link token.
+
+        Args:
+            identity: Отправитель и исходный чат текущего события.
+            confirmation_id: Устойчивый ID показанного ожидания.
+            version: Версия адресного решения пользователя.
+            approve: Перенести identity либо отменить ожидание.
+            now: UTC-время для проверки TTL ожидания и link token.
+
+        Returns:
+            ID итогового профиля либо `None` при недоступном или устаревшем решении.
+        """
+        with self._connection:
+            cursor = self._connection.execute(
+                """UPDATE identity_rebind_confirmations SET status = ?, version = version + 1
+                WHERE id = ? AND version = ? AND status = 'pending' AND expires_at > ?
+                    AND channel = ? AND external_user_id = ? AND origin_chat_id = ?
+                    AND source_app_user_id = (SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?)""",
+                (
+                    "applied" if approve else "cancelled",
+                    confirmation_id,
+                    version,
+                    _format_timestamp(now),
+                    identity.channel,
+                    identity.external_user_id,
+                    identity.external_chat_id,
+                    identity.channel,
+                    identity.external_user_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute(
+                "SELECT * FROM identity_rebind_confirmations WHERE id = ?", (confirmation_id,)
+            ).fetchone()
+            confirmation = rebind_confirmation_from_dto(
+                IdentityRebindConfirmationDto(
+                    **{name: row[name] for name in IdentityRebindConfirmationDto.__dataclass_fields__}
+                )
+            )
+            if not approve:
+                return confirmation.source_app_user_id
+            token = self._connection.execute(
+                """UPDATE identity_link_tokens SET used_at = ? WHERE token_hash = ? AND app_user_id = ?
+                AND used_at IS NULL AND expires_at > ?""",
+                (
+                    _format_timestamp(now),
+                    confirmation.token_hash,
+                    confirmation.target_app_user_id,
+                    _format_timestamp(now),
+                ),
+            )
+            if token.rowcount != 1:
+                # Непригодный код завершает именно эту запись; новую запись он не затрагивает.
+                self._connection.execute(
+                    "UPDATE identity_rebind_confirmations SET status = 'cancelled' WHERE id = ?",
+                    (confirmation_id,),
+                )
+                return None
+            self._connection.execute(
+                "UPDATE external_identities SET app_user_id = ?, external_chat_id = ?, username = ?, display_name = ?, last_seen_at = CURRENT_TIMESTAMP WHERE channel = ? AND external_user_id = ? AND app_user_id = ?",
+                (
+                    confirmation.target_app_user_id,
+                    identity.external_chat_id,
+                    identity.username,
+                    identity.display_name,
+                    identity.channel,
+                    identity.external_user_id,
+                    confirmation.source_app_user_id,
+                ),
+            )
+            self._connection.execute(
+                "DELETE FROM app_users WHERE id = ? AND NOT EXISTS (SELECT 1 FROM external_identities WHERE app_user_id = ?)",
+                (confirmation.source_app_user_id, confirmation.source_app_user_id),
+            )
+            return confirmation.target_app_user_id
 
 
 def _format_timestamp(value: datetime) -> str:

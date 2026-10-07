@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
+
 from dataclasses import replace
 import unittest
 
@@ -299,6 +302,7 @@ class PrepareObsidianReviewTests(unittest.TestCase):
 
     def _command(self) -> PrepareObsidianReviewCommand:
         return PrepareObsidianReviewCommand(
+            origin=PendingOrigin("telegram", "chat"),
             article_id=7,
             analysis=self.analysis,
             app_user_id=3,

@@ -3,6 +3,9 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
+
 from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import GitHubRepositoryGateway
 from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubVaultSelectionService,
@@ -48,6 +51,7 @@ class SQLiteGitHubVaultSelectionManager(VaultSelectionManager):
         self,
         *,
         app_user_id: int,
+        origin: PendingOrigin,
         repository_url: str,
         root_path: str = "",
     ) -> VaultSelectionResult:
@@ -55,46 +59,41 @@ class SQLiteGitHubVaultSelectionManager(VaultSelectionManager):
         with connect_database(self._database_path) as connection:
             return self._service(connection).select(
                 app_user_id=app_user_id,
+                origin=origin,
                 repository_url=repository_url,
                 root_path=root_path,
             )
 
-    def has_replacement_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие ожидающей замены vault."""
+    def get_pending(self, app_user_id: int, origin: PendingOrigin) -> VaultActionConfirmation | None:
+        """Показывает только ожидание исходного чата через короткое соединение."""
         with connect_database(self._database_path) as connection:
-            return self._service(connection).has_replacement_confirmation(
-                app_user_id
+            return self._service(connection).get_pending(app_user_id, origin)
+
+    def request_disconnect(self, app_user_id: int, origin: PendingOrigin) -> VaultDisconnectResult:
+        """Резервирует конфигурацию для адресного отключения."""
+        with connect_database(self._database_path) as connection:
+            return self._service(connection).request_disconnect(app_user_id, origin)
+
+    def decide(
+        self,
+        app_user_id: int,
+        *,
+        confirmation_id: int,
+        origin: PendingOrigin,
+        version: int,
+        action: VaultConfirmationAction,
+        approve: bool
+    ) -> VaultSelectionResult | VaultDisconnectResult:
+        """Выполняет проверенное решение на собственном коротком соединении."""
+        with connect_database(self._database_path) as connection:
+            return self._service(connection).decide(
+                app_user_id,
+                confirmation_id=confirmation_id,
+                origin=origin,
+                version=version,
+                action=action,
+                approve=approve,
             )
-
-    def confirm_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Применяет ожидающую замену vault."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).confirm_replacement(app_user_id)
-
-    def cancel_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Отменяет ожидающую замену vault."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).cancel_replacement(app_user_id)
-
-    def request_disconnect(self, app_user_id: int) -> VaultDisconnectResult:
-        """Создаёт подтверждение отключения активного vault."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).request_disconnect(app_user_id)
-
-    def has_disconnect_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие ожидающего отключения vault."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).has_disconnect_confirmation(app_user_id)
-
-    def confirm_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Удаляет подтверждённый vault и локальный каталог."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).confirm_disconnect(app_user_id)
-
-    def cancel_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Отменяет ожидающее отключение vault."""
-        with connect_database(self._database_path) as connection:
-            return self._service(connection).cancel_disconnect(app_user_id)
 
     def _service(
         self,

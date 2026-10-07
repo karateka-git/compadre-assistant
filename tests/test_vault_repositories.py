@@ -1,4 +1,5 @@
 """Интеграционные тесты SQLite-хранилищ Этапа 9.1."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -263,15 +264,19 @@ class VaultRepositoriesTest(unittest.TestCase):
                     app_user_id=1,
                     installation_ids={101},
                 )
+                SQLiteObsidianVaultRepository(connection).replace(_vault(installation_id=101))
                 confirmations = SQLiteVaultActionConfirmationRepository(connection)
                 replacement = _vault(installation_id=101)
                 confirmations.save(
                     VaultActionConfirmation(
+                        origin=PendingOrigin("telegram", "chat"),
+                        base_vault_id=1,
                         app_user_id=1,
                         action=VaultConfirmationAction.REPLACE,
                         replacement=replacement,
                         expires_at=now + timedelta(minutes=10),
-                    )
+                    ),
+                    now=now,
                 )
 
                 saved_replace = confirmations.find_active(app_user_id=1, now=now)
@@ -281,12 +286,17 @@ class VaultRepositoriesTest(unittest.TestCase):
                 )
                 confirmations.save(
                     VaultActionConfirmation(
+                        origin=PendingOrigin("telegram", "chat"),
+                        base_vault_id=1,
                         app_user_id=1,
                         action=VaultConfirmationAction.DISCONNECT,
                         expires_at=now + timedelta(minutes=20),
-                    )
+                    ),
+                    now=now + timedelta(minutes=10),
                 )
-                saved_disconnect = confirmations.find_active(app_user_id=1, now=now)
+                saved_disconnect = confirmations.find_active(
+                    app_user_id=1, now=now + timedelta(minutes=10)
+                )
 
                 self.assertEqual(saved_replace.action, VaultConfirmationAction.REPLACE)
                 self.assertEqual(saved_replace.replacement, replacement)

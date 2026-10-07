@@ -15,6 +15,7 @@ from obs_chat_bot.core.domain.users.ports import (
 from obs_chat_bot.core.domain.users.entities import (
     MAX_DISPLAY_NAME_LENGTH,
     AppUser,
+    IdentityRebindConfirmation,
     IncomingIdentity,
 )
 
@@ -148,8 +149,20 @@ class UserIdentityService:
         *,
         code: str,
         identity: IncomingIdentity,
-    ) -> AppUser:
-        """Запрашивает подтверждение перепривязки уже известного канала."""
+    ) -> IdentityRebindConfirmation:
+        """Запрашивает адресное подтверждение перепривязки уже известного канала.
+
+        Args:
+            code: Одноразовый код целевого профиля.
+            identity: Отправитель и исходный чат запроса.
+
+        Returns:
+            Ожидание с устойчивым ID и версией для общей команды решения.
+
+        Raises:
+            InvalidLinkCodeError: Код истёк, отсутствует или владелец identity изменился.
+            IdentityAlreadyBoundError: Identity уже у цели либо её перенос занят другим чатом.
+        """
         current_user = self.resolve(identity)
         if current_user is None:
             raise InvalidLinkCodeError("External identity is not bound")
@@ -168,70 +181,72 @@ class UserIdentityService:
         if target_user is None:
             raise InvalidLinkCodeError("Link code points to missing user")
 
-        self._rebind_confirmation_repository.save(
+        confirmation = self._rebind_confirmation_repository.save(
             identity=identity,
             token_hash=token_hash,
+            source_app_user_id=current_user.id,
             target_app_user_id=target_app_user_id,
+            now=self._clock(),
             expires_at=self._clock() + self._token_ttl,
         )
-        return target_user
+        return confirmation
 
-    def confirm_rebind(self, identity: IncomingIdentity) -> AppUser:
-        """Подтверждает ожидающую перепривязку канала."""
-        confirmation = self._rebind_confirmation_repository.find(
+    def confirm_rebind(
+        self, identity: IncomingIdentity, *, confirmation_id: int, version: int
+    ) -> AppUser:
+        """Переносит identity по конкретному актуальному адресу операции ядра.
+
+        Args:
+            identity: Отправитель и исходный чат текущего события.
+            confirmation_id: ID из показанной команды решения.
+            version: Версия этого решения.
+
+        Returns:
+            Целевой профиль после атомарного переноса.
+
+        Raises:
+            InvalidLinkCodeError: Решение недоступно, устарело или истекло.
+        """
+        user_id = self._rebind_confirmation_repository.decide(
             identity=identity,
+            confirmation_id=confirmation_id,
+            version=version,
+            approve=True,
             now=self._clock(),
         )
-        if confirmation is None:
-            raise InvalidLinkCodeError("Rebind confirmation is missing or expired")
+        user = self._app_user_repository.get_by_id(user_id) if user_id else None
+        if user is None:
+            raise InvalidLinkCodeError("Rebind confirmation is unavailable, stale or expired")
+        return user
 
-        token_hash, target_app_user_id = confirmation
-        consumed_app_user_id = self._link_token_repository.consume(
-            token_hash=token_hash,
-            now=self._clock(),
-        )
-        if consumed_app_user_id != target_app_user_id:
-            self._rebind_confirmation_repository.delete(identity=identity)
-            raise InvalidLinkCodeError("Link code is invalid or expired")
+    def cancel_rebind(
+        self, identity: IncomingIdentity, *, confirmation_id: int, version: int
+    ) -> None:
+        """Отменяет только выбранное актуальное ожидание исходного чата.
 
-        previous_identity = self._external_identity_repository.find(identity)
-        previous_app_user_id = (
-            previous_identity.app_user_id if previous_identity is not None else None
-        )
-        self._external_identity_repository.reassign(
-            app_user_id=target_app_user_id,
-            identity=identity,
-        )
-        self._rebind_confirmation_repository.delete(identity=identity)
+        Args:
+            identity: Отправитель и исходный чат текущего события.
+            confirmation_id: Устойчивый ID операции из команды решения.
+            version: Версия, которую пользователь отклоняет.
 
+        Raises:
+            InvalidLinkCodeError: Решение недоступно, устарело или истекло.
+        """
         if (
-            previous_app_user_id is not None
-            and previous_app_user_id != target_app_user_id
-            and self._external_identity_repository.count_for_user(
-                previous_app_user_id
-            )
-            == 0
-        ):
-            self._app_user_repository.delete(previous_app_user_id)
-
-        app_user = self._app_user_repository.get_by_id(target_app_user_id)
-        if app_user is None:
-            raise InvalidLinkCodeError("Link code points to missing user")
-        return app_user
-
-    def cancel_rebind(self, identity: IncomingIdentity) -> None:
-        """Отменяет ожидающую перепривязку канала."""
-        self._rebind_confirmation_repository.delete(identity=identity)
-
-    def has_pending_rebind(self, identity: IncomingIdentity) -> bool:
-        """Проверяет, ждёт ли канал ответа на подтверждение перепривязки."""
-        return (
-            self._rebind_confirmation_repository.find(
+            self._rebind_confirmation_repository.decide(
                 identity=identity,
+                confirmation_id=confirmation_id,
+                version=version,
+                approve=False,
                 now=self._clock(),
             )
-            is not None
-        )
+            is None
+        ):
+            raise InvalidLinkCodeError("Rebind confirmation is unavailable, stale or expired")
+
+    def get_pending_rebind(self, identity: IncomingIdentity) -> IdentityRebindConfirmation | None:
+        """Читает адресное ожидание только в исходном чате identity."""
+        return self._rebind_confirmation_repository.find(identity=identity, now=self._clock())
 
 
 def _hash_code(code: str) -> str:

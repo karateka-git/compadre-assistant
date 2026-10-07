@@ -1,8 +1,11 @@
 """Тесты общего application-flow входящих сообщений."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
+from obs_chat_bot.core.domain.users.entities import IdentityRebindConfirmation
 
 from dataclasses import replace
 from types import SimpleNamespace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import unittest
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
@@ -91,6 +94,15 @@ class FakeArticleUrlUseCase:
             ),
             created=True,
             extracted=True,
+        )
+
+    def get_saved_for_user(self, article_id, app_user_id):
+        return Article(
+            id=article_id,
+            app_user_id=app_user_id,
+            source_url="https://example.com/article",
+            normalized_url="https://example.com/article",
+            status=ArticleStatus.EXTRACTED,
         )
 
     def reprocess_existing(
@@ -228,24 +240,33 @@ class FakeConfirmationService:
         self.confirm_calls = 0
         self.cancel_calls = 0
 
-    def get_pending(self, app_user_id: int):
+    def list_pending(self, app_user_id: int, origin: PendingOrigin):
+        return (
+            (self.proposal,)
+            if self.proposal.status is ObsidianProposalStatus.PENDING
+            and self.proposal.origin == origin
+            else ()
+        )
+
+    def get_active_for_article(self, *, app_user_id, article_id):
         return (
             self.proposal
             if self.proposal.status is ObsidianProposalStatus.PENDING
+            and self.proposal.article_id == article_id
             else None
         )
 
     def get_latest_applied(self, *, app_user_id: int, article_id: int):
         return self.proposal
 
-    def confirm(self, app_user_id: int) -> ObsidianConfirmationResult:
+    def confirm(self, app_user_id: int, **_decision) -> ObsidianConfirmationResult:
         self.confirm_calls += 1
         return ObsidianConfirmationResult(
             status=ObsidianConfirmationStatus.APPLIED,
             proposal=self.proposal,
         )
 
-    def cancel(self, app_user_id: int) -> ObsidianConfirmationResult:
+    def cancel(self, app_user_id: int, **_decision) -> ObsidianConfirmationResult:
         self.cancel_calls += 1
         return ObsidianConfirmationResult(
             status=ObsidianConfirmationStatus.CANCELLED,
@@ -263,15 +284,12 @@ class FakeUserIdentityService:
         """Всегда возвращает пользователя."""
         return self.app_user
 
-    def has_pending_rebind(self, _identity: IncomingIdentity) -> bool:
-        """По умолчанию pending-перепривязки нет."""
-        return False
 
-    def confirm_rebind(self, _identity: IncomingIdentity) -> AppUser:
+    def confirm_rebind(self, _identity: IncomingIdentity, **_decision) -> AppUser:
         """Возвращает пользователя для тестов подтверждения перепривязки."""
         return self.app_user
 
-    def cancel_rebind(self, _identity: IncomingIdentity) -> None:
+    def cancel_rebind(self, _identity: IncomingIdentity, **_decision) -> None:
         """Запоминает отмену перепривязки."""
 
     def update_display_name(
@@ -312,19 +330,25 @@ class FakeRebindIdentityService(FakeUserIdentityService):
         """Имитирует создание ожидающего подтверждения перепривязки."""
         self.rebind_requested = True
         self.pending_rebind = True
-        return self.target_user
+        return IdentityRebindConfirmation(
+            1,
+            42,
+            99,
+            identity.channel,
+            identity.external_user_id,
+            identity.external_chat_id,
+            "hash",
+            datetime.now(UTC) + timedelta(minutes=10),
+        )
 
-    def has_pending_rebind(self, _identity: IncomingIdentity) -> bool:
-        """Возвращает состояние ожидающего подтверждения."""
-        return self.pending_rebind
 
-    def confirm_rebind(self, _identity: IncomingIdentity) -> AppUser:
+    def confirm_rebind(self, _identity: IncomingIdentity, **_decision) -> AppUser:
         """Имитирует подтвержденную перепривязку."""
         self.rebind_confirmed = True
         self.pending_rebind = False
         return self.target_user
 
-    def cancel_rebind(self, _identity: IncomingIdentity) -> None:
+    def cancel_rebind(self, _identity: IncomingIdentity, **_decision) -> None:
         """Имитирует отмену перепривязки."""
         self.rebind_cancelled = True
         self.pending_rebind = False
@@ -342,9 +366,6 @@ class FakeRegisteringIdentityService:
         """Возвращает существующего пользователя, если он задан."""
         return self._existing
 
-    def has_pending_rebind(self, _identity: IncomingIdentity) -> bool:
-        """В тестах регистрации pending-перепривязки нет."""
-        return False
 
     def register(self, _identity: IncomingIdentity) -> AppUser:
         """Создает пользователя и запоминает регистрацию."""
@@ -375,7 +396,9 @@ class FakeGitHubConnectionStarter:
         self.app_user_ids: list[int] = []
         self.completion_handler = None
 
-    def get_pending(self, _app_user_id: int) -> GitHubConnectionStartResult | None:
+    def get_pending(
+        self, _app_user_id: int, _origin: PendingOrigin
+    ) -> GitHubConnectionStartResult | None:
         """Не сообщает об авторизации до её запуска тестом."""
         return None
 
@@ -387,6 +410,7 @@ class FakeGitHubConnectionStarter:
     def start(
         self,
         app_user_id: int,
+        _origin: PendingOrigin,
         _completion_handler=None,
     ) -> GitHubConnectionStartResult:
         """Запоминает пользователя или поднимает настроенную ошибку."""
@@ -396,9 +420,7 @@ class FakeGitHubConnectionStarter:
             raise self.error
         return GitHubConnectionStartResult(
             status=GitHubConnectionStartStatus.STARTED,
-            installation_url=(
-                "https://github.com/apps/obs-chat-bot/installations/new"
-            ),
+            installation_url=("https://github.com/apps/obs-chat-bot/installations/new"),
             authorization=GitHubDeviceAuthorization(
                 device_code="device-secret",
                 user_code="ABCD-EFGH",
@@ -425,6 +447,7 @@ class FakeVaultSelectionManager:
         self.calls: list[tuple[int, str, str]] = []
         self.replacement_pending = False
         self.disconnect_pending = False
+        self.pending_origin = PendingOrigin("telegram", "chat-1")
 
     def get_selected(self, _app_user_id: int) -> ObsidianVault | None:
         """Возвращает настроенный активный vault."""
@@ -434,16 +457,16 @@ class FakeVaultSelectionManager:
         self,
         *,
         app_user_id: int,
+        origin: PendingOrigin,
         repository_url: str,
         root_path: str = "",
     ) -> VaultSelectionResult:
         """Запоминает команду и возвращает настроенный результат."""
+        self.pending_origin = origin
         self.calls.append((app_user_id, repository_url, root_path))
         if self.error is not None:
             raise self.error
-        self.replacement_pending = (
-            self.status is VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED
-        )
+        self.replacement_pending = self.status is VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED
         vault = _test_vault(app_user_id)
         if self.status in {
             VaultSelectionStatus.SELECTED,
@@ -452,73 +475,48 @@ class FakeVaultSelectionManager:
             self.selected = vault
         return VaultSelectionResult(self.status, vault)
 
-    def has_replacement_confirmation(self, _app_user_id: int) -> bool:
-        """Возвращает состояние ожидающей замены."""
-        return self.replacement_pending
-
-    def confirm_replacement(
-        self,
-        app_user_id: int,
-    ) -> VaultSelectionResult | None:
-        """Подтверждает настроенную ожидающую замену."""
-        if not self.replacement_pending:
+    def get_pending(self, app_user_id: int, origin: PendingOrigin):
+        if origin != self.pending_origin or not (self.replacement_pending or self.disconnect_pending):
             return None
-        self.replacement_pending = False
-        return VaultSelectionResult(
-            VaultSelectionStatus.REPLACED,
-            _test_vault(app_user_id),
+        action = (
+            VaultConfirmationAction.REPLACE
+            if self.replacement_pending
+            else VaultConfirmationAction.DISCONNECT
+        )
+        return VaultActionConfirmation(
+            app_user_id=app_user_id,
+            origin=origin,
+            base_vault_id=1,
+            id=1,
+            action=action,
+            expires_at=datetime.now(UTC) + timedelta(minutes=10),
+            replacement=_test_vault(app_user_id) if action is VaultConfirmationAction.REPLACE else None,
         )
 
-    def cancel_replacement(
-        self,
-        app_user_id: int,
-    ) -> VaultSelectionResult | None:
-        """Отменяет настроенную ожидающую замену."""
-        if not self.replacement_pending:
-            return None
-        self.replacement_pending = False
-        return VaultSelectionResult(
-            VaultSelectionStatus.CANCELLED,
-            _test_vault(app_user_id),
-        )
-
-    def request_disconnect(self, app_user_id: int) -> VaultDisconnectResult:
-        """Запрашивает тестовое подтверждение отключения."""
+    def request_disconnect(self, app_user_id: int, origin: PendingOrigin):
         if self.selected is None:
             return VaultDisconnectResult(VaultDisconnectStatus.NOT_CONNECTED)
+        self.pending_origin = origin
         self.disconnect_pending = True
         return VaultDisconnectResult(
             VaultDisconnectStatus.CONFIRMATION_REQUIRED,
             self.selected,
+            self.get_pending(app_user_id, origin),
         )
 
-    def has_disconnect_confirmation(self, _app_user_id: int) -> bool:
-        """Возвращает состояние ожидающего отключения."""
-        return self.disconnect_pending
-
-    def confirm_disconnect(
-        self,
-        app_user_id: int,
-    ) -> VaultDisconnectResult | None:
-        """Подтверждает тестовое отключение."""
-        if not self.disconnect_pending:
-            return None
+    def decide(self, app_user_id, *, confirmation_id, origin, version, action, approve):
+        if action is VaultConfirmationAction.REPLACE:
+            self.replacement_pending = False
+            return VaultSelectionResult(
+                VaultSelectionStatus.REPLACED if approve else VaultSelectionStatus.CANCELLED,
+                _test_vault(app_user_id),
+            )
         self.disconnect_pending = False
         vault = self.selected or _test_vault(app_user_id)
-        self.selected = None
-        return VaultDisconnectResult(VaultDisconnectStatus.DISCONNECTED, vault)
-
-    def cancel_disconnect(
-        self,
-        app_user_id: int,
-    ) -> VaultDisconnectResult | None:
-        """Отменяет тестовое отключение."""
-        if not self.disconnect_pending:
-            return None
-        self.disconnect_pending = False
+        if approve:
+            self.selected = None
         return VaultDisconnectResult(
-            VaultDisconnectStatus.CANCELLED,
-            self.selected or _test_vault(app_user_id),
+            VaultDisconnectStatus.DISCONNECTED if approve else VaultDisconnectStatus.CANCELLED, vault
         )
 
 
@@ -1255,15 +1253,12 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/link ABC123"))
 
-        self.assertEqual(
-            result.type,
-            IncomingMessageResultType.LINK_REBIND_CONFIRMATION_REQUIRED,
-        )
-        self.assertEqual(result.app_user.id, 99)
+        self.assertIn("адресной командой", result.text)
+        self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
         self.assertTrue(identity_service.rebind_requested)
 
-    def test_execute_yes_confirms_pending_rebind(self) -> None:
-        """Ответ `да` подтверждает ожидающую перепривязку канала."""
+    def test_addressed_yes_confirms_pending_rebind(self) -> None:
+        """Адресная команда подтверждает ожидающую перепривязку канала."""
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
         use_case = _make_use_case(
@@ -1271,14 +1266,14 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("да"))
+        result = use_case.execute(_telegram_message("/confirm core identity 1 1 yes"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBOUND)
         self.assertEqual(result.app_user.id, 99)
         self.assertTrue(identity_service.rebind_confirmed)
 
-    def test_execute_no_cancels_pending_rebind(self) -> None:
-        """Ответ `нет` отменяет ожидающую перепривязку канала."""
+    def test_addressed_no_cancels_pending_rebind(self) -> None:
+        """Адресная команда отменяет ожидающую перепривязку канала."""
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
         use_case = _make_use_case(
@@ -1286,13 +1281,13 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("нет"))
+        result = use_case.execute(_telegram_message("/confirm core identity 1 1 no"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBIND_CANCELLED)
         self.assertTrue(identity_service.rebind_cancelled)
 
     def test_execute_waits_for_yes_or_no_when_rebind_is_pending(self) -> None:
-        """Произвольный текст при pending-перепривязке не уходит в article-flow."""
+        """Ожидание identity не перехватывает обычный текст Obsidian."""
         identity_service = FakeRebindIdentityService()
         identity_service.pending_rebind = True
         article_use_case = FakeArticleUrlUseCase()
@@ -1305,7 +1300,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            IncomingMessageResultType.LINK_REBIND_CONFIRMATION_PENDING,
+            ObsidianResultType.ARTICLE_URL_MISSING,
         )
         self.assertEqual(article_use_case.commands, [])
 
@@ -1325,8 +1320,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(analysis_use_case.commands[0].app_user_id, 42)
         self.assertTrue(analysis_use_case.commands[0].force)
 
-    def test_pending_review_accepts_yes_and_no_but_blocks_other_text(self) -> None:
-        """Pending proposal не принимает новое задание до явного решения."""
+    def test_pending_review_accepts_local_yes_without_blocking_other_text(self) -> None:
+        """Pending proposal оставляет обычный предметный текст доступным."""
         proposal = _proposal()
         confirmation = FakeConfirmationService(proposal)
         article_use_case = FakeArticleUrlUseCase()
@@ -1341,7 +1336,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertEqual(
             pending.type,
-            ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
+            ObsidianResultType.ARTICLE_URL_MISSING,
         )
         self.assertEqual(applied.type, ObsidianResultType.ARTICLE_REVIEW_APPLIED)
         self.assertEqual(confirmation.confirm_calls, 1)
@@ -1389,6 +1384,7 @@ def _proposal(
 ) -> ObsidianProposal:
     """Создаёт сохранённое skip-предложение для incoming-flow."""
     return ObsidianProposal(
+        origin=PendingOrigin("telegram", "chat-1"),
         id=1,
         app_user_id=42,
         article_id=7,
@@ -1399,11 +1395,7 @@ def _proposal(
         base_commit_sha="commit",
         base_tree_sha="tree",
         status=status,
-        completed_at=(
-            datetime.now(UTC)
-            if status is ObsidianProposalStatus.APPLIED
-            else None
-        ),
+        completed_at=(datetime.now(UTC) if status is ObsidianProposalStatus.APPLIED else None),
     )
 
 

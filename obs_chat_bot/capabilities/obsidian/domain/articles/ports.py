@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Protocol
+from datetime import datetime
 
 from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
 from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
@@ -189,3 +190,21 @@ class IncomingMessageRepository(Protocol):
         Returns:
             Обновлённое сообщение или `None`, если запись не найдена.
         """
+
+
+class ArticleFlowLeaseRepository(Protocol):
+    """Исключает конкурирующие article flows одного нормализованного URL профиля."""
+
+    def acquire(
+        self,
+        *,
+        app_user_id: int,
+        normalized_url: str,
+        owner: str,
+        now: datetime,
+        expires_at: datetime
+    ) -> bool:
+        """Захватывает только свободный либо истёкший lease статьи."""
+
+    def release(self, *, app_user_id: int, normalized_url: str, owner: str) -> None:
+        """Освобождает lease только захватившему его исполнителю."""

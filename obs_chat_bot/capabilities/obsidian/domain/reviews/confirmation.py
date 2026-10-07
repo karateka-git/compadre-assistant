@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import logging
 from uuid import uuid4
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from obs_chat_bot.capabilities.obsidian.domain.articles.ports import ProcessingErrorRecorder
 from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from obs_chat_bot.capabilities.obsidian.domain.reviews.ports import ObsidianProposalRepository
@@ -26,6 +28,7 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyn
 from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
+    ObsidianProposalStatus,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote
 
@@ -36,8 +39,10 @@ LOGGER = logging.getLogger(__name__)
 class ObsidianConfirmationStatus(StrEnum):
     """Описывает безопасный итог ответа на pending-предложение."""
 
+    FOREIGN_ORIGIN = "foreign_origin"  # Содержимое чужого чата не возвращается.
+    STALE = "stale"  # Версия действия уже изменилась; нужен актуальный ответ.
     NO_PENDING = "no_pending"  # Подтверждать или отменять нечего.
-    PENDING = "pending"  # Ожидается буквальный ответ `да` или `нет`.
+    PENDING = "pending"  # Ожидается адресное решение либо однозначный локальный ответ.
     CANCELLED = "cancelled"  # Пользователь отклонил предложение.
     APPLIED = "applied"  # Commit или skip успешно завершён.
     CONFLICT = "conflict"  # GitHub SHA изменились после подготовки.
@@ -55,7 +60,7 @@ class ObsidianConfirmationResult:
 
 
 class ObsidianProposalConfirmationService:
-    """Применяет только текущее предложение пользователя под SQLite lease."""
+    """Применяет конкретное адресное предложение пользователя под SQLite lease."""
 
     def __init__(
         self,
@@ -76,9 +81,39 @@ class ObsidianProposalConfirmationService:
         self._error_recorder = error_recorder
         self._lease_duration = lease_duration
 
-    def get_pending(self, app_user_id: int) -> ObsidianProposal | None:
-        """Возвращает ожидающее предложение для маршрутизации chat-сообщения."""
-        return self._proposal_repository.get_pending(app_user_id)
+    def list_pending(self, app_user_id: int, origin: PendingOrigin) -> tuple[ObsidianProposal, ...]:
+        """Возвращает актуальные ожидания только этого исходного чата."""
+        return self._proposal_repository.list_pending(app_user_id, origin)
+
+    def get_active_for_article(
+        self, *, app_user_id: int, article_id: int
+    ) -> ObsidianProposal | None:
+        """Находит активный цикл статьи; presentation проверяет исходный адрес."""
+        return self._proposal_repository.get_active_for_article(
+            app_user_id=app_user_id, article_id=article_id
+        )
+
+    def _validate(
+        self, app_user_id: int, proposal_id: int, origin: PendingOrigin, version: int
+    ) -> ObsidianProposal | ObsidianConfirmationResult:
+        pending = self._proposal_repository.get_by_id(proposal_id, app_user_id)
+        if pending is None:
+            return ObsidianConfirmationResult(ObsidianConfirmationStatus.NO_PENDING)
+        if pending.origin != origin:
+            return ObsidianConfirmationResult(ObsidianConfirmationStatus.FOREIGN_ORIGIN)
+        if pending.version != version:
+            return ObsidianConfirmationResult(ObsidianConfirmationStatus.STALE)
+        if pending.status not in {ObsidianProposalStatus.PENDING, ObsidianProposalStatus.EXECUTING}:
+            return ObsidianConfirmationResult(ObsidianConfirmationStatus.NO_PENDING)
+        if (
+            pending.status is ObsidianProposalStatus.EXECUTING
+            and pending.execution_expires_at is not None
+            and pending.execution_expires_at > datetime.now(UTC)
+        ):
+            return ObsidianConfirmationResult(
+                ObsidianConfirmationStatus.IN_PROGRESS, proposal=pending
+            )
+        return pending
 
     def get_latest_applied(
         self,
@@ -92,87 +127,107 @@ class ObsidianProposalConfirmationService:
             article_id=article_id,
         )
 
-    def cancel(self, app_user_id: int) -> ObsidianConfirmationResult:
-        """Отменяет pending без GitHub-запроса и изменения статуса статьи."""
-        pending = self._proposal_repository.get_pending(app_user_id)
-        if pending is None or pending.id is None:
-            return ObsidianConfirmationResult(
-                status=ObsidianConfirmationStatus.NO_PENDING
-            )
+    def cancel(
+        self, app_user_id: int, *, proposal_id: int, origin: PendingOrigin, version: int
+    ) -> ObsidianConfirmationResult:
+        """Отменяет адресное pending атомарной проверкой статуса, адреса и версии."""
+        pending = self._validate(app_user_id, proposal_id, origin, version)
+        if isinstance(pending, ObsidianConfirmationResult):
+            return pending
         cancelled = self._proposal_repository.mark_cancelled(
-            proposal_id=pending.id,
+            proposal_id=proposal_id,
             app_user_id=app_user_id,
+            origin=origin,
+            version=version,
         )
         return ObsidianConfirmationResult(
-            status=(
+            (
                 ObsidianConfirmationStatus.CANCELLED
-                if cancelled is not None
-                else ObsidianConfirmationStatus.NO_PENDING
+                if cancelled
+                else ObsidianConfirmationStatus.IN_PROGRESS
             ),
             proposal=cancelled,
         )
 
-    def confirm(self, app_user_id: int) -> ObsidianConfirmationResult:
-        """Проверяет snapshot и применяет `add`, `update` или `skip`.
+    def confirm(
+        self, app_user_id: int, *, proposal_id: int, origin: PendingOrigin, version: int
+    ) -> ObsidianConfirmationResult:
+        """Захватывает конкретное действие и выполняет SHA preflight под общим lease.
 
-        GitHub ошибки оставляют proposal в `pending`, статью с полным
-        `cleaned_text` и локальный source SHA без изменений, поэтому явное `да`
-        можно безопасно повторить.
+        Args:
+            app_user_id: Внутренний владелец операции.
+            proposal_id: Устойчивый ID proposal из адресного действия.
+            origin: Чат текущего события; обязан совпадать с исходным.
+            version: Версия, показанная пользователю при выборе решения.
+
+        Returns:
+            Итог без раскрытия proposal чужому исходному чату.
         """
-        pending = self._proposal_repository.get_pending(app_user_id)
-        if pending is None or pending.id is None:
-            return ObsidianConfirmationResult(
-                status=ObsidianConfirmationStatus.NO_PENDING
-            )
-        if pending.action is ObsidianProposalAction.SKIP:
-            applied = self._proposal_repository.complete_applied(
-                proposal_id=pending.id,
-                app_user_id=app_user_id,
-                applied_commit_sha=None,
-                head_commit_sha=None,
-                tree_sha=None,
-                note=None,
-            )
-            if applied is None:
-                raise RuntimeError(
-                    "Pending skip proposal changed before local completion"
-                )
-            return ObsidianConfirmationResult(
-                status=ObsidianConfirmationStatus.APPLIED,
-                proposal=applied,
-            )
-
-        vault = self._vault_repository.get_by_id(
-            app_user_id=app_user_id,
-            vault_id=pending.vault_id,
-        )
-        if vault is None or vault.id is None:
-            return self._conflict(pending)
+        pending = self._validate(app_user_id, proposal_id, origin, version)
+        if isinstance(pending, ObsidianConfirmationResult):
+            return pending
         now = datetime.now(UTC)
         owner = f"obsidian-write-{uuid4().hex}"
-        lease = self._lease_repository.acquire(
-            app_user_id=app_user_id,
-            vault_id=vault.id,
-            owner=owner,
-            now=now,
-            expires_at=now + self._lease_duration,
-        )
-        if lease is None:
-            return ObsidianConfirmationResult(
-                status=ObsidianConfirmationStatus.IN_PROGRESS,
-                proposal=pending,
-            )
-        try:
-            result = self._commit_pending(pending, vault)
-        finally:
-            self._lease_repository.release(
+        vault = self._vault_repository.get_by_id(app_user_id=app_user_id, vault_id=pending.vault_id)
+        lease = None
+        if pending.action is not ObsidianProposalAction.SKIP and vault is not None:
+            lease = self._lease_repository.acquire(
                 app_user_id=app_user_id,
-                vault_id=vault.id,
+                vault_id=pending.vault_id,
                 owner=owner,
+                now=now,
+                expires_at=now + self._lease_duration,
             )
-        if result.status is not ObsidianConfirmationStatus.APPLIED:
-            return result
-        return self._refresh_applied_indexes(result)
+            if lease is None:
+                return ObsidianConfirmationResult(
+                    ObsidianConfirmationStatus.IN_PROGRESS, proposal=pending
+                )
+        claimed = None
+        try:
+            claimed = self._proposal_repository.claim(
+                proposal_id=proposal_id,
+                app_user_id=app_user_id,
+                origin=origin,
+                version=version,
+                now=now,
+                expires_at=now + self._lease_duration,
+            )
+            if claimed is None:
+                return ObsidianConfirmationResult(ObsidianConfirmationStatus.STALE)
+            if pending.action is ObsidianProposalAction.SKIP:
+                applied = self._proposal_repository.complete_applied(
+                    proposal_id=proposal_id,
+                    app_user_id=app_user_id,
+                    version=claimed.version,
+                    applied_commit_sha=None,
+                    head_commit_sha=None,
+                    tree_sha=None,
+                    note=None,
+                )
+                if applied is None:
+                    raise RuntimeError("Claimed skip changed before completion")
+                return ObsidianConfirmationResult(
+                    ObsidianConfirmationStatus.APPLIED, proposal=applied
+                )
+            if vault is None or vault.id is None:
+                return self._conflict(claimed)
+            result = self._commit_pending(claimed, vault)
+        finally:
+            if claimed is not None:
+                restored = self._proposal_repository.release_claim(claimed)
+            else:
+                restored = None
+            if lease is not None:
+                self._lease_repository.release(
+                    app_user_id=app_user_id, vault_id=pending.vault_id, owner=owner
+                )
+        if restored is not None:
+            result = replace(result, proposal=restored)
+        return (
+            self._refresh_applied_indexes(result)
+            if result.status is ObsidianConfirmationStatus.APPLIED
+            else result
+        )
 
     def _refresh_applied_indexes(
         self,
@@ -187,9 +242,7 @@ class ObsidianProposalConfirmationService:
         if self._vault_sync_manager is None or result.proposal is None:
             return result
         try:
-            sync_result = self._vault_sync_manager.sync_if_stale(
-                result.proposal.app_user_id
-            )
+            sync_result = self._vault_sync_manager.sync_if_stale(result.proposal.app_user_id)
             if sync_result.embedding_update_failed:
                 return ObsidianConfirmationResult(
                     status=ObsidianConfirmationStatus.APPLIED,
@@ -241,8 +294,7 @@ class ObsidianProposalConfirmationService:
                 and state.target_blob_sha == pending.target_blob_sha
             )
             already_applied = (
-                state.target_blob_sha is not None
-                and state.target_markdown == proposed_markdown
+                state.target_blob_sha is not None and state.target_markdown == proposed_markdown
             )
             if not exact_snapshot and not already_applied:
                 return self._conflict(pending)
@@ -277,15 +329,14 @@ class ObsidianProposalConfirmationService:
             applied = self._proposal_repository.complete_applied(
                 proposal_id=pending.id or 0,
                 app_user_id=pending.app_user_id,
+                version=pending.version,
                 applied_commit_sha=committed.commit_sha,
                 head_commit_sha=committed.commit_sha,
                 tree_sha=committed.tree_sha,
                 note=note,
             )
             if applied is None:
-                raise RuntimeError(
-                    "Pending proposal changed before local completion"
-                )
+                raise RuntimeError("Pending proposal changed before local completion")
             LOGGER.info(
                 "Obsidian proposal applied: proposal_id=%s app_user_id=%s "
                 "article_id=%s action=%s commit_sha=%s",
@@ -320,6 +371,7 @@ class ObsidianProposalConfirmationService:
         conflicted = self._proposal_repository.mark_conflict(
             proposal_id=pending.id or 0,
             app_user_id=pending.app_user_id,
+            version=pending.version,
         )
         return ObsidianConfirmationResult(
             status=ObsidianConfirmationStatus.CONFLICT,

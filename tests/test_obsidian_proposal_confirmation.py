@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
+
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
@@ -43,7 +46,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
         repository = ProposalRepositoryFake(_proposal(ObsidianProposalAction.SKIP))
         gateway = GitHubGatewayFake(_state())
 
-        result = _service(repository, self.vault, gateway).confirm(3)
+        result = _service(repository, self.vault, gateway).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.APPLIED)
         self.assertEqual(repository.pending.status, ObsidianProposalStatus.APPLIED)
@@ -55,7 +60,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
         gateway = GitHubGatewayFake(_state())
         sync = VaultSyncManagerFake()
 
-        result = _service(repository, self.vault, gateway, sync=sync).confirm(3)
+        result = _service(repository, self.vault, gateway, sync=sync).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.APPLIED)
         self.assertEqual(gateway.commit_calls, 1)
@@ -65,20 +72,17 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
 
     def test_update_commits_pending_markdown_and_indexes_marker_metadata(self) -> None:
         """Confirmation коммитит финальный pending и индексирует его frontmatter."""
-        markdown = (
-            "---\ntags: [knowledge-catcher, docker]\n---\n"
-            "# Updated\nНовый текст"
-        )
+        markdown = "---\ntags: [knowledge-catcher, docker]\n---\n" "# Updated\nНовый текст"
         proposal = replace(
             _proposal(ObsidianProposalAction.UPDATE),
             proposed_markdown=markdown,
         )
         repository = ProposalRepositoryFake(proposal)
-        gateway = GitHubGatewayFake(
-            _state(target_blob_sha="old-blob", target_markdown="# Old")
-        )
+        gateway = GitHubGatewayFake(_state(target_blob_sha="old-blob", target_markdown="# Old"))
 
-        result = _service(repository, self.vault, gateway).confirm(3)
+        result = _service(repository, self.vault, gateway).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.APPLIED)
         self.assertEqual(gateway.committed_markdown, markdown)
@@ -92,7 +96,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
         gateway = GitHubGatewayFake(_state())
         sync = VaultSyncManagerFake(error=RuntimeError("embedding unavailable"))
 
-        result = _service(repository, self.vault, gateway, sync=sync).confirm(3)
+        result = _service(repository, self.vault, gateway, sync=sync).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.APPLIED)
         self.assertIsInstance(result.error, RuntimeError)
@@ -110,7 +116,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
             )
         )
 
-        result = _service(repository, self.vault, gateway).confirm(3)
+        result = _service(repository, self.vault, gateway).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.CONFLICT)
         self.assertEqual(repository.pending.status, ObsidianProposalStatus.CONFLICT)
@@ -124,7 +132,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
             error=GitHubGatewayError("timeout"),
         )
 
-        result = _service(repository, self.vault, gateway).confirm(3)
+        result = _service(repository, self.vault, gateway).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.FAILED)
         self.assertEqual(repository.pending.status, ObsidianProposalStatus.PENDING)
@@ -142,7 +152,9 @@ class ObsidianProposalConfirmationTests(unittest.TestCase):
             )
         )
 
-        result = _service(repository, self.vault, gateway).confirm(3)
+        result = _service(repository, self.vault, gateway).confirm(
+            3, proposal_id=8, origin=PendingOrigin("telegram", "chat"), version=1
+        )
 
         self.assertEqual(result.status, ObsidianConfirmationStatus.APPLIED)
         self.assertEqual(gateway.commit_calls, 0)
@@ -157,25 +169,50 @@ class ProposalRepositoryFake:
         self.note: VaultNote | None = None
         self.completed_without_note = False
 
-    def get_pending(self, app_user_id: int) -> ObsidianProposal | None:
+    def get_by_id(self, proposal_id, app_user_id):
+        return (
+            self.pending
+            if self.pending.id == proposal_id and self.pending.app_user_id == app_user_id
+            else None
+        )
+
+    def claim(self, *, proposal_id, app_user_id, origin, version, now, expires_at):
         if (
-            self.pending.app_user_id == app_user_id
-            and self.pending.status is ObsidianProposalStatus.PENDING
+            self.pending.status is not ObsidianProposalStatus.PENDING
+            or self.pending.version != version
+            or self.pending.origin != origin
         ):
-            return self.pending
-        return None
+            return None
+        self.pending = replace(
+            self.pending,
+            status=ObsidianProposalStatus.EXECUTING,
+            version=version + 1,
+            execution_expires_at=expires_at,
+        )
+        return self.pending
+
+    def release_claim(self, proposal):
+        if self.pending.status is not ObsidianProposalStatus.EXECUTING:
+            return None
+        self.pending = replace(
+            self.pending,
+            status=ObsidianProposalStatus.PENDING,
+            version=proposal.version + 1,
+            execution_expires_at=None,
+        )
+        return self.pending
 
     def get_latest_applied_for_article(self, **_kwargs):
         return None
 
-    def mark_cancelled(self, *, proposal_id: int, app_user_id: int):
+    def mark_cancelled(self, *, proposal_id: int, app_user_id: int, origin, version):
         self.pending = replace(
             self.pending,
             status=ObsidianProposalStatus.CANCELLED,
         )
         return self.pending
 
-    def mark_conflict(self, *, proposal_id: int, app_user_id: int):
+    def mark_conflict(self, *, proposal_id: int, app_user_id: int, version):
         self.pending = replace(
             self.pending,
             status=ObsidianProposalStatus.CONFLICT,
@@ -187,6 +224,7 @@ class ProposalRepositoryFake:
         *,
         proposal_id: int,
         app_user_id: int,
+        version: int,
         applied_commit_sha: str | None,
         head_commit_sha: str | None,
         tree_sha: str | None,
@@ -300,6 +338,7 @@ def _proposal(action: ObsidianProposalAction) -> ObsidianProposal:
             "target_blob_sha": "old-blob",
         }
     return ObsidianProposal(
+        origin=PendingOrigin("telegram", "chat"),
         id=8,
         app_user_id=3,
         article_id=7,

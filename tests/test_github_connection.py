@@ -1,4 +1,5 @@
 """Тесты фонового application-сценария GitHub Device Flow."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -206,7 +207,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=clock.sleep,
         )
 
-        result = coordinator.start(42, notify)
+        result = coordinator.start(42, PendingOrigin("telegram", "chat"), notify)
         self.assertTrue(writer.completed.wait(timeout=1))
         self.assertTrue(notification_sent.wait(timeout=1))
 
@@ -251,14 +252,12 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
                 sleeper=clock.sleep,
             )
             self.assertEqual(
-                coordinator.start(1, notify).status,
+                coordinator.start(1, PendingOrigin("telegram", "chat"), notify).status,
                 GitHubConnectionStartStatus.STARTED,
             )
             self.assertTrue(completed.wait(timeout=1))
             with connect_database(database_path) as connection:
-                installations = SQLiteGitHubInstallationRepository(
-                    connection
-                ).list_for_user(1)
+                installations = SQLiteGitHubInstallationRepository(connection).list_for_user(1)
 
             self.assertEqual(completions[0].status, GitHubConnectionCompletionStatus.CONNECTED)
             self.assertEqual(
@@ -287,7 +286,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=clock.sleep,
         )
 
-        first = coordinator.start(42, notify)
+        first = coordinator.start(42, PendingOrigin("telegram", "chat"), notify)
         self.assertTrue(notification_sent.wait(timeout=1))
 
         self.assertEqual(first.status, GitHubConnectionStartStatus.STARTED)
@@ -321,17 +320,13 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=clock.sleep,
         )
 
-        coordinator.start(42, notify)
+        coordinator.start(42, PendingOrigin("telegram", "chat"), notify)
         self.assertTrue(notification_sent.wait(timeout=1))
 
         self.assertEqual(writer.calls, [(42, 777, "octocat", set())])
         self.assertEqual(
             completions,
-            [
-                GitHubConnectionCompletion(
-                    GitHubConnectionCompletionStatus.NO_INSTALLATIONS
-                )
-            ],
+            [GitHubConnectionCompletion(GitHubConnectionCompletionStatus.NO_INSTALLATIONS)],
         )
 
     def test_expired_authorization_notifies_user(self) -> None:
@@ -354,7 +349,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=clock.sleep,
         )
 
-        coordinator.start(42, notify)
+        coordinator.start(42, PendingOrigin("telegram", "chat"), notify)
         self.assertTrue(notification_sent.wait(timeout=1))
 
         self.assertEqual(
@@ -373,12 +368,18 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=lambda _seconds: None,
         )
 
-        self.assertIsNone(coordinator.get_pending(42))
-        first = coordinator.start(42)
+        self.assertIsNone(coordinator.get_pending(42, PendingOrigin("telegram", "chat")))
+        first = coordinator.start(42, PendingOrigin("telegram", "chat"))
         self.assertTrue(gateway.polled.wait(timeout=1))
-        observed = coordinator.get_pending(42)
+        observed = coordinator.get_pending(42, PendingOrigin("telegram", "chat"))
         self.assertEqual(observed.authorization, first.authorization)
-        repeated = coordinator.start(42)
+        foreign = coordinator.get_pending(42, PendingOrigin("vk", "other-chat"))
+        self.assertEqual(foreign.status, GitHubConnectionStartStatus.IN_PROGRESS)
+        self.assertIsNone(foreign.authorization)
+        other_chat = coordinator.start(42, PendingOrigin("telegram", "other-chat"))
+        self.assertEqual(other_chat.status, GitHubConnectionStartStatus.IN_PROGRESS)
+        self.assertIsNone(other_chat.authorization)
+        repeated = coordinator.start(42, PendingOrigin("telegram", "chat"))
         gateway.release_poll.set()
         self.assertTrue(gateway.finished.wait(timeout=1))
 
@@ -408,11 +409,11 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             sleeper=lambda _seconds: None,
         )
 
-        first.start(42)
+        first.start(42, PendingOrigin("telegram", "chat"))
         self.assertTrue(gateway.polled.wait(timeout=1))
-        observed = second.get_pending(42)
+        observed = second.get_pending(42, PendingOrigin("telegram", "chat"))
         self.assertEqual(observed.status, GitHubConnectionStartStatus.IN_PROGRESS)
-        blocked = second.start(42)
+        blocked = second.start(42, PendingOrigin("telegram", "chat"))
         gateway.release_poll.set()
         self.assertTrue(gateway.finished.wait(timeout=1))
 
@@ -447,12 +448,14 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
                 sleeper=clock.sleep,
             )
             self.assertEqual(
-                restarted.start(1).status,
+                restarted.start(1, PendingOrigin("telegram", "chat")).status,
                 GitHubConnectionStartStatus.IN_PROGRESS,
             )
             clock.now += timedelta(minutes=20)
             self.assertEqual(
-                restarted.start(1, lambda _completion: completion_sent.set()).status,
+                restarted.start(
+                    1, PendingOrigin("telegram", "chat"), lambda _completion: completion_sent.set()
+                ).status,
                 GitHubConnectionStartStatus.STARTED,
             )
             self.assertTrue(completion_sent.wait(timeout=1))

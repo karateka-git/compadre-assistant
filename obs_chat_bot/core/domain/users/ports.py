@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Protocol
 
-from obs_chat_bot.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity
+from obs_chat_bot.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation
 
 
 class AppUserRepository(Protocol):
@@ -83,18 +83,23 @@ class IdentityRebindConfirmationRepository(Protocol):
         *,
         identity: IncomingIdentity,
         token_hash: str,
+        source_app_user_id: int,
         target_app_user_id: int,
         expires_at: datetime,
-    ) -> None:
-        """Сохраняет ожидающее подтверждение перепривязки канала."""
+        now: datetime
+    ) -> IdentityRebindConfirmation:
+        """Создаёт новый устойчивый ID ожидания в исходном чате."""
 
-    def find(
+    def find(self, *, identity: IncomingIdentity, now: datetime) -> IdentityRebindConfirmation | None:
+        """Читает только ожидание текущего исходного чата identity."""
+
+    def decide(
         self,
         *,
         identity: IncomingIdentity,
-        now: datetime,
-    ) -> tuple[str, int] | None:
-        """Возвращает хеш кода и целевого пользователя для активного подтверждения."""
-
-    def delete(self, *, identity: IncomingIdentity) -> None:
-        """Удаляет ожидающее подтверждение перепривязки канала."""
+        confirmation_id: int,
+        version: int,
+        approve: bool,
+        now: datetime
+    ) -> int | None:
+        """Атомарно проверяет адрес/владельца/TTL/версию, погашает код и переносит identity."""

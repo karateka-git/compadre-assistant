@@ -49,6 +49,10 @@ CREATE INDEX idx_identity_link_tokens_expires_at
 
 CREATE TABLE identity_rebind_confirmations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_app_user_id INTEGER NOT NULL,
+    origin_chat_id TEXT NOT NULL CHECK (length(trim(origin_chat_id)) > 0),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'cancelled')),
     channel TEXT NOT NULL,
     external_user_id TEXT NOT NULL,
     token_hash TEXT NOT NULL,
@@ -56,8 +60,11 @@ CREATE TABLE identity_rebind_confirmations (
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (target_app_user_id) REFERENCES app_users (id) ON DELETE CASCADE,
-    UNIQUE (channel, external_user_id)
+    FOREIGN KEY (source_app_user_id) REFERENCES app_users (id) ON DELETE CASCADE
 );
+
+CREATE UNIQUE INDEX idx_identity_rebind_confirmations_active_identity
+    ON identity_rebind_confirmations (channel, external_user_id) WHERE status = 'pending';
 
 CREATE INDEX idx_identity_rebind_confirmations_expires_at
     ON identity_rebind_confirmations (expires_at);
@@ -208,7 +215,13 @@ CREATE INDEX idx_obsidian_vaults_repository_id
     ON obsidian_vaults (repository_id);
 
 CREATE TABLE obsidian_vault_confirmations (
-    app_user_id INTEGER NOT NULL PRIMARY KEY,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    base_vault_id INTEGER NOT NULL CHECK (base_vault_id > 0),
+    app_user_id INTEGER NOT NULL,
+    origin_channel TEXT NOT NULL CHECK (length(trim(origin_channel)) > 0),
+    origin_chat_id TEXT NOT NULL CHECK (length(trim(origin_chat_id)) > 0),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'applied', 'cancelled')),
     action TEXT NOT NULL,
     installation_id INTEGER,
     repository_id INTEGER,
@@ -244,6 +257,9 @@ CREATE TABLE obsidian_vault_confirmations (
         )
     )
 );
+
+CREATE UNIQUE INDEX idx_obsidian_vault_confirmations_active_resource
+    ON obsidian_vault_confirmations (app_user_id) WHERE status = 'pending';
 
 CREATE INDEX idx_obsidian_vault_confirmations_expires_at
     ON obsidian_vault_confirmations (expires_at);
@@ -559,6 +575,10 @@ CREATE INDEX idx_obsidian_vault_sync_leases_expires_at
 
 CREATE TABLE obsidian_proposals (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    origin_channel TEXT NOT NULL CHECK (length(trim(origin_channel)) > 0),
+    origin_chat_id TEXT NOT NULL CHECK (length(trim(origin_chat_id)) > 0),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
+    execution_expires_at TEXT,
     app_user_id INTEGER NOT NULL,
     article_id INTEGER NOT NULL,
     analysis_id INTEGER NOT NULL,
@@ -579,7 +599,7 @@ CREATE TABLE obsidian_proposals (
     FOREIGN KEY (article_id) REFERENCES articles (id) ON DELETE CASCADE,
     FOREIGN KEY (analysis_id) REFERENCES analysis_results (id) ON DELETE CASCADE,
     CHECK (action IN ('add', 'update', 'skip')),
-    CHECK (status IN ('pending', 'cancelled', 'conflict', 'applied')),
+    CHECK (status IN ('pending', 'executing', 'cancelled', 'conflict', 'applied')),
     CHECK (length(trim(reasoning)) > 0),
     CHECK (length(trim(base_commit_sha)) > 0),
     CHECK (length(trim(base_tree_sha)) > 0),
@@ -599,10 +619,23 @@ CREATE TABLE obsidian_proposals (
     )
 );
 
-CREATE UNIQUE INDEX idx_obsidian_proposals_one_pending_per_user
-    ON obsidian_proposals (app_user_id)
-    WHERE status = 'pending';
+-- Один цикл одной статьи; разные статьи профиля ожидают независимо.
+CREATE UNIQUE INDEX idx_obsidian_proposals_one_active_per_article
+    ON obsidian_proposals (app_user_id, article_id)
+    WHERE status IN ('pending', 'executing');
+CREATE INDEX idx_obsidian_proposals_origin
+    ON obsidian_proposals (app_user_id, origin_channel, origin_chat_id, status);
 CREATE INDEX idx_obsidian_proposals_app_user_article
     ON obsidian_proposals (app_user_id, article_id, id DESC);
 CREATE INDEX idx_obsidian_proposals_status
     ON obsidian_proposals (status, updated_at);
+
+-- Lease полного article flow исключает конкурирующие анализы одной ссылки.
+CREATE TABLE obsidian_article_flow_leases (
+    app_user_id INTEGER NOT NULL,
+    normalized_url TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    PRIMARY KEY (app_user_id, normalized_url),
+    FOREIGN KEY (app_user_id) REFERENCES app_users (id) ON DELETE CASCADE
+);

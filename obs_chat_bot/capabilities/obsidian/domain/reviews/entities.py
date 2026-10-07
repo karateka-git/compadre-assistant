@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
 
 class ObsidianProposalAction(StrEnum):
     """Действие, рекомендованное после сопоставления статьи с vault."""
@@ -19,6 +21,7 @@ class ObsidianProposalStatus(StrEnum):
     """Описывает жизненный цикл сохранённого предложения."""
 
     PENDING = "pending"  # Ожидает явного ответа пользователя.
+    EXECUTING = "executing"  # Выполнение захвачено атомарно до внешнего эффекта.
     CANCELLED = "cancelled"  # Пользователь ответил `нет`.
     CONFLICT = "conflict"  # Исходный GitHub snapshot изменился.
     APPLIED = "applied"  # Изменение или подтверждённый skip завершены.
@@ -56,6 +59,7 @@ class ObsidianProposal:
     reasoning: str
     base_commit_sha: str
     base_tree_sha: str
+    origin: PendingOrigin
     target_path: str | None = None
     proposed_markdown: str | None = None
     target_blob_sha: str | None = None
@@ -65,14 +69,21 @@ class ObsidianProposal:
     created_at: datetime | None = None
     updated_at: datetime | None = None
     completed_at: datetime | None = None
+    version: int = 1
+    execution_expires_at: datetime | None = None
 
     def __post_init__(self) -> None:
-        if min(
-            self.app_user_id,
-            self.article_id,
-            self.analysis_id,
-            self.vault_id,
-        ) <= 0:
+        if self.version <= 0 or not isinstance(self.origin, PendingOrigin):
+            raise ValueError("proposal must contain origin and positive version")
+        if (
+            min(
+                self.app_user_id,
+                self.article_id,
+                self.analysis_id,
+                self.vault_id,
+            )
+            <= 0
+        ):
             raise ValueError("proposal IDs must be positive")
         if not isinstance(self.action, ObsidianProposalAction):
             raise TypeError("action must be an ObsidianProposalAction")
@@ -108,12 +119,8 @@ class ObsidianProposal:
         if self.status is ObsidianProposalStatus.APPLIED:
             if self.completed_at is None:
                 raise ValueError("applied proposal must contain completed_at")
-            if (
-                self.action is not ObsidianProposalAction.SKIP
-                and (
-                    self.applied_commit_sha is None
-                    or not self.applied_commit_sha.strip()
-                )
+            if self.action is not ObsidianProposalAction.SKIP and (
+                self.applied_commit_sha is None or not self.applied_commit_sha.strip()
             ):
                 raise ValueError("applied add/update must contain commit SHA")
         elif self.applied_commit_sha is not None:

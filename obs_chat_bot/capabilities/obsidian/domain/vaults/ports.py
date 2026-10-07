@@ -173,19 +173,21 @@ class VaultSyncLeaseRepository(Protocol):
 class VaultActionConfirmationRepository(Protocol):
     """Описывает хранение подтверждений замены и отключения vault."""
 
-    def save(self, confirmation: VaultActionConfirmation) -> None:
-        """Сохраняет подтверждение, заменяя предыдущее действие пользователя."""
+    def save(
+        self, confirmation: VaultActionConfirmation, *, now: datetime
+    ) -> VaultActionConfirmation:
+        """Резервирует конфигурацию, не заменяя активное чужое ожидание."""
 
-    def find_active(
-        self,
-        *,
-        app_user_id: int,
-        now: datetime,
-    ) -> VaultActionConfirmation | None:
-        """Возвращает неистёкшее подтверждение пользователя или `None`."""
+    def find_active(self, *, app_user_id: int, now: datetime) -> VaultActionConfirmation | None:
+        """Возвращает активное ожидание конфигурации для проверки ресурса."""
 
-    def delete(self, app_user_id: int) -> None:
-        """Удаляет ожидающее подтверждение пользователя."""
+    def get_by_id(self, confirmation_id: int, app_user_id: int) -> VaultActionConfirmation | None:
+        """Читает адресную операцию только её внутреннему владельцу."""
+
+    def decide(
+        self, confirmation: VaultActionConfirmation, *, approve: bool, now: datetime
+    ) -> ObsidianVault | None:
+        """Атомарно проверяет TTL, адрес, статус, версию и изменяет конфигурацию."""
 
 
 class GitHubDeviceFlowGateway(Protocol):
@@ -319,13 +321,16 @@ class GitHubConnectionStarter(Protocol):
     def installation_url(self) -> str:
         """Возвращает страницу установки и настройки GitHub App."""
 
-    def get_pending(self, app_user_id: int) -> GitHubConnectionStartResult | None:
+    def get_pending(
+        self, app_user_id: int, origin: PendingOrigin
+    ) -> GitHubConnectionStartResult | None:
         """Читает актуальную ожидающую авторизацию без запуска нового Device Flow."""
         ...
 
     def start(
         self,
         app_user_id: int,
+        origin: PendingOrigin,
         completion_handler: GitHubConnectionCompletionHandler | None = None,
     ) -> GitHubConnectionStartResult:
         """Запускает Device Flow или возвращает уже ожидающий challenge."""

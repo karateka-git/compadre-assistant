@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 import logging
@@ -8,6 +9,7 @@ import time
 from typing import Callable, Protocol
 from urllib.parse import unquote, urlsplit
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin, PendingOperationError
 from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
     GitHubInstallationRepository,
     GitHubRepositoryGateway,
@@ -52,6 +54,7 @@ class VaultSelectionResult:
 
     status: VaultSelectionStatus
     vault: ObsidianVault
+    confirmation: VaultActionConfirmation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, VaultSelectionStatus):
@@ -66,6 +69,7 @@ class VaultDisconnectResult:
 
     status: VaultDisconnectStatus
     vault: ObsidianVault | None = None
+    confirmation: VaultActionConfirmation | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, VaultDisconnectStatus):
@@ -103,31 +107,29 @@ class VaultSelectionManager(Protocol):
         self,
         *,
         app_user_id: int,
+        origin: PendingOrigin,
         repository_url: str,
         root_path: str = "",
     ) -> VaultSelectionResult:
         """Проверяет GitHub repository и выбирает его как vault."""
 
-    def has_replacement_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие ожидающей замены vault."""
+    def get_pending(self, app_user_id: int, origin: PendingOrigin) -> VaultActionConfirmation | None:
+        """Показывает только активное ожидание исходного чата."""
 
-    def confirm_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Применяет ожидающую замену или возвращает `None`."""
+    def request_disconnect(self, app_user_id: int, origin: PendingOrigin) -> VaultDisconnectResult:
+        """Создаёт адресное ожидание отключения конфигурации."""
 
-    def cancel_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Отменяет ожидающую замену или возвращает `None`."""
-
-    def request_disconnect(self, app_user_id: int) -> VaultDisconnectResult:
-        """Запрашивает подтверждение удаления активного vault."""
-
-    def has_disconnect_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие активного подтверждения отключения."""
-
-    def confirm_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Удаляет vault после согласия или возвращает `None`."""
-
-    def cancel_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Отменяет отключение либо возвращает `None`."""
+    def decide(
+        self,
+        app_user_id: int,
+        *,
+        confirmation_id: int,
+        origin: PendingOrigin,
+        version: int,
+        action: VaultConfirmationAction,
+        approve: bool
+    ) -> VaultSelectionResult | VaultDisconnectResult:
+        """Исполняет конкретное актуальное решение над конфигурацией vault."""
 
 
 class GitHubVaultSelectionService(VaultSelectionManager):
@@ -162,6 +164,7 @@ class GitHubVaultSelectionService(VaultSelectionManager):
         self,
         *,
         app_user_id: int,
+        origin: PendingOrigin,
         repository_url: str,
         root_path: str = "",
     ) -> VaultSelectionResult:
@@ -169,6 +172,7 @@ class GitHubVaultSelectionService(VaultSelectionManager):
 
         Args:
             app_user_id: Внутренний ID пользователя приложения.
+            origin: Исходный чат будущего ожидания замены.
             repository_url: Полный HTTPS URL GitHub repository.
             root_path: Путь к корню vault внутри repository или пустая строка.
 
@@ -180,6 +184,8 @@ class GitHubVaultSelectionService(VaultSelectionManager):
             GitHubAccountNotConnectedError: У пользователя нет installations.
             GitHubRepositoryNotAccessibleError: У App нет права записи repository.
             GitHubVaultPathNotFoundError: Vault path не является каталогом.
+            VaultResourceBusyError: Другое ожидание резервирует конфигурацию vault.
+            PendingOperationError: Конфигурация изменилась во время проверки GitHub.
         """
         if app_user_id <= 0:
             raise ValueError("app_user_id must be positive")
@@ -187,9 +193,7 @@ class GitHubVaultSelectionService(VaultSelectionManager):
         normalized_root = normalize_vault_root_path(root_path)
         installations = self._installation_repository.list_for_user(app_user_id)
         if not installations:
-            raise GitHubAccountNotConnectedError(
-                "GitHub account has no available installations"
-            )
+            raise GitHubAccountNotConnectedError("GitHub account has no available installations")
 
         inspection_started_at = time.monotonic()
         LOGGER.info(
@@ -231,13 +235,9 @@ class GitHubVaultSelectionService(VaultSelectionManager):
             time.monotonic() - inspection_started_at,
         )
         if inspection is None:
-            raise GitHubRepositoryNotAccessibleError(
-                "GitHub repository is not accessible"
-            )
+            raise GitHubRepositoryNotAccessibleError("GitHub repository is not accessible")
         if not inspection.root_path_is_directory:
-            raise GitHubVaultPathNotFoundError(
-                "GitHub vault path is not a directory"
-            )
+            raise GitHubVaultPathNotFoundError("GitHub vault path is not a directory")
 
         candidate = ObsidianVault(
             app_user_id=app_user_id,
@@ -252,133 +252,103 @@ class GitHubVaultSelectionService(VaultSelectionManager):
         if current is None:
             saved = self._vault_repository.create_if_absent(candidate)
             if saved is not None:
-                self._confirmation_repository.delete(app_user_id)
                 return VaultSelectionResult(VaultSelectionStatus.SELECTED, saved)
             # Другой adapter мог выбрать vault между чтением и вставкой.
             current = self._vault_repository.get_for_user(app_user_id)
             if current is None:
                 raise RuntimeError("Concurrent vault selection could not be read")
         if _same_vault(current, candidate):
-            self._confirmation_repository.delete(app_user_id)
             return VaultSelectionResult(VaultSelectionStatus.ALREADY_SELECTED, current)
 
         now = self._clock()
-        self._confirmation_repository.save(
+        confirmation = self._confirmation_repository.save(
             VaultActionConfirmation(
                 app_user_id=app_user_id,
                 action=VaultConfirmationAction.REPLACE,
+                origin=origin,
+                base_vault_id=current.id or 0,
                 replacement=candidate,
                 expires_at=now + self._confirmation_ttl,
                 created_at=now,
-            )
+            ),
+            now=now,
         )
         return VaultSelectionResult(
             VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED,
             candidate,
+            confirmation,
         )
 
-    def has_replacement_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие активного подтверждения замены vault."""
-        confirmation = self._active_replacement(app_user_id)
-        return confirmation is not None
+    def get_pending(self, app_user_id: int, origin: PendingOrigin) -> VaultActionConfirmation | None:
+        """Читает актуальное ожидание только для исходного чата."""
+        pending = self._confirmation_repository.find_active(app_user_id=app_user_id, now=self._clock())
+        return pending if pending is not None and pending.origin == origin else None
 
-    def confirm_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Заменяет vault предложенным подключением после явного согласия."""
-        confirmation = self._active_replacement(app_user_id)
-        if confirmation is None or confirmation.replacement is None:
-            return None
-        saved = self._vault_repository.replace(confirmation.replacement)
-        self._confirmation_repository.delete(app_user_id)
-        return VaultSelectionResult(VaultSelectionStatus.REPLACED, saved)
-
-    def cancel_replacement(self, app_user_id: int) -> VaultSelectionResult | None:
-        """Отменяет замену, сохраняя текущий активный vault."""
-        confirmation = self._active_replacement(app_user_id)
-        if confirmation is None:
-            return None
-        current = self._vault_repository.get_for_user(app_user_id)
-        self._confirmation_repository.delete(app_user_id)
+    def request_disconnect(self, app_user_id: int, origin: PendingOrigin) -> VaultDisconnectResult:
+        """Резервирует конфигурацию vault для подтверждаемого отключения."""
+        current = self.get_selected(app_user_id)
         if current is None:
-            return None
-        return VaultSelectionResult(VaultSelectionStatus.CANCELLED, current)
-
-    def request_disconnect(self, app_user_id: int) -> VaultDisconnectResult:
-        """Создаёт короткоживущее подтверждение отключения активного vault."""
-        if app_user_id <= 0:
-            raise ValueError("app_user_id must be positive")
-        current = self._vault_repository.get_for_user(app_user_id)
-        if current is None:
-            self._confirmation_repository.delete(app_user_id)
             return VaultDisconnectResult(VaultDisconnectStatus.NOT_CONNECTED)
         now = self._clock()
-        self._confirmation_repository.save(
+        confirmation = self._confirmation_repository.save(
             VaultActionConfirmation(
                 app_user_id=app_user_id,
+                origin=origin,
+                base_vault_id=current.id or 0,
                 action=VaultConfirmationAction.DISCONNECT,
                 expires_at=now + self._confirmation_ttl,
                 created_at=now,
+            ),
+            now=now,
+        )
+        return VaultDisconnectResult(VaultDisconnectStatus.CONFIRMATION_REQUIRED, current, confirmation)
+
+    def decide(
+        self,
+        app_user_id: int,
+        *,
+        confirmation_id: int,
+        origin: PendingOrigin,
+        version: int,
+        action: VaultConfirmationAction,
+        approve: bool
+    ) -> VaultSelectionResult | VaultDisconnectResult:
+        """Проверяет адресную операцию и атомарно завершает изменение конфигурации.
+
+        Args:
+            app_user_id: Внутренний владелец операции.
+            confirmation_id: Неизменный ID сохранённого ожидания.
+            origin: Чат текущего события; должен совпадать с исходным.
+            version: Версия операции из выбранного действия.
+            action: Тип ожидаемого изменения конфигурации.
+            approve: Применить изменение либо отменить ожидание.
+
+        Returns:
+            Результат замены либо отключения vault.
+
+        Raises:
+            PendingOperationError: ID, исходный чат, TTL, статус или версия уже не подходят.
+            VaultResourceBusyError: Vault занят синхронизацией или записью.
+        """
+        pending = self._confirmation_repository.get_by_id(confirmation_id, app_user_id)
+        if pending is None or pending.origin != origin:
+            raise PendingOperationError("Заверши действие в исходном чате; операция здесь недоступна.")
+        if pending.version != version or pending.action is not action:
+            raise PendingOperationError(
+                "Действие устарело. Войди снова в /obsidian для актуального ожидания."
             )
-        )
+        vault = self._confirmation_repository.decide(pending, approve=approve, now=self._clock())
+        if action is VaultConfirmationAction.REPLACE:
+            if vault is None:
+                raise PendingOperationError("Конфигурация vault уже изменилась.")
+            return VaultSelectionResult(
+                VaultSelectionStatus.REPLACED if approve else VaultSelectionStatus.CANCELLED, vault
+            )
+        if vault is None:
+            return VaultDisconnectResult(VaultDisconnectStatus.NOT_CONNECTED)
         return VaultDisconnectResult(
-            VaultDisconnectStatus.CONFIRMATION_REQUIRED,
-            current,
+            VaultDisconnectStatus.DISCONNECTED if approve else VaultDisconnectStatus.CANCELLED, vault
         )
-
-    def has_disconnect_confirmation(self, app_user_id: int) -> bool:
-        """Проверяет наличие активного подтверждения отключения vault."""
-        return self._active_disconnect(app_user_id) is not None
-
-    def confirm_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Удаляет активный vault и зависимые локальные данные после согласия."""
-        if self._active_disconnect(app_user_id) is None:
-            return None
-        current = self._vault_repository.get_for_user(app_user_id)
-        if current is None:
-            self._confirmation_repository.delete(app_user_id)
-            return VaultDisconnectResult(VaultDisconnectStatus.NOT_CONNECTED)
-        self._vault_repository.delete_for_user(app_user_id)
-        self._confirmation_repository.delete(app_user_id)
-        return VaultDisconnectResult(VaultDisconnectStatus.DISCONNECTED, current)
-
-    def cancel_disconnect(self, app_user_id: int) -> VaultDisconnectResult | None:
-        """Отменяет ожидающее отключение и сохраняет активный vault."""
-        if self._active_disconnect(app_user_id) is None:
-            return None
-        current = self._vault_repository.get_for_user(app_user_id)
-        self._confirmation_repository.delete(app_user_id)
-        if current is None:
-            return VaultDisconnectResult(VaultDisconnectStatus.NOT_CONNECTED)
-        return VaultDisconnectResult(VaultDisconnectStatus.CANCELLED, current)
-
-    def _active_replacement(
-        self,
-        app_user_id: int,
-    ) -> VaultActionConfirmation | None:
-        confirmation = self._confirmation_repository.find_active(
-            app_user_id=app_user_id,
-            now=self._clock(),
-        )
-        if (
-            confirmation is None
-            or confirmation.action is not VaultConfirmationAction.REPLACE
-        ):
-            return None
-        return confirmation
-
-    def _active_disconnect(
-        self,
-        app_user_id: int,
-    ) -> VaultActionConfirmation | None:
-        confirmation = self._confirmation_repository.find_active(
-            app_user_id=app_user_id,
-            now=self._clock(),
-        )
-        if (
-            confirmation is None
-            or confirmation.action is not VaultConfirmationAction.DISCONNECT
-        ):
-            return None
-        return confirmation
 
 
 def parse_github_repository_url(value: str) -> tuple[str, str]:

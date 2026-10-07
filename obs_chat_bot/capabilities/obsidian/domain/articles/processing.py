@@ -84,6 +84,19 @@ class ProcessArticleUrlUseCase:
         self._text_extractor = text_extractor
         self._error_recorder = error_recorder
 
+    def get_saved_for_user(self, article_id: int, app_user_id: int) -> Article | None:
+        """Читает сохранённую статью для адресного повторного анализа.
+
+        Args:
+            article_id: Устойчивый ID статьи.
+            app_user_id: Внутренний владелец статьи.
+
+        Returns:
+            Статья только указанного владельца либо `None`.
+        """
+        article = self._article_repository.get_by_id(article_id)
+        return article if article is not None and article.app_user_id == app_user_id else None
+
     def execute(self, command: ProcessArticleUrlCommand) -> ProcessArticleUrlResult:
         """Выполняет pipeline обработки URL.
 
@@ -119,10 +132,7 @@ class ProcessArticleUrlUseCase:
         if (
             existing is not None
             and not command.force_reprocess
-            and (
-                existing.cleaned_text
-                or existing.status is ArticleStatus.REVIEWED
-            )
+            and (existing.cleaned_text or existing.status is ArticleStatus.REVIEWED)
         ):
             return ProcessArticleUrlResult(
                 article=existing,
@@ -151,9 +161,7 @@ class ProcessArticleUrlUseCase:
                 ProcessingStage.FETCHING,
                 error,
                 preserved_status=(
-                    original_status
-                    if command.preserve_existing_on_failure
-                    else None
+                    original_status if command.preserve_existing_on_failure else None
                 ),
             )
             raise ProcessArticleUrlError(
@@ -171,9 +179,7 @@ class ProcessArticleUrlUseCase:
                 ProcessingStage.EXTRACTION,
                 error,
                 preserved_status=(
-                    original_status
-                    if command.preserve_existing_on_failure
-                    else None
+                    original_status if command.preserve_existing_on_failure else None
                 ),
             )
             raise ProcessArticleUrlError(
@@ -198,9 +204,7 @@ class ProcessArticleUrlUseCase:
                 ProcessingStage.STORAGE,
                 error,
                 preserved_status=(
-                    original_status
-                    if command.preserve_existing_on_failure
-                    else None
+                    original_status if command.preserve_existing_on_failure else None
                 ),
             )
             raise ProcessArticleUrlError(
@@ -219,9 +223,7 @@ class ProcessArticleUrlUseCase:
                 ProcessingStage.STORAGE,
                 error,
                 preserved_status=(
-                    original_status
-                    if command.preserve_existing_on_failure
-                    else None
+                    original_status if command.preserve_existing_on_failure else None
                 ),
             )
             raise error

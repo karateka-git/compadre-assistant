@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
+
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from datetime import UTC, datetime
 
 from obs_chat_bot.capabilities.obsidian.data.sqlite.proposal_dtos import (
@@ -26,6 +28,10 @@ def proposal_dto_from_domain(proposal: ObsidianProposal) -> ObsidianProposalDto:
     """
     return ObsidianProposalDto(
         id=proposal.id,
+        origin_channel=proposal.origin.channel,
+        origin_chat_id=proposal.origin.chat_id,
+        version=proposal.version,
+        execution_expires_at=_format_optional_timestamp(proposal.execution_expires_at),
         app_user_id=proposal.app_user_id,
         article_id=proposal.article_id,
         analysis_id=proposal.analysis_id,
@@ -56,6 +62,10 @@ def proposal_dto_from_row(row: sqlite3.Row) -> ObsidianProposalDto:
     """
     return ObsidianProposalDto(
         id=row["id"],
+        origin_channel=row["origin_channel"],
+        origin_chat_id=row["origin_chat_id"],
+        version=row["version"],
+        execution_expires_at=row["execution_expires_at"],
         app_user_id=row["app_user_id"],
         article_id=row["article_id"],
         analysis_id=row["analysis_id"],
@@ -91,6 +101,11 @@ def proposal_from_dto(dto: ObsidianProposalDto) -> ObsidianProposal:
         raise ValueError("Saved proposal must contain timestamps")
     return ObsidianProposal(
         id=dto.id,
+        origin=PendingOrigin(dto.origin_channel, dto.origin_chat_id),
+        version=dto.version,
+        execution_expires_at=(
+            _parse_timestamp(dto.execution_expires_at) if dto.execution_expires_at else None
+        ),
         app_user_id=dto.app_user_id,
         article_id=dto.article_id,
         analysis_id=dto.analysis_id,
@@ -106,11 +121,7 @@ def proposal_from_dto(dto: ObsidianProposalDto) -> ObsidianProposal:
         applied_commit_sha=dto.applied_commit_sha,
         created_at=_parse_timestamp(dto.created_at),
         updated_at=_parse_timestamp(dto.updated_at),
-        completed_at=(
-            _parse_timestamp(dto.completed_at)
-            if dto.completed_at is not None
-            else None
-        ),
+        completed_at=(_parse_timestamp(dto.completed_at) if dto.completed_at is not None else None),
     )
 
 

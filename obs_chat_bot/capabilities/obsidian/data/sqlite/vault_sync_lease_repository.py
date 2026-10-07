@@ -44,7 +44,9 @@ class SQLiteVaultSyncLeaseRepository(VaultSyncLeaseRepository):
                     acquired_at,
                     expires_at
                 )
-                VALUES (?, ?, ?, ?, ?)
+                SELECT ?, ?, ?, ?, ? WHERE EXISTS (
+                    SELECT 1 FROM obsidian_vaults WHERE app_user_id = ? AND id = ?
+                )
                 ON CONFLICT(vault_id) DO UPDATE SET
                     owner = excluded.owner,
                     acquired_at = excluded.acquired_at,
@@ -63,6 +65,8 @@ class SQLiteVaultSyncLeaseRepository(VaultSyncLeaseRepository):
                     requested.owner,
                     format_utc_timestamp(now),
                     format_utc_timestamp(expires_at),
+                    app_user_id,
+                    vault_id,
                 ),
             )
         if cursor.rowcount != 1:

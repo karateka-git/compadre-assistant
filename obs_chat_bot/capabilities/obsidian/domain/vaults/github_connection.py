@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
@@ -8,6 +9,7 @@ from threading import Lock, Thread
 import time
 from uuid import uuid4
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
@@ -38,6 +40,7 @@ class _GitHubConnectionSession:
     authorization: GitHubDeviceAuthorization | None
     completion_handler: GitHubConnectionCompletionHandler | None
     owner: str
+    origin: PendingOrigin
 
 
 class GitHubConnectionCoordinator(GitHubConnectionStarter):
@@ -74,31 +77,51 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
     def start(
         self,
         app_user_id: int,
+        origin: PendingOrigin,
         completion_handler: GitHubConnectionCompletionHandler | None = None,
     ) -> GitHubConnectionStartResult:
-        """Возвращает challenge немедленно и запускает polling в daemon thread."""
+        """Возвращает challenge исходному чату и запускает polling в daemon thread.
+
+        Args:
+            app_user_id: Внутренний пользователь, владеющий общим Device Flow claim.
+            origin: Адрес чата, начавшего авторизацию.
+            completion_handler: Доставка результата в тот же исходный чат.
+
+        Returns:
+            Challenge только исходного чата либо безопасный признак занятости.
+
+        Raises:
+            ValueError: Внутренний ID пользователя некорректен.
+            GitHubGatewayError: Device Flow не удалось начать.
+        """
         if app_user_id <= 0:
             raise ValueError("app_user_id must be positive")
-        pending = self.get_pending(app_user_id)
+        pending = self.get_pending(app_user_id, origin)
         if pending is not None:
             return pending
 
-        return self._start_device_flow(app_user_id, completion_handler)
+        return self._start_device_flow(app_user_id, origin, completion_handler)
 
     def get_pending(
         self,
         app_user_id: int,
+        origin: PendingOrigin,
     ) -> GitHubConnectionStartResult | None:
         """Читает ожидающую авторизацию текущего или соседнего процесса.
 
         Args:
             app_user_id: Внутренний пользователь приложения.
+            origin: Чат текущего события; чужой challenge не возвращается.
 
         Returns:
             Текущий challenge или признак незавершённой shared attempt без запуска API.
         """
         with self._lock:
             if app_user_id in self._sessions:
+                if self._sessions[app_user_id].origin != origin:
+                    return GitHubConnectionStartResult(
+                        GitHubConnectionStartStatus.IN_PROGRESS, self._installation_url
+                    )
                 authorization = self._sessions[app_user_id].authorization
                 status = (
                     GitHubConnectionStartStatus.ALREADY_PENDING
@@ -110,9 +133,7 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
                     installation_url=self._installation_url,
                     authorization=authorization,
                 )
-        if self._state_store.has_active_attempt(
-            app_user_id=app_user_id, now=self._clock()
-        ):
+        if self._state_store.has_active_attempt(app_user_id=app_user_id, now=self._clock()):
             return GitHubConnectionStartResult(
                 status=GitHubConnectionStartStatus.IN_PROGRESS,
                 installation_url=self._installation_url,
@@ -122,6 +143,7 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
     def _start_device_flow(
         self,
         app_user_id: int,
+        origin: PendingOrigin,
         completion_handler: GitHubConnectionCompletionHandler | None,
     ) -> GitHubConnectionStartResult:
         """Захватывает shared claim и запускает Device Flow в текущем процессе."""
@@ -143,6 +165,7 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
                 authorization=None,
                 completion_handler=completion_handler,
                 owner=owner,
+                origin=origin,
             )
             self._sessions[app_user_id] = session
 
@@ -153,6 +176,7 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
                 authorization=authorization,
                 completion_handler=completion_handler,
                 owner=owner,
+                origin=origin,
             )
             with self._lock:
                 self._sessions[app_user_id] = session

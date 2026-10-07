@@ -83,16 +83,13 @@ class FakeIdentity:
         """Возвращает идентифицированного пользователя."""
         return self.user
 
-    def has_pending_rebind(self, _identity: object) -> bool:
-        """Сообщает о перепривязке общего канала."""
-        return self.pending
 
-    def confirm_rebind(self, _identity: object) -> AppUser:
+    def confirm_rebind(self, _identity: object, **_decision) -> AppUser:
         """Завершает подтверждённую перепривязку."""
         self.pending = False
         return self.user
 
-    def cancel_rebind(self, _identity: object) -> None:
+    def cancel_rebind(self, _identity: object, **_decision) -> None:
         """Отменяет ожидающую перепривязку."""
         self.pending = False
 
@@ -215,6 +212,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIsNone(self.repository.get(self.key))
         self.assertTrue(self.identity.pending)
         self.dispatcher.execute(_event("да"))
+        self.assertTrue(self.identity.pending)
+        self.dispatcher.execute(_event("/confirm core identity 1 1 yes"))
         self.assertFalse(self.identity.pending)
         self.assertFalse(self.capability.calls)
 

@@ -7,7 +7,7 @@ import logging
 from obs_chat_bot.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from obs_chat_bot.core.presentation.incoming.ports import (
-    BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
+    ConfirmationAction, BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
 )
 from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
@@ -44,11 +44,8 @@ class IncomingMessageResultType(StrEnum):
     LINKED = "linked"
     LINK_ALREADY_BOUND = "link_already_bound"
     LINK_CODE_INVALID = "link_code_invalid"
-    LINK_REBIND_CONFIRMATION_REQUIRED = "link_rebind_confirmation_required"
     LINK_REBOUND = "link_rebound"
     LINK_REBIND_CANCELLED = "link_rebind_cancelled"
-    LINK_REBIND_CONFIRMATION_MISSING = "link_rebind_confirmation_missing"
-    LINK_REBIND_CONFIRMATION_PENDING = "link_rebind_confirmation_pending"
     MODE_HINT = "mode_hint"  # В этом чате возможность ещё не выбрана.
     MODE_EXITED = "mode_exited"  # Выбор очищен только для указанного чата.
     PROFILE_STATUS = "profile_status"  # Общие сведения о пользователе и выбранном режиме.
@@ -150,43 +147,54 @@ class IncomingMessageDispatcher:
                 capability_help=self._registry.help(),
             )
         identity = _incoming_identity_from_event(event)
-        normalized = text.lower()
-        if not is_general_entry and normalized in {"да", "yes", "y", "нет", "no", "n"}:
-            if self._user_identity_service.has_pending_rebind(identity):
-                if normalized in {"да", "yes", "y"}:
-                    try:
-                        user = self._user_identity_service.confirm_rebind(identity)
-                    except InvalidLinkCodeError as error:
-                        return ProcessIncomingMessageResult(
-                            type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_MISSING,
-                            error=error,
-                        )
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.LINK_REBOUND,
-                        app_user=user,
+        if command is ChatCommand.CONFIRM:
+            parts = parsed.arguments.split() if parsed else []
+            if parts and parts[0] == "core":
+                if (
+                    len(parts) != 5
+                    or parts[1] != "identity"
+                    or not parts[2].isdigit()
+                    or not parts[3].isdigit()
+                    or parts[4] not in {"yes", "no"}
+                ):
+                    return IncomingResponse(
+                        "Используй адресную команду из актуального запроса привязки."
                     )
-                self._user_identity_service.cancel_rebind(identity)
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.LINK_REBIND_CANCELLED
-                )
+                try:
+                    if parts[4] == "yes":
+                        user = self._user_identity_service.confirm_rebind(
+                            identity, confirmation_id=int(parts[2]), version=int(parts[3])
+                        )
+                        return ProcessIncomingMessageResult(
+                            IncomingMessageResultType.LINK_REBOUND, app_user=user
+                        )
+                    self._user_identity_service.cancel_rebind(
+                        identity, confirmation_id=int(parts[2]), version=int(parts[3])
+                    )
+                    return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
+                except InvalidLinkCodeError as error:
+                    return IncomingResponse(
+                        "Действие недоступно, устарело или истекло. Повтори /link в исходном чате.",
+                        error,
+                    )
             user = self._user_identity_service.resolve(identity)
             if user is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.CONFIRMATION_MISSING,
+                return ProcessIncomingMessageResult(IncomingMessageResultType.UNKNOWN_IDENTITY)
+            mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+            target = parts[0] if parts else ""
+            if mode is None or mode.capability_id != target:
+                capability = self._registry.by_id(target)
+                return IncomingResponse(
+                    f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
+                    if capability
+                    else self._registry.entry_hint()
                 )
             return self._dispatch(user, event, completion_handler)
-
-        if not is_general_entry and self._user_identity_service.has_pending_rebind(identity):
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_PENDING
-            )
 
         if command is ChatCommand.START:
             user = self._user_identity_service.resolve(identity)
             if user is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.START_UNREGISTERED
-                )
+                return ProcessIncomingMessageResult(type=IncomingMessageResultType.START_UNREGISTERED)
             if user.display_name is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
@@ -219,25 +227,29 @@ class IncomingMessageDispatcher:
 
         if command is ChatCommand.LINK:
             if parsed is None or not parsed.arguments:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.LINK_COMMAND_INVALID
-                )
+                return ProcessIncomingMessageResult(type=IncomingMessageResultType.LINK_COMMAND_INVALID)
             try:
-                user = self._user_identity_service.link(
-                    code=parsed.arguments, identity=identity
-                )
+                user = self._user_identity_service.link(code=parsed.arguments, identity=identity)
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINKED,
                     app_user=user,
                 )
             except IdentityAlreadyBoundError as error:
                 try:
-                    target = self._user_identity_service.request_rebind_confirmation(
+                    pending = self._user_identity_service.request_rebind_confirmation(
                         code=parsed.arguments, identity=identity
                     )
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_REQUIRED,
-                        app_user=target,
+                    actions = tuple(
+                        ConfirmationAction(
+                            f"core:identity:{pending.id}:{pending.version}:{decision}",
+                            label,
+                            f"/confirm core identity {pending.id} {pending.version} {decision}",
+                        )
+                        for decision, label in (("yes", "Перенести identity"), ("no", "Отменить"))
+                    )
+                    return IncomingResponse(
+                        "Канал уже привязан к другому профилю. Подтверди перенос адресной командой.",
+                        actions=actions,
                     )
                 except IdentityAlreadyBoundError:
                     return ProcessIncomingMessageResult(
@@ -257,9 +269,7 @@ class IncomingMessageDispatcher:
 
         user = self._user_identity_service.resolve(identity)
         if user is None:
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.UNKNOWN_IDENTITY
-            )
+            return ProcessIncomingMessageResult(type=IncomingMessageResultType.UNKNOWN_IDENTITY)
         if command is ChatCommand.EXIT:
             self._chat_mode_repository.clear(ChatModeKey(user.id, event.channel, event.chat_id))
             return ProcessIncomingMessageResult(
@@ -281,13 +291,12 @@ class IncomingMessageDispatcher:
             )
         if command is ChatCommand.NAME:
             return self._save_name(
-                parsed.arguments if parsed is not None else "", user,
+                parsed.arguments if parsed is not None else "",
+                user,
                 registration=user.display_name is None,
             )
         if command is ChatCommand.STATUS:
-            mode = self._chat_mode_repository.get(
-                ChatModeKey(user.id, event.channel, event.chat_id)
-            )
+            mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.PROFILE_STATUS,
                 app_user=user,

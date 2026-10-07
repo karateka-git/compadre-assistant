@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from typing import Protocol
 
 from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultSearchResult
@@ -65,10 +68,33 @@ class ObsidianProposalRepository(Protocol):
     """Хранит pending-предложения и атомарно завершает review workflow."""
 
     def save_pending(self, proposal: ObsidianProposal) -> ObsidianProposal:
-        """Сохраняет предложение, если у пользователя нет другого pending."""
+        """Сохраняет предложение, если у статьи нет другого активного цикла."""
 
-    def get_pending(self, app_user_id: int) -> ObsidianProposal | None:
-        """Возвращает текущее ожидающее предложение пользователя."""
+    def list_pending(self, app_user_id: int, origin: PendingOrigin) -> tuple[ObsidianProposal, ...]:
+        """Возвращает активные предложения только исходного чата."""
+
+    def get_by_id(self, proposal_id: int, app_user_id: int) -> ObsidianProposal | None:
+        """Читает конкретную операцию данного владельца."""
+
+    def get_active_for_article(
+        self, *, app_user_id: int, article_id: int
+    ) -> ObsidianProposal | None:
+        """Находит активный цикл одной статьи для dedup."""
+
+    def claim(
+        self,
+        *,
+        proposal_id: int,
+        app_user_id: int,
+        origin: PendingOrigin,
+        version: int,
+        now: datetime,
+        expires_at: datetime,
+    ) -> ObsidianProposal | None:
+        """Атомарно проверяет адрес, статус и версию перед выполнением."""
+
+    def release_claim(self, proposal: ObsidianProposal) -> ObsidianProposal | None:
+        """Возвращает захваченную операцию в ожидание после внешней ошибки."""
 
     def get_latest_applied_for_article(
         self,
@@ -83,6 +109,8 @@ class ObsidianProposalRepository(Protocol):
         *,
         proposal_id: int,
         app_user_id: int,
+        origin: PendingOrigin,
+        version: int,
     ) -> ObsidianProposal | None:
         """Отменяет только текущее pending-предложение пользователя."""
 
@@ -91,6 +119,7 @@ class ObsidianProposalRepository(Protocol):
         *,
         proposal_id: int,
         app_user_id: int,
+        version: int,
     ) -> ObsidianProposal | None:
         """Помечает предложение устаревшим после расхождения GitHub SHA."""
 
@@ -99,6 +128,7 @@ class ObsidianProposalRepository(Protocol):
         *,
         proposal_id: int,
         app_user_id: int,
+        version: int,
         applied_commit_sha: str | None,
         head_commit_sha: str | None,
         tree_sha: str | None,

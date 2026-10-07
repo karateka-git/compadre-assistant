@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+
+
 from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from tempfile import TemporaryDirectory
 import unittest
 
@@ -29,8 +33,17 @@ class SQLiteObsidianProposalRepositoryTests(unittest.TestCase):
             repository = SQLiteObsidianProposalRepository(connection)
             pending = repository.save_pending(_proposal(ObsidianProposalAction.ADD))
 
+            pending = repository.claim(
+                proposal_id=pending.id,
+                app_user_id=1,
+                origin=pending.origin,
+                version=pending.version,
+                now=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
             applied = repository.complete_applied(
                 proposal_id=pending.id or 0,
+                version=pending.version,
                 app_user_id=1,
                 applied_commit_sha="commit-new",
                 head_commit_sha="commit-new",
@@ -62,7 +75,7 @@ class SQLiteObsidianProposalRepositoryTests(unittest.TestCase):
             self.assertEqual(tuple(vault), ("commit-new", "tree-new"))
             self.assertEqual(tuple(note), ("Tech/New.md", "blob-new", "# New\nText"))
 
-    def test_only_one_pending_proposal_is_allowed_per_user(self) -> None:
+    def test_only_one_active_cycle_is_allowed_per_article(self) -> None:
         with _database() as connection:
             repository = SQLiteObsidianProposalRepository(connection)
             repository.save_pending(_proposal(ObsidianProposalAction.SKIP))
@@ -75,8 +88,17 @@ class SQLiteObsidianProposalRepositoryTests(unittest.TestCase):
             repository = SQLiteObsidianProposalRepository(connection)
             pending = repository.save_pending(_proposal(ObsidianProposalAction.SKIP))
 
+            pending = repository.claim(
+                proposal_id=pending.id,
+                app_user_id=1,
+                origin=pending.origin,
+                version=pending.version,
+                now=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
             applied = repository.complete_applied(
                 proposal_id=pending.id or 0,
+                version=pending.version,
                 app_user_id=1,
                 applied_commit_sha=None,
                 head_commit_sha=None,
@@ -95,8 +117,17 @@ class SQLiteObsidianProposalRepositoryTests(unittest.TestCase):
         with _database() as connection:
             repository = SQLiteObsidianProposalRepository(connection)
             pending = repository.save_pending(_proposal(ObsidianProposalAction.SKIP))
+            pending = repository.claim(
+                proposal_id=pending.id,
+                app_user_id=1,
+                origin=pending.origin,
+                version=pending.version,
+                now=datetime.now(UTC),
+                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+            )
             repository.complete_applied(
                 proposal_id=pending.id or 0,
+                version=pending.version,
                 app_user_id=1,
                 applied_commit_sha=None,
                 head_commit_sha=None,
@@ -167,6 +198,7 @@ def _proposal(action: ObsidianProposalAction) -> ObsidianProposal:
     if action is ObsidianProposalAction.ADD:
         kwargs = {"target_path": "Tech/New.md", "proposed_markdown": "# New\nText"}
     return ObsidianProposal(
+        origin=PendingOrigin("telegram", "chat"),
         app_user_id=1,
         article_id=1,
         analysis_id=1,

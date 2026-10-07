@@ -1,4 +1,5 @@
 """Тесты форматирования общих ответов presentation-слоя."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -371,21 +372,6 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("ABC123", reply)
         self.assertIn("/link ABC123", reply)
 
-    def test_format_incoming_message_result_reports_rebind_confirmation(self) -> None:
-        """Запрос перепривязки просит ответить да или нет."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_REQUIRED,
-                app_user=AppUser(id=99, display_name="Основной профиль"),
-            )
-        )
-
-        self.assertIn("Перепривязать", reply)
-        self.assertIn("Основной профиль", reply)
-        self.assertNotIn("99", reply)
-        self.assertIn("да", reply)
-        self.assertIn("нет", reply)
-
     def test_format_incoming_message_result_reports_rebind_success(self) -> None:
         """Подтвержденная перепривязка сообщает нового пользователя."""
         reply = format_incoming_message_result(
@@ -398,18 +384,6 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("перепривязал", reply)
         self.assertIn("Основной профиль", reply)
         self.assertNotIn("99", reply)
-
-    def test_format_incoming_message_result_reports_pending_rebind(self) -> None:
-        """Pending-перепривязка просит ответить да или нет."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.LINK_REBIND_CONFIRMATION_PENDING,
-            )
-        )
-
-        self.assertIn("жду ответ", reply)
-        self.assertIn("да", reply)
-        self.assertIn("нет", reply)
 
     def test_format_incoming_message_result_reports_processing_error(self) -> None:
         """Ошибка article pipeline получает понятный текст ответа."""
@@ -428,6 +402,7 @@ class TelegramResponsesTest(unittest.TestCase):
     def test_applied_commit_reports_post_commit_index_warning(self) -> None:
         """Сбой embeddings не выдаётся за ошибку уже успешного GitHub commit."""
         proposal = ObsidianProposal(
+            origin=PendingOrigin("telegram", "chat"),
             id=1,
             app_user_id=1,
             article_id=1,

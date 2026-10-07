@@ -1,4 +1,5 @@
 """Тесты доменных правил GitHub и Obsidian vault."""
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 import unittest
@@ -70,12 +71,16 @@ class VaultDomainTest(unittest.TestCase):
         now = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
         with self.assertRaises(ValueError):
             VaultActionConfirmation(
+                origin=PendingOrigin("telegram", "chat"),
+                base_vault_id=1,
                 app_user_id=1,
                 action=VaultConfirmationAction.REPLACE,
                 expires_at=now + timedelta(minutes=10),
             )
         with self.assertRaises(ValueError):
             VaultActionConfirmation(
+                origin=PendingOrigin("telegram", "chat"),
+                base_vault_id=1,
                 app_user_id=1,
                 action=VaultConfirmationAction.REPLACE,
                 replacement=ObsidianVault(

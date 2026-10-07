@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+
+from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 from datetime import UTC, datetime
 
 from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_dtos import (
@@ -198,10 +200,50 @@ def vault_sync_lease_from_row(row: sqlite3.Row) -> VaultSyncLease:
     return vault_sync_lease_from_dto(vault_sync_lease_dto_from_row(row))
 
 
+def vault_confirmation_dto_from_domain(
+    confirmation: VaultActionConfirmation,
+) -> VaultActionConfirmationDto:
+    """Передаёт адресное ожидание в отдельную модель хранения SQLite.
+
+    Args:
+        confirmation: Предметная операция и предлагаемая конфигурация.
+
+    Returns:
+        DTO с плоскими полями конфигурации и текстовыми временными метками.
+    """
+    replacement = confirmation.replacement
+    return VaultActionConfirmationDto(
+        id=confirmation.id,
+        app_user_id=confirmation.app_user_id,
+        origin_channel=confirmation.origin.channel,
+        origin_chat_id=confirmation.origin.chat_id,
+        base_vault_id=confirmation.base_vault_id,
+        version=confirmation.version,
+        status=confirmation.status,
+        action=confirmation.action.value,
+        installation_id=replacement.installation_id if replacement else None,
+        repository_id=replacement.repository_id if replacement else None,
+        owner=replacement.owner if replacement else None,
+        repository=replacement.repository if replacement else None,
+        branch=replacement.branch if replacement else None,
+        root_path=replacement.root_path if replacement else None,
+        expires_at=format_utc_timestamp(confirmation.expires_at),
+        created_at=(
+            format_utc_timestamp(confirmation.created_at) if confirmation.created_at else None
+        ),
+    )
+
+
 def vault_confirmation_dto_from_row(row: sqlite3.Row) -> VaultActionConfirmationDto:
     """Преобразует строку SQLite в DTO подтверждения действия над vault."""
     return VaultActionConfirmationDto(
         app_user_id=row["app_user_id"],
+        id=row["id"],
+        origin_channel=row["origin_channel"],
+        origin_chat_id=row["origin_chat_id"],
+        base_vault_id=row["base_vault_id"],
+        version=row["version"],
+        status=row["status"],
         action=row["action"],
         installation_id=row["installation_id"],
         repository_id=row["repository_id"],
@@ -244,6 +286,11 @@ def vault_confirmation_from_dto(
         )
     return VaultActionConfirmation(
         app_user_id=dto.app_user_id,
+        id=dto.id,
+        origin=PendingOrigin(dto.origin_channel, dto.origin_chat_id),
+        base_vault_id=dto.base_vault_id,
+        version=dto.version,
+        status=dto.status,
         action=action,
         replacement=replacement,
         expires_at=parse_utc_timestamp(dto.expires_at),
