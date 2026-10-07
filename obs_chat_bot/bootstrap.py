@@ -8,6 +8,7 @@ from pathlib import Path
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
+    CapabilityDescriptor,
     IncomingCapabilityPort,
     IncomingResponse,
 )
@@ -15,7 +16,6 @@ from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
 )
 from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
-from obs_chat_bot.core.presentation.incoming.ports import ProfileSetupPort
 from obs_chat_bot.core.domain.users.identity import UserIdentityService
 from obs_chat_bot.capabilities.obsidian.bootstrap import (
     AnalyzeArticleUseCaseFactory,
@@ -65,8 +65,7 @@ def create_incoming_message_dispatcher(
     capabilities: tuple[IncomingCapabilityPort, ...],
     user_identity_service: UserIdentityService,
     chat_mode_repository: ChatModeRepository,
-    profile_setup: ProfileSetupPort | None = None,
-    registration_capability_id: str | None = None,
+    disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
 
@@ -74,8 +73,7 @@ def create_incoming_message_dispatcher(
         capabilities: Только включённые обработчики, включая пользовательские реализации.
         user_identity_service: Общий сервис проверенных identities.
         chat_mode_repository: Хранилище режима конкретного чата.
-        profile_setup: Временный прежний onboarding до шага 2.3.
-        registration_capability_id: Вход для продолжения прежнего onboarding.
+        disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
 
     Returns:
         Диспетчер с проверенным реестром точек входа.
@@ -84,11 +82,9 @@ def create_incoming_message_dispatcher(
         ValueError: Реестр содержит конфликт ID или команд входа.
     """
     return IncomingMessageDispatcher(
-        registry=CapabilityRegistry(capabilities),
+        registry=CapabilityRegistry(capabilities, disabled_capabilities),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
-        profile_setup=profile_setup,
-        registration_capability_id=registration_capability_id,
     )
 
 
@@ -163,8 +159,9 @@ def process_channel_incoming_message(
         ) if "obsidian" in enabled_capabilities else None
         use_case = create_incoming_message_dispatcher(
             capabilities=(entry,) if entry else (),
-            profile_setup=entry,
-            registration_capability_id="obsidian" if entry else None,
+            disabled_capabilities=() if entry else (
+                CapabilityDescriptor("obsidian", "/obsidian", "работа со статьями и Obsidian vault"),
+            ),
             user_identity_service=create_user_identity_service(connection),
             chat_mode_repository=SQLiteChatModeRepository(connection),
         )

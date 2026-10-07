@@ -15,6 +15,7 @@ from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
 from obs_chat_bot.core.domain.users.entities import AppUser
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from test_incoming_boundary import FakeIdentity
+from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
@@ -76,6 +77,7 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                         article_url_use_case=process_use_case,
                         article_analysis_use_case=analysis_use_case,
                         incoming_message_repository=message_repository,
+                        vault_selection_manager=FakeVaultSelectionManager(selected=_test_vault(1)),
                     ),)),
                     user_identity_service=identity,
                     chat_mode_repository=SQLiteChatModeRepository(connection),

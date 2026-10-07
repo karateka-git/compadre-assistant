@@ -594,14 +594,22 @@ def create_obsidian_entry(
     article_url_use_case = (
         use_case_factory or create_process_article_url_use_case
     )(connection)
+    llm_configured = bool(
+        openai_api_key.strip() and openai_model.strip()
+        and validate_external_http_url(openai_base_url) is None
+    )
     article_analysis_use_case = (
         analysis_use_case_factory(connection)
         if analysis_use_case_factory is not None
-        else create_analyze_article_use_case(
-            connection,
-            openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key,
-            openai_model=openai_model,
+        else (
+            create_analyze_article_use_case(
+                connection,
+                openai_base_url=openai_base_url,
+                openai_api_key=openai_api_key,
+                openai_model=openai_model,
+            )
+            if llm_configured
+            else None
         )
     )
     gateway = runtime.repository_gateway if runtime is not None else None
@@ -637,12 +645,13 @@ def create_obsidian_entry(
                 embedding_config=embedding_config,
                 created_note_tag=created_note_tag,
             )
-            return handler._complete_github_registration(
+            return handler._complete_github_connection(
                 repository_arguments, app_user, completion
             )
 
     return ObsidianMessageHandler(
         github_completion_processor=complete_github,
+        llm_configured=llm_configured or analysis_use_case_factory is not None,
         article_url_use_case=article_url_use_case,
         article_analysis_use_case=article_analysis_use_case,
         incoming_message_repository=create_incoming_message_repository(connection),
@@ -664,7 +673,7 @@ def create_obsidian_entry(
             embedding_config=embedding_config,
             chunking_config=chunking_config,
             created_note_tag=created_note_tag,
-        ),
+        ) if llm_configured else None,
         obsidian_confirmation_service=(
             create_obsidian_proposal_confirmation_service(
                 connection,

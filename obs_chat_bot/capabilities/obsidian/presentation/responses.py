@@ -111,7 +111,9 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> str:
                 "и первую синхронизацию."
             )
         case ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE:
-            return "GitHub connector пока не настроен на сервере."
+            return "Провайдер GitHub не настроен на сервере."
+        case ObsidianResultType.LLM_NOT_CONFIGURED:
+            return "Провайдер LLM не настроен на сервере; анализ статей пока недоступен."
         case ObsidianResultType.GITHUB_CONNECT_FAILED:
             return _format_github_failure(result)
         case ObsidianResultType.GITHUB_APP_REQUIRED:
@@ -127,9 +129,9 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> str:
                 "Выбери repository и разреши `Contents: read and write`, "
                 "затем снова пришли его ссылку."
             )
-        case ObsidianResultType.REGISTRATION_VAULT_REQUIRED:
+        case ObsidianResultType.VAULT_REQUIRED:
             return (
-                f"{_display_name(result)}, осталось подключить Obsidian vault.\n"
+                f"{_display_name(result)}, твой Obsidian vault не подключён.\n"
                 "Пришли ссылку на GitHub-репозиторий "
                 "с Obsidian vault."
             )

@@ -613,14 +613,13 @@ def _make_use_case(**dependencies: object) -> PresentationScenario:
     if identity_service is None:
         identity_service = FakeUserIdentityService()
         identity_service.app_user = AppUser(id=1, display_name="Тест")
+    dependencies.setdefault("vault_selection_manager", FakeVaultSelectionManager(selected=_test_vault(42)))
     obsidian = RecordingObsidianHandler(**dependencies)
     modes = MemoryChatModes()
     dispatcher = IncomingMessageDispatcher(
         registry=CapabilityRegistry((obsidian,)),
         user_identity_service=identity_service,
         chat_mode_repository=modes,
-        profile_setup=obsidian,
-        registration_capability_id="obsidian",
     )
     return PresentationScenario(dispatcher, obsidian, modes)
 
@@ -1101,8 +1100,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertIn(starter.installation_url, completions[-1].response.text)
 
-    def test_article_is_blocked_until_registration_has_vault(self) -> None:
-        """Статьи не обрабатываются до завершения подключения Obsidian vault."""
+    def test_article_is_blocked_until_obsidian_has_vault(self) -> None:
+        """Статьи внутри Obsidian требуют подключённый vault готового профиля."""
         article_use_case = FakeArticleUrlUseCase()
         use_case = _make_use_case(
             article_url_use_case=article_use_case,
@@ -1116,7 +1115,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertEqual(
             result.type,
-            ObsidianResultType.REGISTRATION_VAULT_REQUIRED,
+            ObsidianResultType.VAULT_REQUIRED,
         )
         self.assertEqual(article_use_case.commands, [])
 
@@ -1152,10 +1151,10 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             IncomingMessageResultType.REGISTRATION_NAME_SAVED,
         )
         self.assertEqual(result.app_user.display_name, "Влад Ерофеев")
-        self.assertFalse(result.onboarding.ready)
+        self.assertIsNone(use_case.modes.get(ChatModeKey(77, "telegram", "chat-1")))
 
     def test_execute_saves_name_without_reselecting_existing_vault(self) -> None:
-        """Переходный профиль с vault завершает onboarding только вводом имени."""
+        """Профиль с vault завершает регистрацию именем без выбора режима."""
         identity_service = FakeRegisteringIdentityService(existing=AppUser(id=42))
         selected_vault = _test_vault(42)
         use_case = _make_use_case(
@@ -1172,7 +1171,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             result.type,
             IncomingMessageResultType.REGISTRATION_NAME_SAVED,
         )
-        self.assertTrue(result.onboarding.ready)
+        self.assertIsNone(use_case.modes.get(ChatModeKey(42, "telegram", "chat-1")))
 
     def test_execute_name_command_changes_profile_name(self) -> None:
         """`/name` меняет общее имя пользователя всех связанных каналов."""

@@ -99,15 +99,15 @@ class CapabilityCompositionTest(unittest.TestCase):
             self.assertIsNone(SQLiteChatModeRepository(connection).get(self.key))
             self.assertIsNotNone(SQLiteArticleRepository(connection).find_by_normalized_url(saved.normalized_url, app_user_id=self.user.id))
 
-    def test_obsidian_argument_failure_preserves_previous_mode(self) -> None:
-        """Шаг 2.2 не исполняет аргументы /obsidian и сохраняет старый режим."""
+    def test_obsidian_argument_reports_missing_github_provider(self) -> None:
+        """Аргумент /obsidian входит в возможность и проверяет её провайдера."""
         with connect_database(self.database_path) as connection:
             SQLiteChatModeRepository(connection).save(ChatMode(self.key, "old"))
         reply = self.process("/obsidian https://example.com/article")
-        self.assertIsNotNone(reply.error)
-        self.assertIn("без аргумента", reply.text)
+        self.assertIsNone(reply.error)
+        self.assertIn("Провайдер GitHub не настроен", reply.text)
         with connect_database(self.database_path) as connection:
-            self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "old")
+            self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "obsidian")
         self.assertFalse(self.article.commands)
 
     def test_device_flow_completion_uses_fresh_connection_after_exit(self) -> None:
@@ -151,15 +151,15 @@ class CapabilityCompositionTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             self.assertIsNone(SQLiteChatModeRepository(connection).get(self.key))
 
-    def test_initial_name_keeps_previous_onboarding_until_step23(self) -> None:
-        """Первое имя продолжает прежний onboarding; повторные команды не возвращают режим."""
+    def test_initial_name_completes_profile_without_mode(self) -> None:
+        """Первое имя завершает профиль и не выбирает Obsidian."""
         with connect_database(self.database_path) as connection:
             user = create_user_identity_service(connection).register(IncomingIdentity("vk", "new", "peer"))
         common = dict(database_path=self.database_path, openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test", use_case_factory=lambda _connection: self.article, analysis_use_case_factory=lambda _connection: self.analysis)
         reply = process_channel_incoming_message(incoming_message=IncomingEvent("vk", "peer", "1", "/name Имя", "new"), **common)
         self.assertIn("Приятно познакомиться", reply.text)
         with connect_database(self.database_path) as connection:
-            self.assertEqual(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, "vk", "peer")).capability_id, "obsidian")
+            self.assertIsNone(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, "vk", "peer")))
 
 
 class ObsidianEntryStateTest(unittest.TestCase):
@@ -169,7 +169,7 @@ class ObsidianEntryStateTest(unittest.TestCase):
         """Вход напоминает о proposal без его применения или отмены."""
         confirmation = FakeConfirmationService(_proposal())
         handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(), obsidian_confirmation_service=confirmation)
-        response = handler.enter(HandlerContext(AppUser(42, display_name="Тест")), IncomingEvent("telegram", "chat", "1", "/obsidian")).response
+        response = handler.enter(HandlerContext(AppUser(42, display_name="Тест")), IncomingEvent("telegram", "chat", "1", "/obsidian"), "").response
         self.assertIn("да", response.text)
         self.assertIn("нет", response.text)
         self.assertEqual(confirmation.confirm_calls, 0)
@@ -181,11 +181,11 @@ class ObsidianEntryStateTest(unittest.TestCase):
         handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(), vault_selection_manager=manager)
         event = IncomingEvent("telegram", "chat", "1", "/obsidian")
         context = HandlerContext(AppUser(42, display_name="Тест"))
-        self.assertIn("octocat/notes", handler.enter(context, event).response.text)
+        self.assertIn("octocat/notes", handler.enter(context, event, "").response.text)
         manager.selected = replace(manager.selected, repository="changed")
         manager.disconnect_pending = True
         manager.replacement_pending = True
-        response = handler.enter(context, event).response
+        response = handler.enter(context, event, "").response
         self.assertIn("octocat/changed", response.text)
         self.assertIn("замены", response.text)
         self.assertIn("отключения", response.text)

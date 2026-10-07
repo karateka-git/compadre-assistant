@@ -10,14 +10,6 @@ from obs_chat_bot.core.domain.users.entities import AppUser
 
 
 @dataclass(frozen=True, slots=True)
-class OnboardingState:
-    """Описывает готовность прежнего сценария настройки профиля до шага 2.3."""
-
-    ready: bool
-    summary: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
 class HelpSection:
     """Описывает раздел справки без зависимости от конкретной возможности."""
 
@@ -30,7 +22,6 @@ class CapabilityHelp:
     """Дополняет общую справку инструкциями возможности."""
 
     sections: tuple[HelpSection, ...] = ()
-    registration_description: str | None = None
     instructions: tuple[str, ...] = ()
 
 
@@ -120,12 +111,15 @@ class IncomingCapabilityPort(Protocol):
         """Возвращает статическое описание возможности для реестра."""
         ...
 
-    def enter(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+    def enter(
+        self, context: HandlerContext, event: IncomingEvent, arguments: str
+    ) -> CapabilityResult:
         """Входит в возможность и показывает актуальное состояние сценария.
 
         Args:
             context: Проверенный пользователь и доступная фоновая доставка.
             event: Исходное событие с командой входа.
+            arguments: Текст после команды входа без предметного разбора ядром.
 
         Returns:
             Общий ответ и признак длительного либо завершённого сценария.
@@ -142,25 +136,4 @@ class IncomingCapabilityPort(Protocol):
         Returns:
             Общий ответ и признак продолжения либо завершения режима.
         """
-        ...
-
-
-class OnboardingReplyKind(StrEnum):
-    """Выбирает этап сохраняемого до шага 2.3 сценария настройки профиля."""
-
-    START = "start"  # Приветствие готового профиля.
-    REQUIRED = "required"  # Профилю ещё нужна настройка возможности.
-    ALREADY_REGISTERED = "already_registered"  # Повторная регистрация.
-    NAME_SAVED = "name_saved"  # Первичное имя сохранено.
-
-
-class ProfileSetupPort(Protocol):
-    """Сохраняет прежнюю связь регистрации и настройки до отдельного шага 2.3."""
-
-    def onboarding_state(self, app_user: AppUser) -> OnboardingState:
-        """Возвращает нейтральную готовность настройки профиля."""
-        ...
-
-    def onboarding_reply(self, kind: OnboardingReplyKind, app_user: AppUser) -> str:
-        """Оформляет этап прежней настройки профиля."""
         ...

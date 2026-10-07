@@ -11,7 +11,7 @@ PROCESSING_ACK_TEXT = "Принял, обрабатываю. Это может �
 def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
     """Формирует только общие ответы регистрации и связывания каналов."""
     match result.type:
-        case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS:
+        case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS | IncomingMessageResultType.CAPABILITY_DISABLED:
             return result.capability_reply or "Выбери возможность через `/help`."
         case IncomingMessageResultType.MODE_EXITED:
             return f"Режим этого чата завершён.\n{result.capability_reply or 'Справка: `/help`.'}"
@@ -30,7 +30,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
                 "Все команды: `/help`."
             )
         case IncomingMessageResultType.START_REGISTERED:
-            return result.capability_reply or "obsChatBot запущен."
+            return f"obsChatBot запущен.\nРад тебя видеть, {_display_name(result)}.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.REGISTERED:
             return (
                 "Готово, я зарегистрировал тебя.\n"
@@ -42,7 +42,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
                 "Как к тебе обращаться? Пришли имя или название профиля."
             )
         case IncomingMessageResultType.REGISTRATION_NAME_SAVED:
-            return result.capability_reply or f"Приятно познакомиться, {_display_name(result)}."
+            return f"Приятно познакомиться, {_display_name(result)}.\nРегистрация завершена.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.NAME_COMMAND_INVALID:
             return (
                 "Не получилось сохранить имя. Используй от 1 до 80 символов "
@@ -59,7 +59,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
                 "Сначала отправь действие, требующее подтверждения, или `/link <код>`."
             )
         case IncomingMessageResultType.ALREADY_REGISTERED:
-            return result.capability_reply or f"{_display_name(result)}, ты уже зарегистрирован."
+            return f"{_display_name(result)}, ты уже зарегистрирован.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.LINK_CODE_CREATED:
             if result.link_code is None:
                 return "Не удалось создать код привязки. Попробуй позже."
@@ -106,8 +106,6 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
                 "Я жду ответ `да` или `нет` по перепривязке канала.\n"
                 "Ответь `да`, чтобы перепривязать канал, или `нет`, чтобы оставить как есть."
             )
-        case IncomingMessageResultType.ONBOARDING_REQUIRED:
-            return result.capability_reply or "Настройка ещё не завершена."
 
 
 def _display_name(result: ProcessIncomingMessageResult) -> str:
@@ -126,10 +124,7 @@ def _format_help(capability: CapabilityHelp | None) -> str:
             continue
         lines.extend(("", f"{section.value}:"))
         for command in commands:
-            if command is ChatCommand.REGISTER and capability is not None and capability.registration_description:
-                lines.append(f"`{command.usage}` — {capability.registration_description}")
-            else:
-                lines.append(str(command))
+            lines.append(str(command))
     if capability is not None:
         for section in capability.sections:
             lines.extend(("", f"{section.title}:", *section.commands))

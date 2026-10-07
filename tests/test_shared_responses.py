@@ -15,7 +15,6 @@ from obs_chat_bot.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
-from obs_chat_bot.core.presentation.incoming.ports import OnboardingReplyKind
 from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
 from obs_chat_bot.core.presentation.incoming.commands import ChatCommand
 from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
@@ -66,19 +65,9 @@ from obs_chat_bot.capabilities.obsidian.presentation.responses import (
 from obs_chat_bot.core.presentation.responses import format_incoming_message_result
 
 
-def _obsidian_handler(vault: ObsidianVault | None = None) -> ObsidianMessageHandler:
-    """Собирает presentation-слой с заданным vault для текстов онбординга."""
-    class VaultSelection:
-        """Возвращает выбранный vault без обращения к БД."""
-
-        def get_selected(self, _app_user_id: int) -> ObsidianVault | None:
-            """Возвращает vault тестового пользователя."""
-            return vault
-
-    return ObsidianMessageHandler(
-        article_url_use_case=object(),
-        vault_selection_manager=VaultSelection() if vault is not None else None,
-    )
+def _obsidian_handler() -> ObsidianMessageHandler:
+    """Собирает presentation-слой для метаданных предметной справки."""
+    return ObsidianMessageHandler(article_url_use_case=object())
 
 
 class TelegramResponsesTest(unittest.TestCase):
@@ -99,7 +88,8 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("/github_sync", reply)
         self.assertIn("/github_status", reply)
         self.assertIn("/github_disconnect", reply)
-        self.assertIn("`/register` — зарегистрироваться и подключить Obsidian vault", reply)
+        self.assertIn("`/register` — зарегистрироваться", reply)
+        self.assertNotIn("зарегистрироваться и подключить", reply)
         self.assertLess(reply.index("Основные:"), reply.index("Связь Telegram и VK:"))
         self.assertLess(reply.index("Связь Telegram и VK:"), reply.index("Obsidian vault:"))
         self.assertLess(reply.index("Obsidian vault:"), reply.index("Статьи:"))
@@ -319,9 +309,6 @@ class TelegramResponsesTest(unittest.TestCase):
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
-                capability_reply=_obsidian_handler().onboarding_reply(
-                    OnboardingReplyKind.START, AppUser(id=42, display_name="Влад")
-                ),
             )
         )
 
@@ -329,7 +316,7 @@ class TelegramResponsesTest(unittest.TestCase):
             reply,
             "obsChatBot запущен.\n"
             "Рад тебя видеть, Влад.\n"
-            "Войди через `/obsidian`, чтобы прислать ссылку на статью. Справка: `/help`.",
+            "Справка: `/help`.",
         )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
@@ -345,43 +332,29 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_already_registered(self) -> None:
         """Повторный `/register` получает честный ответ."""
-        vault = ObsidianVault(
-            id=1, app_user_id=42, installation_id=10, repository_id=20,
-            owner="karateka-git", repository="my_obs_data", branch="main",
-        )
         reply = format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
-                capability_reply=_obsidian_handler(vault).onboarding_reply(
-                    OnboardingReplyKind.ALREADY_REGISTERED, AppUser(id=42, display_name="Влад")
-                ),
             )
         )
 
         self.assertIn("уже зарегистрирован", reply)
         self.assertIn("Влад", reply)
-        self.assertIn("karateka-git/my_obs_data", reply)
+        self.assertNotIn("vault", reply)
         self.assertNotIn("42", reply)
 
-    def test_name_completion_preserves_existing_vault(self) -> None:
-        """После ввода имени уже подключённый vault не требуется выбирать снова."""
-        vault = ObsidianVault(
-            id=1, app_user_id=42, installation_id=10, repository_id=20,
-            owner="karateka-git", repository="my_obs_data", branch="main",
-        )
+    def test_name_completion_reports_independent_profile(self) -> None:
+        """Сохранение имени завершает профиль без предметного ответа о vault."""
         reply = format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.REGISTRATION_NAME_SAVED,
                 app_user=AppUser(id=42, display_name="Влад"),
-                capability_reply=_obsidian_handler(vault).onboarding_reply(
-                    OnboardingReplyKind.NAME_SAVED, AppUser(id=42, display_name="Влад")
-                ),
             )
         )
 
         self.assertIn("Регистрация завершена", reply)
-        self.assertIn("karateka-git/my_obs_data", reply)
+        self.assertNotIn("vault", reply)
 
     def test_format_incoming_message_result_reports_link_code(self) -> None:
         """Код привязки форматируется как команда для второго канала."""

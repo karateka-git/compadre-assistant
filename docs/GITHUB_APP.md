@@ -78,11 +78,12 @@ instructions:
 /register
 ```
 
-Затем бот просит имя профиля. После сохранения имени пользователь присылает
-repository с Obsidian vault:
+Затем бот просит имя профиля. Сохранение имени завершает регистрацию.
+Подключение vault — отдельное действие внутри Obsidian. Войдите через
+`/obsidian`, затем пришлите repository с Obsidian vault, либо сразу отправьте:
 
 ```text
-https://github.com/owner/repository
+/obsidian https://github.com/owner/repository
 ```
 
 Если vault находится в подпапке, добавьте её после URL:

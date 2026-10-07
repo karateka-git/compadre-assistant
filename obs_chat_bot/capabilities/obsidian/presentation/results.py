@@ -32,7 +32,8 @@ class ObsidianResultType(StrEnum):
     GITHUB_CONNECT_FAILED = "github_connect_failed"
     GITHUB_CONNECT_IN_PROGRESS = "github_connect_in_progress"
     GITHUB_AUTHORIZED_SYNC_STARTED = "github_authorized_sync_started"
-    REGISTRATION_VAULT_REQUIRED = "registration_vault_required"
+    VAULT_REQUIRED = "vault_required"  # Профиль готов, но пользователь ещё не подключил vault.
+    LLM_NOT_CONFIGURED = "llm_not_configured"  # Серверу не задан обязательный LLM-провайдер.
     GITHUB_APP_REQUIRED = "github_app_required"
     GITHUB_VAULT_COMMAND_INVALID = "github_vault_command_invalid"
     GITHUB_VAULT_SELECTED = "github_vault_selected"

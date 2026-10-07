@@ -7,8 +7,7 @@ import logging
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
     CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
-    HelpSection, IncomingCapabilityPort, IncomingResponse, OnboardingReplyKind,
-    OnboardingState, ProfileSetupPort,
+    HelpSection, IncomingCapabilityPort, IncomingResponse,
 )
 from obs_chat_bot.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from obs_chat_bot.capabilities.obsidian.presentation.commands import help_sections as obsidian_help_sections
@@ -103,7 +102,7 @@ ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion], ObsidianMessageResult]
 
 
-class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
+class ObsidianMessageHandler(IncomingCapabilityPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
     def __init__(
@@ -118,6 +117,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
         obsidian_review_use_case: PrepareObsidianReviewUseCase | None = None,
         obsidian_confirmation_service: ObsidianProposalConfirmationService | None = None,
         github_completion_processor: GitHubCompletionProcessor | None = None,
+        llm_configured: bool = True,
     ) -> None:
         """Внедряет предметные use cases и продолжение фоновой авторизации.
 
@@ -130,9 +130,11 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             vault_sync_manager: Обновление локального снимка vault.
             obsidian_review_use_case: Подготовка предложения изменения заметки.
             obsidian_confirmation_service: Подтверждение сохранённого proposal.
+            llm_configured: Наличие обязательной конфигурации LLM в текущей сборке.
             github_completion_processor: Продолжение с собственным соединением;
                 при отсутствии используется текущее предметное окружение.
         """
+        self._llm_configured = llm_configured
         self._github_completion_processor = github_completion_processor
         self._article_url_use_case = article_url_use_case
         self._article_analysis_use_case = article_analysis_use_case
@@ -150,23 +152,21 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             "obsidian", "/obsidian", "работа со статьями и Obsidian vault", self._help()
         )
 
-    def enter(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+    def enter(
+        self, context: HandlerContext, event: IncomingEvent, arguments: str
+    ) -> CapabilityResult:
         """Показывает актуальный vault и ожидающие операции при входе в режим.
 
         Args:
             context: Проверенный внутренний пользователь и фоновая доставка.
-            event: Команда входа без аргументов; аргументы вводятся в шаге 2.3.
+            event: Исходное событие с командой входа и необязательным аргументом.
+            arguments: Текст или URL после команды входа; событие сохраняется целиком.
 
         Returns:
-            Общий ответ длительного режима или ошибка неподдерживаемого аргумента.
+            Общий ответ длительного режима с результатом аргумента или справкой.
         """
-        if len(event.text.strip().split(maxsplit=1)) > 1:
-            return CapabilityResult(
-                IncomingResponse(
-                    "Сейчас используй `/obsidian` без аргумента, затем пришли сообщение в режиме.",
-                    ValueError("Аргументы входа ещё не поддерживаются"),
-                )
-            )
+        if arguments:
+            return self._handle(context, event, arguments)
         user = context.app_user
         pending = (
             self._obsidian_confirmation_service.get_pending(user.id)
@@ -185,15 +185,22 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             return CapabilityResult(
                 replace(response, text=f"Режим Obsidian. Выход: `/exit`.\n{response.text}")
             )
-        state = self.onboarding_state(user)
+        vault = self._selected_vault(user.id)
         lines = [
             "Режим Obsidian. Выход: `/exit`.",
-            state.summary or (
-                "Пришли ссылку на статью."
-                if state.ready
-                else "Пришли ссылку на GitHub-репозиторий с Obsidian vault."
-            ),
+            "Пришли ссылку на статью для анализа и предложения изменения заметки.",
+            "Ссылка на GitHub-репозиторий подключает или заменяет vault; после ссылки можно указать папку.",
+            "Команды: `/github_status`, `/github_sync`, `/github_disconnect`, `/reanalyze <id>`.",
         ]
+        if self._vault_selection_manager is None:
+            lines.append("Провайдер GitHub не настроен на сервере.")
+        elif vault is None:
+            lines.append("Твой Obsidian vault не подключён. Пришли ссылку на GitHub-репозиторий с vault.")
+        else:
+            root = f", папка: `{vault.root_path}`" if vault.root_path else ""
+            lines.append(f"Подключён vault: `{vault.owner}/{vault.repository}`{root}.")
+        if not self._llm_configured:
+            lines.append("Провайдер LLM не настроен на сервере; анализ статей пока недоступен.")
         if self._vault_selection_manager is not None:
             if self._vault_selection_manager.has_replacement_confirmation(user.id):
                 lines.append("Ожидается подтверждение замены vault: ответь `да` или `нет`.")
@@ -224,6 +231,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
         Returns:
             Готовое содержимое ответа с продолжением режима Obsidian.
         """
+        return self._handle(context, event)
+
+    def _handle(
+        self, context: HandlerContext, event: IncomingEvent, arguments: str | None = None
+    ) -> CapabilityResult:
+        """Обрабатывает текст входа с неизменными метаданными и адресом события."""
         delivery = context.delivery
         address = event.reply_address
 
@@ -232,11 +245,21 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             if delivery is not None:
                 delivery.send(address, _present_result(result))
 
-        if delivery is not None and should_acknowledge(event.text):
+        text = event.text if arguments is None else arguments
+        if delivery is not None and should_acknowledge(text):
             from obs_chat_bot.core.presentation.responses import PROCESSING_ACK_TEXT
 
             delivery.send(address, IncomingResponse(PROCESSING_ACK_TEXT))
-        result = self._process(context.app_user, event, complete if delivery else None)
+        result = self._process(
+            context.app_user, event, complete if delivery else None, text=arguments
+        )
+        if arguments is not None and result.error is None and result.type in {
+            ObsidianResultType.ARTICLE_URL_MISSING,
+            ObsidianResultType.REANALYZE_COMMAND_INVALID,
+            ObsidianResultType.GITHUB_VAULT_COMMAND_INVALID,
+        }:
+            # Ошибочный аргумент входа не должен заменять ранее выбранный режим чата.
+            result = replace(result, error=ValueError("Некорректный аргумент входа Obsidian"))
         return CapabilityResult(_present_result(result))
 
     def _help(self) -> CapabilityHelp:
@@ -246,82 +269,27 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
                 HelpSection(title, commands)
                 for title, commands in obsidian_help_sections()
             ),
-            registration_description="зарегистрироваться и подключить Obsidian vault",
             instructions=(
-                "После `/register` пришли ссылку на GitHub repository с Obsidian vault.",
+                "Войди через `/obsidian [текст или URL]`. Подключение vault выполняется внутри этого режима.",
                 "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
                 "",
                 "Ответы `да` и `нет` используются, когда бот просит подтвердить перепривязку или замену.",
             ),
         )
 
-    def onboarding_reply(self, kind: OnboardingReplyKind, app_user: AppUser) -> str:
-        """Оформляет специфичный для Obsidian этап регистрации.
-
-        Args:
-            kind: Тип общего этапа регистрации.
-            app_user: Идентифицированный пользователь.
-
-        Returns:
-            Готовый текст для канала.
-
-        Raises:
-            ValueError: Если общий вход передал неизвестный код этапа.
-        """
-        name = app_user.display_name or "пользователь"
-        state = self.onboarding_state(app_user)
-        if kind is OnboardingReplyKind.REQUIRED:
-            return (
-                f"{name}, осталось подключить Obsidian vault.\n"
-                "Войди через `/obsidian` и пришли ссылку на GitHub-репозиторий с Obsidian vault."
-            )
-        if kind is OnboardingReplyKind.START:
-            return (
-                "obsChatBot запущен.\n"
-                f"Рад тебя видеть, {name}.\n"
-                "Войди через `/obsidian`, чтобы прислать ссылку на статью. Справка: `/help`."
-            )
-        if kind is OnboardingReplyKind.ALREADY_REGISTERED:
-            vault = state.summary or "Obsidian vault ещё не подключён."
-            return (
-                f"{name}, ты уже зарегистрирован.\n"
-                f"{vault}\n"
-                "Войди через `/obsidian`, чтобы присылать статьи. Чтобы заменить vault, пришли ссылку "
-                "на другой GitHub-репозиторий."
-            )
-        if kind is OnboardingReplyKind.NAME_SAVED:
-            if state.ready:
-                vault = state.summary or "Obsidian vault ещё не подключён."
-                return (
-                    f"Приятно познакомиться, {name}.\n"
-                    f"{vault}\n"
-                    "Регистрация завершена — можешь присылать ссылки на статьи."
-                )
-            return (
-                f"Приятно познакомиться, {name}.\n"
-                "Теперь пришли ссылку на GitHub-репозиторий с Obsidian vault.\n"
-                "Если vault находится во вложенной папке, добавь путь после ссылки."
-            )
-        raise ValueError(f"Unknown onboarding reply kind: {kind}")
-
-    def onboarding_state(self, app_user: AppUser) -> OnboardingState:
-        """Проверяет наличие выбранного vault без раскрытия его модели ядру."""
+    def _selected_vault(self, app_user_id: int) -> ObsidianVault | None:
+        """Читает vault только при предметном обращении к Obsidian."""
         if self._vault_selection_manager is None:
-            return OnboardingState(ready=True)
-        vault = self._vault_selection_manager.get_selected(app_user.id)
-        if vault is None:
-            return OnboardingState(ready=False)
-        root = f", папка: `{vault.root_path}`" if vault.root_path else ""
-        return OnboardingState(
-            ready=True,
-            summary=f"Подключён vault: `{vault.owner}/{vault.repository}`{root}.",
-        )
+            return None
+        return self._vault_selection_manager.get_selected(app_user_id)
 
     def _process(
         self,
         app_user: AppUser,
         event: IncomingEvent,
         completion_handler: ObsidianCompletionHandler | None = None,
+        *,
+        text: str | None = None,
     ) -> ObsidianMessageResult:
         """Выполняет Obsidian-сценарий после общей идентификации.
 
@@ -329,11 +297,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             app_user: Уже найденный пользователь приложения.
             event: Нейтральное событие канала.
             completion_handler: Доставка фонового GitHub-ответа в исходный чат.
+            text: Аргумент входа либо `None` для исходного текста события.
 
         Returns:
             Предметный результат для представления Obsidian.
         """
-        text = event.text.strip()
+        text = (event.text if text is None else text).strip()
         parsed = ParsedObsidianCommand.parse(text)
         command = parsed.command if parsed is not None else None
         normalized = text.lower()
@@ -405,7 +374,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             return self._request_vault_disconnect(app_user)
         repository_arguments = _github_repository_arguments(text)
         if repository_arguments is not None:
-            return self._connect_registration_vault(
+            return self._connect_vault(
                 repository_arguments,
                 app_user,
                 completion_handler=completion_handler,
@@ -420,16 +389,23 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             username=event.username,
             display_name=event.display_name,
         )
+        if self._vault_selection_manager is None:
+            return ObsidianMessageResult(
+                type=ObsidianResultType.GITHUB_CONNECT_UNAVAILABLE, app_user=app_user
+            )
+        if self._selected_vault(app_user.id) is None:
+            return ObsidianMessageResult(
+                type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user
+            )
+        if not self._llm_configured:
+            return ObsidianMessageResult(
+                type=ObsidianResultType.LLM_NOT_CONFIGURED, app_user=app_user
+            )
         if command is ObsidianCommand.REANALYZE:
             return self._reanalyze_article(
                 parsed.arguments if parsed is not None else "",
                 incoming_message,
                 app_user,
-            )
-        if not self.onboarding_state(app_user).ready:
-            return ObsidianMessageResult(
-                type=ObsidianResultType.REGISTRATION_VAULT_REQUIRED,
-                app_user=app_user,
             )
         return self._process_article_url(incoming_message, app_user)
 
@@ -689,7 +665,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
         )
         if sync_result.status is VaultSyncStatus.NO_VAULT:
             return ObsidianMessageResult(
-                type=ObsidianResultType.REGISTRATION_VAULT_REQUIRED,
+                type=ObsidianResultType.VAULT_REQUIRED,
                 app_user=app_user,
             )
         if sync_result.status is VaultSyncStatus.IN_PROGRESS:
@@ -776,7 +752,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             error=confirmation.error,
         )
 
-    def _connect_registration_vault(
+    def _connect_vault(
         self,
         arguments: str,
         app_user: AppUser,
@@ -816,7 +792,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
                 app_user=app_user,
             )
 
-        processor = self._github_completion_processor or self._complete_github_registration
+        processor = self._github_completion_processor or self._complete_github_connection
 
         def complete_github(completion: GitHubConnectionCompletion) -> None:
             """Продолжает фоновой сценарий через процессор с собственным соединением."""
@@ -873,13 +849,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
             github_connection=connection,
         )
 
-    def _complete_github_registration(
+    def _complete_github_connection(
         self,
         repository_arguments: str,
         app_user: AppUser,
         completion: GitHubConnectionCompletion,
     ) -> ObsidianMessageResult:
-        """Продолжает регистрацию после завершения фонового Device Flow."""
+        """Продолжает подключение vault после завершения фонового Device Flow."""
         if completion.status is GitHubConnectionCompletionStatus.CONNECTED:
             result = self._select_github_vault(repository_arguments, app_user)
             if (
@@ -914,7 +890,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, ProfileSetupPort):
         arguments: str,
         app_user: AppUser,
     ) -> ObsidianMessageResult:
-        """Проверяет GitHub URL из регистрации и запускает выбор vault."""
+        """Проверяет GitHub URL внутри режима и запускает выбор vault."""
         parts = arguments.split(maxsplit=1)
         if not parts:
             return ObsidianMessageResult(

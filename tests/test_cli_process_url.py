@@ -21,6 +21,8 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from obs_chat_bot.core.data.config import AppConfig, GitHubAppConfig
 from obs_chat_bot.bootstrap import process_channel_incoming_message
+from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
+from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 from obs_chat_bot.presentation.cli.main import (
     check_github_config,
     check_llm_config,
@@ -464,15 +466,17 @@ class ProcessUrlCliTest(unittest.TestCase):
                 use_case_factory=lambda _connection: fake_use_case,
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
-            result = process_channel_incoming_message(
-                database_path=database_path,
-                incoming_message=_telegram_message("https://example.com/article", "msg-2"),
-                openai_base_url="https://llm.example/v1",
-                openai_api_key="token",
-                openai_model="fake-model",
-                use_case_factory=lambda _connection: fake_use_case,
-                analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
-            )
+            with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager(selected=_test_vault(1))):
+                result = process_channel_incoming_message(
+                    runtime=ObsidianProcessRuntime(None, object()),
+                    database_path=database_path,
+                    incoming_message=_telegram_message("/obsidian https://example.com/article", "msg-2"),
+                    openai_base_url="https://llm.example/v1",
+                    openai_api_key="token",
+                    openai_model="fake-model",
+                    use_case_factory=lambda _connection: fake_use_case,
+                    analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
+                )
 
         self.assertIn("Готово: статья сохранена", result.text)
         self.assertEqual(fake_use_case.commands[0].source_url, "https://example.com/article")

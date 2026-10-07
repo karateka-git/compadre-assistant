@@ -57,9 +57,10 @@ class FakeCapability(IncomingCapabilityPort):
         """Объявляет тестовую точку входа."""
         return self._descriptor
 
-    def enter(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+    def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Фиксирует вход и сообщает выбранную семантику режима."""
         self.entries.append((context.app_user, event))
+        self.entry_arguments = arguments
         if self.entry_exception:
             raise self.entry_exception
         return CapabilityResult(IncomingResponse(self.pending, self.entry_error), self.entry_mode)
@@ -147,6 +148,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         reply = self.dispatcher.execute(event)
         self.assertEqual(reply.text, self.capability.pending)
         self.assertEqual(self.capability.entries, [(self.identity.user, event)])
+        self.assertEqual(self.capability.entry_arguments, "произвольный аргумент")
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
         incoming = _event("https://example.com/article")
         self.dispatcher.execute(incoming)
@@ -263,13 +265,14 @@ class IncomingBoundaryTest(unittest.TestCase):
             incoming_message_processor=self.dispatcher.execute,
             logger=logging.getLogger("test.fake.telegram"),
         )
-        for text in ("/selected", "действие"):
+        for text in ("/selected аргумент Telegram", "действие"):
             message.text = text
             asyncio.run(aiogram.dispatcher.included_router.handler(message))
         self.assertIn("/selected_confirm token", message.answers[-1])
         self.assertIsNone(self.repository.get(ChatModeKey(23, "telegram", "42")))
+        self.assertEqual(self.capability.entry_arguments, "аргумент Telegram")
         client = FakeVkClient()
-        for text in ("/selected", "действие"):
+        for text in ("/selected аргумент VK", "действие"):
             _handle_update(
                 {"type": "message_new", "object": {"message": {"id": 1, "peer_id": 42, "from_id": 1, "text": text}}},
                 incoming_message_processor=self.dispatcher.execute,
@@ -278,8 +281,36 @@ class IncomingBoundaryTest(unittest.TestCase):
             )
         self.assertIn("/selected_confirm token", client.messages[-1][1])
         self.assertIsNone(self.repository.get(ChatModeKey(23, "vk", "42")))
+        self.assertEqual(self.capability.entry_arguments, "аргумент VK")
         self.assertEqual([event.channel for _, event in self.capability.entries], ["telegram", "vk"])
         self.assertEqual([event.channel for _, event in self.capability.calls], ["telegram", "vk"])
+
+    def test_disabled_entry_metadata_is_generic_and_preserves_mode(self) -> None:
+        """Метаданные любого отключённого входа не запускают выбранный обработчик."""
+        disabled = CapabilityDescriptor("unavailable", "/unavailable", "отключённая возможность")
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), disabled_capabilities=(disabled,),
+            user_identity_service=self.identity, chat_mode_repository=self.repository,
+        )
+        dispatcher.execute(_event("/selected"))
+        reply = dispatcher.execute(_event("/unavailable https://example.com/article"))
+        self.assertIn("`unavailable` отключена", reply.text)
+        self.assertEqual(self.repository.get(self.key).capability_id, "selected")
+        self.assertFalse(self.capability.calls)
+        self.assertNotIn("/unavailable", dispatcher.execute(_event("/help")).text)
+
+    def test_registry_checks_disabled_metadata_conflicts(self) -> None:
+        """Отключённые входы подчиняются общим ограничениям реестра."""
+        for descriptor in (
+            CapabilityDescriptor("selected", "/different", "описание"),
+            CapabilityDescriptor("different", "/selected", "описание"),
+            CapabilityDescriptor("different", "/help", "описание"),
+            CapabilityDescriptor("different", "invalid", "описание"),
+            CapabilityDescriptor(" ", "/different", "описание"),
+            CapabilityDescriptor("different", "/different", " "),
+        ):
+            with self.subTest(descriptor=descriptor), self.assertRaises(ValueError):
+                CapabilityRegistry((self.capability,), (descriptor,))
 
     def test_registry_rejects_id_command_and_reserved_conflicts(self) -> None:
         """Ошибки запуска называют конфликтующий ID или команду."""

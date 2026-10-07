@@ -8,8 +8,7 @@ from obs_chat_bot.core.presentation.incoming.commands import ChatCommand, Parsed
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from obs_chat_bot.core.presentation.incoming.ports import (
     BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
-    HandlerContext, IncomingResponse, OnboardingReplyKind, OnboardingState,
-    ProfileSetupPort, ReplyDeliveryPort,
+    HandlerContext, IncomingResponse, ReplyDeliveryPort,
 )
 from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
 from obs_chat_bot.core.domain.users.identity import (
@@ -50,11 +49,11 @@ class IncomingMessageResultType(StrEnum):
     LINK_REBIND_CANCELLED = "link_rebind_cancelled"
     LINK_REBIND_CONFIRMATION_MISSING = "link_rebind_confirmation_missing"
     LINK_REBIND_CONFIRMATION_PENDING = "link_rebind_confirmation_pending"
-    ONBOARDING_REQUIRED = "onboarding_required"
     MODE_HINT = "mode_hint"  # В этом чате возможность ещё не выбрана.
     MODE_EXITED = "mode_exited"  # Выбор очищен только для указанного чата.
     PROFILE_STATUS = "profile_status"  # Общие сведения о пользователе и выбранном режиме.
     MODE_UNAVAILABLE = "mode_unavailable"  # Сохранённый маршрут не подключён к текущему входу.
+    CAPABILITY_DISABLED = "capability_disabled"  # Явная команда относится к отключённому входу.
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +63,6 @@ class ProcessIncomingMessageResult:
     type: IncomingMessageResultType
     app_user: AppUser | None = None
     link_code: CreatedLinkCode | None = None
-    onboarding: OnboardingState | None = None
     error: Exception | None = None
     capability_reply: str | None = None
     capability_help: CapabilityHelp | None = None
@@ -87,8 +85,6 @@ class IncomingMessageDispatcher:
 
     Args:
         registry: Проверенный реестр включённых возможностей.
-        profile_setup: Прежний onboarding до отдельного шага 2.3.
-        registration_capability_id: Вход прежнего onboarding после задания имени.
         user_identity_service: Общий сервис профиля и связей каналов.
         chat_mode_repository: Обязательное хранилище выбора конкретного чата.
     """
@@ -97,22 +93,11 @@ class IncomingMessageDispatcher:
         self,
         *,
         registry: CapabilityRegistry,
-        profile_setup: ProfileSetupPort | None = None,
-        registration_capability_id: str | None = None,
         user_identity_service: UserIdentityService,
         chat_mode_repository: ChatModeRepository,
     ) -> None:
-        """Внедряет общий реестр, repositories и временную политику onboarding."""
-        if (
-            registration_capability_id is not None
-            and registry.by_id(registration_capability_id) is None
-        ):
-            raise ValueError(
-                f"Не включён регистрационный вход: {registration_capability_id}"
-            )
+        """Внедряет общий реестр и repositories независимого профиля."""
         self._registry = registry
-        self._profile_setup = profile_setup
-        self._registration_capability_id = registration_capability_id
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
 
@@ -154,7 +139,11 @@ class IncomingMessageDispatcher:
         text = event.text.strip()
         parsed = ParsedChatCommand.parse(text)
         command = parsed.command if parsed is not None else None
-        is_general_entry = command is not None or self._registry.by_command(text) is not None
+        is_general_entry = (
+            command is not None
+            or self._registry.by_command(text) is not None
+            or self._registry.disabled_by_command(text) is not None
+        )
         if command is ChatCommand.HELP:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.HELP,
@@ -203,19 +192,10 @@ class IncomingMessageDispatcher:
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                     app_user=user,
                 )
-            state = self._onboarding_state(user)
             return ProcessIncomingMessageResult(
-                type=(
-                    IncomingMessageResultType.START_REGISTERED
-                    if state.ready
-                    else IncomingMessageResultType.ONBOARDING_REQUIRED
-                ),
+                type=IncomingMessageResultType.START_REGISTERED,
                 app_user=user,
-                onboarding=state,
-                capability_reply=self._onboarding_reply(
-                    OnboardingReplyKind.START if state.ready else OnboardingReplyKind.REQUIRED,
-                    user,
-                ),
+                capability_reply=self._registry.entry_hint(),
             )
 
         if command is ChatCommand.REGISTER:
@@ -231,21 +211,10 @@ class IncomingMessageDispatcher:
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                     app_user=existing,
                 )
-            state = self._onboarding_state(existing)
             return ProcessIncomingMessageResult(
-                type=(
-                    IncomingMessageResultType.ALREADY_REGISTERED
-                    if state.ready
-                    else IncomingMessageResultType.ONBOARDING_REQUIRED
-                ),
+                type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=existing,
-                onboarding=state,
-                capability_reply=self._onboarding_reply(
-                    OnboardingReplyKind.ALREADY_REGISTERED
-                    if state.ready
-                    else OnboardingReplyKind.REQUIRED,
-                    existing,
-                ),
+                capability_reply=self._registry.entry_hint(),
             )
 
         if command is ChatCommand.LINK:
@@ -313,7 +282,7 @@ class IncomingMessageDispatcher:
         if command is ChatCommand.NAME:
             return self._save_name(
                 parsed.arguments if parsed is not None else "", user,
-                registration=user.display_name is None, event=event,
+                registration=user.display_name is None,
             )
         if command is ChatCommand.STATUS:
             mode = self._chat_mode_repository.get(
@@ -329,12 +298,12 @@ class IncomingMessageDispatcher:
                 ),
             )
         if user.display_name is None:
-            if command is not None or self._registry.by_command(text) is not None:
+            if is_general_entry:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                     app_user=user,
                 )
-            return self._save_name(text, user, registration=True, event=event)
+            return self._save_name(text, user, registration=True)
         return self._dispatch(user, event, completion_handler)
 
     def _dispatch(
@@ -349,10 +318,18 @@ class IncomingMessageDispatcher:
             CallbackReplyDelivery(completion_handler) if completion_handler else None,
         )
         key = ChatModeKey(user.id, event.channel, event.chat_id)
+        disabled = self._registry.disabled_by_command(event.text)
+        if disabled is not None:
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.CAPABILITY_DISABLED,
+                app_user=user,
+                capability_reply=f"Возможность `{disabled.capability_id}` отключена.\n{self._registry.entry_hint()}",
+            )
         entry = self._registry.by_command(event.text)
         if entry is not None:
             try:
-                result = entry.enter(context, event)
+                parts = event.text.strip().split(maxsplit=1)
+                result = entry.enter(context, event, parts[1] if len(parts) > 1 else "")
             except Exception as error:
                 LOGGER.exception(
                     "Capability entry failed: capability_id=%s",
@@ -388,30 +365,14 @@ class IncomingMessageDispatcher:
             self._chat_mode_repository.clear(key)
         return result.response
 
-    def _onboarding_state(self, user: AppUser) -> OnboardingState:
-        """Читает прежнюю готовность настройки через отдельный контракт."""
-        if self._profile_setup is None:
-            return OnboardingState(True)
-        return self._profile_setup.onboarding_state(user)
-
-    def _onboarding_reply(self, kind: OnboardingReplyKind, user: AppUser) -> str:
-        """Добавляет доступный вход к прежнему ответу настройки профиля."""
-        reply = (
-            self._profile_setup.onboarding_reply(kind, user)
-            if self._profile_setup
-            else "Профиль сохранён."
-        )
-        return f"{reply}\n{self._registry.entry_hint()}"
-
     def _save_name(
         self,
         display_name: str,
         user: AppUser,
         *,
         registration: bool,
-        event: IncomingEvent,
     ) -> ProcessIncomingMessageResult:
-        """Сохраняет имя и запрашивает готовность выбранной возможности."""
+        """Сохраняет имя и завершает регистрацию без выбора возможности."""
         try:
             updated = self._user_identity_service.update_display_name(
                 app_user_id=user.id, display_name=display_name
@@ -422,16 +383,6 @@ class IncomingMessageDispatcher:
                 app_user=user,
                 error=error,
             )
-        if registration and self._registration_capability_id is not None:
-            # До шага 2.3 первоначальное имя продолжает прежний onboarding в этом чате.
-            entry = self._registry.by_id(self._registration_capability_id)
-            if entry is not None:
-                self._chat_mode_repository.save(
-                    ChatMode(
-                        ChatModeKey(updated.id, event.channel, event.chat_id),
-                        entry.descriptor.capability_id,
-                    )
-                )
         return ProcessIncomingMessageResult(
             type=(
                 IncomingMessageResultType.REGISTRATION_NAME_SAVED
@@ -439,16 +390,7 @@ class IncomingMessageDispatcher:
                 else IncomingMessageResultType.NAME_UPDATED
             ),
             app_user=updated,
-            onboarding=(
-                self._onboarding_state(updated)
-                if registration
-                else None
-            ),
-            capability_reply=(
-                self._onboarding_reply(OnboardingReplyKind.NAME_SAVED, updated)
-                if registration
-                else None
-            ),
+            capability_reply=self._registry.entry_hint() if registration else None,
         )
 
 
