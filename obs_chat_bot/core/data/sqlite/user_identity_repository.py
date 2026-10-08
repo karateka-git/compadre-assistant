@@ -306,6 +306,7 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
             Существующий или созданный профиль.
         """
         dto = incoming_identity_to_dto(identity)
+        creating = False
         try:
             with self._connection:
                 # Блокировка писателя до чтения исключает гонку двух регистраций.
@@ -317,6 +318,7 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
                 if existing is not None:
                     self._touch_identity(dto)
                     return self._require_user(existing["app_user_id"])
+                creating = True
                 cursor = self._connection.execute("INSERT INTO app_users DEFAULT VALUES")
                 app_user_id = cursor.lastrowid
                 if app_user_id is None:
@@ -325,6 +327,8 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
                 return self._require_user(app_user_id)
         except sqlite3.IntegrityError:
             # При нарушении UNIQUE обе вставки уже откатились; возвращаем победителя гонки.
+            if not creating:
+                raise
             existing = self._connection.execute(
                 "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
                 (dto.channel, dto.external_user_id),
