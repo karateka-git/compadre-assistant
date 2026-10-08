@@ -1,6 +1,7 @@
 """Тесты VK presentation adapter."""
 
 import logging
+from threading import Event, Thread
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
@@ -13,6 +14,7 @@ from obs_chat_bot.presentation.vk.bot import (
     VkApiClient,
     VkBotError,
     VkTransientError,
+    _VkUpdateWorkers,
     _handle_update,
     _long_poll_retry_delay,
     _safe_send_vk_message,
@@ -117,6 +119,18 @@ class LongPollSequenceClient:
         if isinstance(result, BaseException):
             raise result
         return result
+
+
+class LongPollMessageClient(LongPollSequenceClient, FakeVkClient):
+    """Имитирует Long Poll и сохраняет ответы без обращения к VK."""
+
+    def __init__(self, *, waits: list[object]) -> None:
+        LongPollSequenceClient.__init__(
+            self,
+            servers=[LongPollServer(server="https://long-poll.example", key="key", ts="1")],
+            waits=waits,
+        )
+        FakeVkClient.__init__(self)
 
 
 class VkBotTest(unittest.TestCase):
@@ -447,6 +461,126 @@ class VkBotTest(unittest.TestCase):
 
         self.assertEqual(client.server_calls, 1)
         self.assertEqual(delays, [])
+
+    def test_long_poll_keeps_chat_order_without_blocking_another_chat(self) -> None:
+        """Задержка A1 не задерживает B1 и не позволяет A2 обогнать A1."""
+        a1_started = Event()
+        release_a1 = Event()
+        b1_finished = Event()
+        calls: list[str] = []
+        client = LongPollMessageClient(waits=[
+            {"ts": "2", "updates": [_update(1, 11, "A1"), _update(2, 22, "B1")]},
+            {"ts": "3", "updates": [_update(3, 11, "A2")]},
+            KeyboardInterrupt(),
+        ])
+        stopped = Event()
+
+        def processor(event: IncomingEvent, _handler) -> IncomingResponse:
+            calls.append(event.text)
+            if event.text == "A1":
+                a1_started.set()
+                self.assertTrue(release_a1.wait(3))
+            if event.text == "B1":
+                b1_finished.set()
+            return IncomingResponse(event.text)
+
+        def run() -> None:
+            try:
+                run_vk_bot(
+                    token="token", group_id=1, incoming_message_processor=processor,
+                    logger=logging.getLogger("test.vk.workers.order"),
+                    client=client, worker_count=2, max_queue_size=2,  # type: ignore[arg-type]
+                )
+            except KeyboardInterrupt:
+                stopped.set()
+
+        runner = Thread(target=run)
+        runner.start()
+        try:
+            self.assertTrue(a1_started.wait(3))
+            self.assertTrue(b1_finished.wait(3))
+            self.assertFalse(stopped.is_set())
+            self.assertEqual(calls.count("A2"), 0)
+        finally:
+            release_a1.set()
+            runner.join(3)
+
+        self.assertFalse(runner.is_alive())
+        self.assertTrue(stopped.is_set())
+        self.assertEqual([text for text in calls if text.startswith("A")], ["A1", "A2"])
+        self.assertEqual([peer_id for peer_id, _ in client.messages], [22, 11, 11])
+
+    def test_worker_queue_blocks_producer_without_dropping_updates(self) -> None:
+        """Полная очередь останавливает producer до освобождения места."""
+        started = Event()
+        release = Event()
+        producer_started = Event()
+        submitted = Event()
+        handled: list[int] = []
+
+        def handle(update: dict[str, object]) -> None:
+            number = int(update["number"])
+            if number == 1:
+                started.set()
+                self.assertTrue(release.wait(3))
+            handled.append(number)
+
+        workers = _VkUpdateWorkers(
+            handler=handle, logger=logging.getLogger("test.vk.workers.queue"),
+            worker_count=1, max_queue_size=1,
+        )
+        workers.submit("chat", {"number": 1})
+        self.assertTrue(started.wait(3))
+        workers.submit("chat", {"number": 2})
+
+        def submit_third() -> None:
+            producer_started.set()
+            workers.submit("chat", {"number": 3})
+            submitted.set()
+
+        producer = Thread(target=submit_third)
+        producer.start()
+        try:
+            self.assertTrue(producer_started.wait(3))
+            self.assertFalse(submitted.wait(0.1))
+        finally:
+            release.set()
+            producer.join(3)
+            workers.close()
+
+        self.assertFalse(producer.is_alive())
+        self.assertTrue(submitted.is_set())
+        self.assertEqual(handled, [1, 2, 3])
+
+    def test_shutdown_drains_queue_and_worker_error_does_not_stop_it(self) -> None:
+        """После остановки poll принятые updates завершаются даже после ошибки."""
+        client = LongPollMessageClient(waits=[
+            {"ts": "2", "updates": [_update(1, 11, "bad"), _update(2, 11, "good")]},
+            KeyboardInterrupt(),
+        ])
+
+        def processor(event: IncomingEvent, _handler) -> IncomingResponse:
+            if event.text == "bad":
+                raise RuntimeError("test processor failure")
+            return IncomingResponse(event.text)
+
+        logger = logging.getLogger("test.vk.workers.shutdown")
+        with self.assertLogs(logger, level="ERROR") as logs:
+            with self.assertRaises(KeyboardInterrupt):
+                run_vk_bot(
+                    token="token", group_id=1, incoming_message_processor=processor,
+                    logger=logger, client=client, worker_count=1, max_queue_size=1,  # type: ignore[arg-type]
+                )
+
+        self.assertEqual(client.messages, [(11, "good")])
+        self.assertIn("VK update handling failed", "\n".join(logs.output))
+
+
+def _update(message_id: int, peer_id: int, text: str) -> dict[str, object]:
+    """Создаёт сообщение VK для сценариев Long Poll."""
+    return {"type": "message_new", "object": {"message": {
+        "id": message_id, "peer_id": peer_id, "from_id": peer_id, "text": text,
+    }}}
 
 
 def _unused_processor(

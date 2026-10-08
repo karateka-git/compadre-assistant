@@ -4,8 +4,10 @@ import json
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Callable
 from random import randint
+from threading import Condition, Thread
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
@@ -27,6 +29,8 @@ VK_TRANSIENT_API_ERROR_CODES = frozenset({1, 6, 9, 10, 29})
 VK_LONG_POLL_RETRY_BASE_SECONDS = 0.5
 VK_LONG_POLL_RETRY_MAX_SECONDS = 30.0
 VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
+VK_UPDATE_WORKER_COUNT = 4
+VK_UPDATE_QUEUE_SIZE = 128
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
@@ -54,6 +58,8 @@ def run_vk_bot(
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
+    worker_count: int = VK_UPDATE_WORKER_COUNT,
+    max_queue_size: int = VK_UPDATE_QUEUE_SIZE,
 ) -> None:
     """Запускает VK Bots Long Poll adapter.
 
@@ -66,6 +72,8 @@ def run_vk_bot(
         client: Необязательный VK API-клиент для тестов.
         retry_sleeper: Функция ожидания между повторами.
         retry_jitter: Генератор случайного смещения задержки.
+        worker_count: Максимальное число одновременно обрабатываемых обновлений.
+        max_queue_size: Максимальное число ожидающих обработки обновлений.
     """
     api_client = client or VkApiClient(token=token)
     long_poll = _get_long_poll_server_with_retry(
@@ -76,45 +84,146 @@ def run_vk_bot(
         sleeper=retry_sleeper,
         jitter=retry_jitter,
     )
-    logger.info("VK bot long polling started for group_id=%s", group_id)
-
-    while True:
-        payload = _retry_long_poll_request(
-            lambda: api_client.wait_long_poll(long_poll),
+    workers = _VkUpdateWorkers(
+        handler=lambda update: _handle_update(
+            update,
+            incoming_message_processor=incoming_message_processor,
+            client=api_client,
             logger=logger,
-            stage="wait",
-            sleeper=retry_sleeper,
-            jitter=retry_jitter,
-        )
-
-        if "failed" in payload:
-            long_poll = _recover_long_poll(
-                payload,
-                long_poll,
-                group_id,
-                api_client,
+            empty_message_reply=empty_message_reply,
+        ),
+        logger=logger,
+        worker_count=worker_count,
+        max_queue_size=max_queue_size,
+    )
+    logger.info("VK bot long polling started for group_id=%s", group_id)
+    try:
+        while True:
+            payload = _retry_long_poll_request(
+                lambda: api_client.wait_long_poll(long_poll),
                 logger=logger,
+                stage="wait",
                 sleeper=retry_sleeper,
                 jitter=retry_jitter,
             )
-            continue
 
-        long_poll = LongPollServer(
-            server=long_poll.server,
-            key=long_poll.key,
-            ts=str(payload.get("ts", long_poll.ts)),
-        )
-        for update in payload.get("updates", []):
-            try:
-                _handle_update(
-                    update,
-                    incoming_message_processor=incoming_message_processor,
-                    client=api_client,
+            if "failed" in payload:
+                long_poll = _recover_long_poll(
+                    payload,
+                    long_poll,
+                    group_id,
+                    api_client,
                     logger=logger,
-                    empty_message_reply=empty_message_reply,
+                    sleeper=retry_sleeper,
+                    jitter=retry_jitter,
                 )
+                continue
+
+            long_poll = LongPollServer(
+                server=long_poll.server,
+                key=long_poll.key,
+                ts=str(payload.get("ts", long_poll.ts)),
+            )
+            for update in payload.get("updates", []):
+                if not isinstance(update, dict):
+                    logger.error("VK update handling failed: unexpected update format")
+                    continue
+                if update.get("type") != "message_new":
+                    continue
+                object_data = update.get("object")
+                message = object_data.get("message") if isinstance(object_data, dict) else None
+                chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
+                workers.submit(chat_id, update)
+    finally:
+        workers.close()
+
+
+class _VkUpdateWorkers:
+    """Выполняет VK updates параллельно с последовательностью внутри чата.
+
+    Ожидающие обновления ограничены; submit блокирует Long Poll при заполнении
+    очереди. Во время close принятые обновления исполняются до выхода workers.
+    """
+
+    def __init__(
+        self,
+        *,
+        handler: Callable[[dict[str, Any]], None],
+        logger: logging.Logger,
+        worker_count: int,
+        max_queue_size: int,
+    ) -> None:
+        if worker_count < 1 or max_queue_size < 1:
+            raise ValueError("worker_count and max_queue_size must be positive")
+        self._handler = handler
+        self._logger = logger
+        self._condition = Condition()
+        self._queues: dict[str, deque[dict[str, Any]]] = {}
+        self._ready: deque[str] = deque()
+        self._scheduled: set[str] = set()
+        self._queued_count = 0
+        self._closed = False
+        self._max_queue_size = max_queue_size
+        self._threads = [
+            Thread(target=self._run, name=f"vk-update-{index + 1}")
+            for index in range(worker_count)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def submit(self, chat_id: str, update: dict[str, Any]) -> None:
+        """Добавляет update в очередь, ожидая свободного места при переполнении.
+
+        Args:
+            chat_id: Идентификатор VK-чата для последовательной обработки.
+            update: Исходное обновление Long Poll.
+
+        Raises:
+            RuntimeError: Если пул уже закрыт.
+        """
+        with self._condition:
+            while self._queued_count >= self._max_queue_size and not self._closed:
+                self._condition.wait()
+            if self._closed:
+                raise RuntimeError("VK update workers are closed")
+            self._queues.setdefault(chat_id, deque()).append(update)
+            self._queued_count += 1
+            if chat_id not in self._scheduled:
+                self._scheduled.add(chat_id)
+                self._ready.append(chat_id)
+            self._condition.notify_all()
+
+    def close(self) -> None:
+        """Останавливает приём и дожидается обработки всех принятых updates."""
+        with self._condition:
+            self._closed = True
+            self._condition.notify_all()
+        for thread in self._threads:
+            thread.join()
+
+    def _run(self) -> None:
+        while True:
+            with self._condition:
+                while not self._ready:
+                    if self._closed:
+                        return
+                    self._condition.wait()
+                chat_id = self._ready.popleft()
+                update = self._queues[chat_id].popleft()
+                self._queued_count -= 1
+                self._condition.notify_all()
+            try:
+                self._handler(update)
             except Exception as error:
-                logger.error("VK update handling failed: %s", error)
+                self._logger.error("VK update handling failed: %s", error)
+            finally:
+                with self._condition:
+                    if self._queues[chat_id]:
+                        self._ready.append(chat_id)
+                    else:
+                        del self._queues[chat_id]
+                        self._scheduled.remove(chat_id)
+                    self._condition.notify_all()
 
 
 class LongPollServer:
