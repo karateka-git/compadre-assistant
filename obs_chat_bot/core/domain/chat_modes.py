@@ -41,11 +41,42 @@ class ChatMode:
             raise ValueError("capability_id must not be empty")
 
 
+@dataclass(frozen=True, slots=True)
+class ChatModeState:
+    """Хранит версию выбора, включая очищенный режим конкретного чата.
+
+    Нулевая ревизия означает, что запись для этого чата ещё не создавалась.
+    """
+
+    key: ChatModeKey
+    capability_id: str | None
+    revision: int
+
+
 class ChatModeRepository(Protocol):
     """Задаёт хранение режима независимо от транспорта и предметного сценария."""
 
     def get(self, key: ChatModeKey) -> ChatMode | None:
         """Возвращает режим конкретного чата либо отсутствие выбора."""
+        ...
+
+    def get_state(self, key: ChatModeKey) -> ChatModeState:
+        """Возвращает выбор и ревизию, сохраняя версию очищенного режима."""
+        ...
+
+    def replace_if_revision(
+        self, key: ChatModeKey, expected_revision: int, capability_id: str | None
+    ) -> bool:
+        """Меняет выбор, только если ревизия не изменилась после чтения.
+
+        Args:
+            key: Адрес конкретного чата.
+            expected_revision: Ревизия перед вызовом обработчика.
+            capability_id: Новый ID или None для завершения режима.
+
+        Returns:
+            True при изменении, False при устаревшем результате.
+        """
         ...
 
     def save(self, mode: ChatMode) -> None:
@@ -57,5 +88,5 @@ class ChatModeRepository(Protocol):
         ...
 
     def clear(self, key: ChatModeKey) -> None:
-        """Удаляет выбор чата, сохраняя предметные данные возможности."""
+        """Очищает выбор чата, сохраняя его ревизию и предметные данные."""
         ...

@@ -4,7 +4,7 @@ from dataclasses import fields
 import unittest
 
 from obs_chat_bot.bootstrap import create_incoming_message_dispatcher
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository
+from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
 from obs_chat_bot.core.domain.users.entities import AppUser
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
@@ -19,22 +19,45 @@ class MemoryChatModes(ChatModeRepository):
 
     def __init__(self) -> None:
         self.modes: dict[ChatModeKey, ChatMode] = {}
+        self.revisions: dict[ChatModeKey, int] = {}
 
     def get(self, key: ChatModeKey) -> ChatMode | None:
         """Возвращает режим указанного чата."""
         return self.modes.get(key)
 
+    def get_state(self, key: ChatModeKey) -> ChatModeState:
+        """Возвращает состояние, включая ревизию очищенного выбора."""
+        mode = self.modes.get(key)
+        return ChatModeState(key, mode.capability_id if mode else None, self.revisions.get(key, 0))
+
+    def replace_if_revision(
+        self, key: ChatModeKey, expected_revision: int, capability_id: str | None
+    ) -> bool:
+        """Меняет выбор только при совпадении сохранённой ревизии."""
+        if self.revisions.get(key, 0) != expected_revision:
+            return False
+        if capability_id is None:
+            self.modes.pop(key, None)
+        else:
+            self.modes[key] = ChatMode(key, capability_id)
+        self.revisions[key] = expected_revision + 1
+        return True
+
     def save(self, mode: ChatMode) -> None:
         """Меняет режим указанного чата."""
         self.modes[mode.key] = mode
+        self.revisions[mode.key] = self.revisions.get(mode.key, 0) + 1
 
     def activate_if_absent(self, mode: ChatMode) -> ChatMode:
         """Атомарно сохраняет первый выбор в тестовом хранилище."""
-        return self.modes.setdefault(mode.key, mode)
+        if mode.key not in self.modes:
+            self.save(mode)
+        return self.modes[mode.key]
 
     def clear(self, key: ChatModeKey) -> None:
-        """Удаляет только адресованный режим."""
+        """Очищает только адресованный режим и увеличивает его ревизию."""
         self.modes.pop(key, None)
+        self.revisions[key] = self.revisions.get(key, 0) + 1
 
 
 class FakeCapability(IncomingCapabilityPort):
@@ -48,6 +71,7 @@ class FakeCapability(IncomingCapabilityPort):
         self.handle_mode = CapabilityMode.ACTIVE
         self.entry_error: Exception | None = None
         self.entry_exception: Exception | None = None
+        self.handle_error: Exception | None = None
         self.pending = "Актуальное состояние"
         self.delivery = None
         self.actions = ()
@@ -69,7 +93,10 @@ class FakeCapability(IncomingCapabilityPort):
         """Фиксирует исходное событие и независимую доставку."""
         self.calls.append((context.app_user, event))
         self.delivery = context.delivery
-        return CapabilityResult(IncomingResponse("Тестовый ответ", actions=self.actions), self.handle_mode)
+        return CapabilityResult(
+            IncomingResponse("Тестовый ответ", self.handle_error, actions=self.actions),
+            self.handle_mode,
+        )
 
 
 class FakeIdentity:
@@ -201,6 +228,15 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.capability.handle_mode = CapabilityMode.COMPLETE
         self.dispatcher.execute(_event("завершить"))
         self.assertIsNone(self.repository.get(self.key))
+
+    def test_failed_complete_preserves_mode(self) -> None:
+        """Ошибка результата handle не завершает выбранный режим."""
+        self.dispatcher.execute(_event("/selected"))
+        self.capability.handle_mode = CapabilityMode.COMPLETE
+        self.capability.handle_error = RuntimeError("Сбой")
+        response = self.dispatcher.execute(_event("завершить"))
+        self.assertIsInstance(response.error, RuntimeError)
+        self.assertEqual(self.repository.get(self.key).capability_id, "selected")
 
     def test_general_commands_and_entry_precede_pending_rebind(self) -> None:
         """Общие команды доступны во время прежнего текстового rebind."""

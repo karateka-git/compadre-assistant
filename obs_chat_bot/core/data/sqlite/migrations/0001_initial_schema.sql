@@ -23,7 +23,8 @@ CREATE TABLE active_chat_modes (
     app_user_id INTEGER NOT NULL,
     channel TEXT NOT NULL CHECK (length(trim(channel)) > 0),
     chat_id TEXT NOT NULL CHECK (length(trim(chat_id)) > 0),
-    capability_id TEXT NOT NULL CHECK (length(trim(capability_id)) > 0),
+    capability_id TEXT CHECK (capability_id IS NULL OR length(trim(capability_id)) > 0),
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision > 0),
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (app_user_id, channel, chat_id),
     FOREIGN KEY (app_user_id) REFERENCES app_users (id) ON DELETE CASCADE

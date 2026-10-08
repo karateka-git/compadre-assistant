@@ -19,7 +19,7 @@ from obs_chat_bot.core.domain.users.identity import (
     UserIdentityService,
 )
 from obs_chat_bot.core.domain.users.entities import AppUser, IncomingIdentity
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository
+from obs_chat_bot.core.domain.chat_modes import ChatModeKey, ChatModeRepository
 
 
 LOGGER = logging.getLogger(__name__)
@@ -336,6 +336,7 @@ class IncomingMessageDispatcher:
             )
         entry = self._registry.by_command(event.text)
         if entry is not None:
+            state = self._chat_mode_repository.get_state(key)
             try:
                 parts = event.text.strip().split(maxsplit=1)
                 result = entry.enter(context, event, parts[1] if len(parts) > 1 else "")
@@ -353,16 +354,18 @@ class IncomingMessageDispatcher:
                 result.response.error is None
                 and result.mode is CapabilityMode.ACTIVE
             ):
-                self._chat_mode_repository.save(ChatMode(key, entry.descriptor.capability_id))
+                self._chat_mode_repository.replace_if_revision(
+                    key, state.revision, entry.descriptor.capability_id
+                )
             return result.response
-        mode = self._chat_mode_repository.get(key)
-        if mode is None:
+        state = self._chat_mode_repository.get_state(key)
+        if state.capability_id is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
                 app_user=user,
                 capability_reply=self._registry.entry_hint(),
             )
-        capability = self._registry.by_id(mode.capability_id)
+        capability = self._registry.by_id(state.capability_id)
         if capability is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_UNAVAILABLE,
@@ -370,8 +373,8 @@ class IncomingMessageDispatcher:
                 capability_reply=self._registry.entry_hint(),
             )
         result = capability.handle(context, event)
-        if result.mode is CapabilityMode.COMPLETE:
-            self._chat_mode_repository.clear(key)
+        if result.response.error is None and result.mode is CapabilityMode.COMPLETE:
+            self._chat_mode_repository.replace_if_revision(key, state.revision, None)
         return result.response
 
     def _save_name(

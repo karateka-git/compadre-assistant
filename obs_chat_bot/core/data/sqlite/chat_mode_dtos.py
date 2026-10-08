@@ -10,5 +10,6 @@ class ChatModeDto:
     app_user_id: int
     channel: str
     chat_id: str
-    capability_id: str
+    capability_id: str | None
+    revision: int = 0
     updated_at: str | None = None

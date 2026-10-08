@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 from channel_helpers import process_channel_incoming_message
@@ -15,8 +16,36 @@ from obs_chat_bot.core.domain.users.entities import IncomingIdentity
 from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
 from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import CapabilityMode
 from test_incoming_boundary import FakeCapability, FakeIdentity
 from sqlite_helpers import ensure_app_user
+
+
+class DelayedCapability(FakeCapability):
+    """Останавливает выбранный вызов до конкурирующей смены режима."""
+
+    def __init__(self, *, delay_enter: bool = False, delay_handle: bool = False) -> None:
+        super().__init__()
+        self.delay_enter = delay_enter
+        self.delay_handle = delay_handle
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def enter(self, context, event, arguments):
+        """Ожидает разрешения перед завершением входа."""
+        if self.delay_enter:
+            self.started.set()
+            if not self.release.wait(5):
+                raise TimeoutError("Delayed entry was not released")
+        return super().enter(context, event, arguments)
+
+    def handle(self, context, event):
+        """Ожидает разрешения перед завершением текущего режима."""
+        if self.delay_handle:
+            self.started.set()
+            if not self.release.wait(5):
+                raise TimeoutError("Delayed handling was not released")
+        return super().handle(context, event)
 
 
 class ChatModesTest(unittest.TestCase):
@@ -63,6 +92,31 @@ class ChatModesTest(unittest.TestCase):
             results = list(executor.map(activate, ("first", "second")))
         self.assertEqual(results[0], results[1])
 
+    def test_only_one_connection_can_replace_the_same_revision(self) -> None:
+        """Две независимые записи с одной ревизией дают ровно одного победителя."""
+        key = ChatModeKey(1, "telegram", "cas-chat")
+        start = threading.Event()
+        ready = threading.Barrier(3)
+
+        def replace(capability_id: str) -> bool:
+            with connect_database(self.database_path) as connection:
+                repository = SQLiteChatModeRepository(connection)
+                self.assertEqual(repository.get_state(key).revision, 0)
+                ready.wait(timeout=5)
+                self.assertTrue(start.wait(5))
+                return repository.replace_if_revision(key, 0, capability_id)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(replace, name) for name in ("first", "second")]
+            ready.wait(timeout=5)
+            start.set()
+            results = [future.result(timeout=5) for future in futures]
+        self.assertEqual(sorted(results), [False, True])
+        with connect_database(self.database_path) as connection:
+            state = SQLiteChatModeRepository(connection).get_state(key)
+            self.assertIn(state.capability_id, {"first", "second"})
+            self.assertEqual(state.revision, 1)
+
     def test_clear_leaves_profile_and_other_chat(self) -> None:
         """Удаление выбора не удаляет профиль и маршрут соседнего чата."""
         key = ChatModeKey(1, "telegram", "chat")
@@ -75,6 +129,83 @@ class ChatModesTest(unittest.TestCase):
             self.assertIsNone(repository.get(key))
             self.assertEqual(repository.get(other.key), other)
             self.assertIsNotNone(SQLiteAppUserRepository(connection).get_by_id(1))
+
+    def test_late_enter_cannot_restore_mode_after_exit_on_other_connection(self) -> None:
+        """Поздний вход не отменяет /exit, а tombstone переживает новое соединение."""
+        capability = DelayedCapability(delay_enter=True)
+        key = ChatModeKey(23, "telegram", "chat")
+        registry = CapabilityRegistry((capability,))
+        event = IncomingEvent(channel="telegram", chat_id="chat", message_id="1", text="/selected")
+
+        def enter() -> None:
+            with connect_database(self.database_path) as connection:
+                dispatcher = IncomingMessageDispatcher(
+                    registry=registry, user_identity_service=FakeIdentity(),
+                    chat_mode_repository=SQLiteChatModeRepository(connection),
+                )
+                dispatcher.execute(event)
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(enter)
+            try:
+                self.assertTrue(capability.started.wait(5))
+                with connect_database(self.database_path) as connection:
+                    dispatcher = IncomingMessageDispatcher(
+                        registry=registry, user_identity_service=FakeIdentity(),
+                        chat_mode_repository=SQLiteChatModeRepository(connection),
+                    )
+                    dispatcher.execute(IncomingEvent(
+                        channel="telegram", chat_id="chat", message_id="2", text="/exit"
+                    ))
+                    self.assertEqual(SQLiteChatModeRepository(connection).get_state(key).revision, 1)
+            finally:
+                capability.release.set()
+            future.result(timeout=5)
+        with connect_database(self.database_path) as connection:
+            repository = SQLiteChatModeRepository(connection)
+            self.assertIsNone(repository.get(key))
+            self.assertEqual(repository.get_state(key).revision, 1)
+
+    def test_late_complete_cannot_clear_new_mode_on_other_connection(self) -> None:
+        """Поздний COMPLETE не удаляет более свежий выбор другой возможности."""
+        capability = DelayedCapability(delay_handle=True)
+        capability.handle_mode = CapabilityMode.COMPLETE
+        other = FakeCapability("other", "/other")
+        registry = CapabilityRegistry((capability, other))
+        key = ChatModeKey(23, "vk", "chat")
+        with connect_database(self.database_path) as connection:
+            SQLiteChatModeRepository(connection).save(ChatMode(key, "selected"))
+
+        def handle() -> None:
+            with connect_database(self.database_path) as connection:
+                dispatcher = IncomingMessageDispatcher(
+                    registry=registry, user_identity_service=FakeIdentity(),
+                    chat_mode_repository=SQLiteChatModeRepository(connection),
+                )
+                dispatcher.execute(IncomingEvent(
+                    channel="vk", chat_id="chat", message_id="1", text="завершить"
+                ))
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(handle)
+            try:
+                self.assertTrue(capability.started.wait(5))
+                with connect_database(self.database_path) as connection:
+                    dispatcher = IncomingMessageDispatcher(
+                        registry=registry, user_identity_service=FakeIdentity(),
+                        chat_mode_repository=SQLiteChatModeRepository(connection),
+                    )
+                    dispatcher.execute(IncomingEvent(
+                        channel="vk", chat_id="chat", message_id="2", text="/other"
+                    ))
+                    self.assertEqual(SQLiteChatModeRepository(connection).get(key).capability_id, "other")
+            finally:
+                capability.release.set()
+            future.result(timeout=5)
+        with connect_database(self.database_path) as connection:
+            repository = SQLiteChatModeRepository(connection)
+            self.assertEqual(repository.get(key).capability_id, "other")
+            self.assertEqual(repository.get_state(key).revision, 2)
 
     def test_dispatcher_restores_mode_without_parsing_subject_text(self) -> None:
         """Новый диспетчер передаёт исходное событие в восстановленный вход."""

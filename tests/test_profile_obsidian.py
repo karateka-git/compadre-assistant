@@ -83,7 +83,7 @@ class ProfileObsidianTest(unittest.TestCase):
             for command in ("/start", "/register", "/status", "/help", "/name Новое имя", "/link_code", "/exit"):
                 self.assertIsNone(self.process(command, runtime=runtime).error)
         with connect_database(self.database_path) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes WHERE capability_id IS NOT NULL").fetchone()[0], 0)
 
     def test_channels_link_to_profile_with_disabled_obsidian(self) -> None:
         """Общая привязка Telegram/VK доступна без предметной возможности и vault."""
