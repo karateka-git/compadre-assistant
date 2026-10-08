@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from contextlib import contextmanager
+from collections.abc import Iterator
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
@@ -22,7 +24,7 @@ from obs_chat_bot.capabilities.obsidian.bootstrap import (
     GitHubConnectionStarter,
     ObsidianProcessRuntime,
     ProcessArticleUrlUseCaseFactory,
-    create_obsidian_entry,
+    ObsidianCapability,
     create_obsidian_process_runtime,
     process_url_for_cli,
     validate_external_http_url,
@@ -106,64 +108,84 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
         )
 
 
-def process_channel_incoming_message(
-    *,
-    database_path: Path,
-    incoming_message: IncomingEvent,
-    openai_base_url: str,
-    openai_api_key: str,
-    openai_model: str,
-    runtime: ObsidianProcessRuntime | None = None,
+class ChannelMessageProcessor:
+    """Держит один реестр процесса и открывает core scope на каждое событие."""
+
+    def __init__(self, *, database_path: Path,
+                 capabilities: tuple[IncomingCapabilityPort, ...],
+                 disabled_capabilities: tuple[CapabilityDescriptor, ...] = ()) -> None:
+        """Регистрирует обработчики при запуске без соединения с SQLite.
+
+        Args:
+            database_path: Общий путь SQLite для коротких core scopes.
+            capabilities: Уже собранные входы включённых возможностей.
+            disabled_capabilities: Метаданные отключённых входов.
+
+        Raises:
+            ValueError: Повторный ID или команда входа в реестре.
+        """
+        self._database_path = database_path
+        self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
+
+    def __call__(self, incoming_message: IncomingEvent,
+                 completion_handler: ChannelCompletionHandler | None = None) -> IncomingResponse:
+        """Читает identity и режим в коротком независимом core scope."""
+        with connect_database(self._database_path) as connection:
+            dispatcher = IncomingMessageDispatcher(
+                registry=self._registry,
+                user_identity_service=create_user_identity_service(connection),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+            )
+            return dispatcher.execute(incoming_message, completion_handler)
+
+
+@contextmanager
+def create_channel_message_processor(
+    *, database_path: Path, runtime: ObsidianProcessRuntime | None = None,
+    openai_base_url: str = "", openai_api_key: str = "", openai_model: str = "",
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     chunking_config: ChunkingConfig = ChunkingConfig(),
     embedding_config: EmbeddingConfig | None = None,
     obsidian_created_note_tag: str | None = "knowledge-catcher",
-    completion_handler: ChannelCompletionHandler | None = None,
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
-) -> IncomingResponse:
-    """Обрабатывает одно событие канала с отдельным SQLite-соединением.
+) -> Iterator[ChannelMessageProcessor]:
+    """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
 
     Args:
-        database_path: Путь к общей SQLite-БД.
-        incoming_message: Нормализованное событие канала.
-        openai_base_url: Базовый URL OpenAI-compatible API.
-        openai_api_key: API key LLM.
-        openai_model: Модель анализа и proposal.
-        runtime: Процессные зависимости Obsidian.
-        use_case_factory: Тестовая фабрика article pipeline.
-        analysis_use_case_factory: Тестовая фабрика анализа.
-        chunking_config: Настройки разбиения заметок.
-        embedding_config: Настройки semantic index.
-        obsidian_created_note_tag: Служебный тег новых заметок.
-        completion_handler: Доставка фонового ответа в сохранённый адрес канала.
-        enabled_capabilities: Явно включённые ID текущей сборки.
+        database_path: Общий путь SQLite для событий и предметных операций.
+        runtime: Процессные зависимости Obsidian либо `None`.
+        openai_base_url: Endpoint LLM.
+        openai_api_key: Ключ LLM при включённой конфигурации.
+        openai_model: Модель анализа Obsidian.
+        use_case_factory: Подменная фабрика article pipeline для тестов.
+        analysis_use_case_factory: Подменная фабрика анализа для тестов.
+        chunking_config: Настройки разбиения Markdown.
+        embedding_config: Необязательный профиль embeddings.
+        obsidian_created_note_tag: Служебный тег новой заметки.
+        enabled_capabilities: Явно включённые ID.
 
-    Returns:
-        Готовый нейтральный ответ каналу.
+    Yields:
+        Обработчик всех сообщений процесса с одним реестром.
     """
-    validate_enabled_capabilities(enabled_capabilities)
-    with connect_database(database_path) as connection:
-        entry = create_obsidian_entry(
-            connection,
-            database_path=database_path,
-            openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key,
-            openai_model=openai_model,
-            runtime=runtime,
-            use_case_factory=use_case_factory,
+    try:
+        validate_enabled_capabilities(enabled_capabilities)
+        entry = ObsidianCapability(
+            database_path=database_path, openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key, openai_model=openai_model,
+            runtime=runtime, use_case_factory=use_case_factory,
             analysis_use_case_factory=analysis_use_case_factory,
-            chunking_config=chunking_config,
-            embedding_config=embedding_config,
+            chunking_config=chunking_config, embedding_config=embedding_config,
             created_note_tag=obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
-        use_case = create_incoming_message_dispatcher(
-            capabilities=(entry,) if entry else (),
-            disabled_capabilities=() if entry else (
+        processor = ChannelMessageProcessor(
+            database_path=database_path,
+            capabilities=(entry,) if entry is not None else (),
+            disabled_capabilities=() if entry is not None else (
                 CapabilityDescriptor("obsidian", "/obsidian", "работа со статьями и Obsidian vault"),
             ),
-            user_identity_service=create_user_identity_service(connection),
-            chat_mode_repository=SQLiteChatModeRepository(connection),
         )
-
-        return use_case.execute(incoming_message, completion_handler)
+        yield processor
+    finally:
+        if runtime is not None:
+            runtime.close()

@@ -262,7 +262,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             processor(IncomingEvent("telegram", "chat", text, text, "user"), None)
         # Gateway есть, но пользователь ещё не выбрал vault; LLM отсутствует.
         runtime = ObsidianProcessRuntime(None, object())
-        from obs_chat_bot.bootstrap import process_channel_incoming_message
+        from channel_helpers import process_channel_incoming_message
         with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager()):
             reply = process_channel_incoming_message(
                 database_path=self.root / "app.db", incoming_message=IncomingEvent(

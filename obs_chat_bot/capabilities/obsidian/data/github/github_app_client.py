@@ -122,6 +122,10 @@ class _PooledHttpxRequestOpener:
             ),
         )
 
+    def close(self) -> None:
+        """Закрывает общий HTTP connection pool после остановки процесса."""
+        self._client.close()
+
     def __call__(self, request: Request, timeout: float) -> _HttpxResponseAdapter:
         """Преобразует urllib Request в потоковый запрос общего httpx.Client."""
         try:
@@ -161,6 +165,12 @@ class HttpxGitHubAppClient(
     GitHubVaultWriteGateway,
 ):
     """Выполняет GitHub Device Flow и выпускает installation tokens."""
+
+    def close(self) -> None:
+        """Освобождает принадлежащий adapter HTTP pool, если он создан им."""
+        close = getattr(self._request_opener, "close", None)
+        if callable(close):
+            close()
 
     def __init__(
         self,

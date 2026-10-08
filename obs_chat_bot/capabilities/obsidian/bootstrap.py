@@ -9,7 +9,7 @@ from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.domain.users.entities import AppUser
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from document_chunker import (
     ChunkingPolicy,
@@ -22,7 +22,9 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import Analyze
 from obs_chat_bot.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
 from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
 from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlCommand, ProcessArticleUrlError
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult, obsidian_capability_help
+from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from obs_chat_bot.core.presentation.incoming.ports import CapabilityDescriptor, CapabilityResult, HandlerContext, IncomingCapabilityPort
 from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
 from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianProposalConfirmationService,
@@ -125,10 +127,90 @@ class ObsidianProcessRuntime:
     Attributes:
         connection_starter: Coordinator с in-memory Device Flow sessions.
         repository_gateway: Общий HTTP-клиент для работы с vault.
+        llm_client: Общий SDK-клиент анализа и подготовки proposal.
+        embedding_client: Общий SDK-клиент semantic index.
+        note_chunker: Неизменяемый parser и policy Markdown для всех операций.
     """
 
     connection_starter: GitHubConnectionStarter | None
     repository_gateway: GitHubRepositoryGateway | None
+    llm_client: Any | None = None
+    embedding_client: Any | None = None
+    note_chunker: VaultNoteChunker | None = None
+
+    def close(self) -> None:
+        """Закрывает принадлежащие процессу HTTP и SDK-клиенты."""
+        for client in (self.embedding_client, self.llm_client, self.repository_gateway):
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+
+
+class ObsidianCapability(IncomingCapabilityPort):
+    """Держит один зарегистрированный вход и открывает SQLite только для вызова."""
+
+    def __init__(
+        self,
+        *,
+        database_path: Path,
+        openai_base_url: str,
+        openai_api_key: str,
+        openai_model: str,
+        runtime: ObsidianProcessRuntime | None = None,
+        use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
+        analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
+        chunking_config: ChunkingConfig = ChunkingConfig(),
+        embedding_config: EmbeddingConfig | None = None,
+        created_note_tag: str | None = "knowledge-catcher",
+    ) -> None:
+        """Сохраняет настройки без соединения и repositories.
+
+        Args:
+            database_path: Путь к общей SQLite-БД для operation scopes.
+            openai_base_url: Endpoint LLM.
+            openai_api_key: Ключ LLM, если провайдер настроен.
+            openai_model: Имя модели анализа.
+            runtime: Процессные внешние клиенты и Device Flow.
+            use_case_factory: Подменная фабрика article pipeline для тестов.
+            analysis_use_case_factory: Подменная фабрика анализа для тестов.
+            chunking_config: Параметры разбиения заметок.
+            embedding_config: Необязательный профиль semantic index.
+            created_note_tag: Служебный тег новых заметок.
+        """
+        self._database_path = database_path
+        self._options = dict(
+            database_path=database_path,
+            openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            runtime=runtime,
+            use_case_factory=use_case_factory,
+            analysis_use_case_factory=analysis_use_case_factory,
+            chunking_config=chunking_config,
+            embedding_config=embedding_config,
+            created_note_tag=created_note_tag,
+        )
+        self._descriptor = CapabilityDescriptor(
+            "obsidian", "/obsidian", "работа со статьями и Obsidian vault",
+            obsidian_capability_help(),
+        )
+
+    @property
+    def descriptor(self) -> CapabilityDescriptor:
+        """Возвращает статическую справку без обращения к SQLite."""
+        return self._descriptor
+
+    def enter(
+        self, context: HandlerContext, event: IncomingEvent, arguments: str
+    ) -> CapabilityResult:
+        """Входит в Obsidian с отдельным SQLite operation scope."""
+        with connect_database(self._database_path) as connection:
+            return create_obsidian_entry(connection, **self._options).enter(context, event, arguments)
+
+    def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+        """Передаёт событие Obsidian с отдельным SQLite operation scope."""
+        with connect_database(self._database_path) as connection:
+            return create_obsidian_entry(connection, **self._options).handle(context, event)
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,26 +307,57 @@ def create_obsidian_process_runtime(
     database_path: Path,
     github_app_config: GitHubAppConfig | None,
     github_connection_starter: GitHubConnectionStarter | None = None,
+    openai_base_url: str = "",
+    openai_api_key: str = "",
+    openai_model: str = "",
+    embedding_config: EmbeddingConfig | None = None,
+    chunking_config: ChunkingConfig = ChunkingConfig(),
 ) -> ObsidianProcessRuntime:
-    """Создаёт один GitHub gateway и coordinator на процесс бота.
+    """Создаёт процессные GitHub и настроенные LLM/embedding клиенты.
 
     Args:
         database_path: Путь к общей SQLite-БД.
         github_app_config: Настройки GitHub App либо `None`.
         github_connection_starter: Готовый coordinator для тестов.
+        openai_base_url: Endpoint LLM при включённой конфигурации.
+        openai_api_key: Ключ LLM при включённой конфигурации.
+        openai_model: Имя модели LLM.
+        embedding_config: Отдельная конфигурация embedding API.
+        chunking_config: Неизменяемая policy процессного Markdown chunker.
 
     Returns:
         Процессные зависимости, переиспользуемые worker threads.
     """
     gateway = create_github_app_client(github_app_config) if github_app_config else None
     starter = github_connection_starter
-    if starter is None and github_app_config is not None:
-        starter = create_github_connection_coordinator(
-            database_path=database_path,
-            config=github_app_config,
-            gateway=gateway,
-        )
-    return ObsidianProcessRuntime(starter, gateway)
+    llm_client = embedding_client = None
+    try:
+        note_chunker = create_vault_note_chunker(chunking_config)
+        if starter is None and github_app_config is not None:
+            starter = create_github_connection_coordinator(
+                database_path=database_path,
+                config=github_app_config,
+                gateway=gateway,
+            )
+        if openai_api_key.strip() and openai_model.strip():
+            from openai import OpenAI
+
+            llm_client = OpenAI(base_url=openai_base_url, api_key=openai_api_key)
+        if embedding_config is not None:
+            from openai import OpenAI
+
+            embedding_client = OpenAI(
+                base_url=embedding_config.base_url,
+                api_key=embedding_config.api_key,
+                timeout=30,
+                max_retries=2,
+            )
+    except Exception:
+        ObsidianProcessRuntime(starter, gateway, llm_client, embedding_client).close()
+        raise
+    return ObsidianProcessRuntime(
+        starter, gateway, llm_client, embedding_client, note_chunker
+    )
 
 
 def create_vault_note_chunker(config: ChunkingConfig) -> VaultNoteChunker:
@@ -273,27 +386,30 @@ def create_vault_full_text_search_service(
     connection: sqlite3.Connection,
     *,
     chunking_config: ChunkingConfig = ChunkingConfig(),
+    note_chunker: VaultNoteChunker | None = None,
 ) -> VaultFullTextSearchService:
     """Собирает поиск FTS5 с проверкой текущей chunking signature.
 
     Args:
         connection: Открытое SQLite-соединение приложения.
         chunking_config: Policy, определяющая допустимое поколение chunks.
+        note_chunker: Процессный Markdown chunker или `None` для отдельной сборки.
 
     Returns:
         Application-сервис изолированного полнотекстового поиска по vault.
     """
     return VaultFullTextSearchService(
         repository=SQLiteVaultFullTextSearchRepository(connection),
-        chunker=create_vault_note_chunker(chunking_config),
+        chunker=note_chunker or create_vault_note_chunker(chunking_config),
     )
 
 
-def create_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
+def create_embedding_provider(config: EmbeddingConfig, *, client: Any | None = None) -> EmbeddingProvider:
     """Собирает OpenAI-compatible embedding adapter.
 
     Args:
         config: Отдельная конфигурация semantic embedding provider.
+        client: Процессный SDK-клиент или `None` для автономного adapter.
 
     Returns:
         Adapter embedding API за application-owned port.
@@ -306,6 +422,7 @@ def create_embedding_provider(config: EmbeddingConfig) -> EmbeddingProvider:
         price_per_million_tokens=config.price_per_million_tokens,
         price_currency=config.price_currency,
         tariff_version=config.tariff_version,
+        client=client,
     )
 
 
@@ -314,6 +431,8 @@ def create_vault_hybrid_search_service(
     *,
     embedding_config: EmbeddingConfig,
     chunking_config: ChunkingConfig = ChunkingConfig(),
+    embedding_client: Any | None = None,
+    note_chunker: VaultNoteChunker | None = None,
 ) -> VaultHybridSearchService:
     """Собирает BM25, cosine search и RRF поверх одного SQLite connection.
 
@@ -321,12 +440,14 @@ def create_vault_hybrid_search_service(
         connection: Открытое SQLite-соединение приложения.
         embedding_config: Обязательный provider semantic query.
         chunking_config: Policy допустимого поколения chunks.
+        embedding_client: Процессный SDK-клиент или `None`.
+        note_chunker: Процессный Markdown chunker или `None`.
 
     Returns:
         Hybrid retrieval service с явным FTS5 fallback ожидаемых semantic ошибок.
     """
-    chunker = create_vault_note_chunker(chunking_config)
-    provider = create_embedding_provider(embedding_config)
+    chunker = note_chunker or create_vault_note_chunker(chunking_config)
+    provider = create_embedding_provider(embedding_config, client=embedding_client)
     return VaultHybridSearchService(
         lexical_search=VaultFullTextSearchService(
             repository=SQLiteVaultFullTextSearchRepository(connection),
@@ -366,6 +487,7 @@ def create_analyze_article_use_case(
     openai_base_url: str,
     openai_api_key: str,
     openai_model: str,
+    llm_client: Any | None = None,
 ) -> AnalyzeArticleUseCase:
     """Собирает concrete dependencies для LLM-анализа статьи.
 
@@ -374,6 +496,7 @@ def create_analyze_article_use_case(
         openai_base_url: Базовый URL OpenAI-compatible API.
         openai_api_key: API key провайдера LLM.
         openai_model: Имя модели для анализа статей.
+        llm_client: Процессный SDK-клиент или `None`.
 
     Returns:
         Use case с SQLite-хранилищем и OpenAI-compatible analyzer.
@@ -384,6 +507,7 @@ def create_analyze_article_use_case(
             base_url=openai_base_url,
             api_key=openai_api_key,
             model=openai_model,
+            client=llm_client,
         ),
         analysis_result_repository=SQLiteArticleAnalysisResultRepository(connection),
         error_recorder=SQLiteProcessingErrorRecorder(connection),
@@ -399,6 +523,9 @@ def create_prepare_obsidian_review_use_case(
     embedding_config: EmbeddingConfig | None,
     chunking_config: ChunkingConfig = ChunkingConfig(),
     created_note_tag: str | None = "knowledge-catcher",
+    llm_client: Any | None = None,
+    embedding_client: Any | None = None,
+    note_chunker: VaultNoteChunker | None = None,
 ) -> PrepareObsidianReviewUseCase:
     """Собирает retrieval, preflight и двухфазную LLM-генерацию 10.9.
 
@@ -410,19 +537,26 @@ def create_prepare_obsidian_review_use_case(
         embedding_config: Semantic provider либо `None` для явного FTS fallback.
         chunking_config: Ожидаемая signature локального chunk index.
         created_note_tag: Служебный тег новых заметок или `None` для отключения.
+        llm_client: Процессный SDK-клиент или `None`.
+        embedding_client: Процессный SDK-клиент или `None`.
+        note_chunker: Процессный Markdown chunker или `None`.
 
     Returns:
         Полностью собранный use case подготовки Obsidian review.
     """
+    chunker = note_chunker or create_vault_note_chunker(chunking_config)
     lexical_search = create_vault_full_text_search_service(
         connection,
         chunking_config=chunking_config,
+        note_chunker=chunker,
     )
     search = (
         create_vault_hybrid_search_service(
             connection,
             embedding_config=embedding_config,
             chunking_config=chunking_config,
+            embedding_client=embedding_client,
+            note_chunker=chunker,
         )
         if embedding_config is not None
         else VaultFtsFallbackSearchService(lexical_search=lexical_search)
@@ -437,6 +571,7 @@ def create_prepare_obsidian_review_use_case(
             base_url=openai_base_url,
             api_key=openai_api_key,
             model=openai_model,
+            client=llm_client,
         ),
         proposal_repository=SQLiteObsidianProposalRepository(connection),
         error_recorder=SQLiteProcessingErrorRecorder(connection),
@@ -513,6 +648,8 @@ def create_vault_sync_manager(
     github_gateway: GitHubVaultGateway,
     chunking_config: ChunkingConfig = ChunkingConfig(),
     embedding_config: EmbeddingConfig | None = None,
+    embedding_client: Any | None = None,
+    note_chunker: VaultNoteChunker | None = None,
 ) -> VaultSyncManager:
     """Собирает GitHub/SQLite-сценарий синхронизации vault.
 
@@ -521,6 +658,8 @@ def create_vault_sync_manager(
         github_gateway: GitHub App gateway чтения Git trees и blobs.
         chunking_config: Policy разбиения Markdown-заметок на chunks.
         embedding_config: Настройки semantic index либо `None` для FTS-only.
+        embedding_client: Процессный SDK-клиент или `None`.
+        note_chunker: Процессный Markdown chunker или `None`.
 
     Returns:
         Менеджер с отдельным соединением для каждой операции.
@@ -528,9 +667,9 @@ def create_vault_sync_manager(
     return SQLiteGitHubVaultSyncManager(
         database_path=database_path,
         github_gateway=github_gateway,
-        note_chunker=create_vault_note_chunker(chunking_config),
+        note_chunker=note_chunker or create_vault_note_chunker(chunking_config),
         embedding_provider=(
-            create_embedding_provider(embedding_config)
+            create_embedding_provider(embedding_config, client=embedding_client)
             if embedding_config is not None
             else None
         ),
@@ -576,7 +715,7 @@ def create_obsidian_entry(
     embedding_config: EmbeddingConfig | None = None,
     created_note_tag: str | None = "knowledge-catcher",
 ) -> ObsidianMessageHandler:
-    """Собирает публичный вход Obsidian на одно SQLite-соединение сообщения.
+    """Собирает предметный обработчик на одно SQLite-соединение операции.
 
     Args:
         connection: Соединение текущего worker thread.
@@ -609,6 +748,7 @@ def create_obsidian_entry(
                 openai_base_url=openai_base_url,
                 openai_api_key=openai_api_key,
                 openai_model=openai_model,
+                llm_client=runtime.llm_client if runtime is not None else None,
             )
             if llm_configured
             else None
@@ -622,6 +762,8 @@ def create_obsidian_entry(
             github_gateway=gateway,
             chunking_config=chunking_config,
             embedding_config=embedding_config,
+            embedding_client=runtime.embedding_client if runtime is not None else None,
+            note_chunker=runtime.note_chunker if runtime is not None else None,
         )
         if gateway is not None and hasattr(gateway, "fetch_vault_snapshot")
         else None
@@ -678,6 +820,9 @@ def create_obsidian_entry(
                 embedding_config=embedding_config,
                 chunking_config=chunking_config,
                 created_note_tag=created_note_tag,
+                llm_client=runtime.llm_client if runtime is not None else None,
+                embedding_client=runtime.embedding_client if runtime is not None else None,
+                note_chunker=runtime.note_chunker if runtime is not None else None,
             )
             if llm_configured
             else None

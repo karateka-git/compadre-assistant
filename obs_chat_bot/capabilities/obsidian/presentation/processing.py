@@ -111,6 +111,21 @@ ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
 
+def obsidian_capability_help() -> CapabilityHelp:
+    """Возвращает справку Obsidian без открытия предметного SQLite scope."""
+    return CapabilityHelp(
+        sections=tuple(
+            HelpSection(title, commands) for title, commands in obsidian_help_sections()
+        ),
+        instructions=(
+            "Войди через `/obsidian [текст или URL]`. Подключение vault выполняется внутри этого режима.",
+            "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
+            "",
+            "Ответы `да` и `нет` выбирают единственное ожидание этого чата; при нескольких используй адресную команду `/confirm`.",
+        ),
+    )
+
+
 class ObsidianMessageHandler(IncomingCapabilityPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
@@ -294,17 +309,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
 
     def _help(self) -> CapabilityHelp:
         """Описывает команды и подсказки Obsidian для общей справки."""
-        return CapabilityHelp(
-            sections=tuple(
-                HelpSection(title, commands) for title, commands in obsidian_help_sections()
-            ),
-            instructions=(
-                "Войди через `/obsidian [текст или URL]`. Подключение vault выполняется внутри этого режима.",
-                "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
-                "",
-                "Ответы `да` и `нет` выбирают единственное ожидание этого чата; при нескольких используй адресную команду `/confirm`.",
-            ),
-        )
+        return obsidian_capability_help()
 
     def _selected_vault(self, app_user_id: int) -> ObsidianVault | None:
         """Читает vault только при предметном обращении к Obsidian."""

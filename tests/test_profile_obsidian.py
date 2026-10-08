@@ -6,7 +6,8 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.bootstrap import create_incoming_message_dispatcher, create_user_identity_service, process_channel_incoming_message
+from obs_chat_bot.bootstrap import create_incoming_message_dispatcher, create_user_identity_service
+from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
@@ -54,7 +55,7 @@ class ProfileObsidianTest(unittest.TestCase):
     def test_registration_and_profile_commands_work_with_disabled_obsidian(self) -> None:
         """Отключённый модуль не мешает имени, справке и связи каналов."""
         for channel in ("telegram", "vk", "cli"):
-            with self.subTest(channel=channel), patch("obs_chat_bot.bootstrap.create_obsidian_entry") as factory:
+            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
                 options = dict(channel=channel, enabled_capabilities=(), openai_api_key="", openai_model="")
                 self.register(**options)
                 self.assertIn("Рад тебя видеть, Имя", self.process("/start", **options).text)

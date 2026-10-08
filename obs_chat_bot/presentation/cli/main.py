@@ -616,29 +616,25 @@ def run_telegram_bot_command(
             database_path=database_path,
             github_app_config=github_app_config,
             github_connection_starter=github_connection_starter,
+            openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            embedding_config=embedding_config,
+            chunking_config=chunking_config,
         ) if "obsidian" in enabled_capabilities else None
-        run_telegram_bot(
-            token=token,
-            proxy_url=proxy_url,
-            incoming_message_processor=lambda incoming_message, completion_handler: (
-                app_bootstrap.process_channel_incoming_message(
-                    database_path=database_path,
-                    incoming_message=incoming_message,
-                    openai_base_url=openai_base_url,
-                    openai_api_key=openai_api_key,
-                    openai_model=openai_model,
-                    use_case_factory=use_case_factory,
-                    analysis_use_case_factory=analysis_use_case_factory,
-                    runtime=runtime,
-                    chunking_config=chunking_config,
-                    embedding_config=embedding_config,
-                    obsidian_created_note_tag=obsidian_created_note_tag,
-                    completion_handler=completion_handler,
-                    enabled_capabilities=enabled_capabilities,
-                )
-            ),
-            logger=logger,
-        )
+        with app_bootstrap.create_channel_message_processor(
+            database_path=database_path, runtime=runtime,
+            openai_base_url=openai_base_url, openai_api_key=openai_api_key,
+            openai_model=openai_model, use_case_factory=use_case_factory,
+            analysis_use_case_factory=analysis_use_case_factory,
+            chunking_config=chunking_config, embedding_config=embedding_config,
+            obsidian_created_note_tag=obsidian_created_note_tag,
+            enabled_capabilities=enabled_capabilities,
+        ) as processor:
+            run_telegram_bot(
+                token=token, proxy_url=proxy_url,
+                incoming_message_processor=processor, logger=logger,
+            )
     except KeyboardInterrupt:
         logger.info("Telegram bot stopped")
         return 0
@@ -710,29 +706,25 @@ def run_vk_bot_command(
             database_path=database_path,
             github_app_config=github_app_config,
             github_connection_starter=github_connection_starter,
+            openai_base_url=openai_base_url,
+            openai_api_key=openai_api_key,
+            openai_model=openai_model,
+            embedding_config=embedding_config,
+            chunking_config=chunking_config,
         ) if "obsidian" in enabled_capabilities else None
-        run_vk_bot(
-            token=token,
-            group_id=group_id,
-            incoming_message_processor=lambda incoming_message, completion_handler: (
-                app_bootstrap.process_channel_incoming_message(
-                    database_path=database_path,
-                    incoming_message=incoming_message,
-                    openai_base_url=openai_base_url,
-                    openai_api_key=openai_api_key,
-                    openai_model=openai_model,
-                    use_case_factory=use_case_factory,
-                    analysis_use_case_factory=analysis_use_case_factory,
-                    runtime=runtime,
-                    chunking_config=chunking_config,
-                    embedding_config=embedding_config,
-                    obsidian_created_note_tag=obsidian_created_note_tag,
-                    completion_handler=completion_handler,
-                    enabled_capabilities=enabled_capabilities,
-                )
-            ),
-            logger=logger,
-        )
+        with app_bootstrap.create_channel_message_processor(
+            database_path=database_path, runtime=runtime,
+            openai_base_url=openai_base_url, openai_api_key=openai_api_key,
+            openai_model=openai_model, use_case_factory=use_case_factory,
+            analysis_use_case_factory=analysis_use_case_factory,
+            chunking_config=chunking_config, embedding_config=embedding_config,
+            obsidian_created_note_tag=obsidian_created_note_tag,
+            enabled_capabilities=enabled_capabilities,
+        ) as processor:
+            run_vk_bot(
+                token=token, group_id=group_id,
+                incoming_message_processor=processor, logger=logger,
+            )
     except KeyboardInterrupt:
         logger.info("VK bot stopped")
         return 0

@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from obs_chat_bot.bootstrap import process_channel_incoming_message
+from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations

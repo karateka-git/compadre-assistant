@@ -20,7 +20,7 @@ from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleA
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from obs_chat_bot.core.data.config import AppConfig, GitHubAppConfig
-from obs_chat_bot.bootstrap import process_channel_incoming_message
+from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
 from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 from obs_chat_bot.presentation.cli.main import (

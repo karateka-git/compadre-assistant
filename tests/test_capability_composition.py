@@ -3,14 +3,16 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
+from threading import Barrier, Lock
 from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.bootstrap import create_user_identity_service, process_channel_incoming_message, validate_enabled_capabilities
-from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
+from obs_chat_bot.bootstrap import create_channel_message_processor, create_user_identity_service, validate_enabled_capabilities
+from channel_helpers import process_channel_incoming_message
+from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime, create_obsidian_process_runtime, create_vault_note_chunker
 from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubConnectionCompletion, GitHubConnectionCompletionStatus
@@ -65,6 +67,117 @@ class CapabilityCompositionTest(unittest.TestCase):
             with self.subTest(identifiers=identifiers), self.assertRaises(ValueError):
                 validate_enabled_capabilities(identifiers)
 
+    def test_process_registry_reuses_handler_and_scopes_only_obsidian_events(self) -> None:
+        """Общие команды обходят Obsidian scope, а предметные события получают новые соединения."""
+        connections = []
+
+        def article_factory(connection):
+            """Записывает соединение, принадлежащее только текущей операции."""
+            connections.append(connection)
+            return self.article
+
+        with create_channel_message_processor(
+            database_path=self.database_path,
+            openai_base_url="https://example.com/v1",
+            openai_api_key="test", openai_model="test",
+            use_case_factory=article_factory,
+            analysis_use_case_factory=lambda _connection: self.analysis,
+        ) as processor:
+            registered = processor._registry.by_id("obsidian")
+            for command in ("/help", "/status", "/name Имя", "/link_code"):
+                processor(self.event(command))
+            self.assertEqual(connections, [])
+            self.assertIn("Режим Obsidian", processor(self.event("/obsidian")).text)
+            self.assertIs(processor._registry.by_id("obsidian"), registered)
+            self.assertIn("Режим Obsidian", processor(self.event("/obsidian")).text)
+        self.assertEqual(len(connections), 2)
+        self.assertIsNot(connections[0], connections[1])
+        for connection in connections:
+            with self.assertRaises(sqlite3.ProgrammingError):
+                connection.execute("SELECT 1")
+
+    def test_processor_closes_only_owned_process_clients(self) -> None:
+        """Остановка процессного входа закрывает HTTP/LLM клиентов по одному разу."""
+        class Client:
+            def __init__(self):
+                self.closes = 0
+
+            def close(self):
+                self.closes += 1
+
+        github, llm, embedding = Client(), Client(), Client()
+        runtime = ObsidianProcessRuntime(None, github, llm, embedding)
+        with create_channel_message_processor(
+            database_path=self.database_path,
+            runtime=runtime,
+        ) as processor:
+            processor(self.event("/help"))
+            self.assertEqual((github.closes, llm.closes, embedding.closes), (0, 0, 0))
+        self.assertEqual((github.closes, llm.closes, embedding.closes), (1, 1, 1))
+
+    def test_failed_process_registration_closes_runtime_clients(self) -> None:
+        """Сбой сборки реестра после создания runtime не оставляет открытых клиентов."""
+        class Client:
+            def __init__(self):
+                self.closes = 0
+
+            def close(self):
+                self.closes += 1
+
+        clients = (Client(), Client(), Client())
+        runtime = ObsidianProcessRuntime(None, *clients)
+        with patch("obs_chat_bot.bootstrap.ChannelMessageProcessor", side_effect=ValueError("registry")):
+            with self.assertRaisesRegex(ValueError, "registry"):
+                with create_channel_message_processor(
+                    database_path=self.database_path, runtime=runtime,
+                ):
+                    self.fail("Процесс не должен быть передан вызывающему коду")
+        self.assertEqual(tuple(client.closes for client in clients), (1, 1, 1))
+
+    def test_process_chunker_is_reused_for_separate_obsidian_operations(self) -> None:
+        """Операции получают один неизменяемый chunker из процессного runtime."""
+        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_note_chunker",
+                   wraps=create_vault_note_chunker) as factory:
+            runtime = create_obsidian_process_runtime(
+                database_path=self.database_path, github_app_config=None,
+            )
+            with create_channel_message_processor(
+                database_path=self.database_path,
+                runtime=runtime,
+                openai_base_url="https://example.com/v1",
+                openai_api_key="test", openai_model="test",
+                use_case_factory=lambda _connection: self.article,
+                analysis_use_case_factory=lambda _connection: self.analysis,
+            ) as processor:
+                self.assertIn("Режим Obsidian", processor(self.event("/obsidian")).text)
+                self.assertIn("Режим Obsidian", processor(self.event("/obsidian")).text)
+            self.assertEqual(factory.call_count, 1)
+
+    def test_parallel_events_do_not_share_obsidian_connection(self) -> None:
+        """Два вызова одного зарегистрированного входа имеют разные SQLite scopes."""
+        barrier = Barrier(2)
+        guard = Lock()
+        connections = []
+
+        def article_factory(connection):
+            """Удерживает два одновременных вызова внутри их собственных scopes."""
+            with guard:
+                connections.append(connection)
+            barrier.wait(timeout=3)
+            connection.execute("SELECT 1")
+            return self.article
+
+        with create_channel_message_processor(
+            database_path=self.database_path,
+            use_case_factory=article_factory,
+            analysis_use_case_factory=lambda _connection: self.analysis,
+        ) as processor, ThreadPoolExecutor(max_workers=2) as executor:
+            calls = [executor.submit(processor, self.event("/obsidian")) for _ in range(2)]
+            for call in calls:
+                self.assertIn("Режим Obsidian", call.result(timeout=5).text)
+        self.assertEqual(len(connections), 2)
+        self.assertIsNot(connections[0], connections[1])
+
     def test_no_mode_and_exit_do_not_run_article_or_llm_after_restart(self) -> None:
         """Смена соединения сохраняет отсутствие режима и явный выход."""
         for text in ("https://example.com/article", "текст"):
@@ -86,7 +199,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             SQLiteChatModeRepository(connection).save(ChatMode(self.key, "obsidian"))
             saved = SQLiteArticleRepository(connection).create(Article("https://example.com/article", "https://example.com/article", self.user.id))
-        with patch("obs_chat_bot.bootstrap.create_obsidian_entry") as factory:
+        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", reply.text)
             self.assertIn("/exit", reply.text)
