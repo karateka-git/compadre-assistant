@@ -263,7 +263,7 @@ class EmbeddingCheckpointsTest(unittest.TestCase):
                     provider = BatchProvider(before_batch=change_lease)
                     with self.assertRaisesRegex(RuntimeError, "lease"):
                         service._run_with_lease(vault, now=now[0], operation=lambda: _update(
-                            con, vault.id, provider, guard=service._embedding_write_guard))
+                            con, vault.id, provider, guard=service._lease_write_guard))
                     self.assertEqual(len(provider.calls), 2)
                     self.assertEqual(len(repository.list_for_vault(app_user_id=1, vault_id=vault.id)), 1)
                     self.assertIsNone(repository.get_state(app_user_id=1, vault_id=vault.id))

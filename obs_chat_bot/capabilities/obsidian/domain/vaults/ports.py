@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timedelta
 from typing import Mapping, Protocol
 
 from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
@@ -168,6 +169,33 @@ class VaultSyncLeaseRepository(Protocol):
         owner: str,
     ) -> bool:
         """Освобождает lease только для захватившего его владельца."""
+
+    def run_exclusive(
+        self,
+        *,
+        app_user_id: int,
+        vault_id: int,
+        owner: str,
+        clock: Callable[[], datetime],
+        duration: timedelta,
+        operation: Callable[[], GitHubVaultCommitResult],
+    ) -> GitHubVaultCommitResult:
+        """Удерживает межпроцессный lock vault и lease на время внешнего commit.
+
+        Args:
+            app_user_id: Владелец vault.
+            vault_id: Идентификатор общего ресурса.
+            owner: Идентификатор ранее захваченной операции.
+            clock: Часы проверки lease.
+            duration: Срок продления владения.
+            operation: Единственный внешний commit внутри lock.
+
+        Returns:
+            Результат внешнего commit.
+
+        Raises:
+            RuntimeError: Владение lease утрачено до начала commit.
+        """
 
 
 class VaultActionConfirmationRepository(Protocol):

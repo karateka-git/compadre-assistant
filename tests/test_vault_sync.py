@@ -98,18 +98,24 @@ class MemoryLeaseRepository:
 
     def __init__(self):
         self.released = False
+        self.lease = None
 
     def acquire(self, **values):
-        return VaultSyncLease(
+        self.lease = VaultSyncLease(
             app_user_id=values["app_user_id"],
             vault_id=values["vault_id"],
             owner=values["owner"],
             acquired_at=values["now"],
             expires_at=values["expires_at"],
         )
+        return self.lease
+
+    def get(self, **_values):
+        return self.lease
 
     def release(self, **_values):
         self.released = True
+        self.lease = None
         return True
 
 

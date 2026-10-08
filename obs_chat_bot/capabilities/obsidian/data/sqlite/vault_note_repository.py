@@ -8,6 +8,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import (
     vault_note_from_dto,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 
 NOTE_COLUMNS = """
@@ -33,6 +34,7 @@ class SQLiteVaultNoteRepository(VaultNoteRepository):
     def upsert(self, note: VaultNote) -> VaultNote:
         """Атомарно сохраняет заметку и полностью заменяет её metadata."""
         with self._connection:
+            fence_vault_write(self._connection, note.app_user_id, note.vault_id)
             vault_row = self._connection.execute(
                 """
                 SELECT 1
@@ -149,6 +151,7 @@ class SQLiteVaultNoteRepository(VaultNoteRepository):
         ordered_paths = sorted(paths)
         placeholders = ", ".join("?" for _ in ordered_paths)
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             cursor = self._connection.execute(
                 f"""
                 DELETE FROM obsidian_notes

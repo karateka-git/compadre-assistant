@@ -9,6 +9,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import (
     obsidian_vault_from_row,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 
 VAULT_COLUMNS = """
@@ -154,6 +155,7 @@ class SQLiteObsidianVaultRepository(ObsidianVaultRepository):
                 raise ValueError(f"{name} must not be empty")
 
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             self._connection.execute(
                 """
                 UPDATE obsidian_vaults

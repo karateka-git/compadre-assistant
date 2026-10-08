@@ -8,6 +8,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_mappers import (
     vault_instruction_from_dto,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultInstruction
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 
 INSTRUCTION_COLUMNS = """
@@ -44,6 +45,7 @@ class SQLiteVaultInstructionRepository(VaultInstructionRepository):
         ):
             raise ValueError("instruction does not belong to requested vault")
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             vault_row = self._connection.execute(
                 """
                 SELECT 1

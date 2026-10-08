@@ -19,6 +19,8 @@ from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposalStatus,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
+from obs_chat_bot.capabilities.obsidian.domain.vaults.lease_scope import current_vault_lease
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 
 PROPOSAL_COLUMNS = """
@@ -178,6 +180,7 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
     def release_claim(self, proposal: ObsidianProposal) -> ObsidianProposal | None:
         """Возвращает незавершённую операцию в pending после ошибки внешней записи."""
         with self._connection:
+            fence_vault_write(self._connection, proposal.app_user_id, proposal.vault_id)
             cursor = self._connection.execute(
                 """UPDATE obsidian_proposals SET status = 'pending', version = version + 1,
                     execution_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
@@ -249,6 +252,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         """Атомарно фиксирует local snapshot и завершает article review."""
         now = _format_timestamp(datetime.now(UTC))
         with self._connection:
+            if note is not None:
+                fence_vault_write(self._connection, app_user_id, note.vault_id)
             pending = self._connection.execute(
                 """
                 SELECT action, article_id, vault_id FROM obsidian_proposals
@@ -353,6 +358,9 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         if origin is not None:
             params += (origin.channel, origin.chat_id)
         with self._connection:
+            scope = current_vault_lease()
+            if origin is None and scope is not None:
+                fence_vault_write(self._connection, app_user_id, scope.vault_id)
             cursor = self._connection.execute(
                 """UPDATE obsidian_proposals SET status = ?, version = version + 1,
                     execution_expires_at = NULL, completed_at = ?, updated_at = CURRENT_TIMESTAMP

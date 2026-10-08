@@ -23,6 +23,9 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubVaultSnapshotStatus,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.markdown import parse_markdown
+from obs_chat_bot.capabilities.obsidian.domain.vaults.lease_scope import (
+    VaultLeaseLostError, VaultLeaseScope, active_vault_lease,
+)
 from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
     GitHubVaultGateway,
     ObsidianVaultRepository,
@@ -149,7 +152,7 @@ class VaultSyncService:
         self._embedding_indexer = embedding_indexer
         self._clock = clock
         self._lease_duration = lease_duration
-        self._embedding_write_guard: Callable[[], None] | None = None
+        self._lease_write_guard: Callable[[], None] | None = None
 
     def sync(self, app_user_id: int) -> VaultSyncResult:
         """Обновляет локальную копию, скачивая только изменённые Markdown blobs."""
@@ -272,13 +275,16 @@ class VaultSyncService:
                 or current.owner != owner
                 or current.expires_at <= self._clock()
             ):
-                raise RuntimeError("Vault sync lease expired or changed during embedding")
+                raise VaultLeaseLostError("Vault sync lease expired or changed")
 
-        self._embedding_write_guard = check_lease
+        self._lease_write_guard = check_lease
         try:
-            return operation()
+            with active_vault_lease(VaultLeaseScope(
+                vault.app_user_id, vault.id, owner, self._clock, self._lease_duration,
+            )):
+                return operation()
         finally:
-            self._embedding_write_guard = None
+            self._lease_write_guard = None
             self._lease_repository.release(
                 app_user_id=vault.app_user_id,
                 vault_id=vault.id,
@@ -381,6 +387,8 @@ class VaultSyncService:
             snapshot.status.value,
             time.monotonic() - github_started_at,
         )
+        if self._lease_write_guard is not None:
+            self._lease_write_guard()
         if snapshot.status is GitHubVaultSnapshotStatus.NOT_MODIFIED:
             chunk_update = self._ensure_current_index(
                 vault,
@@ -599,6 +607,8 @@ class VaultSyncService:
         """Обновляет только chunks, не выполняя лишний запрос к GitHub."""
         if vault.id is None:
             raise ValueError("vault must be saved before indexing")
+        if self._lease_write_guard is not None:
+            self._lease_write_guard()
         notes = self._note_repository.list_for_vault(
             app_user_id=vault.app_user_id,
             vault_id=vault.id,
@@ -687,7 +697,7 @@ class VaultSyncService:
             app_user_id=vault.app_user_id,
             vault_id=vault.id,
             chunk_index_signature=self._chunk_indexer.index_signature,
-            before_write=self._embedding_write_guard,
+            before_write=self._lease_write_guard,
         )
         LOGGER.info(
             "Vault embedding index update completed: app_user_id=%s vault_id=%s "

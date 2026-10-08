@@ -270,6 +270,9 @@ class LeaseRepositoryFake:
     def release(self, **_kwargs):
         return True
 
+    def run_exclusive(self, *, operation, **_kwargs):
+        return operation()
+
 
 class GitHubGatewayFake:
     """Возвращает заданный remote state и считает write-вызовы."""

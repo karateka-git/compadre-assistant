@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from math import isfinite
 import sqlite3
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultChunkEmbeddingDraft
 from obs_chat_bot.capabilities.obsidian.domain.search.ports import VaultEmbeddingIndexRepository
@@ -121,6 +122,7 @@ class SQLiteVaultEmbeddingIndexRepository(VaultEmbeddingIndexRepository):
         """Удаляет только marker, проверяя lease под write lock при наличии guard."""
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
+            fence_vault_write(self._connection, app_user_id, vault_id)
             if before_write is not None:
                 before_write()
             self._connection.execute(
@@ -156,6 +158,7 @@ class SQLiteVaultEmbeddingIndexRepository(VaultEmbeddingIndexRepository):
         )
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
+            fence_vault_write(self._connection, app_user_id, vault_id)
             if before_write is not None:
                 before_write()
             self._check_chunk_state(app_user_id, vault_id, chunk_index_signature)
@@ -208,6 +211,7 @@ class SQLiteVaultEmbeddingIndexRepository(VaultEmbeddingIndexRepository):
             raise ValueError("embedding profile values must not be empty")
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
+            fence_vault_write(self._connection, app_user_id, vault_id)
             if before_write is not None:
                 before_write()
             self._check_chunk_state(app_user_id, vault_id, chunk_index_signature)

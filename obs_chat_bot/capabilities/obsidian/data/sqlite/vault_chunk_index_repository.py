@@ -17,6 +17,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.chunk_mappers import (
     vault_note_chunk_from_dto,
 )
 from obs_chat_bot.capabilities.obsidian.domain.search.entities import VaultChunkIndexState, VaultNoteChunk
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_lease_fence import fence_vault_write
 
 
 CHUNK_COLUMNS = """
@@ -103,6 +104,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
     def invalidate(self, *, app_user_id: int, vault_id: int) -> None:
         """Удаляет marker до начала потенциально частичной серии записей."""
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             self._connection.execute(
                 """
                 DELETE FROM obsidian_chunk_index_states
@@ -153,6 +155,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
         if not source_blob_sha.strip() or not index_signature.strip():
             raise ValueError("note index state values must not be empty")
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             self._require_note_scope(
                 app_user_id=app_user_id,
                 vault_id=vault_id,
@@ -190,6 +193,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
     ) -> ChunkIndexUpdate:
         """Атомарно сравнивает и заменяет chunks одной заметки."""
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             note_path = self._require_note_scope(
                 app_user_id=app_user_id,
                 vault_id=vault_id,
@@ -276,6 +280,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
         ordered_ids = sorted(note_ids)
         placeholders = ", ".join("?" for _ in ordered_ids)
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             cursor = self._connection.execute(
                 f"""
                 DELETE FROM obsidian_note_chunks
@@ -298,6 +303,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
         if not index_signature.strip():
             raise ValueError("index_signature must not be empty")
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             note_paths = self._list_note_paths(
                 app_user_id=app_user_id,
                 vault_id=vault_id,
@@ -376,6 +382,7 @@ class SQLiteVaultChunkIndexRepository(VaultChunkIndexRepository):
         if not index_signature.strip():
             raise ValueError("index_signature must not be empty")
         with self._connection:
+            fence_vault_write(self._connection, app_user_id, vault_id)
             self._require_vault_scope(app_user_id=app_user_id, vault_id=vault_id)
             if self.list_stale_note_ids(
                 app_user_id=app_user_id,

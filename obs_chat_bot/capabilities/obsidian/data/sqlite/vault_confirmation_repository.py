@@ -22,6 +22,7 @@ from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository im
     SQLiteObsidianVaultRepository,
     _vault_values,
 )
+from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_process_lock import vault_process_lock
 
 
 class SQLiteVaultActionConfirmationRepository(VaultActionConfirmationRepository):
@@ -113,6 +114,32 @@ class SQLiteVaultActionConfirmationRepository(VaultActionConfirmationRepository)
         return vault_confirmation_from_row(row) if row else None
 
     def decide(
+        self, confirmation: VaultActionConfirmation, *, approve: bool, now: datetime
+    ) -> ObsidianVault | None:
+        """Применяет решение под тем же межпроцессным lock, что и write-back.
+
+        Args:
+            confirmation: Подтверждаемая замена или отключение vault.
+            approve: Применить изменение конфигурации.
+            now: Время проверки TTL и занятого lease.
+
+        Returns:
+            Актуальный vault либо `None`, если изменение его удалило.
+
+        Raises:
+            VaultResourceBusyError: Внешняя запись удерживает lock vault.
+            PendingOperationError: Ожидание или конфигурация уже изменились.
+        """
+        with vault_process_lock(
+            self._connection, confirmation.base_vault_id, blocking=False,
+        ) as locked:
+            if not locked:
+                raise VaultResourceBusyError(
+                    "Vault занят синхронизацией или записью. Повтори решение позже."
+                )
+            return self._decide_locked(confirmation, approve=approve, now=now)
+
+    def _decide_locked(
         self, confirmation: VaultActionConfirmation, *, approve: bool, now: datetime
     ) -> ObsidianVault | None:
         """Одной транзакцией проверяет CAS и меняет vault вместе со статусом решения.

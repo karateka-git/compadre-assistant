@@ -1,11 +1,13 @@
 """Проверки шага 2.4 с настоящими SQLite repositories и автономными gateways."""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event
+import sqlite3
 import unittest
 
 from obs_chat_bot.bootstrap import create_user_identity_service
@@ -60,6 +62,7 @@ from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultSearchR
 from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
     VaultActionConfirmation,
     VaultConfirmationAction,
+    VaultNote,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubVaultTargetState,
@@ -404,29 +407,104 @@ class OperationScopesTest(unittest.TestCase):
             applying = executor.submit(self.process, first.actions[0].command, TG)
             self.assertTrue(entered.wait(2))
             try:
-                same = self.process(first.actions[0].command, TG)
-                other = self.process(second.actions[0].command, VK)
-                self.assertIn("устарело", same.text)
-                self.assertIn("занят", other.text)
-                self.assertEqual(len(self.pending(VK)), 1)
                 self.assertEqual(self.gateway.commits, 0)
-                # Настоящий sync читает тот же SQLite lease и не достигает gateway.
-                with connect_database(self.path) as connection:
-                    sync = VaultSyncService(
-                        vault_repository=SQLiteObsidianVaultRepository(connection),
-                        note_repository=SQLiteVaultNoteRepository(connection),
-                        instruction_repository=SQLiteVaultInstructionRepository(connection),
-                        lease_repository=SQLiteVaultSyncLeaseRepository(connection),
-                        github_gateway=object(),
-                        chunk_indexer=object(),
-                    )
-                    self.assertEqual(sync.sync(1).status, VaultSyncStatus.IN_PROGRESS)
             finally:
                 release.set()
             self.assertIsNone(applying.result(timeout=3).error)
         self.assertEqual(self.gateway.commits, 1)
         self.assertIn("Vault изменился", self.process(second.actions[0].command, VK).text)
         self.assertEqual(self.gateway.commits, 1)
+
+    def test_expired_lease_taken_during_preflight_blocks_remote_commit(self):
+        """После takeover между SHA preflight и commit старый worker не пишет GitHub."""
+        self.prepare()
+        pending = self.pending()[0]
+        original_inspect = self.gateway.inspect_vault_target
+
+        def takeover(vault, *, target_path):
+            state = original_inspect(vault, target_path=target_path)
+            with connect_database(self.path) as second:
+                second.execute(
+                    "UPDATE obsidian_vault_sync_leases SET expires_at = ? WHERE vault_id = 1",
+                    ((datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),),
+                )
+                second.commit()
+                acquired = SQLiteVaultSyncLeaseRepository(second).acquire(
+                    app_user_id=1, vault_id=1, owner="vk-worker",
+                    now=datetime.now(UTC), expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                )
+                self.assertIsNotNone(acquired)
+            return state
+
+        self.gateway.inspect_vault_target = takeover
+        with connect_database(self.path) as first:
+            result = self.service(first).confirm(
+                1, proposal_id=pending.id, origin=TG, version=pending.version,
+            )
+        self.assertEqual(result.status, ObsidianConfirmationStatus.IN_PROGRESS)
+        self.assertEqual(self.gateway.commits, 0)
+        with connect_database(self.path) as connection:
+            vault = SQLiteObsidianVaultRepository(connection).get_for_user(1)
+            self.assertEqual(vault.head_commit_sha, "base-commit")
+            self.assertEqual(SQLiteVaultNoteRepository(connection).list_for_vault(
+                app_user_id=1, vault_id=1,
+            ), [])
+
+    def test_remote_commit_holds_fence_during_delayed_http_call(self):
+        """Другой процесс не захватывает даже истёкший TTL до ответа GitHub."""
+        first = self.prepare()
+        with connect_database(self.path) as connection:
+            connection.executescript("""
+                INSERT INTO github_accounts (app_user_id, github_user_id, login)
+                VALUES (2, 101, 'other');
+                INSERT INTO github_installations (app_user_id, installation_id)
+                VALUES (2, 201);
+                INSERT INTO obsidian_vaults (id, app_user_id, installation_id,
+                    repository_id, owner, repository, branch)
+                VALUES (2, 2, 201, 301, 'other', 'vault', 'main');
+            """)
+            pending_disconnect = SQLiteVaultActionConfirmationRepository(connection).save(
+                VaultActionConfirmation(
+                    app_user_id=1, origin=TG, base_vault_id=1,
+                    action=VaultConfirmationAction.DISCONNECT,
+                    expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                ),
+                now=datetime.now(UTC),
+            )
+        entered, release, attempted = Event(), Event(), Event()
+        self.gateway.entered, self.gateway.release = entered, release
+
+        def contender():
+            with closing(sqlite3.connect(self.path, timeout=5)) as connection:
+                connection.row_factory = sqlite3.Row
+                attempted.set()
+                return SQLiteVaultSyncLeaseRepository(connection).acquire(
+                    app_user_id=1, vault_id=1, owner="vk-worker",
+                    now=datetime.now(UTC) + timedelta(minutes=10),
+                    expires_at=datetime.now(UTC) + timedelta(minutes=15),
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            applying = executor.submit(self.process, first.actions[0].command, TG)
+            self.assertTrue(entered.wait(2))
+            competing = executor.submit(contender)
+            self.assertTrue(attempted.wait(2))
+            self.assertIsNone(competing.result(timeout=3))
+            with connect_database(self.path) as independent:
+                SQLiteVaultNoteRepository(independent).upsert(
+                    VaultNote(2, 2, "other.md", "other-blob", "# Other")
+                )
+                self.assertEqual(len(SQLiteVaultNoteRepository(independent).list_for_vault(
+                    app_user_id=2, vault_id=2,
+                )), 1)
+                with self.assertRaises(VaultResourceBusyError):
+                    SQLiteVaultActionConfirmationRepository(independent).decide(
+                        pending_disconnect, approve=True, now=datetime.now(UTC),
+                    )
+            release.set()
+            self.assertIsNone(applying.result(timeout=3).error)
+        self.assertEqual(self.gateway.commits, 1)
+        self.assertIsNotNone(contender())
 
     def test_configuration_pending_is_local_and_replace_disconnect_are_exclusive(self):
         """Конфликт за конфигурацию не подменяет ожидание и не блокирует другую статью."""

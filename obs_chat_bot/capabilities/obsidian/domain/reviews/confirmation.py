@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from collections.abc import Callable
+from contextlib import nullcontext
 
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
@@ -19,6 +21,9 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubVaultCommitResult,
 )
 from obs_chat_bot.capabilities.obsidian.domain.vaults.markdown import parse_markdown
+from obs_chat_bot.capabilities.obsidian.domain.vaults.lease_scope import (
+    VaultLeaseLostError, VaultLeaseScope, active_vault_lease,
+)
 from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
     GitHubVaultWriteGateway,
     ObsidianVaultRepository,
@@ -72,6 +77,7 @@ class ObsidianProposalConfirmationService:
         vault_sync_manager: VaultSyncManager | None = None,
         error_recorder: ProcessingErrorRecorder | None = None,
         lease_duration: timedelta = timedelta(minutes=5),
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._proposal_repository = proposal_repository
         self._vault_repository = vault_repository
@@ -80,6 +86,7 @@ class ObsidianProposalConfirmationService:
         self._vault_sync_manager = vault_sync_manager
         self._error_recorder = error_recorder
         self._lease_duration = lease_duration
+        self._clock = clock
 
     def list_pending(self, app_user_id: int, origin: PendingOrigin) -> tuple[ObsidianProposal, ...]:
         """Возвращает актуальные ожидания только этого исходного чата."""
@@ -166,7 +173,7 @@ class ObsidianProposalConfirmationService:
         pending = self._validate(app_user_id, proposal_id, origin, version)
         if isinstance(pending, ObsidianConfirmationResult):
             return pending
-        now = datetime.now(UTC)
+        now = self._clock()
         owner = f"obsidian-write-{uuid4().hex}"
         vault = self._vault_repository.get_by_id(app_user_id=app_user_id, vault_id=pending.vault_id)
         lease = None
@@ -184,39 +191,59 @@ class ObsidianProposalConfirmationService:
                 )
         claimed = None
         try:
-            claimed = self._proposal_repository.claim(
-                proposal_id=proposal_id,
-                app_user_id=app_user_id,
-                origin=origin,
-                version=version,
-                now=now,
-                expires_at=now + self._lease_duration,
+            scope = (
+                active_vault_lease(VaultLeaseScope(
+                    app_user_id, pending.vault_id, owner, self._clock, self._lease_duration,
+                )) if lease is not None else nullcontext()
             )
-            if claimed is None:
-                return ObsidianConfirmationResult(ObsidianConfirmationStatus.STALE)
-            if pending.action is ObsidianProposalAction.SKIP:
-                applied = self._proposal_repository.complete_applied(
+            with scope:
+                claimed = self._proposal_repository.claim(
                     proposal_id=proposal_id,
                     app_user_id=app_user_id,
-                    version=claimed.version,
-                    applied_commit_sha=None,
-                    head_commit_sha=None,
-                    tree_sha=None,
-                    note=None,
+                    origin=origin,
+                    version=version,
+                    now=now,
+                    expires_at=now + self._lease_duration,
                 )
-                if applied is None:
-                    raise RuntimeError("Claimed skip changed before completion")
-                return ObsidianConfirmationResult(
-                    ObsidianConfirmationStatus.APPLIED, proposal=applied
-                )
-            if vault is None or vault.id is None:
-                return self._conflict(claimed)
-            result = self._commit_pending(claimed, vault)
+                if claimed is None:
+                    return ObsidianConfirmationResult(ObsidianConfirmationStatus.STALE)
+                if pending.action is ObsidianProposalAction.SKIP:
+                    applied = self._proposal_repository.complete_applied(
+                        proposal_id=proposal_id,
+                        app_user_id=app_user_id,
+                        version=claimed.version,
+                        applied_commit_sha=None,
+                        head_commit_sha=None,
+                        tree_sha=None,
+                        note=None,
+                    )
+                    if applied is None:
+                        raise RuntimeError("Claimed skip changed before completion")
+                    return ObsidianConfirmationResult(
+                        ObsidianConfirmationStatus.APPLIED, proposal=applied
+                    )
+                if vault is None or vault.id is None:
+                    return self._conflict(claimed)
+                result = self._commit_pending(claimed, vault, owner=owner)
+        except VaultLeaseLostError as error:
+            result = ObsidianConfirmationResult(
+                ObsidianConfirmationStatus.IN_PROGRESS, proposal=claimed, error=error,
+            )
         finally:
+            restored = None
             if claimed is not None:
-                restored = self._proposal_repository.release_claim(claimed)
-            else:
-                restored = None
+                try:
+                    release_scope = (
+                        active_vault_lease(VaultLeaseScope(
+                            app_user_id, pending.vault_id, owner, self._clock,
+                            self._lease_duration,
+                        )) if lease is not None else nullcontext()
+                    )
+                    with release_scope:
+                        restored = self._proposal_repository.release_claim(claimed)
+                except VaultLeaseLostError:
+                    # Истёкший claim восстановит новый worker после SHA preflight.
+                    pass
             if lease is not None:
                 self._lease_repository.release(
                     app_user_id=app_user_id, vault_id=pending.vault_id, owner=owner
@@ -280,6 +307,8 @@ class ObsidianProposalConfirmationService:
         self,
         pending: ObsidianProposal,
         vault: ObsidianVault,
+        *,
+        owner: str,
     ) -> ObsidianConfirmationResult:
         """Выполняет сетевую часть подтверждения внутри захваченного lease."""
         try:
@@ -305,11 +334,18 @@ class ObsidianProposalConfirmationService:
                     blob_sha=state.target_blob_sha or "",
                 )
             else:
-                committed = self._github_gateway.commit_vault_markdown(
-                    vault,
-                    target_path=pending.target_path or "",
-                    markdown=proposed_markdown,
-                    expected_blob_sha=pending.target_blob_sha,
+                committed = self._lease_repository.run_exclusive(
+                    app_user_id=pending.app_user_id,
+                    vault_id=pending.vault_id,
+                    owner=owner,
+                    clock=self._clock,
+                    duration=self._lease_duration,
+                    operation=lambda: self._github_gateway.commit_vault_markdown(
+                        vault,
+                        target_path=pending.target_path or "",
+                        markdown=proposed_markdown,
+                        expected_blob_sha=pending.target_blob_sha,
+                    ),
                 )
             metadata = parse_markdown(
                 pending.target_path or "",
