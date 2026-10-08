@@ -11,6 +11,7 @@ from obs_chat_bot.core.domain.users.ports import (
     ExternalIdentityRepository,
     IdentityRebindConfirmationRepository,
     IdentityLinkTokenRepository,
+    IdentityLifecycleRepository,
 )
 from obs_chat_bot.core.domain.users.entities import (
     MAX_DISPLAY_NAME_LENGTH,
@@ -54,14 +55,28 @@ class UserIdentityService:
         external_identity_repository: ExternalIdentityRepository,
         link_token_repository: IdentityLinkTokenRepository,
         rebind_confirmation_repository: IdentityRebindConfirmationRepository,
+        lifecycle_repository: IdentityLifecycleRepository,
         clock: Callable[[], datetime] | None = None,
         token_factory: Callable[[], str] | None = None,
         token_ttl: timedelta = timedelta(minutes=10),
     ) -> None:
+        """Собирает сценарии профиля поверх общих ports.
+
+        Args:
+            app_user_repository: Чтение и изменение профиля.
+            external_identity_repository: Чтение известных внешних identities.
+            link_token_repository: Создание и проверка link-кодов.
+            rebind_confirmation_repository: Адресные подтверждения переноса.
+            lifecycle_repository: Атомарная регистрация и первая привязка канала.
+            clock: Источник текущего времени, по умолчанию UTC.
+            token_factory: Генератор одноразового кода.
+            token_ttl: Срок действия кода и подтверждения.
+        """
         self._app_user_repository = app_user_repository
         self._external_identity_repository = external_identity_repository
         self._link_token_repository = link_token_repository
         self._rebind_confirmation_repository = rebind_confirmation_repository
+        self._lifecycle_repository = lifecycle_repository
         self._clock = clock or (lambda: datetime.now(UTC))
         self._token_factory = token_factory or (lambda: token_urlsafe(6))
         self._token_ttl = token_ttl
@@ -76,17 +91,8 @@ class UserIdentityService:
         return self._app_user_repository.get_by_id(external_identity.app_user_id)
 
     def register(self, identity: IncomingIdentity) -> AppUser:
-        """Создает нового пользователя и привязывает к нему текущий канал."""
-        existing = self.resolve(identity)
-        if existing is not None:
-            return existing
-
-        app_user = self._app_user_repository.create()
-        self._external_identity_repository.create(
-            app_user_id=app_user.id,
-            identity=identity,
-        )
-        return app_user
+        """Атомарно возвращает профиль либо создаёт его с первой связью канала."""
+        return self._lifecycle_repository.register(identity)
 
     def update_display_name(
         self,
@@ -125,23 +131,13 @@ class UserIdentityService:
 
     def link(self, *, code: str, identity: IncomingIdentity) -> AppUser:
         """Привязывает текущий канал к пользователю по одноразовому коду."""
-        if self.resolve(identity) is not None:
-            raise IdentityAlreadyBoundError("External identity is already bound")
-
-        app_user_id = self._link_token_repository.consume(
+        app_user = self._lifecycle_repository.link(
+            identity=identity,
             token_hash=_hash_code(code.strip()),
             now=self._clock(),
         )
-        if app_user_id is None:
-            raise InvalidLinkCodeError("Link code is invalid or expired")
-
-        self._external_identity_repository.create(
-            app_user_id=app_user_id,
-            identity=identity,
-        )
-        app_user = self._app_user_repository.get_by_id(app_user_id)
         if app_user is None:
-            raise InvalidLinkCodeError("Link code points to missing user")
+            raise InvalidLinkCodeError("Link code is invalid or expired")
         return app_user
 
     def request_rebind_confirmation(

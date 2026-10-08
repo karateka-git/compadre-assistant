@@ -47,6 +47,7 @@ from obs_chat_bot.core.data.sqlite.user_identity_repository import (
     SQLiteExternalIdentityRepository,
     SQLiteIdentityLinkTokenRepository,
     SQLiteIdentityRebindConfirmationRepository,
+    SQLiteIdentityLifecycleRepository,
 )
 
 
@@ -59,6 +60,7 @@ def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentity
         rebind_confirmation_repository=SQLiteIdentityRebindConfirmationRepository(
             connection
         ),
+        lifecycle_repository=SQLiteIdentityLifecycleRepository(connection),
     )
 
 

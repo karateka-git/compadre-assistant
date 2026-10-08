@@ -68,11 +68,30 @@ class IdentityLinkTokenRepository(Protocol):
     ) -> None:
         """Сохраняет одноразовый код привязки."""
 
-    def consume(self, *, token_hash: str, now: datetime) -> int | None:
-        """Погашает код и возвращает ID пользователя, если код действителен."""
-
     def find_active(self, *, token_hash: str, now: datetime) -> int | None:
         """Возвращает ID пользователя для действующего кода без погашения."""
+
+
+class IdentityLifecycleRepository(Protocol):
+    """Выполняет неделимые изменения профиля, identity и link-кода."""
+
+    def register(self, identity: IncomingIdentity) -> AppUser:
+        """Возвращает существующий профиль или создаёт его вместе с первой identity."""
+
+    def link(self, *, identity: IncomingIdentity, token_hash: str, now: datetime) -> AppUser | None:
+        """Погашает действующий код вместе с созданием identity.
+
+        Args:
+            identity: Новая внешняя личность.
+            token_hash: SHA-256 хеш одноразового кода.
+            now: Текущее время для проверки срока действия.
+
+        Returns:
+            Целевой профиль либо `None`, если код недействителен.
+
+        Raises:
+            IdentityAlreadyBoundError: Внешняя личность уже привязана.
+        """
 
 
 class IdentityRebindConfirmationRepository(Protocol):

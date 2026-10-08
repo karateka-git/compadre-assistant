@@ -8,11 +8,12 @@ from obs_chat_bot.core.domain.users.ports import (
     ExternalIdentityRepository,
     IdentityRebindConfirmationRepository,
     IdentityLinkTokenRepository,
+    IdentityLifecycleRepository,
 )
 from obs_chat_bot.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation
 from obs_chat_bot.core.domain.users.identity import IdentityAlreadyBoundError, InvalidLinkCodeError
 from obs_chat_bot.core.data.sqlite.user_identity_dtos import (
-    AppUserDto, ExternalIdentityDto, IdentityLinkTokenDto, IdentityRebindConfirmationDto,
+    AppUserDto, ExternalIdentityDto, IncomingIdentityDto, IdentityLinkTokenDto, IdentityRebindConfirmationDto,
 )
 from obs_chat_bot.core.data.sqlite.user_identity_mappers import (
     app_user_from_dto, external_identity_from_dto, incoming_identity_to_dto,
@@ -258,25 +259,6 @@ class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
                 (app_user_id, token_hash, _format_timestamp(expires_at)),
             )
 
-    def consume(self, *, token_hash: str, now: datetime) -> int | None:
-        """Погашает действующий код и возвращает ID пользователя."""
-        with self._connection:
-            row = self._find_active_dto(token_hash=token_hash, now=now)
-            if row is None:
-                return None
-
-            cursor = self._connection.execute(
-                """
-                UPDATE identity_link_tokens
-                SET used_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND used_at IS NULL
-                """,
-                (row.id,),
-            )
-            if cursor.rowcount != 1:
-                return None
-            return link_token_owner_from_dto(row)
-
     def find_active(self, *, token_hash: str, now: datetime) -> int | None:
         """Возвращает ID пользователя для действующего кода без погашения."""
         row = self._find_active_dto(token_hash=token_hash, now=now)
@@ -301,6 +283,125 @@ class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
             (token_hash, _format_timestamp(now)),
         ).fetchone()
         return IdentityLinkTokenDto(**dict(row)) if row is not None else None
+
+
+class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
+    """Сериализует регистрацию и привязку канала в коротких SQLite-транзакциях."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        """Сохраняет соединение, настроенное с foreign keys и busy timeout.
+
+        Args:
+            connection: Соединение SQLite, принадлежащее текущему core scope.
+        """
+        self._connection = connection
+
+    def register(self, identity: IncomingIdentity) -> AppUser:
+        """Создаёт профиль вместе с identity либо возвращает её владельца.
+
+        Args:
+            identity: Отправитель из внешнего канала.
+
+        Returns:
+            Существующий или созданный профиль.
+        """
+        dto = incoming_identity_to_dto(identity)
+        try:
+            with self._connection:
+                # Блокировка писателя до чтения исключает гонку двух регистраций.
+                self._connection.execute("BEGIN IMMEDIATE")
+                existing = self._connection.execute(
+                    "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                    (dto.channel, dto.external_user_id),
+                ).fetchone()
+                if existing is not None:
+                    self._touch_identity(dto)
+                    return self._require_user(existing["app_user_id"])
+                cursor = self._connection.execute("INSERT INTO app_users DEFAULT VALUES")
+                app_user_id = cursor.lastrowid
+                if app_user_id is None:
+                    raise RuntimeError("SQLite did not return a new app user id")
+                self._insert_identity(app_user_id, dto)
+                return self._require_user(app_user_id)
+        except sqlite3.IntegrityError:
+            # При нарушении UNIQUE обе вставки уже откатились; возвращаем победителя гонки.
+            existing = self._connection.execute(
+                "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                (dto.channel, dto.external_user_id),
+            ).fetchone()
+            if existing is None:
+                raise
+            return self._require_user(existing["app_user_id"])
+
+    def link(self, *, identity: IncomingIdentity, token_hash: str, now: datetime) -> AppUser | None:
+        """Погашает link-код и создаёт identity одним коммитом.
+
+        Args:
+            identity: Новая внешняя личность.
+            token_hash: SHA-256 хеш кода.
+            now: UTC-время проверки TTL.
+
+        Returns:
+            Владелец кода либо `None` для недействительного кода.
+
+        Raises:
+            IdentityAlreadyBoundError: Внешняя личность уже привязана.
+        """
+        dto = incoming_identity_to_dto(identity)
+        try:
+            with self._connection:
+                self._connection.execute("BEGIN IMMEDIATE")
+                existing = self._connection.execute(
+                    "SELECT 1 FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                    (dto.channel, dto.external_user_id),
+                ).fetchone()
+                if existing is not None:
+                    raise IdentityAlreadyBoundError("External identity is already bound")
+                token = self._connection.execute(
+                    """UPDATE identity_link_tokens SET used_at = ?
+                    WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+                    RETURNING app_user_id""",
+                    (_format_timestamp(now), token_hash, _format_timestamp(now)),
+                ).fetchone()
+                if token is None:
+                    return None
+                app_user_id = token["app_user_id"]
+                self._insert_identity(app_user_id, dto)
+                return self._require_user(app_user_id)
+        except sqlite3.IntegrityError:
+            # Ошибка UNIQUE после погашения откатывает и used_at.
+            existing = self._connection.execute(
+                "SELECT 1 FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                (dto.channel, dto.external_user_id),
+            ).fetchone()
+            if existing is not None:
+                raise IdentityAlreadyBoundError("External identity is already bound") from None
+            raise
+
+    def _insert_identity(self, app_user_id: int, dto: IncomingIdentityDto) -> None:
+        self._connection.execute(
+            """INSERT INTO external_identities
+            (app_user_id, channel, external_user_id, external_chat_id, username, display_name)
+            VALUES (?, ?, ?, ?, ?, ?)""",
+            (app_user_id, dto.channel, dto.external_user_id, dto.external_chat_id,
+             dto.username, dto.display_name),
+        )
+
+    def _touch_identity(self, dto: IncomingIdentityDto) -> None:
+        self._connection.execute(
+            """UPDATE external_identities SET external_chat_id = ?, username = ?,
+            display_name = ?, last_seen_at = CURRENT_TIMESTAMP
+            WHERE channel = ? AND external_user_id = ?""",
+            (dto.external_chat_id, dto.username, dto.display_name, dto.channel, dto.external_user_id),
+        )
+
+    def _require_user(self, app_user_id: int) -> AppUser:
+        row = self._connection.execute(
+            "SELECT id, display_name, created_at FROM app_users WHERE id = ?", (app_user_id,)
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("Identity owner is missing")
+        return app_user_from_dto(AppUserDto(**dict(row)))
 
 
 class SQLiteIdentityRebindConfirmationRepository(IdentityRebindConfirmationRepository):
