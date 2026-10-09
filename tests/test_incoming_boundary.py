@@ -72,6 +72,8 @@ class FakeCapability(IncomingCapabilityPort):
         self.entry_error: Exception | None = None
         self.entry_exception: Exception | None = None
         self.handle_error: Exception | None = None
+        self.handle_exception: Exception | None = None
+        self.background_reply: IncomingResponse | None = None
         self.pending = "Актуальное состояние"
         self.delivery = None
         self.actions = ()
@@ -93,6 +95,10 @@ class FakeCapability(IncomingCapabilityPort):
         """Фиксирует исходное событие и независимую доставку."""
         self.calls.append((context.app_user, event))
         self.delivery = context.delivery
+        if self.background_reply is not None and context.delivery is not None:
+            context.delivery.send(event.reply_address, self.background_reply)
+        if self.handle_exception is not None:
+            raise self.handle_exception
         return CapabilityResult(
             IncomingResponse("Тестовый ответ", self.handle_error, actions=self.actions),
             self.handle_mode,
@@ -237,6 +243,77 @@ class IncomingBoundaryTest(unittest.TestCase):
         response = self.dispatcher.execute(_event("завершить"))
         self.assertIsInstance(response.error, RuntimeError)
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
+
+    def test_handle_exception_preserves_mode_and_does_not_repeat_effect(self) -> None:
+        """Сбой после фоновой доставки оставляет маршрут и не повторяет действие."""
+        self.dispatcher.execute(_event("/selected"))
+        before = self.repository.get_state(self.key)
+        failure = RuntimeError("секретная причина")
+        self.capability.handle_mode = CapabilityMode.COMPLETE
+        self.capability.handle_exception = failure
+        self.capability.background_reply = IncomingResponse("Действие принято")
+        delivered = []
+
+        with self.assertLogs("obs_chat_bot.core.presentation.incoming.dispatcher", level="ERROR") as logs:
+            response = self.dispatcher.execute(_event("подтвердить"), delivered.append)
+
+        self.assertEqual(response.error, failure)
+        self.assertIn("Проверь состояние действия", response.text)
+        self.assertNotIn("секретная причина", response.render_text())
+        self.assertEqual(response.actions, ())
+        self.assertEqual(self.repository.get_state(self.key), before)
+        self.assertEqual(len(self.capability.calls), 1)
+        self.assertEqual(len(delivered), 1)
+        self.assertEqual(delivered[0].response.text, "Действие принято")
+        self.assertIn("capability_id=selected", "\n".join(logs.output))
+
+    def test_handle_exception_has_same_safe_reply_in_both_adapters(self) -> None:
+        """TG и VK показывают одинаковый безопасный ответ подменной возможности."""
+        import asyncio
+        import logging
+        from obs_chat_bot.presentation.telegram.bot import _register_handlers
+        from obs_chat_bot.presentation.vk.bot import _handle_update
+        from test_telegram_bot import FakeAiogram, TelegramMessage
+        from test_vk_bot import FakeVkClient
+
+        self.capability.handle_mode = CapabilityMode.COMPLETE
+        self.capability.handle_exception = RuntimeError("секретная причина")
+        aiogram = FakeAiogram()
+        message = TelegramMessage()
+        message.message_id = 1
+        message.from_user = None
+        _register_handlers(
+            aiogram.dispatcher, aiogram,
+            incoming_message_processor=self.dispatcher.execute,
+            logger=logging.getLogger("test.fake.telegram"),
+        )
+        with self.assertLogs(level="ERROR"):
+            for text in ("/selected", "внешнее действие"):
+                message.text = text
+                asyncio.run(aiogram.dispatcher.included_router.handler(message))
+
+        client = FakeVkClient()
+        with self.assertLogs(level="ERROR"):
+            for text in ("/selected", "внешнее действие"):
+                _handle_update(
+                    {"type": "message_new", "object": {"message": {
+                        "id": 1, "peer_id": 42, "from_id": 1, "text": text,
+                    }}},
+                    incoming_message_processor=self.dispatcher.execute,
+                    client=client,
+                    logger=logging.getLogger("test.fake.vk"),
+                )
+
+        telegram_reply = message.answers[-1]
+        vk_reply = client.messages[-1][1]
+        self.assertEqual(telegram_reply, vk_reply)
+        self.assertIn("Проверь состояние действия", telegram_reply)
+        self.assertNotIn("секретная причина", telegram_reply)
+        self.assertEqual(len(self.capability.calls), 2)
+        for channel in ("telegram", "vk"):
+            key = ChatModeKey(23, channel, "42")
+            self.assertEqual(self.repository.get(key).capability_id, "selected")
+            self.assertEqual(self.repository.get_state(key).revision, 1)
 
     def test_general_commands_and_entry_precede_pending_rebind(self) -> None:
         """Общие команды доступны во время прежнего текстового rebind."""

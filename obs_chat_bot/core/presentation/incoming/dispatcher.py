@@ -372,7 +372,17 @@ class IncomingMessageDispatcher:
                 app_user=user,
                 capability_reply=self._registry.entry_hint(),
             )
-        result = capability.handle(context, event)
+        try:
+            result = capability.handle(context, event)
+        except Exception as error:
+            LOGGER.exception(
+                "Capability handling failed: capability_id=%s",
+                capability.descriptor.capability_id,
+            )
+            return IncomingResponse(
+                "Не удалось обработать сообщение. Проверь состояние действия перед повторной отправкой.",
+                error,
+            )
         if result.response.error is None and result.mode is CapabilityMode.COMPLETE:
             self._chat_mode_repository.replace_if_revision(key, state.revision, None)
         return result.response
