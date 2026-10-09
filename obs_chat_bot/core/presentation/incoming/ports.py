@@ -86,6 +86,7 @@ class CapabilityDescriptor:
     entry_command: str
     description: str
     help: CapabilityHelp = CapabilityHelp()
+    persistent_mode: bool = True  # Длительный вход требует явного выхода из режима.
 
 
 class CapabilityMode(StrEnum):

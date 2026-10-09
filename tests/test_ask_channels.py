@@ -3,6 +3,7 @@
 import asyncio
 from dataclasses import replace
 import logging
+import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -42,24 +43,42 @@ class AskChannelsTest(unittest.TestCase):
         self.logger.disabled = True
         self.addCleanup(setattr, self.logger, "disabled", False)
 
-    def send(self, channel, processor, text, chat_id=42):
+    def send(self, channel, processor, text, chat_id=42, on_delivery=None):
         """Проводит сообщение через канал и возвращает доставленный текст."""
         if channel == "telegram":
             aiogram = FakeAiogram()
             _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=processor, logger=self.logger)
             message = TelegramMessage()
+            original_answer = message.answer
+            async def answer(text):
+                await original_answer(text)
+                if on_delivery:
+                    on_delivery(text)
+            message.answer = answer
+            async def send_message(*, chat_id, text):
+                await answer(text)
+            message.send_message = send_message
             message.chat = SimpleNamespace(id=chat_id)
             message.from_user = SimpleNamespace(id=7, username=None, full_name="Тест")
             message.message_id = 1
             message.text = text
             asyncio.run(aiogram.dispatcher.included_router.handler(message))
-            return "\n".join(message.answers)
+            self.delivered = message.answers
+            return "\n".join(text for text in message.answers if text != "Вопрос принят. Готовлю ответ…")
         client = FakeVkClient()
+        original_send = client.send_message
+        def send_message(**kwargs):
+            result = original_send(**kwargs)
+            if on_delivery:
+                on_delivery(kwargs["text"])
+            return result
+        client.send_message = send_message
         _handle_update(
             {"type": "message_new", "object": {"message": {"peer_id": chat_id, "from_id": 7, "id": 1, "text": text}}},
             incoming_message_processor=processor, client=client, logger=self.logger,
         )
-        return "\n".join(item[1] for item in client.messages)
+        self.delivered = [item[1] for item in client.messages]
+        return "\n".join(text for text in self.delivered if text != "Вопрос принят. Готовлю ответ…")
 
     def test_registered_questions_are_independent_and_do_not_select_mode(self) -> None:
         """Оба канала требуют завершённую регистрацию и выполняют только /ask."""
@@ -108,6 +127,9 @@ class AskChannelsTest(unittest.TestCase):
                         reply = self.send(channel, processor, "/ask вопрос")
                         self.assertIn("позже", reply)
                         self.assertNotIn(str(error), reply)
+                    model.answer.side_effect = None
+                    model.answer.return_value = "   "
+                    self.assertIn("позже", self.send(channel, processor, "/ask пустой ответ"))
                     self.send(channel, processor, "/ask")
                     self.send(channel, processor, "/ask " + "я" * 101)
                     self.send(channel, processor, "/ask другой чат", chat_id=43)
@@ -142,7 +164,7 @@ class AskChannelsTest(unittest.TestCase):
                 self.send(channel, incoming_message_processor, "/name Тест")
                 self.assertEqual(self.send(channel, incoming_message_processor, "/ask вопрос"), "Ответ")
 
-            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot", side_effect=polling):
+            with self.subTest(channel=channel), patch("obs_chat_bot.bootstrap.load_ask_config", return_value=self.config), patch("obs_chat_bot.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot", side_effect=polling):
                 model_type.return_value.answer.return_value = "Ответ"
                 self.assertEqual(command(database_path=self.path, token="123456:ABCDEF_test_token_123456789", logger=self.logger, enabled_capabilities=("ask",), **extra), 0)
                 loader.assert_called_once_with()
@@ -155,3 +177,40 @@ class AskChannelsTest(unittest.TestCase):
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config):
                     self.fail("Сбой регистрации должен прервать запуск")
             model_type.return_value.close.assert_called_once_with()
+
+    def test_acknowledgement_precedes_slow_model_and_long_answer_is_split(self) -> None:
+        """Оба канала доставляют подтверждение до ответа и сохраняют длинный текст."""
+        for channel in ("telegram", "vk"):
+            accepted = threading.Event()
+            answer = "я" * 10000
+            def respond(**_kwargs):
+                self.assertTrue(accepted.wait(2), "Подтверждение должно прийти до завершения API")
+                return answer
+            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+                model_type.return_value.answer.side_effect = respond
+                with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
+                    self.send(channel, processor, "/register")
+                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == "Вопрос принят. Готовлю ответ…" else None)
+                    self.assertEqual(self.delivered[0], "Вопрос принят. Готовлю ответ…")
+                    self.assertGreater(len(self.delivered), 2)
+                    self.assertEqual("".join(self.delivered[1:]), answer)
+                    self.send(channel, processor, "/ask")
+                    self.assertEqual(len(self.delivered), 1)
+
+    def test_help_matrix_matches_enabled_capabilities(self) -> None:
+        """Справка обоих каналов показывает только включённые входы и верный выход."""
+        for enabled in ((), ("obsidian",), ("ask",), ("obsidian", "ask")):
+            with self.subTest(enabled=enabled), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+                with create_channel_message_processor(database_path=self.path, enabled_capabilities=enabled, obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
+                    for channel in ("telegram", "vk"):
+                        self.send(channel, processor, "/register")
+                        self.send(channel, processor, "/name Тест")
+                        help_text = self.send(channel, processor, "/help")
+                        self.assertEqual("/ask" in help_text, "ask" in enabled)
+                        self.assertEqual("/obsidian" in help_text, "obsidian" in enabled)
+                        for line in help_text.splitlines():
+                            if "/ask" in line:
+                                self.assertNotIn("/exit", line)
+                if "ask" not in enabled:
+                    model_type.assert_not_called()

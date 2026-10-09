@@ -14,7 +14,10 @@ from obs_chat_bot.core.presentation.incoming.ports import (
 class AskCapability(IncomingCapabilityPort):
     """Выполняет один вопрос без установки длительного режима чата."""
 
-    descriptor = CapabilityDescriptor("ask", "/ask", "один вопрос модели без истории")
+    descriptor = CapabilityDescriptor(
+        "ask", "/ask", "один вопрос модели без истории: /ask <вопрос>",
+        persistent_mode=False,
+    )
 
     def __init__(self, question: AskQuestion) -> None:
         """Принимает собранный независимый сценарий вопроса."""
@@ -33,8 +36,15 @@ class AskCapability(IncomingCapabilityPort):
         Returns:
             Ответ либо безопасное описание ожидаемой ошибки без перехода режима.
         """
+        def notify() -> None:
+            """Подтверждает приём перед сетевым запросом через общий delivery port."""
+            if context.delivery is not None:
+                context.delivery.send(
+                    event.reply_address, IncomingResponse("Вопрос принят. Готовлю ответ…")
+                )
+
         try:
-            response = IncomingResponse(self._question.execute(arguments))
+            response = IncomingResponse(self._question.execute(arguments, on_request=notify))
         except EmptyQuestionError as error:
             response = IncomingResponse("Напиши вопрос после команды: /ask <вопрос>.", error)
         except QuestionTooLongError as error:

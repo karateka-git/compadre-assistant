@@ -276,6 +276,25 @@ class RuntimeConfigurationTest(unittest.TestCase):
         self.assertIn("Провайдер LLM не настроен", reply.text)
         self.assertNotIn("vault не подключён", reply.text)
 
+    def test_ask_healthcheck_and_startup_matrix(self) -> None:
+        """Все сочетания проверяют ASK_* только при включении и не вызывают API."""
+        for channel in ("telegram", "vk"):
+            for enabled in ("", "obsidian", "ask", "obsidian,ask"):
+                for valid in (False, True):
+                    env = self.env(channel, "obsidian" in enabled, "absent")
+                    env["ENABLED_CAPABILITIES"] = enabled
+                    env.update(ASK_BASE_URL="https://ask.example/v1", ASK_API_KEY="ask-secret", ASK_MODEL="model" if valid else "")
+                    for health in (False, True):
+                        with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot") as runner:
+                            code, logger = self.run_cli(["--healthcheck"] if health else [f"--{channel}-bot"], env)
+                            invalid = "ask" in enabled and not valid
+                            self.assertEqual(code, (1 if health else 2) if invalid else 0)
+                            self.assertNotIn("ask-secret", str(logger.method_calls))
+                            if health or invalid or "ask" not in enabled:
+                                model_type.assert_not_called()
+                            if invalid:
+                                runner.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

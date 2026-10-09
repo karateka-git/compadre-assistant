@@ -282,7 +282,7 @@ def check_capability_configuration(
     obsidian_config: ObsidianConfig | None,
     logger: logging.Logger,
 ) -> bool:
-    """Проверяет провайдеры включённого Obsidian и сообщает доступность функций.
+    """Проверяет профили включённых возможностей и сообщает доступность функций.
 
     Полностью пустые группы GitHub/LLM сохраняют доступность общих команд;
     обработчик Obsidian сообщает о ненастроенном провайдере. Частичные или
@@ -296,9 +296,17 @@ def check_capability_configuration(
     Returns:
         `True`, если конфигурация провайдеров допускает запуск.
     """
+    ask_ready = True
+    if "ask" in enabled_capabilities:
+        try:
+            app_bootstrap.load_ask_config()
+            logger.info("Ask configuration is ready; API availability is not checked")
+        except ValueError as error:
+            logger.error("Ask configuration is invalid: %s", error)
+            ask_ready = False
     if "obsidian" not in enabled_capabilities:
         logger.info("Obsidian is disabled; provider configuration is not checked")
-        return True
+        return ask_ready
     if obsidian_config is None:
         logger.error("Obsidian configuration is missing")
         return False
@@ -318,7 +326,7 @@ def check_capability_configuration(
         )
     github_ready = check_github_config(obsidian_config.github_app, logger)
     embedding_ready = check_embedding_config(obsidian_config.embedding, logger)
-    return llm_ready and github_ready and embedding_ready
+    return ask_ready and llm_ready and github_ready and embedding_ready
 
 
 def check_telegram_config(token: str, logger: logging.Logger) -> bool:

@@ -88,7 +88,8 @@ class CapabilityRegistry:
     def help(self) -> CapabilityHelp:
         """Формирует справку всех включённых входов и способ выхода."""
         entries = tuple(
-            f"`{entry.descriptor.entry_command}` — {entry.descriptor.description}; выход: `/exit`"
+            f"`{entry.descriptor.entry_command}` — {entry.descriptor.description}"
+            + ("; выход: `/exit`" if entry.descriptor.persistent_mode else "")
             for entry in self._by_id.values()
         )
         sections = (HelpSection("Возможности", entries),) if entries else ()

@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from collections.abc import Iterator
 
 from obs_chat_bot.capabilities.ask.bootstrap import create_ask_runtime
-from obs_chat_bot.capabilities.ask.data.configuration import AskConfig
+from obs_chat_bot.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from obs_chat_bot.capabilities.ask.presentation.handler import AskCapability
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent

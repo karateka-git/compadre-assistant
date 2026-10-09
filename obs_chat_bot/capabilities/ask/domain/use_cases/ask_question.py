@@ -1,5 +1,7 @@
 """Сценарий одного вопроса и одного ответа без истории диалога."""
 
+from collections.abc import Callable
+
 from obs_chat_bot.capabilities.ask.domain.errors import (
     EmptyQuestionError,
     InvalidAskAnswerError,
@@ -35,7 +37,7 @@ class AskQuestion:
         self._model = model
         self._max_question_chars = max_question_chars
 
-    def execute(self, question: str) -> str:
+    def execute(self, question: str, *, on_request: Callable[[], None] | None = None) -> str:
         """Отправляет модели только текущий вопрос и фиксированную инструкцию.
 
         URL и другие фрагменты вопроса остаются обычным текстом. Внешние
@@ -43,6 +45,7 @@ class AskQuestion:
 
         Args:
             question: Текст одного вопроса пользователя.
+            on_request: Необязательное уведомление после проверки вопроса перед API.
 
         Returns:
             Непустой текст ответа модели.
@@ -62,6 +65,8 @@ class AskQuestion:
                 f"Вопрос должен содержать не более {self._max_question_chars} символов."
             )
 
+        if on_request is not None:
+            on_request()
         answer = self._model.answer(question=question, instruction=ASK_INSTRUCTION)
         if not isinstance(answer, str) or not answer.strip():
             raise InvalidAskAnswerError("Модель не вернула непустой текст ответа.")
