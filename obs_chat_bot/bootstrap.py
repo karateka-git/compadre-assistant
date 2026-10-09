@@ -29,6 +29,11 @@ from obs_chat_bot.capabilities.obsidian.bootstrap import (
     process_url_for_cli,
     validate_external_http_url,
     validate_github_app_config,
+    ObsidianConfig,
+    load_obsidian_config,
+    ObsidianConfigError,
+    EmbeddingConfig,
+    GitHubAppConfig,
 )
 from obs_chat_bot.capabilities.obsidian.smoke import (
     AnalysisSmokeError,
@@ -38,7 +43,6 @@ from obs_chat_bot.capabilities.obsidian.smoke import (
     run_pipeline_smoke,
     run_sqlite_smoke,
 )
-from obs_chat_bot.core.data.config import ChunkingConfig, EmbeddingConfig
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from obs_chat_bot.core.domain.chat_modes import ChatModeRepository
@@ -110,6 +114,23 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
         )
 
 
+def load_obsidian_profile(
+    enabled_capabilities: tuple[str, ...],
+) -> ObsidianConfig | None:
+    """Загружает предметный профиль только для включённого Obsidian.
+
+    Args:
+        enabled_capabilities: Проверенные ID выбранных возможностей.
+
+    Returns:
+        Профиль Obsidian либо `None`, если возможность отключена.
+
+    Raises:
+        ObsidianConfigError: Настройки включённой возможности некорректны.
+    """
+    return load_obsidian_config() if "obsidian" in enabled_capabilities else None
+
+
 class ChannelMessageProcessor:
     """Держит один реестр процесса и открывает core scope на каждое событие."""
 
@@ -144,12 +165,9 @@ class ChannelMessageProcessor:
 @contextmanager
 def create_channel_message_processor(
     *, database_path: Path, runtime: ObsidianProcessRuntime | None = None,
-    openai_base_url: str = "", openai_api_key: str = "", openai_model: str = "",
+    obsidian_config: ObsidianConfig | None = None,
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-    embedding_config: EmbeddingConfig | None = None,
-    obsidian_created_note_tag: str | None = "knowledge-catcher",
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
 ) -> Iterator[ChannelMessageProcessor]:
     """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
@@ -157,14 +175,9 @@ def create_channel_message_processor(
     Args:
         database_path: Общий путь SQLite для событий и предметных операций.
         runtime: Процессные зависимости Obsidian либо `None`.
-        openai_base_url: Endpoint LLM.
-        openai_api_key: Ключ LLM при включённой конфигурации.
-        openai_model: Модель анализа Obsidian.
+        obsidian_config: Профиль настроек включённой возможности.
         use_case_factory: Подменная фабрика article pipeline для тестов.
         analysis_use_case_factory: Подменная фабрика анализа для тестов.
-        chunking_config: Настройки разбиения Markdown.
-        embedding_config: Необязательный профиль embeddings.
-        obsidian_created_note_tag: Служебный тег новой заметки.
         enabled_capabilities: Явно включённые ID.
 
     Yields:
@@ -172,13 +185,18 @@ def create_channel_message_processor(
     """
     try:
         validate_enabled_capabilities(enabled_capabilities)
+        if "obsidian" in enabled_capabilities and obsidian_config is None:
+            raise ValueError("Для включённого Obsidian требуется его профиль настроек")
         entry = ObsidianCapability(
-            database_path=database_path, openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key, openai_model=openai_model,
+            database_path=database_path,
+            openai_base_url=obsidian_config.openai_base_url,
+            openai_api_key=obsidian_config.openai_api_key,
+            openai_model=obsidian_config.openai_model,
             runtime=runtime, use_case_factory=use_case_factory,
             analysis_use_case_factory=analysis_use_case_factory,
-            chunking_config=chunking_config, embedding_config=embedding_config,
-            created_note_tag=obsidian_created_note_tag,
+            chunking_config=obsidian_config.chunking,
+            embedding_config=obsidian_config.embedding,
+            created_note_tag=obsidian_config.obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
         processor = ChannelMessageProcessor(
             database_path=database_path,

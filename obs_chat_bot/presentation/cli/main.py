@@ -20,16 +20,17 @@ from obs_chat_bot.bootstrap import (
     AnalysisSmokeError,
     SQLiteSmokeError,
     PipelineSmokeError,
+    EmbeddingConfig,
+    GitHubAppConfig,
+    ObsidianConfig,
+    ObsidianConfigError,
     run_analysis_smoke,
     run_sqlite_smoke,
     run_pipeline_smoke,
 )
 from obs_chat_bot.core.data.config import (
     AppConfig,
-    ChunkingConfig,
     ConfigError,
-    EmbeddingConfig,
-    GitHubAppConfig,
     load_config,
     parse_channels,
 )
@@ -126,12 +127,14 @@ def main() -> int:
             ("vk",) if args.vk_bot else
             () if args.process_url else args.channels
         )
-        config = load_config(
-            channels=channels,
-            include_capability_settings=not bool(args.process_url),
-        )
+        config = load_config(channels=channels)
         app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
-    except (ConfigError, ValueError) as error:
+        obsidian_config = (
+            app_bootstrap.load_obsidian_profile(config.enabled_capabilities)
+            if not args.process_url
+            else None
+        )
+    except (ConfigError, ObsidianConfigError, ValueError) as error:
         logger.error("Configuration error: %s", error)
         return 2
     configure_debug_logging(config.app_debug)
@@ -143,13 +146,16 @@ def main() -> int:
         return 1
 
     if args.healthcheck:
-        return run_healthcheck(config, logger)
+        return run_healthcheck(config, logger, obsidian_config=obsidian_config)
 
-    if not args.process_url and not check_runtime_configuration(config, logger):
+    if not args.process_url and not check_runtime_configuration(config, logger, obsidian_config=obsidian_config):
         return 2
 
     for key, value in config.safe_summary().items():
         logger.info("Config %s: %s", key, value)
+    if obsidian_config is not None:
+        for key, value in obsidian_config.safe_summary().items():
+            logger.info("Obsidian config %s: %s", key, value)
 
     logger.info("Data directory: %s", config.data_dir.resolve())
 
@@ -168,13 +174,7 @@ def main() -> int:
             database_path=config.database_path,
             token=config.telegram_bot_token,
             proxy_url=config.telegram_proxy_url,
-            openai_base_url=config.openai_base_url,
-            openai_api_key=config.openai_api_key,
-            openai_model=config.openai_model,
-            github_app_config=config.github_app,
-            chunking_config=config.chunking,
-            embedding_config=config.embedding,
-            obsidian_created_note_tag=config.obsidian_created_note_tag,
+            obsidian_config=obsidian_config,
             enabled_capabilities=config.enabled_capabilities,
             logger=logger,
         )
@@ -184,13 +184,7 @@ def main() -> int:
             database_path=config.database_path,
             token=config.vk_bot_token,
             group_id=config.vk_group_id,
-            openai_base_url=config.openai_base_url,
-            openai_api_key=config.openai_api_key,
-            openai_model=config.openai_model,
-            github_app_config=config.github_app,
-            chunking_config=config.chunking,
-            embedding_config=config.embedding,
-            obsidian_created_note_tag=config.obsidian_created_note_tag,
+            obsidian_config=obsidian_config,
             enabled_capabilities=config.enabled_capabilities,
             logger=logger,
         )
@@ -211,12 +205,16 @@ def configure_debug_logging(enabled: bool) -> None:
 TELEGRAM_TOKEN_PATTERN = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 
 
-def run_healthcheck(config: AppConfig, logger: logging.Logger) -> int:
+def run_healthcheck(
+    config: AppConfig, logger: logging.Logger, *,
+    obsidian_config: ObsidianConfig | None = None,
+) -> int:
     """Проверяет runtime-конфигурацию, каталог данных и SQLite.
 
     Args:
         config: Загруженная конфигурация приложения.
         logger: Logger для диагностических сообщений.
+        obsidian_config: Профиль включённой возможности.
 
     Returns:
         Ноль при успехе, иначе единицу.
@@ -233,7 +231,7 @@ def run_healthcheck(config: AppConfig, logger: logging.Logger) -> int:
         return 1
 
     # Выполняем независимые проверки целиком, чтобы первый сбой не скрывал другие.
-    configuration_ready = check_runtime_configuration(config, logger)
+    configuration_ready = check_runtime_configuration(config, logger, obsidian_config=obsidian_config)
     database_ready = check_database(config.database_path, logger)
     if not configuration_ready or not database_ready:
         return 1
@@ -242,12 +240,16 @@ def run_healthcheck(config: AppConfig, logger: logging.Logger) -> int:
     return 0
 
 
-def check_runtime_configuration(config: AppConfig, logger: logging.Logger) -> bool:
+def check_runtime_configuration(
+    config: AppConfig, logger: logging.Logger, *,
+    obsidian_config: ObsidianConfig | None = None,
+) -> bool:
     """Проверяет выбранные каналы и включённые возможности без внешних API.
 
     Args:
         config: Настройки текущего запуска.
         logger: Logger отдельных результатов каналов и провайдеров.
+        obsidian_config: Профиль включённой возможности.
 
     Returns:
         `True`, если запуск выбранной конфигурации разрешён.
@@ -268,11 +270,7 @@ def check_runtime_configuration(config: AppConfig, logger: logging.Logger) -> bo
             results.append(False)
     results.append(check_capability_configuration(
         enabled_capabilities=config.enabled_capabilities,
-        openai_base_url=config.openai_base_url,
-        openai_api_key=config.openai_api_key,
-        openai_model=config.openai_model,
-        github_app_config=config.github_app,
-        embedding_config=config.embedding,
+        obsidian_config=obsidian_config,
         logger=logger,
     ))
     return all(results)
@@ -281,11 +279,7 @@ def check_runtime_configuration(config: AppConfig, logger: logging.Logger) -> bo
 def check_capability_configuration(
     *,
     enabled_capabilities: tuple[str, ...],
-    openai_base_url: str,
-    openai_api_key: str,
-    openai_model: str,
-    github_app_config: GitHubAppConfig | None,
-    embedding_config: EmbeddingConfig | None,
+    obsidian_config: ObsidianConfig | None,
     logger: logging.Logger,
 ) -> bool:
     """Проверяет провайдеры включённого Obsidian и сообщает доступность функций.
@@ -296,11 +290,7 @@ def check_capability_configuration(
 
     Args:
         enabled_capabilities: ID возможностей текущей сборки.
-        openai_base_url: Endpoint анализа/review Obsidian.
-        openai_api_key: Отдельный ключ LLM.
-        openai_model: Модель анализа/review.
-        github_app_config: Полная группа GitHub либо `None`.
-        embedding_config: Полная группа embeddings либо `None` для FTS.
+        obsidian_config: Настройки Obsidian либо `None` при отключении.
         logger: Logger безопасных диагностических сообщений.
 
     Returns:
@@ -309,17 +299,25 @@ def check_capability_configuration(
     if "obsidian" not in enabled_capabilities:
         logger.info("Obsidian is disabled; provider configuration is not checked")
         return True
-    llm_values = (openai_base_url.strip(), openai_api_key.strip(), openai_model.strip())
+    if obsidian_config is None:
+        logger.error("Obsidian configuration is missing")
+        return False
+    llm_values = (
+        obsidian_config.openai_base_url.strip(),
+        obsidian_config.openai_api_key.strip(),
+        obsidian_config.openai_model.strip(),
+    )
     if not any(llm_values):
         logger.info("Obsidian LLM is not configured; article analysis/review unavailable")
         llm_ready = True
     else:
         llm_ready = check_llm_config(
-            base_url=openai_base_url, api_key=openai_api_key,
-            model=openai_model, logger=logger,
+            base_url=obsidian_config.openai_base_url,
+            api_key=obsidian_config.openai_api_key,
+            model=obsidian_config.openai_model, logger=logger,
         )
-    github_ready = check_github_config(github_app_config, logger)
-    embedding_ready = check_embedding_config(embedding_config, logger)
+    github_ready = check_github_config(obsidian_config.github_app, logger)
+    embedding_ready = check_embedding_config(obsidian_config.embedding, logger)
     return llm_ready and github_ready and embedding_ready
 
 
@@ -564,13 +562,7 @@ def run_telegram_bot_command(
     database_path: Path,
     token: str,
     proxy_url: str | None = None,
-    openai_base_url: str = "",
-    openai_api_key: str = "",
-    openai_model: str = "",
-    github_app_config: GitHubAppConfig | None = None,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-    embedding_config: EmbeddingConfig | None = None,
-    obsidian_created_note_tag: str | None = "knowledge-catcher",
+    obsidian_config: ObsidianConfig | None = None,
     logger: logging.Logger,
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
@@ -583,13 +575,7 @@ def run_telegram_bot_command(
         database_path: Путь к рабочему файлу SQLite.
         token: Telegram Bot API token.
         proxy_url: Необязательный адрес прокси только для Telegram Bot API.
-        openai_base_url: Базовый URL OpenAI-compatible API.
-        openai_api_key: API key провайдера LLM.
-        openai_model: Имя модели для анализа статей.
-        github_app_config: Настройки GitHub App или `None`.
-        chunking_config: Policy разбиения заметок на chunks.
-        embedding_config: Настройки semantic index либо `None`.
-        obsidian_created_note_tag: Служебный тег новых заметок или `None`.
+        obsidian_config: Профиль включённого Obsidian либо `None`.
         logger: Logger для результата запуска.
         use_case_factory: Factory use case, полезная для тестов без polling.
         analysis_use_case_factory: Factory use case анализа, полезная для тестов.
@@ -603,9 +589,7 @@ def run_telegram_bot_command(
         return 2
     if not check_capability_configuration(
         enabled_capabilities=enabled_capabilities,
-        openai_base_url=openai_base_url, openai_api_key=openai_api_key,
-        openai_model=openai_model, github_app_config=github_app_config,
-        embedding_config=embedding_config, logger=logger,
+        obsidian_config=obsidian_config, logger=logger,
     ):
         return 2
     try:
@@ -614,21 +598,19 @@ def run_telegram_bot_command(
             return 1
         runtime = create_obsidian_process_runtime(
             database_path=database_path,
-            github_app_config=github_app_config,
+            github_app_config=obsidian_config.github_app,
             github_connection_starter=github_connection_starter,
-            openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key,
-            openai_model=openai_model,
-            embedding_config=embedding_config,
-            chunking_config=chunking_config,
+            openai_base_url=obsidian_config.openai_base_url,
+            openai_api_key=obsidian_config.openai_api_key,
+            openai_model=obsidian_config.openai_model,
+            embedding_config=obsidian_config.embedding,
+            chunking_config=obsidian_config.chunking,
         ) if "obsidian" in enabled_capabilities else None
         with app_bootstrap.create_channel_message_processor(
             database_path=database_path, runtime=runtime,
-            openai_base_url=openai_base_url, openai_api_key=openai_api_key,
-            openai_model=openai_model, use_case_factory=use_case_factory,
+            obsidian_config=obsidian_config,
+            use_case_factory=use_case_factory,
             analysis_use_case_factory=analysis_use_case_factory,
-            chunking_config=chunking_config, embedding_config=embedding_config,
-            obsidian_created_note_tag=obsidian_created_note_tag,
             enabled_capabilities=enabled_capabilities,
         ) as processor:
             run_telegram_bot(
@@ -653,13 +635,7 @@ def run_vk_bot_command(
     database_path: Path,
     token: str,
     group_id: int | None,
-    openai_base_url: str = "",
-    openai_api_key: str = "",
-    openai_model: str = "",
-    github_app_config: GitHubAppConfig | None = None,
-    chunking_config: ChunkingConfig = ChunkingConfig(),
-    embedding_config: EmbeddingConfig | None = None,
-    obsidian_created_note_tag: str | None = "knowledge-catcher",
+    obsidian_config: ObsidianConfig | None = None,
     logger: logging.Logger,
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
@@ -672,13 +648,7 @@ def run_vk_bot_command(
         database_path: Путь к рабочему файлу SQLite.
         token: VK group access token.
         group_id: ID VK-группы для Bots Long Poll.
-        openai_base_url: Базовый URL OpenAI-compatible API.
-        openai_api_key: API key провайдера LLM.
-        openai_model: Имя модели для анализа статей.
-        github_app_config: Настройки GitHub App или `None`.
-        chunking_config: Policy разбиения заметок на chunks.
-        embedding_config: Настройки semantic index либо `None`.
-        obsidian_created_note_tag: Служебный тег новых заметок или `None`.
+        obsidian_config: Профиль включённого Obsidian либо `None`.
         logger: Logger для результата запуска.
         use_case_factory: Factory use case для тестов.
         analysis_use_case_factory: Factory analysis use case для тестов.
@@ -692,9 +662,7 @@ def run_vk_bot_command(
         return 2
     if not check_capability_configuration(
         enabled_capabilities=enabled_capabilities,
-        openai_base_url=openai_base_url, openai_api_key=openai_api_key,
-        openai_model=openai_model, github_app_config=github_app_config,
-        embedding_config=embedding_config, logger=logger,
+        obsidian_config=obsidian_config, logger=logger,
     ):
         return 2
 
@@ -704,21 +672,19 @@ def run_vk_bot_command(
             return 1
         runtime = create_obsidian_process_runtime(
             database_path=database_path,
-            github_app_config=github_app_config,
+            github_app_config=obsidian_config.github_app,
             github_connection_starter=github_connection_starter,
-            openai_base_url=openai_base_url,
-            openai_api_key=openai_api_key,
-            openai_model=openai_model,
-            embedding_config=embedding_config,
-            chunking_config=chunking_config,
+            openai_base_url=obsidian_config.openai_base_url,
+            openai_api_key=obsidian_config.openai_api_key,
+            openai_model=obsidian_config.openai_model,
+            embedding_config=obsidian_config.embedding,
+            chunking_config=obsidian_config.chunking,
         ) if "obsidian" in enabled_capabilities else None
         with app_bootstrap.create_channel_message_processor(
             database_path=database_path, runtime=runtime,
-            openai_base_url=openai_base_url, openai_api_key=openai_api_key,
-            openai_model=openai_model, use_case_factory=use_case_factory,
+            obsidian_config=obsidian_config,
+            use_case_factory=use_case_factory,
             analysis_use_case_factory=analysis_use_case_factory,
-            chunking_config=chunking_config, embedding_config=embedding_config,
-            obsidian_created_note_tag=obsidian_created_note_tag,
             enabled_capabilities=enabled_capabilities,
         ) as processor:
             run_vk_bot(

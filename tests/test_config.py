@@ -2,9 +2,13 @@
 
 import os
 import unittest
+from dataclasses import fields
 from unittest.mock import patch
 
-from obs_chat_bot.core.data.config import ConfigError, load_config
+from obs_chat_bot.core.data.config import AppConfig, ConfigError, load_config
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import (
+    ObsidianConfigError, load_obsidian_config,
+)
 
 
 class ConfigTest(unittest.TestCase):
@@ -34,6 +38,20 @@ class ConfigTest(unittest.TestCase):
         """Новый ID добавляется в конфигурацию без изменений core."""
         with patch.dict(os.environ, _env(ENABLED_CAPABILITIES="fake"), clear=True):
             self.assertEqual(load_config().enabled_capabilities, ("fake",))
+
+    def test_core_profile_has_no_obsidian_fields_for_future_ask(self) -> None:
+        """Новый профиль Ask не требует предметных полей или разбора Obsidian в core."""
+        field_names = {item.name for item in fields(AppConfig)}
+        self.assertTrue({"enabled_capabilities", "selected_channels"} <= field_names)
+        self.assertFalse(field_names & {
+            "openai_base_url", "openai_api_key", "openai_model", "github_app",
+            "embedding", "chunking", "obsidian_created_note_tag",
+        })
+        with patch.dict(os.environ, _env(
+            ENABLED_CAPABILITIES="ask", OPENAI_API_KEY="partial",
+            GITHUB_APP_ID="bad", EMBEDDING_PRICE_PER_MILLION_TOKENS="bad",
+        ), clear=True):
+            self.assertEqual(load_config().enabled_capabilities, ("ask",))
 
     def test_load_config_reads_optional_debug_flag(self) -> None:
         """APP_DEBUG включает debug-режим, но остаётся опциональным."""
@@ -89,10 +107,10 @@ class ConfigTest(unittest.TestCase):
 
         self.assertFalse(config.app_debug)
 
-    def test_load_config_defaults_created_note_tag(self) -> None:
+    def test_load_obsidian_config_defaults_created_note_tag(self) -> None:
         """Без env-настройки заметки бота получают согласованный тег."""
         with patch.dict(os.environ, _env(), clear=True):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(config.obsidian_created_note_tag, "knowledge-catcher")
         self.assertEqual(
@@ -100,25 +118,25 @@ class ConfigTest(unittest.TestCase):
             "knowledge-catcher",
         )
 
-    def test_load_config_reads_hierarchical_created_note_tag(self) -> None:
+    def test_load_obsidian_config_reads_hierarchical_created_note_tag(self) -> None:
         """Тег может использовать поддерживаемую Obsidian иерархию через `/`."""
         with patch.dict(
             os.environ,
             _env(OBSIDIAN_CREATED_NOTE_TAG="topic/ai"),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(config.obsidian_created_note_tag, "topic/ai")
 
-    def test_load_config_disables_created_note_tag_case_insensitively(self) -> None:
+    def test_load_obsidian_config_disables_created_note_tag_case_insensitively(self) -> None:
         """Специальное значение `off` отключает маркер без учёта регистра."""
         with patch.dict(
             os.environ,
             _env(OBSIDIAN_CREATED_NOTE_TAG="OfF"),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertIsNone(config.obsidian_created_note_tag)
         self.assertEqual(
@@ -126,17 +144,17 @@ class ConfigTest(unittest.TestCase):
             "disabled",
         )
 
-    def test_load_config_rejects_empty_created_note_tag(self) -> None:
+    def test_load_obsidian_config_rejects_empty_created_note_tag(self) -> None:
         """Явно заданная пустая строка не интерпретируется как отключение."""
         with patch.dict(
             os.environ,
             _env(OBSIDIAN_CREATED_NOTE_TAG=""),
             clear=True,
         ):
-            with self.assertRaises(ConfigError):
-                load_config()
+            with self.assertRaises(ObsidianConfigError):
+                load_obsidian_config()
 
-    def test_load_config_rejects_invalid_created_note_tags(self) -> None:
+    def test_load_obsidian_config_rejects_invalid_created_note_tags(self) -> None:
         """Маркер соответствует синтаксису Obsidian и текущего parser Markdown."""
         invalid_values = (
             "#knowledge-catcher",
@@ -154,10 +172,10 @@ class ConfigTest(unittest.TestCase):
                     _env(OBSIDIAN_CREATED_NOTE_TAG=value),
                     clear=True,
                 ):
-                    with self.assertRaises(ConfigError):
-                        load_config()
+                    with self.assertRaises(ObsidianConfigError):
+                        load_obsidian_config()
 
-    def test_load_config_reads_optional_chunking_settings(self) -> None:
+    def test_load_obsidian_config_reads_optional_chunking_settings(self) -> None:
         """Технические размеры chunks читаются отдельно от правил vault."""
         with patch.dict(
             os.environ,
@@ -168,22 +186,22 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(config.chunking.minimum_size_chars, 100)
         self.assertEqual(config.chunking.target_size_chars, 1000)
         self.assertEqual(config.chunking.maximum_size_chars, 2000)
 
-    def test_load_config_uses_default_chunking_settings(self) -> None:
+    def test_load_obsidian_config_uses_default_chunking_settings(self) -> None:
         """Без CHUNK_* приложение получает согласованную безопасную policy."""
         with patch.dict(os.environ, _env(), clear=True):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(config.chunking.minimum_size_chars, 300)
         self.assertEqual(config.chunking.target_size_chars, 3000)
         self.assertEqual(config.chunking.maximum_size_chars, 6000)
 
-    def test_load_config_rejects_inconsistent_chunking_settings(self) -> None:
+    def test_load_obsidian_config_rejects_inconsistent_chunking_settings(self) -> None:
         """Minimum, target и maximum должны сохранять допустимый порядок."""
         with patch.dict(
             os.environ,
@@ -194,10 +212,10 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            with self.assertRaises(ConfigError):
-                load_config()
+            with self.assertRaises(ObsidianConfigError):
+                load_obsidian_config()
 
-    def test_load_config_reads_optional_github_app_group(self) -> None:
+    def test_load_obsidian_config_reads_optional_github_app_group(self) -> None:
         """GitHub App включается только полным набором безопасных настроек."""
         with patch.dict(
             os.environ,
@@ -209,7 +227,7 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(config.github_app.app_id, 12345)
         self.assertEqual(config.github_app.client_id, "Iv1.client")
@@ -219,24 +237,24 @@ class ConfigTest(unittest.TestCase):
         )
         self.assertNotIn("Iv1.client", config.safe_summary().values())
 
-    def test_load_config_leaves_github_disabled_when_group_is_empty(self) -> None:
+    def test_load_obsidian_config_leaves_github_disabled_when_group_is_empty(self) -> None:
         """Пустая GitHub-группа не мешает запускать ещё не настроенный connector."""
         with patch.dict(os.environ, _env(), clear=True):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertIsNone(config.github_app)
 
-    def test_load_config_rejects_partial_github_app_group(self) -> None:
+    def test_load_obsidian_config_rejects_partial_github_app_group(self) -> None:
         """Частичная GitHub-конфигурация не допускает неоднозначный runtime."""
         with patch.dict(
             os.environ,
             _env(GITHUB_APP_ID="12345", GITHUB_CLIENT_ID="Iv1.client"),
             clear=True,
         ):
-            with self.assertRaises(ConfigError):
-                load_config()
+            with self.assertRaises(ObsidianConfigError):
+                load_obsidian_config()
 
-    def test_load_config_reads_separate_embedding_group(self) -> None:
+    def test_load_obsidian_config_reads_separate_embedding_group(self) -> None:
         """Embedding provider не переиспользует credentials LLM-агента."""
         with patch.dict(
             os.environ,
@@ -248,7 +266,7 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(
             config.embedding.base_url,
@@ -265,14 +283,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.safe_summary()["embedding_api_key"], "set")
         self.assertNotIn("embedding-secret", config.safe_summary().values())
 
-    def test_load_config_leaves_embeddings_disabled_when_group_is_empty(self) -> None:
+    def test_load_obsidian_config_leaves_embeddings_disabled_when_group_is_empty(self) -> None:
         """До настройки semantic search группа остаётся опциональной."""
         with patch.dict(os.environ, _env(), clear=True):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertIsNone(config.embedding)
 
-    def test_load_config_reads_complete_embedding_pricing_group(self) -> None:
+    def test_load_obsidian_config_reads_complete_embedding_pricing_group(self) -> None:
         """Тариф загружается только целиком и безопасно виден в summary."""
         with patch.dict(
             os.environ,
@@ -287,7 +305,7 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            config = load_config()
+            config = load_obsidian_config()
 
         self.assertEqual(str(config.embedding.price_per_million_tokens), "3.25")
         self.assertEqual(config.embedding.price_currency, "RUB")
@@ -297,7 +315,7 @@ class ConfigTest(unittest.TestCase):
             "3.25",
         )
 
-    def test_load_config_rejects_partial_embedding_pricing_group(self) -> None:
+    def test_load_obsidian_config_rejects_partial_embedding_pricing_group(self) -> None:
         """Одна цена без валюты и версии тарифа не создаёт ложную оценку cost."""
         with patch.dict(
             os.environ,
@@ -310,18 +328,18 @@ class ConfigTest(unittest.TestCase):
             ),
             clear=True,
         ):
-            with self.assertRaises(ConfigError):
-                load_config()
+            with self.assertRaises(ObsidianConfigError):
+                load_obsidian_config()
 
-    def test_load_config_rejects_partial_embedding_group(self) -> None:
+    def test_load_obsidian_config_rejects_partial_embedding_group(self) -> None:
         """Ключ без URL и model не создаёт неоднозначный runtime."""
         with patch.dict(
             os.environ,
             _env(EMBEDDING_API_KEY="embedding-secret"),
             clear=True,
         ):
-            with self.assertRaises(ConfigError):
-                load_config()
+            with self.assertRaises(ObsidianConfigError):
+                load_obsidian_config()
 
     def test_load_config_rejects_invalid_debug_flag(self) -> None:
         """Некорректное boolean-значение APP_DEBUG считается ошибкой конфига."""

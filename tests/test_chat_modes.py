@@ -7,6 +7,7 @@ import threading
 import unittest
 
 from channel_helpers import process_channel_incoming_message
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
@@ -242,7 +243,13 @@ class ChatModesTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             SQLiteExternalIdentityRepository(connection).create(app_user_id=1, identity=IncomingIdentity("telegram", "external", "chat"))
         event = IncomingEvent(channel="telegram", external_user_id="external", chat_id="chat", message_id="1", text="обычный текст")
-        response = process_channel_incoming_message(database_path=self.database_path, incoming_message=event, openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test")
+        response = process_channel_incoming_message(
+            database_path=self.database_path, incoming_message=event,
+            obsidian_config=ObsidianConfig(
+                openai_base_url="https://example.com/v1",
+                openai_api_key="test", openai_model="test",
+            ),
+        )
         self.assertTrue(response.text)
         with connect_database(self.database_path) as connection:
             mode = SQLiteChatModeRepository(connection).get(ChatModeKey(1, "telegram", "chat"))

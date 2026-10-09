@@ -14,7 +14,7 @@ Knowledge Catcher принимает ссылки на статьи из мес�
 локально и пока не развёрнута на VPS; прежние результаты записаны в
 [истории](HISTORY.md#доступ-telegram-bot-api-с-российских-vps).
 
-## Текущая структура после шага 2.6.5
+## Текущая структура после шага 2.6.6
 
 ```mermaid
 flowchart LR
@@ -40,10 +40,10 @@ flowchart LR
 | Часть | Ответственность |
 | --- | --- |
 | `core/domain/` | Пользователи, identities, общие use cases и ports; ключ и ID активного режима чата. |
-| `core/data/` | Конфигурация, SQLite connection/schema lifecycle, отдельные DTO, mappers и repositories профилей и режимов. |
+| `core/data/` | Общая конфигурация каналов и списка возможностей, SQLite connection/schema lifecycle, отдельные DTO, mappers и repositories профилей и режимов. |
 | `core/presentation/` | Нейтральное событие, общие команды, диспетчер и форматирование общих ответов. |
 | `capabilities/obsidian/domain/` | Модели, правила, use cases и ports статей, vault, поиска и proposals. |
-| `capabilities/obsidian/data/` | Предметные SQLite DTO, mappers и repositories; HTTP, GitHub, LLM, embeddings, extraction, YAML-конфигурация vault и adapter `document_chunker`. |
+| `capabilities/obsidian/data/` | Профиль настроек Obsidian, предметные SQLite DTO, mappers и repositories; HTTP, GitHub, LLM, embeddings, extraction, YAML-конфигурация vault и adapter `document_chunker`. |
 | `capabilities/obsidian/presentation/` | Команды, обработка текста и подтверждений, форматирование ответов Obsidian и статический пример правил vault. |
 | `capabilities/obsidian/bootstrap.py` | Сборка зависимостей возможности и её публичного входа. |
 | `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне presentation возможностей. |
@@ -58,6 +58,15 @@ flowchart LR
 `CapabilityRegistry` получает явно собранные обработчики из composition root.
 `CapabilityDescriptor` задаёт устойчивый ID, команду входа и справку. Реестр
 проверяет конфликты ID, команд и зарезервированных общих имён при сборке.
+
+`core/data/config.py` читает только `APP_ENV`, путь SQLite, выбранные каналы,
+их credentials/proxy, debug-флаг и список ID возможностей. Отдельный
+`capabilities/obsidian/data/configuration/config.py` владеет профилем LLM,
+GitHub App, embeddings, chunking и тега заметок. Главный composition root
+вызывает его loader только при включённом Obsidian; CLI передаёт профиль
+сборке процесса и healthcheck. При отключении ошибочные предметные переменные
+окружения не разбираются. У будущего Ask будет собственный профиль и loader;
+добавление его полей не потребует изменений общей модели `AppConfig`.
 Обработчики `enter(context, event)` и `handle(context, event)` вызывают предметные
 use cases и возвращают `CapabilityResult(IncomingResponse, CapabilityMode)`.
 Предметные модели форматируются внутри presentation возможности. Общий ответ

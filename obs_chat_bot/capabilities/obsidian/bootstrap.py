@@ -48,7 +48,14 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.ports import (
 from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import VaultSelectionManager
 from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncManager
 from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.core.data.config import ChunkingConfig, EmbeddingConfig, GitHubAppConfig
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import (
+    ChunkingConfig,
+    EmbeddingConfig,
+    GitHubAppConfig,
+    ObsidianConfig,
+    ObsidianConfigError,
+    load_obsidian_config,
+)
 from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import (
     OpenAICompatibleEmbeddingProvider,
 )

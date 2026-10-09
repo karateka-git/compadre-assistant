@@ -19,8 +19,9 @@ Copy-Item .env.example .env
 ## Заполнить конфигурацию
 
 `.env.example` — шаблон, который нужно заполнить: с `replace-me` или пустыми
-токенами выбранных каналов приложение не готово к запуску. Переменные читает
-[`config.py`](../obs_chat_bot/core/data/config.py).
+токенами выбранных каналов приложение не готово к запуску. Общие переменные
+читает [`core/data/config.py`](../obs_chat_bot/core/data/config.py), а настройки
+Obsidian — [`capabilities/obsidian/data/configuration/config.py`](../obs_chat_bot/capabilities/obsidian/data/configuration/config.py).
 
 | Переменные | Назначение и обязательность |
 | --- | --- |

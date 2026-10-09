@@ -14,7 +14,10 @@ from obs_chat_bot.capabilities.obsidian.bootstrap import (
     ObsidianProcessRuntime,
     create_prepare_obsidian_review_use_case,
 )
-from obs_chat_bot.core.data.config import ConfigError, load_config
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import (
+    ObsidianConfigError, load_obsidian_config, ObsidianConfig,
+)
+from obs_chat_bot.core.data.config import load_config
 from obs_chat_bot.core.data.sqlite.connection import connect_database
 from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
@@ -183,8 +186,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
             with self.subTest(group=group):
                 env = self.env("telegram", True, "absent")
                 env.update(values)
-                with patch.dict(os.environ, env, clear=True), self.assertRaises(ConfigError) as error:
-                    load_config()
+                with patch.dict(os.environ, env, clear=True), self.assertRaises(ObsidianConfigError) as error:
+                    load_obsidian_config()
                 self.assertIn(missing, str(error.exception))
                 self.assertNotIn("secret", str(error.exception))
 
@@ -192,13 +195,14 @@ class RuntimeConfigurationTest(unittest.TestCase):
         """Невалидные endpoint и PEM дают отдельные результаты проверки."""
         with patch.dict(os.environ, self.env("vk", True, "valid"), clear=True):
             config = load_config()
-        config = replace(
-            config, openai_base_url="http://localhost/v1",
-            github_app=replace(config.github_app, private_key_path=self.root / "missing.pem"),
-            embedding=replace(config.embedding, base_url="http://localhost/v1"),
+            obsidian_config = load_obsidian_config()
+        obsidian_config = replace(
+            obsidian_config, openai_base_url="http://localhost/v1",
+            github_app=replace(obsidian_config.github_app, private_key_path=self.root / "missing.pem"),
+            embedding=replace(obsidian_config.embedding, base_url="http://localhost/v1"),
         )
         logger = Mock()
-        self.assertEqual(run_healthcheck(config, logger), 1)
+        self.assertEqual(run_healthcheck(config, logger, obsidian_config=obsidian_config), 1)
         for diagnostic in ("LLM", "GitHub", "Embedding", "Database connection is ready"):
             self.assertIn(diagnostic, str(logger.method_calls))
         self.assertNotIn("vault не подключён", str(logger.method_calls))
@@ -267,7 +271,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             reply = process_channel_incoming_message(
                 database_path=self.root / "app.db", incoming_message=IncomingEvent(
                     "telegram", "chat", "article", "/obsidian https://article.example/page", "user"
-                ), openai_base_url="", openai_api_key="", openai_model="", runtime=runtime,
+                ), obsidian_config=ObsidianConfig(openai_base_url="", openai_api_key="", openai_model=""), runtime=runtime,
             )
         self.assertIn("Провайдер LLM не настроен", reply.text)
         self.assertNotIn("vault не подключён", reply.text)

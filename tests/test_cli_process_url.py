@@ -19,7 +19,8 @@ from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageRe
 from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
 from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
 from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.core.data.config import AppConfig, GitHubAppConfig
+from obs_chat_bot.core.data.config import AppConfig
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import GitHubAppConfig, ObsidianConfig
 from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
 from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
@@ -180,12 +181,15 @@ class ProcessUrlCliTest(unittest.TestCase):
                 app_env="test",
                 database_path=Path(temporary_directory) / "test.db",
                 telegram_bot_token="123456789:abcdefghijklmnopqrstuvwxyz",
-                openai_base_url="https://llm.example/v1",
-                openai_api_key="token",
-                openai_model="fake-model",
             )
 
-            exit_code = run_healthcheck(config, SilentLogger())
+            exit_code = run_healthcheck(
+                config, SilentLogger(),
+                obsidian_config=ObsidianConfig(
+                    openai_base_url="https://llm.example/v1",
+                    openai_api_key="token", openai_model="fake-model",
+                ),
+            )
 
         self.assertEqual(exit_code, 0)
 
@@ -320,6 +324,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -338,6 +343,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -353,6 +359,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                     analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
@@ -371,6 +378,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                     database_path=Path(directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
                     proxy_url="socks5://10.77.77.1:1080",
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -397,7 +405,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                 exit_code = run_telegram_bot_command(
                     database_path=Path(directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
-                    github_app_config=github_config,
+                    obsidian_config=ObsidianConfig(github_app=github_config),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                 )
@@ -415,6 +423,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                     database_path=Path(temporary_directory) / "test.db",
                     token="vk-token",
                     group_id=123,
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                     use_case_factory=lambda _connection: fake_use_case,
                     analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
@@ -435,6 +444,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                     database_path=Path(temporary_directory) / "test.db",
                     token="vk-token",
                     group_id=123,
+                    obsidian_config=ObsidianConfig(),
                     logger=SilentLogger(),
                 )
 
@@ -451,18 +461,14 @@ class ProcessUrlCliTest(unittest.TestCase):
             process_channel_incoming_message(
                 database_path=database_path,
                 incoming_message=_telegram_message("/register"),
-                openai_base_url="https://llm.example/v1",
-                openai_api_key="token",
-                openai_model="fake-model",
+                obsidian_config=ObsidianConfig(openai_base_url="https://llm.example/v1", openai_api_key="token", openai_model="fake-model"),
                 use_case_factory=lambda _connection: fake_use_case,
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
             process_channel_incoming_message(
                 database_path=database_path,
                 incoming_message=_telegram_message("Test User", "msg-name"),
-                openai_base_url="https://llm.example/v1",
-                openai_api_key="token",
-                openai_model="fake-model",
+                obsidian_config=ObsidianConfig(openai_base_url="https://llm.example/v1", openai_api_key="token", openai_model="fake-model"),
                 use_case_factory=lambda _connection: fake_use_case,
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
@@ -471,9 +477,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                     runtime=ObsidianProcessRuntime(None, object()),
                     database_path=database_path,
                     incoming_message=_telegram_message("/obsidian https://example.com/article", "msg-2"),
-                    openai_base_url="https://llm.example/v1",
-                    openai_api_key="token",
-                    openai_model="fake-model",
+                    obsidian_config=ObsidianConfig(openai_base_url="https://llm.example/v1", openai_api_key="token", openai_model="fake-model"),
                     use_case_factory=lambda _connection: fake_use_case,
                     analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
                 )

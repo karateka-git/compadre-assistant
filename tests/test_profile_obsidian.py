@@ -9,6 +9,7 @@ from unittest.mock import patch
 from obs_chat_bot.bootstrap import create_incoming_message_dispatcher, create_user_identity_service
 from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from obs_chat_bot.core.data.sqlite.connection import connect_database
@@ -39,7 +40,10 @@ class ProfileObsidianTest(unittest.TestCase):
         options = dict(
             database_path=self.database_path,
             incoming_message=self.event(text, channel, chat),
-            openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test",
+            obsidian_config=ObsidianConfig(
+                openai_base_url="https://example.com/v1",
+                openai_api_key="test", openai_model="test",
+            ),
             use_case_factory=lambda _connection: self.article,
             analysis_use_case_factory=lambda _connection: self.analysis,
         )
@@ -56,7 +60,7 @@ class ProfileObsidianTest(unittest.TestCase):
         """Отключённый модуль не мешает имени, справке и связи каналов."""
         for channel in ("telegram", "vk", "cli"):
             with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
-                options = dict(channel=channel, enabled_capabilities=(), openai_api_key="", openai_model="")
+                options = dict(channel=channel, enabled_capabilities=(), obsidian_config=None)
                 self.register(**options)
                 self.assertIn("Рад тебя видеть, Имя", self.process("/start", **options).text)
                 self.assertIn("уже зарегистрирован", self.process("/register", **options).text)
@@ -100,7 +104,7 @@ class ProfileObsidianTest(unittest.TestCase):
     def test_absent_llm_does_not_construct_provider_during_registration(self) -> None:
         """Пустые credentials не превращают регистрацию в ошибку SDK."""
         with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_analyze_article_use_case") as analyzer, patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_prepare_obsidian_review_use_case") as review:
-            options = dict(openai_api_key="", openai_model="", analysis_use_case_factory=None)
+            options = dict(obsidian_config=ObsidianConfig(), analysis_use_case_factory=None)
             self.register(**options)
             self.assertIn("/obsidian", self.process("/start", **options).text)
             self.assertIn("Провайдер LLM не настроен", self.process("/obsidian", **options).text)
@@ -120,7 +124,10 @@ class ProfileObsidianTest(unittest.TestCase):
             self.assertNotIn("Провайдер", no_vault.text)
             self.assertIn("GitHub-репозиторий", self.process("/obsidian", runtime=runtime).text)
             manager.selected = _test_vault(1)
-            missing_llm = self.process("/obsidian https://example.com/article", runtime=runtime, openai_api_key="", analysis_use_case_factory=None)
+            missing_llm = self.process(
+                "/obsidian https://example.com/article", runtime=runtime,
+                obsidian_config=ObsidianConfig(), analysis_use_case_factory=None,
+            )
             self.assertIn("Провайдер LLM не настроен", missing_llm.text)
         self.assertFalse(self.article.commands)
         self.assertFalse(self.analysis.commands)

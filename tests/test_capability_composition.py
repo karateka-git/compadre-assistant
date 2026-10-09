@@ -10,7 +10,13 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.bootstrap import create_channel_message_processor, create_user_identity_service, validate_enabled_capabilities
+from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from obs_chat_bot.bootstrap import (
+    create_channel_message_processor,
+    create_user_identity_service,
+    load_obsidian_profile,
+    validate_enabled_capabilities,
+)
 from channel_helpers import process_channel_incoming_message
 from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime, create_obsidian_process_runtime, create_vault_note_chunker
 from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
@@ -53,9 +59,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         return process_channel_incoming_message(
             database_path=self.database_path,
             incoming_message=self.event(text),
-            openai_base_url="https://example.com/v1",
-            openai_api_key="test",
-            openai_model="test",
+            obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"),
             use_case_factory=lambda _connection: self.article,
             analysis_use_case_factory=lambda _connection: self.analysis,
             **overrides,
@@ -66,6 +70,15 @@ class CapabilityCompositionTest(unittest.TestCase):
         for identifiers in (("unknown",), ("obsidian", "obsidian")):
             with self.subTest(identifiers=identifiers), self.assertRaises(ValueError):
                 validate_enabled_capabilities(identifiers)
+
+    def test_composition_loads_obsidian_profile_only_when_enabled(self) -> None:
+        """Выключенная возможность не читает свои настройки и не влияет на будущий Ask."""
+        profile = ObsidianConfig()
+        with patch("obs_chat_bot.bootstrap.load_obsidian_config", return_value=profile) as loader:
+            self.assertIsNone(load_obsidian_profile(("ask",)))
+            loader.assert_not_called()
+            self.assertIs(load_obsidian_profile(("obsidian",)), profile)
+            loader.assert_called_once_with()
 
     def test_process_registry_reuses_handler_and_scopes_only_obsidian_events(self) -> None:
         """Общие команды обходят Obsidian scope, а предметные события получают новые соединения."""
@@ -78,8 +91,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
         with create_channel_message_processor(
             database_path=self.database_path,
-            openai_base_url="https://example.com/v1",
-            openai_api_key="test", openai_model="test",
+            obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"),
             use_case_factory=article_factory,
             analysis_use_case_factory=lambda _connection: self.analysis,
         ) as processor:
@@ -109,7 +121,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         runtime = ObsidianProcessRuntime(None, github, llm, embedding)
         with create_channel_message_processor(
             database_path=self.database_path,
-            runtime=runtime,
+            runtime=runtime, obsidian_config=ObsidianConfig(),
         ) as processor:
             processor(self.event("/help"))
             self.assertEqual((github.closes, llm.closes, embedding.closes), (0, 0, 0))
@@ -130,6 +142,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "registry"):
                 with create_channel_message_processor(
                     database_path=self.database_path, runtime=runtime,
+                    obsidian_config=ObsidianConfig(),
                 ):
                     self.fail("Процесс не должен быть передан вызывающему коду")
         self.assertEqual(tuple(client.closes for client in clients), (1, 1, 1))
@@ -144,8 +157,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             with create_channel_message_processor(
                 database_path=self.database_path,
                 runtime=runtime,
-                openai_base_url="https://example.com/v1",
-                openai_api_key="test", openai_model="test",
+                obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"),
                 use_case_factory=lambda _connection: self.article,
                 analysis_use_case_factory=lambda _connection: self.analysis,
             ) as processor:
@@ -169,6 +181,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
         with create_channel_message_processor(
             database_path=self.database_path,
+            obsidian_config=ObsidianConfig(),
             use_case_factory=article_factory,
             analysis_use_case_factory=lambda _connection: self.analysis,
         ) as processor, ThreadPoolExecutor(max_workers=2) as executor:
@@ -243,7 +256,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             started = process_channel_incoming_message(
                 database_path=self.database_path,
                 incoming_message=self.event("https://github.com/octocat/notes Vault"),
-                openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test",
+                obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"),
                 runtime=runtime,
                 use_case_factory=article_factory,
                 analysis_use_case_factory=lambda _connection: self.analysis,
@@ -269,7 +282,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         """Первое имя завершает профиль и не выбирает Obsidian."""
         with connect_database(self.database_path) as connection:
             user = create_user_identity_service(connection).register(IncomingIdentity("vk", "new", "peer"))
-        common = dict(database_path=self.database_path, openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test", use_case_factory=lambda _connection: self.article, analysis_use_case_factory=lambda _connection: self.analysis)
+        common = dict(database_path=self.database_path, obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"), use_case_factory=lambda _connection: self.article, analysis_use_case_factory=lambda _connection: self.analysis)
         reply = process_channel_incoming_message(incoming_message=IncomingEvent("vk", "peer", "1", "/name Имя", "new"), **common)
         self.assertIn("Приятно познакомиться", reply.text)
         with connect_database(self.database_path) as connection:
