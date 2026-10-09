@@ -1,4 +1,4 @@
-"""Сборка Ask вне domain без регистрации входов в ядре."""
+"""Сборка процессного сценария Ask вне domain."""
 
 from collections.abc import Iterator
 from contextlib import contextmanager

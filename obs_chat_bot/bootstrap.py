@@ -1,4 +1,4 @@
-"""Собирает общие зависимости приложения и регистрирует возможность Obsidian."""
+"""Собирает общие зависимости приложения и явно регистрирует возможности."""
 
 from __future__ import annotations
 
@@ -6,6 +6,10 @@ import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
+
+from obs_chat_bot.capabilities.ask.bootstrap import create_ask_runtime
+from obs_chat_bot.capabilities.ask.data.configuration import AskConfig
+from obs_chat_bot.capabilities.ask.presentation.handler import AskCapability
 
 from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
 from obs_chat_bot.core.presentation.incoming.ports import (
@@ -107,7 +111,7 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
     """
     if len(set(enabled_capabilities)) != len(enabled_capabilities):
         raise ValueError("Конфликт ID включённых возможностей")
-    unknown = set(enabled_capabilities) - {"obsidian"}
+    unknown = set(enabled_capabilities) - {"obsidian", "ask"}
     if unknown:
         raise ValueError(
             f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
@@ -169,6 +173,7 @@ def create_channel_message_processor(
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
+    ask_config: AskConfig | None = None,
 ) -> Iterator[ChannelMessageProcessor]:
     """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
 
@@ -179,6 +184,7 @@ def create_channel_message_processor(
         use_case_factory: Подменная фабрика article pipeline для тестов.
         analysis_use_case_factory: Подменная фабрика анализа для тестов.
         enabled_capabilities: Явно включённые ID.
+        ask_config: Профиль Ask либо None для чтения ASK_* при включении.
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
@@ -198,14 +204,20 @@ def create_channel_message_processor(
             embedding_config=obsidian_config.embedding,
             created_note_tag=obsidian_config.obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
-        processor = ChannelMessageProcessor(
-            database_path=database_path,
-            capabilities=(entry,) if entry is not None else (),
-            disabled_capabilities=() if entry is not None else (
+        with create_ask_runtime(enabled="ask" in enabled_capabilities, config=ask_config) as ask:
+            capabilities = (entry,) if entry is not None else ()
+            disabled = () if entry is not None else (
                 CapabilityDescriptor("obsidian", "/obsidian", "работа со статьями и Obsidian vault"),
-            ),
-        )
-        yield processor
+            )
+            if ask is not None:
+                capabilities += (AskCapability(ask),)
+            else:
+                disabled += (AskCapability.descriptor,)
+            yield ChannelMessageProcessor(
+                database_path=database_path,
+                capabilities=capabilities,
+                disabled_capabilities=disabled,
+            )
     finally:
         if runtime is not None:
             runtime.close()
