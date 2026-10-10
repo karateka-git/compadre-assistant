@@ -782,7 +782,7 @@ class HttpxGitHubAppClient(
         repository_path = _vault_repository_path(vault, target_path)
         body: dict[str, Any] = {
             "message": (
-                f"Knowledge Catcher: {'update' if expected_blob_sha else 'add'} "
+                f"Compadre Assistant: {'update' if expected_blob_sha else 'add'} "
                 f"{target_path}"
             ),
             "content": base64.b64encode(markdown.encode("utf-8")).decode("ascii"),

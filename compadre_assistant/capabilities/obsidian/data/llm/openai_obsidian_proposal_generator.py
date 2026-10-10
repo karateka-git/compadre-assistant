@@ -180,7 +180,7 @@ def _writing_messages(context: ObsidianWritingContext) -> list[dict[str, str]]:
                 "и стиль целевой и соседних заметок. Верни только полный итоговый "
                 "Markdown целевой заметки без пояснений и code fence. Не меняй "
                 "целевой путь и не выдумывай отсутствующие факты. Не добавляй "
-                "служебный тег Knowledge Catcher ни inline, ни во frontmatter: "
+                "служебный тег knowledge-catcher ни inline, ни во frontmatter: "
                 "application добавит его после генерации."
             ),
         },

@@ -1,4 +1,4 @@
-# Эксплуатация Knowledge Catcher
+# Эксплуатация Compadre Assistant
 
 
 Локальная версия после шага 4.2 использует пакет `compadre_assistant` и

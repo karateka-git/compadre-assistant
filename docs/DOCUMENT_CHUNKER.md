@@ -4,7 +4,7 @@
 в подэтапах 10.1–10.2; FTS5, embeddings и hybrid search также реализованы.
 
 Этот документ фиксирует границу независимой библиотеки разбиения документов и
-её интеграцию с `obsChatBot`. История реализации RAG и write-back сохранена в
+её интеграцию с `Compadre Assistant`. История реализации RAG и write-back сохранена в
 `docs/HISTORY.md`.
 
 ## Цель
@@ -41,7 +41,7 @@ document_chunker/
 Отдельный repository или публикация в PyPI откладываются до появления второго
 потребителя. Пакет не импортирует `compadre_assistant` и не знает о его domain-моделях.
 
-`obsChatBot` использует библиотеку через собственный application-port и
+`Compadre Assistant` использует библиотеку через собственный application-port и
 data-adapter:
 
 ```text
@@ -147,7 +147,7 @@ maximum_size_chars = 6000
 для обычного делимого текста. Структурная корректность parser не превращается в
 набор пользовательских флагов.
 
-`obsChatBot` читает необязательные переменные:
+`Compadre Assistant` читает необязательные переменные:
 
 ```env
 CHUNK_MINIMUM_SIZE_CHARS=300

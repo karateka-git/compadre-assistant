@@ -23,14 +23,14 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> str:
             return _format_help(result.capability_help)
         case IncomingMessageResultType.START_UNREGISTERED:
             return (
-                "obsChatBot запущен.\n"
+                "Compadre Assistant запущен.\n"
                 "Этот канал пока не зарегистрирован.\n"
                 "Отправь `/register`, чтобы создать нового пользователя, или `/link <код>`, "
                 "чтобы привязать этот канал к уже существующему пользователю.\n"
                 "Все команды: `/help`."
             )
         case IncomingMessageResultType.START_REGISTERED:
-            return f"obsChatBot запущен.\nРад тебя видеть, {_display_name(result)}.\n{result.capability_reply or 'Справка: `/help`.'}"
+            return f"Compadre Assistant запущен.\nРад тебя видеть, {_display_name(result)}.\n{result.capability_reply or 'Справка: `/help`.'}"
         case IncomingMessageResultType.REGISTERED:
             return (
                 "Готово, я зарегистрировал тебя.\n"
@@ -96,7 +96,7 @@ def _display_name(result: ProcessIncomingMessageResult) -> str:
 
 def _format_help(capability: CapabilityHelp | None) -> str:
     """Объединяет общие команды и разделы подключённой возможности."""
-    lines = ["Доступные команды:"]
+    lines = ["Compadre Assistant — справка.", "Доступные команды:"]
     for section in CommandSection:
         commands = [command for command in ChatCommand if command.section is section]
         if not commands:

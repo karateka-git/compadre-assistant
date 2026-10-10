@@ -315,7 +315,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
         self.assertEqual(
             reply,
-            "obsChatBot запущен.\n"
+            "Compadre Assistant запущен.\n"
             "Рад тебя видеть, Влад.\n"
             "Справка: `/help`.",
         )
