@@ -900,7 +900,7 @@ GitHub Device Flow, установка App и чтение/запись тест
 - [x] Обновить локальную конфигурацию и документацию для нового технического
   имени без изменения секретов и запущенных процессов. Проверить импорт пакета,
   CLI, тесты и локальные smoke-сценарии.
-- [ ] Проверить контейнерную сборку при доступном Docker daemon.
+- [x] Проверить контейнерную сборку при доступном Docker daemon.
 
 Реализация 2026-10-10: пакет перенесён в `compadre_assistant` без legacy wrapper,
 обновлены импорты, patch-targets тестов и загрузка resource template. CLI называется
@@ -913,8 +913,14 @@ Compose-сервисы — `tg_assistant`/`vk_assistant`, общий anchor — 
 
 Проверки: 548 unittest прошли; импорт пакета и resource template, CLI `--help`,
 `--sqlite-smoke`, `--pipeline-smoke`, `--analysis-smoke` успешны.
-`docker compose config --services` возвращает оба новых имени. Контейнерная
-сборка пока не проверена: Docker API недоступен по pipe `dockerDesktopLinuxEngine`.
+`docker compose config --services` возвращает оба новых имени. После появления
+Docker daemon 29.7.2 команда `docker compose build tg_assistant` успешно собрала
+общий для обоих сервисов image `compadre-assistant:dev`. В отдельных контейнерах
+прошли CLI `--help`, три smoke и `--healthcheck` обоих каналов с Obsidian/Ask.
+Использованы `--network none`, read-only root filesystem и временная SQLite
+в tmpfs `/tmp`, без host volumes и `.env`. Healthcheck использовал фиктивные
+credentials Ask/каналов и ненастроенные провайдеры Obsidian; это автономная
+проверка контейнера, не доступности API. Telegram/VK polling не запускался.
 Работающие процессы, `.env`, данные SQLite и публичные форматы не менялись.
 
 ### 4.3. Обновить пользовательские названия и тексты
@@ -1130,14 +1136,19 @@ smoke-процесс с предварительной сверкой executable
   Compose, README и `AGENTS.md` нет; wrapper-пакета нет. Начальная схема,
   vault template и `.env.example` совпадают с `5c525f4` с учётом окончания строк.
   Служебный тег `knowledge-catcher`, env-ключи и предметные IDs сохранены.
-- Compose config возвращает `tg_assistant` и `vk_assistant`. Docker daemon
-  недоступен по pipe `dockerDesktopLinuxEngine`; сборка и запуск контейнеров
-  остаются непроверенными. Docker Desktop автоматически не запускался.
+- Compose config возвращает `tg_assistant` и `vk_assistant`. После появления
+  Docker daemon 29.7.2 общий image `compadre-assistant:dev` собран через
+  `docker compose build tg_assistant`. Контейнерные help, SQLite/pipeline/analysis
+  smoke и healthcheck прошли без сети, с read-only root filesystem и SQLite
+  в tmpfs `/tmp`. Host volumes и `.env` не подключались, credentials профиля
+  Ask/каналов фиктивные, провайдеры Obsidian не настроены. Контейнерный polling
+  и доступ к API не проверялись; управление UI не использовалось.
 - Read-only `getMe` подтвердил нового `CompadreAssistant_bot`, ID `8870763711`,
   и имя **Compadre Assistant**. Токен постоянного `.env` по-прежнему относится к
   `KnowledgeCatcher_bot`, ID `8425300894`. В 4.5 запущен отдельный локальный
-  polling нового бота с временной БД и профилем Ask; пользовательские команды
-  ещё ожидаются. Постоянный runtime не переключён.
+  polling нового бота с временной БД и профилем Ask: реальные `/start`,
+  `/register` с сохранением имени и `/ask` прошли, пять ответов доставлены
+  без ошибок. Проверочный процесс остановлен; постоянный runtime не переключён.
 - VK API подтвердил **Compadre Assistant**, `compadre_assistant`, ID `240322403`.
   GitHub API подтвердил `karateka-git/compadre-assistant`, ID `1269089612`.
   После переименования пользователем API App подтвердил **Compadre Assistant**,
@@ -1146,10 +1157,13 @@ smoke-процесс с предварительной сверкой executable
   Прежний PEM успешно подписывает JWT. Через существующую installation
   `148238219` прочитаны metadata и `.knowledge-catcher.yml` vault
   `karateka-git/my_obs_data` токеном с `Contents: read`; затем token отозван.
-- Live-команды нового Telegram-бота и VK, Ask через каналы, Device Flow,
-  повторная установка App и запись в тестовый vault не выполнялись.
+- Telegram `/help`, `/obsidian`, `/exit` не поступили в проверочном запуске.
+  Живые сценарии VK, Device Flow, повторная установка App и запись в тестовый
+  vault не выполнялись. Ask через новый Telegram проверен в 4.5;
+  Ask через VK остаётся непроверенным.
   Read-only проверка существующего vault не заменяет пользовательский сценарий.
-  Предыдущий реальный запрос Ask относится к этапу 3 и не заменяет эти проверки.
+  Предыдущий прямой API запрос Ask этапа 3 и Telegram smoke 4.5 не заменяют
+  оставшиеся проверки интеграций.
   `.env`, текущая БД, аккаунты и production в 4.7 не изменялись; VPS не посещался.
 
 Перед работой с production прочитать `docs/PRODUCTION.md` и соблюдать правила

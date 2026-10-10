@@ -21,8 +21,10 @@
 `240322403` и получило имя Compadre Assistant; пользователь установил адрес
 `compadre_assistant`. Репозиторий переименован в `karateka-git/compadre-assistant`,
 его ID `1269089612` сохранён. Постоянный runtime Telegram пока использует
-прежнего бота; отдельный локальный polling нового бота с временной БД запущен
-и ожидает пользовательских команд. Пользователь переименовал существующую
+прежнего бота. На отдельном локальном polling нового бота с временной БД
+проверены реальные `/start`, `/register` с сохранением имени и `/ask`:
+пять ответов доставлены без ошибок. Проверочный процесс остановлен.
+Пользователь переименовал существующую
 GitHub App в **Compadre Assistant**, slug `compadre-assistant`, сохранив ID
 `4363317`. Обновлён локальный `GITHUB_APP_SLUG`; App ID, Client ID, PEM и
 installations сохранены. Прежний PEM успешно подписывает JWT; через installation
@@ -31,9 +33,12 @@ installations сохранены. Прежний PEM успешно подпис
 
 Итоговая сверка: 548 unittest, CLI help, SQLite/pipeline/analysis smoke и
 healthcheck локального профиля с временной БД прошли. Read-only API подтвердили
-профили Telegram/VK, репозиторий и фактическую App. Docker daemon недоступен,
-сборка контейнера не проверена. Live-команды каналов, Device Flow и запись
-в тестовый vault остаются открытыми в
+профили Telegram/VK, репозиторий и фактическую App. После появления Docker daemon
+29.7.2 собран общий image `compadre-assistant:dev`; контейнерные CLI help,
+три smoke и healthcheck прошли без сети, с временной SQLite в tmpfs и фиктивным
+профилем, без host volumes и `.env`. Контейнерный polling не запускался.
+Telegram `/help`, `/obsidian`, `/exit`,
+живые сценарии VK, Device Flow и запись в тестовый vault остаются открытыми в
 [roadmap 4.5–4.7](ASSISTANT_REBIRTH_ROADMAP.md#45-переключить-telegram-и-обновить-профиль-vk).
 Этап 4 целиком не завершён; production не обновлялся.
 
