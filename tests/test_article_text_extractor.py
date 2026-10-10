@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleExtractionError
-from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
-from obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor import (
+from compadre_assistant.capabilities.obsidian.domain.articles.errors import ArticleExtractionError
+from compadre_assistant.capabilities.obsidian.domain.articles.html import ArticleHtml
+from compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor import (
     TrafilaturaArticleTextExtractor,
 )
 
@@ -21,12 +21,12 @@ class TrafilaturaArticleTextExtractorTest(unittest.TestCase):
 
         with (
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+                "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
                 "_extract_clean_text",
                 return_value=" Clean article text ",
             ),
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+                "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
                 "_extract_title",
                 return_value="Article title",
             ),
@@ -45,12 +45,12 @@ class TrafilaturaArticleTextExtractorTest(unittest.TestCase):
 
         with (
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+                "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
                 "_extract_clean_text",
                 return_value="Clean article text",
             ),
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+                "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
                 "_extract_title",
                 return_value=None,
             ),
@@ -73,7 +73,7 @@ class TrafilaturaArticleTextExtractorTest(unittest.TestCase):
         html = _article_html("<html><body>Raw</body></html>")
 
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+            "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
             "_extract_clean_text",
             return_value="   ",
         ):
@@ -86,7 +86,7 @@ class TrafilaturaArticleTextExtractorTest(unittest.TestCase):
         html = _article_html("<html><body>Raw</body></html>")
 
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
+            "compadre_assistant.capabilities.obsidian.data.extraction.trafilatura_article_extractor."
             "_load_trafilatura",
             side_effect=ArticleExtractionError("trafilatura is not installed"),
         ):
@@ -95,7 +95,7 @@ class TrafilaturaArticleTextExtractorTest(unittest.TestCase):
 
     def test_extract_title_reads_metadata_title(self) -> None:
         """Заголовок читается из metadata `trafilatura`."""
-        from obs_chat_bot.capabilities.obsidian.data.extraction import trafilatura_article_extractor
+        from compadre_assistant.capabilities.obsidian.data.extraction import trafilatura_article_extractor
 
         html = _article_html("<html><body>Raw</body></html>")
         fake_trafilatura = SimpleNamespace(

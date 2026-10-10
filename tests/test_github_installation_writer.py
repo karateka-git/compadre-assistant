@@ -4,14 +4,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_writer import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_writer import (
     SQLiteGitHubAccountAccessWriter,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -20,7 +20,7 @@ class GitHubInstallationWriterTest(unittest.TestCase):
 
     def test_writer_opens_fresh_connection_and_persists_only_ids(self) -> None:
         """Writer не переносит user token в SQLite repository."""
-        with TemporaryDirectory(prefix="obs-chat-bot-github-writer-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-writer-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)

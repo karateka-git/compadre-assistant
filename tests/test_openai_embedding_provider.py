@@ -5,9 +5,9 @@ from decimal import Decimal
 import unittest
 import json
 
-from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingCallContext
-from obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible import (
+from compadre_assistant.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from compadre_assistant.capabilities.obsidian.domain.search.models import EmbeddingCallContext
+from compadre_assistant.capabilities.obsidian.data.embeddings.openai_compatible import (
     OpenAICompatibleEmbeddingProvider,
 )
 
@@ -216,7 +216,7 @@ class OpenAICompatibleEmbeddingProviderTest(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible",
+            "compadre_assistant.capabilities.obsidian.data.embeddings.openai_compatible",
             level="INFO",
         ) as captured:
             provider.embed_query(private_text, context=context)
@@ -261,7 +261,7 @@ class OpenAICompatibleEmbeddingProviderTest(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible",
+            "compadre_assistant.capabilities.obsidian.data.embeddings.openai_compatible",
             level="INFO",
         ) as captured:
             _collect(provider, ("one", "two", "three"))
@@ -280,7 +280,7 @@ class OpenAICompatibleEmbeddingProviderTest(unittest.TestCase):
         provider = _provider(_FakeEmbeddingsResource())
 
         with self.assertLogs(
-            "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible",
+            "compadre_assistant.capabilities.obsidian.data.embeddings.openai_compatible",
             level="INFO",
         ) as captured:
             provider.embed_query("semantic query")
@@ -308,7 +308,7 @@ class OpenAICompatibleEmbeddingProviderTest(unittest.TestCase):
         provider = _provider(_FakeEmbeddingsResource(responder=fail))
 
         with self.assertLogs(
-            "obs_chat_bot.capabilities.obsidian.data.embeddings.openai_compatible",
+            "compadre_assistant.capabilities.obsidian.data.embeddings.openai_compatible",
             level="ERROR",
         ) as captured:
             with self.assertRaises(EmbeddingProviderError):

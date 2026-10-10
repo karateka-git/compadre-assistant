@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY obs_chat_bot ./obs_chat_bot
+COPY compadre_assistant ./compadre_assistant
 COPY document_chunker ./document_chunker
 
-CMD ["python", "-m", "obs_chat_bot"]
+CMD ["python", "-m", "compadre_assistant"]

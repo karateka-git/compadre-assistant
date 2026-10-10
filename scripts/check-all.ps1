@@ -7,5 +7,5 @@ Set-Location $projectRoot
 $services = @(Get-ConfiguredBotServices)
 Invoke-ProjectCompose -ComposeArguments @('build', $services[0])
 foreach ($mode in @('--healthcheck', '--sqlite-smoke', '--pipeline-smoke', '--analysis-smoke')) {
-    Invoke-ProjectCompose -ComposeArguments @('run', '--rm', $services[0], 'python', '-m', 'obs_chat_bot', $mode)
+    Invoke-ProjectCompose -ComposeArguments @('run', '--rm', $services[0], 'python', '-m', 'compadre_assistant', $mode)
 }

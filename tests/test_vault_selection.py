@@ -1,5 +1,5 @@
 """Тесты application-сценария выбора Obsidian vault из GitHub."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime
 from contextlib import contextmanager
@@ -8,8 +8,8 @@ from tempfile import TemporaryDirectory
 from threading import Thread
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubRepositoryInspection
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import GitHubRepositoryInspection
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubRepositoryNotAccessibleError,
     GitHubVaultPathNotFoundError,
     GitHubVaultSelectionService,
@@ -19,18 +19,18 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
     normalize_vault_root_path,
     parse_github_repository_url,
 )
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_vault_selection_manager import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_vault_selection_manager import (
     SQLiteGitHubVaultSelectionManager,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
     SQLiteVaultActionConfirmationRepository,
 )
 from tests.sqlite_helpers import ensure_app_user
@@ -345,7 +345,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
         self,
     ) -> None:
         """Background callback открывает собственное SQLite-соединение."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-background-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-background-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)
@@ -376,7 +376,7 @@ class GitHubVaultSelectionServiceTest(unittest.TestCase):
 @contextmanager
 def _database():
     """Создаёт временную SQLite-базу и возвращает её context manager."""
-    with TemporaryDirectory(prefix="obs-chat-bot-vault-select-") as directory:
+    with TemporaryDirectory(prefix="compadre-assistant-vault-select-") as directory:
         path = Path(directory) / "test.db"
         with connect_database(path) as connection:
             apply_migrations(connection)

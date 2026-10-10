@@ -4,17 +4,17 @@ from dataclasses import replace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.search.errors import (
+from compadre_assistant.capabilities.obsidian.domain.search.errors import (
     EmbeddingProviderError,
     SearchIndexCorruptedError,
     SearchIndexUnavailableError,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.hybrid import (
+from compadre_assistant.capabilities.obsidian.domain.search.hybrid import (
     VaultFtsFallbackSearchService,
     VaultHybridSearchService,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.vector import VaultVectorSearchService
-from obs_chat_bot.capabilities.obsidian.domain.search.entities import (
+from compadre_assistant.capabilities.obsidian.domain.search.vector import VaultVectorSearchService
+from compadre_assistant.capabilities.obsidian.domain.search.entities import (
     ArticleSearchQuery,
     EmbeddingVector,
     VaultChunkEmbedding,
@@ -23,7 +23,7 @@ from obs_chat_bot.capabilities.obsidian.domain.search.entities import (
     VaultEmbeddingIndexState,
     VaultNoteChunk,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.statuses import (
+from compadre_assistant.capabilities.obsidian.domain.search.statuses import (
     VaultSearchFallbackReason,
     VaultSearchMode,
 )
@@ -326,7 +326,7 @@ class VaultHybridSearchServiceTest(unittest.TestCase):
         )
 
         with self.assertLogs(
-            "obs_chat_bot.capabilities.obsidian.domain.search.hybrid",
+            "compadre_assistant.capabilities.obsidian.domain.search.hybrid",
             level="WARNING",
         ) as captured:
             result = service.search(query=_query(), vault_id=10)

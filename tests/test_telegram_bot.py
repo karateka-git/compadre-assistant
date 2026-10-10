@@ -14,9 +14,9 @@ from aiogram.exceptions import (
 )
 from aiogram.methods import GetMe
 
-from obs_chat_bot.core.presentation.incoming.events import ReplyAddress
-from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
-from obs_chat_bot.presentation.telegram.bot import (
+from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
+from compadre_assistant.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,
     _create_telegram_completion_handler,
@@ -393,7 +393,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
             )
 
         with patch(
-            "obs_chat_bot.presentation.telegram.bot._load_aiogram",
+            "compadre_assistant.presentation.telegram.bot._load_aiogram",
             return_value=aiogram,
         ):
             asyncio.run(run())
@@ -432,7 +432,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
                 )
 
         with patch(
-            "obs_chat_bot.presentation.telegram.bot._load_aiogram",
+            "compadre_assistant.presentation.telegram.bot._load_aiogram",
             return_value=aiogram,
         ):
             asyncio.run(run())
@@ -494,7 +494,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
             await asyncio.to_thread(
                 handler,
                 BackgroundReply(ReplyAddress("telegram", "100"), IncomingResponse(
-                    "https://github.com/apps/obs-chat-bot/installations/new "
+                    "https://github.com/apps/compadre-assistant/installations/new "
                     "Contents: read and write"
                 )),
             )

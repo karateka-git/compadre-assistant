@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 
 from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationStatus,
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubGatewayError,
     GitHubVaultCommitResult,
     GitHubVaultTargetState,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote, VaultSyncLease
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote, VaultSyncLease
 
 
 class ObsidianProposalConfirmationTests(unittest.TestCase):

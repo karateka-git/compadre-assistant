@@ -11,25 +11,25 @@ from document_chunker import (
     DocumentFormat,
     MarkdownDocumentParser,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.full_text import VaultFullTextSearchService
-from obs_chat_bot.capabilities.obsidian.domain.search.indexing import VaultChunkIndexer
-from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.capabilities.obsidian.domain.search.full_text import VaultFullTextSearchService
+from compadre_assistant.capabilities.obsidian.domain.search.indexing import VaultChunkIndexer
+from compadre_assistant.capabilities.obsidian.data.chunking.document_note_chunker import DocumentVaultNoteChunker
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import (
     SQLiteVaultChunkIndexRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_full_text_search_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_full_text_search_repository import (
     SQLiteVaultFullTextSearchRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault, VaultNote
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -296,7 +296,7 @@ class VaultFullTextSearchTest(unittest.TestCase):
     @contextmanager
     def _database(self):
         """Открывает временную SQLite-БД с начальной development-схемой."""
-        with TemporaryDirectory(prefix="obs-chat-bot-fts-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-fts-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 yield connection

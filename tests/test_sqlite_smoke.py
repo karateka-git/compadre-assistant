@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.smoke import run_sqlite_smoke
+from compadre_assistant.capabilities.obsidian.smoke import run_sqlite_smoke
 
 
 class SQLiteSmokeTest(unittest.TestCase):

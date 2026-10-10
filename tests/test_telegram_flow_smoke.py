@@ -5,32 +5,32 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
-from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
-from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
-from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
-from obs_chat_bot.core.domain.users.entities import AppUser
-from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
+from compadre_assistant.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
+from compadre_assistant.capabilities.obsidian.domain.articles.html import ArticleHtml
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
+from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from test_incoming_boundary import FakeIdentity
 from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.incoming_message_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.incoming_message_repository import (
     SQLiteIncomingMessageRepository,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository import (
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.processing_error_repository import (
     SQLiteProcessingErrorRecorder,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -46,7 +46,7 @@ class TelegramFlowSmokeTest(unittest.TestCase):
 
     def test_telegram_flow_saves_message_article_and_analysis(self) -> None:
         """Ссылка проходит весь MVP-flow и повторно использует сохранённые данные."""
-        with TemporaryDirectory(prefix="obs-chat-bot-telegram-flow-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-telegram-flow-") as directory:
             database_path = Path(directory) / "telegram-flow.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)

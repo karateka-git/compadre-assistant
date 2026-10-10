@@ -1,69 +1,69 @@
 """Тесты форматирования общих ответов presentation-слоя."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 from dataclasses import replace
 from datetime import UTC, datetime
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
+from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleResult
+from compadre_assistant.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
-from obs_chat_bot.core.presentation.incoming.dispatcher import (
+from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
-from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.core.presentation.incoming.commands import ChatCommand
-from obs_chat_bot.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
-from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
+from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
+from compadre_assistant.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
     GitHubConnectionStartStatus,
     GitHubDeviceAuthorization,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import (
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
     VaultSyncWarning,
     VaultSyncWarningReason,
 )
-from obs_chat_bot.core.domain.users.identity import CreatedLinkCode
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.core.domain.users.identity import CreatedLinkCode
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.core.domain.users.entities import AppUser
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
-from obs_chat_bot.capabilities.obsidian.presentation.responses import (
+from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault
+from compadre_assistant.capabilities.obsidian.presentation.responses import (
     format_article_analysis_result,
     format_article_processing_result,
     format_obsidian_message_result,
 )
-from obs_chat_bot.core.presentation.responses import format_incoming_message_result
+from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
 
 def _obsidian_handler() -> ObsidianMessageHandler:
@@ -454,7 +454,7 @@ class TelegramResponsesTest(unittest.TestCase):
                 github_connection=GitHubConnectionStartResult(
                     status=GitHubConnectionStartStatus.STARTED,
                     installation_url=(
-                        "https://github.com/apps/obs-chat-bot/installations/new"
+                        "https://github.com/apps/compadre-assistant/installations/new"
                     ),
                     authorization=GitHubDeviceAuthorization(
                         device_code="device-secret",
@@ -497,7 +497,7 @@ class TelegramResponsesTest(unittest.TestCase):
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_APP_REQUIRED,
                 installation_url=(
-                    "https://github.com/apps/obs-chat-bot/installations/new"
+                    "https://github.com/apps/compadre-assistant/installations/new"
                 ),
             )
         )

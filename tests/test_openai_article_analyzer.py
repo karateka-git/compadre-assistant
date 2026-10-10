@@ -3,13 +3,13 @@
 from types import SimpleNamespace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.errors import ArticleAnalysisError
-from obs_chat_bot.capabilities.obsidian.data.llm.openai_article_analyzer import (
+from compadre_assistant.capabilities.obsidian.domain.articles.errors import ArticleAnalysisError
+from compadre_assistant.capabilities.obsidian.data.llm.openai_article_analyzer import (
     MAX_ANALYSIS_RESPONSE_CHARS,
     MAX_ANALYSIS_RESPONSE_TOKENS,
     OpenAIArticleAnalyzer,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 
 
 class OpenAIArticleAnalyzerTest(unittest.TestCase):

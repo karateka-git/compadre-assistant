@@ -3,15 +3,15 @@
 from dataclasses import fields
 import unittest
 
-from obs_chat_bot.bootstrap import create_incoming_message_dispatcher
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
-from obs_chat_bot.core.domain.users.entities import AppUser
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import (
+from compadre_assistant.bootstrap import create_incoming_message_dispatcher
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
+from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse,
 )
-from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 
 
 class MemoryChatModes(ChatModeRepository):
@@ -254,7 +254,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.capability.background_reply = IncomingResponse("Действие принято")
         delivered = []
 
-        with self.assertLogs("obs_chat_bot.core.presentation.incoming.dispatcher", level="ERROR") as logs:
+        with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR") as logs:
             response = self.dispatcher.execute(_event("подтвердить"), delivered.append)
 
         self.assertEqual(response.error, failure)
@@ -271,8 +271,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         """TG и VK показывают одинаковый безопасный ответ подменной возможности."""
         import asyncio
         import logging
-        from obs_chat_bot.presentation.telegram.bot import _register_handlers
-        from obs_chat_bot.presentation.vk.bot import _handle_update
+        from compadre_assistant.presentation.telegram.bot import _register_handlers
+        from compadre_assistant.presentation.vk.bot import _handle_update
         from test_telegram_bot import FakeAiogram, TelegramMessage
         from test_vk_bot import FakeVkClient
 
@@ -360,9 +360,9 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Новая возможность проходит через настоящие адаптеры с общими контрактами."""
         import asyncio
         import logging
-        from obs_chat_bot.core.presentation.incoming.ports import ConfirmationAction
-        from obs_chat_bot.presentation.telegram.bot import _register_handlers
-        from obs_chat_bot.presentation.vk.bot import _handle_update
+        from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction
+        from compadre_assistant.presentation.telegram.bot import _register_handlers
+        from compadre_assistant.presentation.vk.bot import _handle_update
         from test_telegram_bot import FakeAiogram, TelegramMessage
         from test_vk_bot import FakeVkClient
 

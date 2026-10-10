@@ -1,7 +1,7 @@
-x-catcher-base: &catcher-base
+x-assistant-base: &assistant-base
   build:
     context: .
-  image: obs-chat-bot:dev
+  image: compadre-assistant:dev
   env_file:
     - .env
   environment:
@@ -11,23 +11,23 @@ x-catcher-base: &catcher-base
     - ./data:/app/data
 
 services:
-  tg_catcher:
-    <<: *catcher-base
+  tg_assistant:
+    <<: *assistant-base
     restart: unless-stopped
-    command: ["python", "-m", "obs_chat_bot", "--telegram-bot"]
+    command: ["python", "-m", "compadre_assistant", "--telegram-bot"]
     healthcheck:
-      test: ["CMD", "python", "-m", "obs_chat_bot", "--healthcheck", "--channels", "telegram"]
+      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "telegram"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
 
-  vk_catcher:
-    <<: *catcher-base
+  vk_assistant:
+    <<: *assistant-base
     restart: unless-stopped
-    command: ["python", "-m", "obs_chat_bot", "--vk-bot"]
+    command: ["python", "-m", "compadre_assistant", "--vk-bot"]
     healthcheck:
-      test: ["CMD", "python", "-m", "obs_chat_bot", "--healthcheck", "--channels", "vk"]
+      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "vk"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -5,14 +5,14 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -21,7 +21,7 @@ class SQLiteArticleAnalysisResultRepositoryTest(unittest.TestCase):
 
     def test_save_creates_analysis_result(self) -> None:
         """Новый результат анализа сохраняется и возвращается с ID."""
-        with TemporaryDirectory(prefix="obs-chat-bot-analysis-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-analysis-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 article_id = _create_article(connection)
@@ -46,7 +46,7 @@ class SQLiteArticleAnalysisResultRepositoryTest(unittest.TestCase):
 
     def test_get_by_id_returns_saved_result(self) -> None:
         """Сохранённый результат можно прочитать по ID."""
-        with TemporaryDirectory(prefix="obs-chat-bot-analysis-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-analysis-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 article_id = _create_article(connection)
@@ -59,7 +59,7 @@ class SQLiteArticleAnalysisResultRepositoryTest(unittest.TestCase):
 
     def test_get_latest_for_article_returns_newest_result(self) -> None:
         """Для статьи возвращается последний сохранённый результат анализа."""
-        with TemporaryDirectory(prefix="obs-chat-bot-analysis-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-analysis-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 article_id = _create_article(connection)
@@ -74,7 +74,7 @@ class SQLiteArticleAnalysisResultRepositoryTest(unittest.TestCase):
 
     def test_get_latest_for_article_returns_none_without_results(self) -> None:
         """Если результатов анализа нет, repository возвращает `None`."""
-        with TemporaryDirectory(prefix="obs-chat-bot-analysis-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-analysis-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 article_id = _create_article(connection)
@@ -86,7 +86,7 @@ class SQLiteArticleAnalysisResultRepositoryTest(unittest.TestCase):
 
     def test_save_rejects_already_saved_result(self) -> None:
         """Repository не вставляет модель, которая уже содержит ID."""
-        with TemporaryDirectory(prefix="obs-chat-bot-analysis-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-analysis-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 repository = SQLiteArticleAnalysisResultRepository(connection)

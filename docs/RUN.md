@@ -5,7 +5,7 @@
 
 ## Быстрый запуск через скрипты
 
-Скрипты `open-*.cmd` открывают отдельное окно PowerShell, выполняют нужные команды и оставляют окно открытым после завершения. Скрипты проверок и запуска команд внутри контейнера сначала пересобирают образ `obs-chat-bot:dev`, чтобы Docker использовал свежий код проекта.
+Скрипты `open-*.cmd` открывают отдельное окно PowerShell, выполняют нужные команды и оставляют окно открытым после завершения. Скрипты проверок и запуска команд внутри контейнера сначала пересобирают образ `compadre-assistant:dev`, чтобы Docker использовал свежий код проекта.
 
 Запустить сборку и старт каналов из `ENABLED_CHANNELS` (по умолчанию Telegram и VK):
 
@@ -182,7 +182,7 @@ cd <путь-к-клонированному-репозиторию>
 ## Пересоздание базы после изменения схемы
 
 Пока проект находится в активной разработке, актуальная схема целиком хранится в
-`obs_chat_bot/core/data/sqlite/migrations/0001_initial_schema.sql`. Новые миграции
+`compadre_assistant/core/data/sqlite/migrations/0001_initial_schema.sql`. Новые миграции
 `0002`, `0003` и далее не создаются.
 
 Перед новым запуском после изменения схемы остановить контейнеры и другие
@@ -244,7 +244,7 @@ docker compose up --build
 Команда собирает или обновляет образ, создаёт контейнер и запускает Telegram-бота и VK-бота в polling-режиме. Окно нужно оставить открытым, пока бот должен принимать сообщения.
 
 Если настроен только один канал, укажите сервис: `docker compose up --build
-tg_catcher` или `docker compose up --build vk_catcher`. Отсутствие токена не
+tg_assistant` или `docker compose up --build vk_assistant`. Отсутствие токена не
 отключает второй сервис автоматически. Используйте scripts с `ENABLED_CHANNELS`
 для выбора сервисов. `--telegram-bot` проверяет только Telegram, `--vk-bot` —
 только VK; токен другого канала не требуется.
@@ -259,17 +259,17 @@ tg_catcher` или `docker compose up --build vk_catcher`. Отсутствие 
 Затем Docker Compose подготавливает и запускает контейнер:
 
 ```text
-Image obs-chat-bot:dev Built
+Image compadre-assistant:dev Built
 Network ... Created
 Container ... Created
-Attaching to tg_catcher-1, vk_catcher-1
+Attaching to tg_assistant-1, vk_assistant-1
 ```
 
-Строки с префиксом `tg_catcher-1 |` / `vk_catcher-1 |` и именем `obs_chat_bot` выводит уже наше Python-приложение:
+Строки с префиксом `tg_assistant-1 |` / `vk_assistant-1 |` и именем `compadre_assistant` выводит уже наше Python-приложение:
 
 ```text
-tg_catcher-1 | ... INFO obs_chat_bot: Starting obsChatBot 0.1.0
-tg_catcher-1 | ... INFO obs_chat_bot: Telegram bot polling started
+tg_assistant-1 | ... INFO compadre_assistant: Starting Compadre Assistant 0.1.0
+tg_assistant-1 | ... INFO compadre_assistant: Telegram bot polling started
 ```
 
 Остановить бота можно через `Ctrl+C` в окне, где запущен `docker compose up`.
@@ -294,8 +294,8 @@ docker compose ps -a
 ## 6. Выполнить healthcheck
 
 ```powershell
-docker compose run --rm tg_catcher python -m obs_chat_bot --healthcheck --channels telegram
-docker compose run --rm vk_catcher python -m obs_chat_bot --healthcheck --channels vk
+docker compose run --rm tg_assistant python -m compadre_assistant --healthcheck --channels telegram
+docker compose run --rm vk_assistant python -m compadre_assistant --healthcheck --channels vk
 ```
 
 Команда проверяет выбранный канал, включённые возможности, доступность папки
@@ -318,7 +318,7 @@ LLM/embeddings и возможность подписать JWT локальны
 ## 7. Проверить SQLite-контур
 
 ```powershell
-docker compose run --rm tg_catcher python -m obs_chat_bot --sqlite-smoke
+docker compose run --rm tg_assistant python -m compadre_assistant --sqlite-smoke
 ```
 
 Команда создаёт временную базу, применяет миграции, повторно проверяет их идемпотентность, записывает тестовую статью через `ArticleRepository` и читает её обратно. Рабочая база `data/app.db` не изменяется.
@@ -326,7 +326,7 @@ docker compose run --rm tg_catcher python -m obs_chat_bot --sqlite-smoke
 ## 8. Проверить обработку URL
 
 ```powershell
-docker compose run --rm tg_catcher python -m obs_chat_bot --process-url "https://example.com/article"
+docker compose run --rm tg_assistant python -m compadre_assistant --process-url "https://example.com/article"
 ```
 
 Команда запускает текущий article pipeline: нормализует URL, создаёт или переиспользует статью в SQLite, загружает HTML, извлекает чистый текст и сохраняет результат в `data/app.db`.
@@ -343,7 +343,7 @@ docker compose run --rm tg_catcher python -m obs_chat_bot --process-url "https:/
 ## 9. Проверить pipeline без интернета
 
 ```powershell
-docker compose run --rm tg_catcher python -m obs_chat_bot --pipeline-smoke
+docker compose run --rm tg_assistant python -m compadre_assistant --pipeline-smoke
 ```
 
 Команда создаёт временную базу, применяет миграции и проверяет article pipeline на fake HTML-загрузчике и fake extractor. Рабочая база `data/app.db` не изменяется.
@@ -351,7 +351,7 @@ docker compose run --rm tg_catcher python -m obs_chat_bot --pipeline-smoke
 ## 10. Проверить анализ без LLM
 
 ```powershell
-docker compose run --rm tg_catcher python -m obs_chat_bot --analysis-smoke
+docker compose run --rm tg_assistant python -m compadre_assistant --analysis-smoke
 ```
 
 Команда создаёт временную базу, применяет миграции, создаёт статью с извлечённым текстом и проверяет analysis pipeline на fake LLM-анализаторе. Рабочая база `data/app.db` не изменяется.
@@ -369,7 +369,7 @@ VK_GROUP_ID=...
 вместе с Telegram. Отдельная команда ниже нужна для изолированной проверки VK:
 
 ```powershell
-docker compose run --rm --entrypoint python vk_catcher -m obs_chat_bot --vk-bot
+docker compose run --rm --entrypoint python vk_assistant -m compadre_assistant --vk-bot
 ```
 
 VK adapter использует тот же incoming-flow, регистрацию, привязку каналов,
@@ -425,7 +425,7 @@ Replace/disconnect единственного vault взаимно исключ�
 
 До подключения пользователь вручную создаёт в корне выбранного vault обязательный
 `.knowledge-catcher.yml`. Готовый пример находится в
-[`obs_chat_bot/resources/.knowledge-catcher.yml`](../obs_chat_bot/resources/.knowledge-catcher.yml):
+[`compadre_assistant/resources/.knowledge-catcher.yml`](../compadre_assistant/resources/.knowledge-catcher.yml):
 
 ```yaml
 version: 1
@@ -539,8 +539,8 @@ proposal и полный текст статьи: позже можно безо
 реализованы. Текст строится автоматически из единого реестра команд, который
 также используется общим Telegram/VK parser.
 
-Общие команды находятся в [commands.py](../obs_chat_bot/core/presentation/incoming/commands.py),
-точки входа регистрирует [registry.py](../obs_chat_bot/core/presentation/incoming/registry.py).
+Общие команды находятся в [commands.py](../compadre_assistant/core/presentation/incoming/commands.py),
+точки входа регистрирует [registry.py](../compadre_assistant/core/presentation/incoming/registry.py).
 Основные команды: `/start`, `/help`, `/register`, `/name <имя>`, `/status`, `/exit`.
 `/status` показывает профиль и выбранный режим текущего чата.
 `/obsidian [текст или URL]` включает работу с vault и обрабатывает аргумент.

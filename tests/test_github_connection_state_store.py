@@ -5,11 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_connection_state_store import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_connection_state_store import (
     SQLiteGitHubConnectionStateStore,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -19,7 +19,7 @@ class GitHubConnectionStateStoreTest(unittest.TestCase):
     def test_connection_attempt_is_shared(self) -> None:
         """Два экземпляра видят один межпроцессный claim Device Flow."""
         now = datetime.now(UTC)
-        with TemporaryDirectory(prefix="obs-chat-bot-github-state-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-state-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)
@@ -51,7 +51,7 @@ class GitHubConnectionStateStoreTest(unittest.TestCase):
     def test_expired_attempt_can_be_restarted_after_process_loss(self) -> None:
         """Новый процесс повторно захватывает claim после истечения старого."""
         now = datetime.now(UTC)
-        with TemporaryDirectory(prefix="obs-chat-bot-github-restart-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-restart-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)

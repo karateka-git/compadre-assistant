@@ -2,12 +2,12 @@
 
 import unittest
 
-from obs_chat_bot.core.presentation.incoming.commands import (
+from compadre_assistant.core.presentation.incoming.commands import (
     ChatCommand,
     CommandSection,
     ParsedChatCommand,
 )
-from obs_chat_bot.capabilities.obsidian.presentation.commands import (
+from compadre_assistant.capabilities.obsidian.presentation.commands import (
     ObsidianCommand,
     ParsedObsidianCommand,
     help_sections,

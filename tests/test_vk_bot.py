@@ -6,10 +6,10 @@ import unittest
 from unittest.mock import patch
 from urllib.error import URLError
 
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.events import ReplyAddress
-from obs_chat_bot.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
-from obs_chat_bot.presentation.vk.bot import (
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
+from compadre_assistant.presentation.vk.bot import (
     LongPollServer,
     VkApiClient,
     VkBotError,
@@ -288,7 +288,7 @@ class VkBotTest(unittest.TestCase):
         )
         completion_handlers[0](
             BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse(
-                "https://github.com/apps/obs-chat-bot/installations/new "
+                "https://github.com/apps/compadre-assistant/installations/new "
                 "Contents: read and write"
             ))
         )
@@ -341,7 +341,7 @@ class VkBotTest(unittest.TestCase):
             return FakeHttpResponse()
 
         client = VkApiClient(token="token")
-        with patch("obs_chat_bot.presentation.vk.bot.urlopen", fake_urlopen):
+        with patch("compadre_assistant.presentation.vk.bot.urlopen", fake_urlopen):
             client.send_message(peer_id=22, text="hello")
 
         request = captured["request"]
@@ -355,7 +355,7 @@ class VkBotTest(unittest.TestCase):
         client = VkApiClient(token="token")
 
         with patch(
-            "obs_chat_bot.presentation.vk.bot.urlopen",
+            "compadre_assistant.presentation.vk.bot.urlopen",
             side_effect=URLError("connection closed"),
         ):
             with self.assertRaises(VkTransientError):

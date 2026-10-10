@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 
 from pathlib import Path
@@ -10,18 +10,18 @@ from datetime import UTC, datetime, timedelta
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import (
     PendingObsidianProposalError,
     SQLiteObsidianProposalRepository,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultNote
 from tests.sqlite_helpers import ensure_app_user
 
 

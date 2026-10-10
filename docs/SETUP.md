@@ -20,8 +20,8 @@ Copy-Item .env.example .env
 
 `.env.example` — шаблон, который нужно заполнить: с `replace-me` или пустыми
 токенами выбранных каналов приложение не готово к запуску. Общие переменные
-читает [`core/data/config.py`](../obs_chat_bot/core/data/config.py), а настройки
-Obsidian — [`capabilities/obsidian/data/configuration/config.py`](../obs_chat_bot/capabilities/obsidian/data/configuration/config.py).
+читает [`core/data/config.py`](../compadre_assistant/core/data/config.py), а настройки
+Obsidian — [`capabilities/obsidian/data/configuration/config.py`](../compadre_assistant/capabilities/obsidian/data/configuration/config.py).
 
 | Переменные | Назначение и обязательность |
 | --- | --- |
@@ -70,10 +70,10 @@ frontmatter tags уже существующей заметки. Изменен�
 После запуска Docker Engine:
 
 ```powershell
-docker compose up --build tg_catcher
+docker compose up --build tg_assistant
 ```
 
-Для VK используйте `docker compose up --build vk_catcher`. Для обоих каналов —
+Для VK используйте `docker compose up --build vk_assistant`. Для обоих каналов —
 `docker compose up --build`; оба набора channel credentials должны быть заполнены.
 Compose не отключает сервис автоматически, если его токен отсутствует.
 Для привычных `open-*.cmd` задайте `ENABLED_CHANNELS=telegram` или `vk`;
@@ -92,9 +92,9 @@ scripts запускают выбранные сервисы. Отдельные
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m unittest discover -s tests
-.\.venv\Scripts\python.exe -m obs_chat_bot --sqlite-smoke
-.\.venv\Scripts\python.exe -m obs_chat_bot --pipeline-smoke
-.\.venv\Scripts\python.exe -m obs_chat_bot --analysis-smoke
+.\.venv\Scripts\python.exe -m compadre_assistant --sqlite-smoke
+.\.venv\Scripts\python.exe -m compadre_assistant --pipeline-smoke
+.\.venv\Scripts\python.exe -m compadre_assistant --analysis-smoke
 ```
 
 В Linux/macOS создайте среду через `python3.12 -m venv .venv` и используйте

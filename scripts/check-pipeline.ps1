@@ -4,5 +4,5 @@ $projectRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $projectRoot
 
 . (Join-Path $PSScriptRoot "common.ps1")
-Invoke-ProjectCompose -ComposeArguments @('build', 'tg_catcher')
-Invoke-ProjectCompose -ComposeArguments @('run', '--rm', 'tg_catcher', 'python', '-m', 'obs_chat_bot', '--pipeline-smoke')
+Invoke-ProjectCompose -ComposeArguments @('build', 'tg_assistant')
+Invoke-ProjectCompose -ComposeArguments @('run', '--rm', 'tg_assistant', 'python', '-m', 'compadre_assistant', '--pipeline-smoke')

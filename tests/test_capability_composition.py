@@ -4,33 +4,33 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from threading import Barrier, Lock
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
-from obs_chat_bot.bootstrap import (
+from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from compadre_assistant.bootstrap import (
     create_channel_message_processor,
     create_user_identity_service,
     load_obsidian_profile,
     validate_enabled_capabilities,
 )
 from channel_helpers import process_channel_incoming_message
-from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime, create_obsidian_process_runtime, create_vault_note_chunker
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import GitHubConnectionCompletion, GitHubConnectionCompletionStatus
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import GitHubAccountNotConnectedError
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
-from obs_chat_bot.core.domain.users.entities import AppUser, IncomingIdentity
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import HandlerContext
+from compadre_assistant.capabilities.obsidian.bootstrap import ObsidianProcessRuntime, create_obsidian_process_runtime, create_vault_note_chunker
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import GitHubConnectionCompletion, GitHubConnectionCompletionStatus
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import GitHubAccountNotConnectedError
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
+from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.ports import HandlerContext
 from test_process_incoming_message import FakeArticleUrlUseCase, FakeAnalysisUseCase, FakeConfirmationService, FakeGitHubConnectionStarter, FakeVaultSelectionManager, _proposal, _test_vault
 
 
@@ -74,7 +74,7 @@ class CapabilityCompositionTest(unittest.TestCase):
     def test_composition_loads_obsidian_profile_only_when_enabled(self) -> None:
         """Выключенная возможность не читает свои настройки и не влияет на будущий Ask."""
         profile = ObsidianConfig()
-        with patch("obs_chat_bot.bootstrap.load_obsidian_config", return_value=profile) as loader:
+        with patch("compadre_assistant.bootstrap.load_obsidian_config", return_value=profile) as loader:
             self.assertIsNone(load_obsidian_profile(("ask",)))
             loader.assert_not_called()
             self.assertIs(load_obsidian_profile(("obsidian",)), profile)
@@ -138,7 +138,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
         clients = (Client(), Client(), Client())
         runtime = ObsidianProcessRuntime(None, *clients)
-        with patch("obs_chat_bot.bootstrap.ChannelMessageProcessor", side_effect=ValueError("registry")):
+        with patch("compadre_assistant.bootstrap.ChannelMessageProcessor", side_effect=ValueError("registry")):
             with self.assertRaisesRegex(ValueError, "registry"):
                 with create_channel_message_processor(
                     database_path=self.database_path, runtime=runtime,
@@ -149,7 +149,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
     def test_process_chunker_is_reused_for_separate_obsidian_operations(self) -> None:
         """Операции получают один неизменяемый chunker из процессного runtime."""
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_note_chunker",
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_note_chunker",
                    wraps=create_vault_note_chunker) as factory:
             runtime = create_obsidian_process_runtime(
                 database_path=self.database_path, github_app_config=None,
@@ -212,7 +212,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             SQLiteChatModeRepository(connection).save(ChatMode(self.key, "obsidian"))
             saved = SQLiteArticleRepository(connection).create(Article("https://example.com/article", "https://example.com/article", self.user.id))
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", reply.text)
             self.assertIn("/exit", reply.text)
@@ -252,7 +252,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             return self.article
 
         self.process("/obsidian")
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             started = process_channel_incoming_message(
                 database_path=self.database_path,
                 incoming_message=self.event("https://github.com/octocat/notes Vault"),

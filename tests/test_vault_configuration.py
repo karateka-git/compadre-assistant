@@ -2,9 +2,9 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.data.configuration.vault_configuration import parse_vault_configuration
-from obs_chat_bot.capabilities.obsidian.presentation.vault_configuration import load_vault_configuration_example
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
+from compadre_assistant.capabilities.obsidian.data.configuration.vault_configuration import parse_vault_configuration
+from compadre_assistant.capabilities.obsidian.presentation.vault_configuration import load_vault_configuration_example
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )

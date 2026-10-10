@@ -39,15 +39,15 @@ document_chunker/
 ```
 
 Отдельный repository или публикация в PyPI откладываются до появления второго
-потребителя. Пакет не импортирует `obs_chat_bot` и не знает о его domain-моделях.
+потребителя. Пакет не импортирует `compadre_assistant` и не знает о его domain-моделях.
 
 `obsChatBot` использует библиотеку через собственный application-port и
 data-adapter:
 
 ```text
-obs_chat_bot/capabilities/obsidian/domain/search/ports.py
-obs_chat_bot/capabilities/obsidian/domain/search/indexing.py
-obs_chat_bot/capabilities/obsidian/data/chunking/document_note_chunker.py
+compadre_assistant/capabilities/obsidian/domain/search/ports.py
+compadre_assistant/capabilities/obsidian/domain/search/indexing.py
+compadre_assistant/capabilities/obsidian/data/chunking/document_note_chunker.py
 ```
 
 Направление зависимости:

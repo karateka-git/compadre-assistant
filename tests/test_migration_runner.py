@@ -7,9 +7,9 @@ from threading import Barrier
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-import obs_chat_bot.core.data.sqlite.migration_runner as migration_runner
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+import compadre_assistant.core.data.sqlite.migration_runner as migration_runner
 
 
 class MigrationRunnerTest(unittest.TestCase):
@@ -17,7 +17,7 @@ class MigrationRunnerTest(unittest.TestCase):
 
     def test_two_adapters_can_initialize_one_empty_database(self) -> None:
         """Второй adapter повторно проверяет журнал после захвата SQLite lock."""
-        with TemporaryDirectory(prefix="obs-chat-bot-migration-race-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-migration-race-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 migration_runner._ensure_migrations_table(connection)

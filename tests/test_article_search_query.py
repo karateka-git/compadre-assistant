@@ -2,13 +2,13 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.search.article_query import (
+from compadre_assistant.capabilities.obsidian.domain.search.article_query import (
     MAX_LEXICAL_QUERY_CHARS,
     MAX_SEMANTIC_QUERY_CHARS,
     ArticleSearchQueryBuilder,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 
 
 class ArticleSearchQueryBuilderTest(unittest.TestCase):

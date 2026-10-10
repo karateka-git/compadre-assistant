@@ -5,7 +5,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-from obs_chat_bot.capabilities.ask.domain.errors import (
+from compadre_assistant.capabilities.ask.domain.errors import (
     AskError,
     AskModelError,
     AskModelTimeoutError,
@@ -14,8 +14,8 @@ from obs_chat_bot.capabilities.ask.domain.errors import (
     InvalidAskAnswerError,
     QuestionTooLongError,
 )
-from obs_chat_bot.capabilities.ask.domain.ports.model import AskModel
-from obs_chat_bot.capabilities.ask.domain.use_cases.ask_question import (
+from compadre_assistant.capabilities.ask.domain.ports.model import AskModel
+from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import (
     ASK_INSTRUCTION,
     AskQuestion,
 )
@@ -138,7 +138,7 @@ class AskDomainBoundaryTest(unittest.TestCase):
     def test_domain_imports_only_own_domain_and_pure_standard_modules(self) -> None:
         """Разрешены собственный domain и явный набор чистых стандартных модулей."""
         root = Path(__file__).resolve().parents[1]
-        domain = root / "obs_chat_bot" / "capabilities" / "ask" / "domain"
+        domain = root / "compadre_assistant" / "capabilities" / "ask" / "domain"
         pure_modules = {"__future__", "typing", "dataclasses", "enum", "collections", "abc"}
         for path in domain.rglob("*.py"):
             package = ".".join(path.relative_to(root).parts[:-1])
@@ -155,8 +155,8 @@ class AskDomainBoundaryTest(unittest.TestCase):
                         modules = [module]
                     for module in modules:
                         self.assertTrue(
-                            module == "obs_chat_bot.capabilities.ask.domain"
-                            or module.startswith("obs_chat_bot.capabilities.ask.domain.")
+                            module == "compadre_assistant.capabilities.ask.domain"
+                            or module.startswith("compadre_assistant.capabilities.ask.domain.")
                             or module.split(".")[0] in pure_modules,
                             f"Запрещённая зависимость Ask domain: {module}",
                         )

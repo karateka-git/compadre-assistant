@@ -66,7 +66,7 @@ instructions:
 ```
 
 Создайте и `rules.md` с правилами ведения заметок. Расширенный
-[пример в репозитории](../obs_chat_bot/resources/.knowledge-catcher.yml)
+[пример в репозитории](../compadre_assistant/resources/.knowledge-catcher.yml)
 ссылается на файлы `memory-bank/`: при его копировании эти файлы тоже должны
 существовать. Бот не создаёт конфигурацию или правила автоматически.
 

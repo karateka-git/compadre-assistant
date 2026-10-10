@@ -6,15 +6,15 @@ function Get-ConfiguredBotServices {
     }
     # Полная конфигурация содержит secrets; используем её только в памяти.
     $composeConfig = ($composeJson -join "`n") | ConvertFrom-Json
-    $channelValue = $composeConfig.services.tg_catcher.environment.ENABLED_CHANNELS
+    $channelValue = $composeConfig.services.tg_assistant.environment.ENABLED_CHANNELS
     $channels = @($channelValue.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
     if ($channels.Count -eq 0 -or (@($channels | Select-Object -Unique).Count -ne $channels.Count)) {
         throw "ENABLED_CHANNELS must select telegram and/or vk without duplicates."
     }
     foreach ($channel in $channels) {
         switch ($channel) {
-            'telegram' { 'tg_catcher' }
-            'vk' { 'vk_catcher' }
+            'telegram' { 'tg_assistant' }
+            'vk' { 'vk_assistant' }
             default { throw "Unknown channel in ENABLED_CHANNELS: $channel" }
         }
     }

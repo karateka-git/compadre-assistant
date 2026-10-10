@@ -4,10 +4,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -16,7 +16,7 @@ class ArticleUserIsolationTest(unittest.TestCase):
 
     def test_same_normalized_url_can_be_saved_for_different_users(self) -> None:
         """Уникальность статьи ограничена пользователем приложения."""
-        with TemporaryDirectory(prefix="obs-chat-bot-article-scope-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-article-scope-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 ensure_app_user(connection)

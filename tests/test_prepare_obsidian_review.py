@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 
 from dataclasses import replace
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
-from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import (
+from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
+from compadre_assistant.capabilities.obsidian.domain.reviews.proposal import (
     PrepareObsidianReviewCommand,
     PrepareObsidianReviewError,
     PrepareObsidianReviewUseCase,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultSearchResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.capabilities.obsidian.domain.search.models import VaultSearchResult
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianReviewPlan,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultInstruction,
     VaultNote,

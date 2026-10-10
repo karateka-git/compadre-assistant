@@ -36,7 +36,7 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {
 
 . (Join-Path $PSScriptRoot "common.ps1")
 $services = @(Get-ConfiguredBotServices)
-$inactiveServices = @(@('tg_catcher', 'vk_catcher') | Where-Object { $_ -notin $services })
+$inactiveServices = @(@('tg_assistant', 'vk_assistant') | Where-Object { $_ -notin $services })
 if ($inactiveServices.Count -gt 0) {
     Invoke-ProjectCompose -ComposeArguments (@('stop') + $inactiveServices)
 }

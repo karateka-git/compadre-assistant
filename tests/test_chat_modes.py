@@ -7,17 +7,17 @@ import threading
 import unittest
 
 from channel_helpers import process_channel_incoming_message
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
-from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.data.sqlite.user_identity_repository import SQLiteAppUserRepository, SQLiteExternalIdentityRepository
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
-from obs_chat_bot.core.domain.users.entities import IncomingIdentity
-from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.ports import CapabilityMode
+from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.user_identity_repository import SQLiteAppUserRepository, SQLiteExternalIdentityRepository
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
+from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.ports import CapabilityMode
 from test_incoming_boundary import FakeCapability, FakeIdentity
 from sqlite_helpers import ensure_app_user
 

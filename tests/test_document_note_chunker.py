@@ -10,10 +10,10 @@ from document_chunker import (
     MarkdownDocumentParser,
 )
 
-from obs_chat_bot.capabilities.obsidian.data.chunking.document_note_chunker import (
+from compadre_assistant.capabilities.obsidian.data.chunking.document_note_chunker import (
     DocumentVaultNoteChunker,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultNote
 
 
 class DocumentVaultNoteChunkerTest(unittest.TestCase):

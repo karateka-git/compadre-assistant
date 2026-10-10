@@ -8,19 +8,19 @@ from threading import Event
 import sqlite3
 import unittest
 
-from obs_chat_bot.core.domain.users.identity import (
+from compadre_assistant.core.domain.users.identity import (
     IdentityAlreadyBoundError, InvalidLinkCodeError, UserIdentityService,
 )
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.data.sqlite.user_identity_repository import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteAppUserRepository,
     SQLiteExternalIdentityRepository,
     SQLiteIdentityRebindConfirmationRepository,
     SQLiteIdentityLinkTokenRepository,
     SQLiteIdentityLifecycleRepository,
 )
-from obs_chat_bot.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.domain.users.entities import IncomingIdentity
 
 
 class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
@@ -28,7 +28,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_register_creates_user_and_resolves_same_identity(self) -> None:
         """Регистрация создает внутреннего пользователя и связь с каналом."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 service = _service(connection)
@@ -47,7 +47,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_link_code_binds_second_channel_to_same_user(self) -> None:
         """Одноразовый код привязывает новый канал к существующему пользователю."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 service = _service(connection)
@@ -65,7 +65,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_confirm_rebind_moves_channel_and_deletes_empty_previous_user(self) -> None:
         """Подтверждение перепривязки переносит канал и удаляет пустого старого пользователя."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 service = _service(connection)
@@ -92,7 +92,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_register_rolls_back_profile_when_identity_insert_violates_unique(self) -> None:
         """Ошибка UNIQUE на второй вставке не оставляет профиль без identity."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 _install_identity_unique_conflict(connection)
@@ -103,7 +103,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_link_rolls_back_code_when_identity_insert_violates_unique(self) -> None:
         """Ошибка UNIQUE после погашения возвращает код в активное состояние."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 service = _service(connection)
@@ -122,7 +122,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_concurrent_register_returns_existing_profile_without_orphan(self) -> None:
         """Второе SQLite-соединение видит завершённую регистрацию первого."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             path = Path(directory) / "test.db"
             with connect_database(path) as first:
                 apply_migrations(first)
@@ -148,7 +148,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_concurrent_identity_claim_preserves_unconsumed_code(self) -> None:
         """Параллельная привязка identity не погашает код второго соединения."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             path = Path(directory) / "test.db"
             with connect_database(path) as first:
                 apply_migrations(first)
@@ -178,7 +178,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
     def test_two_connections_cannot_consume_same_code(self) -> None:
         """Два соединения дают одну новую связь на один одноразовый код."""
-        with TemporaryDirectory(prefix="obs-chat-bot-identity-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-identity-") as directory:
             path = Path(directory) / "test.db"
             with connect_database(path) as first:
                 apply_migrations(first)

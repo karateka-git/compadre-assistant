@@ -6,15 +6,15 @@ from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.domain.search.indexing import VaultEmbeddingIndexer
-from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultChunkEmbeddingDraft
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import SQLiteVaultChunkIndexRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_embedding_index_repository import SQLiteVaultEmbeddingIndexRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import SQLiteVaultSyncLeaseRepository
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncService
+from compadre_assistant.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from compadre_assistant.capabilities.obsidian.domain.search.indexing import VaultEmbeddingIndexer
+from compadre_assistant.capabilities.obsidian.domain.search.models import VaultChunkEmbeddingDraft
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import SQLiteVaultChunkIndexRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_embedding_index_repository import SQLiteVaultEmbeddingIndexRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import SQLiteVaultSyncLeaseRepository
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncService
 from tests.test_vault_embedding_index_repository import _prepare_indexes, _chunker
 
 
@@ -35,7 +35,7 @@ class BatchProvider:
 
     def iter_document_batches(self, texts, *, context=None):
         """Фиксирует только фактически начатые платные пакеты."""
-        from obs_chat_bot.capabilities.obsidian.domain.search.entities import EmbeddingVector
+        from compadre_assistant.capabilities.obsidian.domain.search.entities import EmbeddingVector
         for position, text in enumerate(texts):
             self.calls.append(text)
             if self.before_batch is not None:
@@ -190,7 +190,7 @@ class EmbeddingCheckpointsTest(unittest.TestCase):
 
     def test_incomplete_or_dimension_changing_stream_retains_valid_checkpoint(self):
         """Нарушение пакетного контракта не публикует marker и сохраняет первый пакет."""
-        from obs_chat_bot.capabilities.obsidian.domain.search.entities import EmbeddingVector
+        from compadre_assistant.capabilities.obsidian.domain.search.entities import EmbeddingVector
         for kind in ("short", "empty", "dimension", "model", "extra"):
             with self.subTest(kind=kind), TemporaryDirectory() as directory:
                 with connect_database(Path(directory) / "test.db") as con:

@@ -6,16 +6,16 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.bootstrap import create_incoming_message_dispatcher, create_user_identity_service
+from compadre_assistant.bootstrap import create_incoming_message_dispatcher, create_user_identity_service
 from channel_helpers import process_channel_incoming_message
-from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
+from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from test_process_incoming_message import FakeArticleUrlUseCase, FakeAnalysisUseCase, FakeIncomingMessageRepository, FakeVaultSelectionManager, _test_vault
 
 
@@ -59,7 +59,7 @@ class ProfileObsidianTest(unittest.TestCase):
     def test_registration_and_profile_commands_work_with_disabled_obsidian(self) -> None:
         """Отключённый модуль не мешает имени, справке и связи каналов."""
         for channel in ("telegram", "vk", "cli"):
-            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
+            with self.subTest(channel=channel), patch("compadre_assistant.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
                 options = dict(channel=channel, enabled_capabilities=(), obsidian_config=None)
                 self.register(**options)
                 self.assertIn("Рад тебя видеть, Имя", self.process("/start", **options).text)
@@ -82,7 +82,7 @@ class ProfileObsidianTest(unittest.TestCase):
         """Общий профиль остаётся доступен при сбое предметного хранилища."""
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager), patch.object(manager, "get_selected", side_effect=AssertionError("Профиль не читает vault")):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager), patch.object(manager, "get_selected", side_effect=AssertionError("Профиль не читает vault")):
             self.register(runtime=runtime)
             for command in ("/start", "/register", "/status", "/help", "/name Новое имя", "/link_code", "/exit"):
                 self.assertIsNone(self.process(command, runtime=runtime).error)
@@ -103,7 +103,7 @@ class ProfileObsidianTest(unittest.TestCase):
 
     def test_absent_llm_does_not_construct_provider_during_registration(self) -> None:
         """Пустые credentials не превращают регистрацию в ошибку SDK."""
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_analyze_article_use_case") as analyzer, patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_prepare_obsidian_review_use_case") as review:
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_analyze_article_use_case") as analyzer, patch("compadre_assistant.capabilities.obsidian.bootstrap.create_prepare_obsidian_review_use_case") as review:
             options = dict(obsidian_config=ObsidianConfig(), analysis_use_case_factory=None)
             self.register(**options)
             self.assertIn("/obsidian", self.process("/start", **options).text)
@@ -118,7 +118,7 @@ class ProfileObsidianTest(unittest.TestCase):
         self.assertIn("Провайдер GitHub не настроен", no_provider.text)
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             no_vault = self.process("/obsidian https://example.com/article", runtime=runtime)
             self.assertIn("vault не подключён", no_vault.text)
             self.assertNotIn("Провайдер", no_vault.text)
@@ -168,7 +168,7 @@ class ProfileObsidianTest(unittest.TestCase):
         self.register()
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             self.assertIn("/obsidian", self.process("https://github.com/octocat/notes Vault", runtime=runtime).text)
             self.assertFalse(manager.calls)
             reply = self.process("/obsidian https://github.com/octocat/notes Vault", runtime=runtime)
@@ -184,7 +184,7 @@ class ProfileObsidianTest(unittest.TestCase):
             SQLiteChatModeRepository(connection).save(ChatMode(key, "previous"))
         manager = FakeVaultSelectionManager(selected=_test_vault(1))
         runtime = ObsidianProcessRuntime(None, object())
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             for text in ("/obsidian текст без URL", "/obsidian /reanalyze invalid"):
                 self.assertIsNotNone(self.process(text, runtime=runtime).error)
                 with connect_database(self.database_path) as connection:

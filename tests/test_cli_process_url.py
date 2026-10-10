@@ -5,26 +5,26 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
+from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageResultType
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.core.data.config import AppConfig
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import GitHubAppConfig, ObsidianConfig
+from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageResultType
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from compadre_assistant.core.data.config import AppConfig
+from compadre_assistant.capabilities.obsidian.data.configuration.config import GitHubAppConfig, ObsidianConfig
 from channel_helpers import process_channel_incoming_message
-from obs_chat_bot.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
+from compadre_assistant.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
 from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
-from obs_chat_bot.presentation.cli.main import (
+from compadre_assistant.presentation.cli.main import (
     check_github_config,
     check_llm_config,
     check_telegram_config,
@@ -38,8 +38,8 @@ from obs_chat_bot.presentation.cli.main import (
     run_telegram_bot_command,
     run_vk_bot_command,
 )
-from obs_chat_bot.presentation.telegram.bot import TelegramBotError
-from obs_chat_bot.presentation.vk.bot import VkBotError
+from compadre_assistant.presentation.telegram.bot import TelegramBotError
+from compadre_assistant.presentation.vk.bot import VkBotError
 
 
 class SilentLogger:
@@ -126,7 +126,7 @@ class ProcessUrlCliTest(unittest.TestCase):
         """CLI принимает URL как отдельный режим запуска."""
         with patch(
             "sys.argv",
-            ["obs-chat-bot", "--process-url", "https://example.com/article"],
+            ["compadre-assistant", "--process-url", "https://example.com/article"],
         ):
             args = parse_args()
 
@@ -136,7 +136,7 @@ class ProcessUrlCliTest(unittest.TestCase):
 
     def test_parse_args_reads_pipeline_smoke(self) -> None:
         """CLI принимает pipeline smoke как отдельный режим запуска."""
-        with patch("sys.argv", ["obs-chat-bot", "--pipeline-smoke"]):
+        with patch("sys.argv", ["compadre-assistant", "--pipeline-smoke"]):
             args = parse_args()
 
         self.assertTrue(args.pipeline_smoke)
@@ -146,7 +146,7 @@ class ProcessUrlCliTest(unittest.TestCase):
 
     def test_parse_args_reads_analysis_smoke(self) -> None:
         """CLI принимает analysis smoke как отдельный режим запуска."""
-        with patch("sys.argv", ["obs-chat-bot", "--analysis-smoke"]):
+        with patch("sys.argv", ["compadre-assistant", "--analysis-smoke"]):
             args = parse_args()
 
         self.assertTrue(args.analysis_smoke)
@@ -156,7 +156,7 @@ class ProcessUrlCliTest(unittest.TestCase):
 
     def test_parse_args_reads_telegram_bot(self) -> None:
         """CLI принимает запуск Telegram-бота как отдельный режим."""
-        with patch("sys.argv", ["obs-chat-bot", "--telegram-bot"]):
+        with patch("sys.argv", ["compadre-assistant", "--telegram-bot"]):
             args = parse_args()
 
         self.assertTrue(args.telegram_bot)
@@ -166,7 +166,7 @@ class ProcessUrlCliTest(unittest.TestCase):
 
     def test_parse_args_reads_vk_bot(self) -> None:
         """CLI принимает запуск VK-бота как отдельный режим."""
-        with patch("sys.argv", ["obs-chat-bot", "--vk-bot"]):
+        with patch("sys.argv", ["compadre-assistant", "--vk-bot"]):
             args = parse_args()
 
         self.assertTrue(args.vk_bot)
@@ -176,7 +176,7 @@ class ProcessUrlCliTest(unittest.TestCase):
 
     def test_run_healthcheck_validates_runtime_config(self) -> None:
         """Healthcheck проверяет SQLite, Telegram и LLM-конфигурацию."""
-        with TemporaryDirectory(prefix="obs-chat-bot-health-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-health-") as temporary_directory:
             config = AppConfig(
                 app_env="test",
                 database_path=Path(temporary_directory) / "test.db",
@@ -222,12 +222,12 @@ class ProcessUrlCliTest(unittest.TestCase):
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.primitives.asymmetric import rsa
 
-        with TemporaryDirectory(prefix="obs-chat-bot-github-health-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-health-") as directory:
             key_path = Path(directory) / "app.pem"
             config = GitHubAppConfig(
                 app_id=123,
                 client_id="Iv1.client",
-                app_slug="obs-chat-bot",
+                app_slug="compadre-assistant",
                 private_key_path=key_path,
             )
             self.assertFalse(check_github_config(config, SilentLogger()))
@@ -249,7 +249,7 @@ class ProcessUrlCliTest(unittest.TestCase):
         import logging
 
         root_logger = logging.getLogger()
-        app_logger = logging.getLogger("obs_chat_bot")
+        app_logger = logging.getLogger("compadre_assistant")
         old_root_level = root_logger.level
         old_app_level = app_logger.level
         try:
@@ -266,7 +266,7 @@ class ProcessUrlCliTest(unittest.TestCase):
         import logging
 
         root_logger = logging.getLogger()
-        app_logger = logging.getLogger("obs_chat_bot")
+        app_logger = logging.getLogger("compadre_assistant")
         httpx_logger = logging.getLogger("httpx")
         httpcore_logger = logging.getLogger("httpcore")
         old_root_level = root_logger.level
@@ -289,7 +289,7 @@ class ProcessUrlCliTest(unittest.TestCase):
         """Успешный pipeline возвращает нулевой exit code."""
         fake_use_case = FakeProcessArticleUrlUseCase()
 
-        with TemporaryDirectory(prefix="obs-chat-bot-cli-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-cli-") as temporary_directory:
             exit_code = run_process_url_command(
                 database_path=Path(temporary_directory) / "test.db",
                 source_url="https://example.com/article",
@@ -306,7 +306,7 @@ class ProcessUrlCliTest(unittest.TestCase):
             error=ProcessArticleUrlError("failed")
         )
 
-        with TemporaryDirectory(prefix="obs-chat-bot-cli-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-cli-") as temporary_directory:
             exit_code = run_process_url_command(
                 database_path=Path(temporary_directory) / "test.db",
                 source_url="https://example.com/article",
@@ -319,8 +319,8 @@ class ProcessUrlCliTest(unittest.TestCase):
     def test_run_telegram_bot_command_returns_zero_on_stop(self) -> None:
         """Штатное завершение Telegram adapter возвращает нулевой exit code."""
         fake_use_case = FakeProcessArticleUrlUseCase()
-        with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot") as runner:
-            with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
+        with patch("compadre_assistant.presentation.cli.main.run_telegram_bot") as runner:
+            with TemporaryDirectory(prefix="compadre-assistant-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
@@ -336,10 +336,10 @@ class ProcessUrlCliTest(unittest.TestCase):
         """Ошибка Telegram adapter превращается в ненулевой exit code."""
         fake_use_case = FakeProcessArticleUrlUseCase()
         with patch(
-            "obs_chat_bot.presentation.cli.main.run_telegram_bot",
+            "compadre_assistant.presentation.cli.main.run_telegram_bot",
             side_effect=TelegramBotError("failed"),
         ):
-            with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
+            with TemporaryDirectory(prefix="compadre-assistant-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
@@ -354,8 +354,8 @@ class ProcessUrlCliTest(unittest.TestCase):
         """Telegram adapter получает processor вместо готового SQLite use case."""
         fake_use_case = FakeProcessArticleUrlUseCase()
         fake_analysis_use_case = FakeAnalyzeArticleUseCase()
-        with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot") as runner:
-            with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
+        with patch("compadre_assistant.presentation.cli.main.run_telegram_bot") as runner:
+            with TemporaryDirectory(prefix="compadre-assistant-telegram-") as temporary_directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
@@ -372,8 +372,8 @@ class ProcessUrlCliTest(unittest.TestCase):
     def test_run_telegram_bot_command_passes_proxy_to_adapter(self) -> None:
         """CLI передаёт Telegram-прокси только соответствующему adapter."""
         fake_use_case = FakeProcessArticleUrlUseCase()
-        with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot") as runner:
-            with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as directory:
+        with patch("compadre_assistant.presentation.cli.main.run_telegram_bot") as runner:
+            with TemporaryDirectory(prefix="compadre-assistant-telegram-") as directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
@@ -395,13 +395,13 @@ class ProcessUrlCliTest(unittest.TestCase):
         github_config = GitHubAppConfig(
             app_id=123,
             client_id="Iv1.client",
-            app_slug="obs-chat-bot",
+            app_slug="compadre-assistant",
             private_key_path=Path("data/github-app.pem"),
         )
-        with patch("obs_chat_bot.presentation.cli.main.validate_github_app_config", return_value=None), patch("obs_chat_bot.presentation.cli.main.run_telegram_bot"), patch(
-            "obs_chat_bot.capabilities.obsidian.bootstrap.create_github_connection_coordinator"
+        with patch("compadre_assistant.presentation.cli.main.validate_github_app_config", return_value=None), patch("compadre_assistant.presentation.cli.main.run_telegram_bot"), patch(
+            "compadre_assistant.capabilities.obsidian.bootstrap.create_github_connection_coordinator"
         ) as coordinator_factory:
-            with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as directory:
+            with TemporaryDirectory(prefix="compadre-assistant-telegram-") as directory:
                 exit_code = run_telegram_bot_command(
                     database_path=Path(directory) / "test.db",
                     token="123456789:abcdefghijklmnopqrstuvwxyz",
@@ -417,8 +417,8 @@ class ProcessUrlCliTest(unittest.TestCase):
         """VK adapter получает processor вместо готового SQLite use case."""
         fake_use_case = FakeProcessArticleUrlUseCase()
         fake_analysis_use_case = FakeAnalyzeArticleUseCase()
-        with patch("obs_chat_bot.presentation.cli.main.run_vk_bot") as runner:
-            with TemporaryDirectory(prefix="obs-chat-bot-vk-") as temporary_directory:
+        with patch("compadre_assistant.presentation.cli.main.run_vk_bot") as runner:
+            with TemporaryDirectory(prefix="compadre-assistant-vk-") as temporary_directory:
                 exit_code = run_vk_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="vk-token",
@@ -436,10 +436,10 @@ class ProcessUrlCliTest(unittest.TestCase):
     def test_run_vk_bot_command_returns_one_on_adapter_error(self) -> None:
         """Ошибка VK adapter превращается в ненулевой exit code."""
         with patch(
-            "obs_chat_bot.presentation.cli.main.run_vk_bot",
+            "compadre_assistant.presentation.cli.main.run_vk_bot",
             side_effect=VkBotError("failed"),
         ):
-            with TemporaryDirectory(prefix="obs-chat-bot-vk-") as temporary_directory:
+            with TemporaryDirectory(prefix="compadre-assistant-vk-") as temporary_directory:
                 exit_code = run_vk_bot_command(
                     database_path=Path(temporary_directory) / "test.db",
                     token="vk-token",
@@ -455,7 +455,7 @@ class ProcessUrlCliTest(unittest.TestCase):
         fake_use_case = FakeProcessArticleUrlUseCase(article_id=None)
         fake_analysis_use_case = FakeAnalyzeArticleUseCase()
 
-        with TemporaryDirectory(prefix="obs-chat-bot-telegram-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-telegram-") as temporary_directory:
             database_path = Path(temporary_directory) / "test.db"
             initialize_database(database_path, SilentLogger())
             process_channel_incoming_message(
@@ -472,7 +472,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                 use_case_factory=lambda _connection: fake_use_case,
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
-            with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager(selected=_test_vault(1))):
+            with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager(selected=_test_vault(1))):
                 result = process_channel_incoming_message(
                     runtime=ObsidianProcessRuntime(None, object()),
                     database_path=database_path,

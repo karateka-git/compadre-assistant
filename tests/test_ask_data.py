@@ -9,13 +9,13 @@ from unittest.mock import patch
 import httpx
 from openai import OpenAI
 
-from obs_chat_bot.capabilities.ask.bootstrap import create_ask_runtime
-from obs_chat_bot.capabilities.ask.data.configuration import AskConfig, AskConfigError, load_ask_config
-from obs_chat_bot.capabilities.ask.data.llm.openai_ask_model import OpenAIAskModel
-from obs_chat_bot.capabilities.ask.domain.errors import (
+from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
+from compadre_assistant.capabilities.ask.data.configuration import AskConfig, AskConfigError, load_ask_config
+from compadre_assistant.capabilities.ask.data.llm.openai_ask_model import OpenAIAskModel
+from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError, QuestionTooLongError,
 )
-from obs_chat_bot.capabilities.ask.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
+from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
 
 
 def _config() -> AskConfig:
@@ -128,8 +128,8 @@ class AskBootstrapTest(unittest.TestCase):
 
     def test_disabled_does_not_load_profile_or_construct_client(self) -> None:
         """Отключённая возможность не обращается даже к loader настроек."""
-        with patch("obs_chat_bot.capabilities.ask.bootstrap.load_ask_config") as loader, \
-                patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model:
+        with patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config") as loader, \
+                patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model:
             with create_ask_runtime(enabled=False) as runtime:
                 self.assertIsNone(runtime)
             loader.assert_not_called()
@@ -137,7 +137,7 @@ class AskBootstrapTest(unittest.TestCase):
 
     def test_enabled_runtime_configures_sdk_and_closes_on_failure(self) -> None:
         """SDK получает отдельные настройки, без повторов и с гарантированным close."""
-        with patch("obs_chat_bot.capabilities.ask.data.llm.openai_ask_model.OpenAI") as sdk:
+        with patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI") as sdk:
             with self.assertRaisesRegex(RuntimeError, "consumer"):
                 with create_ask_runtime(enabled=True, config=_config()) as runtime:
                     self.assertIsInstance(runtime, AskQuestion)

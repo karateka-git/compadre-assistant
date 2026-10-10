@@ -10,19 +10,19 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from obs_chat_bot.bootstrap import create_channel_message_processor
-from obs_chat_bot.capabilities.ask.data.configuration import AskConfig
-from obs_chat_bot.capabilities.ask.domain.errors import (
+from compadre_assistant.bootstrap import create_channel_message_processor
+from compadre_assistant.capabilities.ask.data.configuration import AskConfig
+from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError,
 )
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import ObsidianConfig
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.presentation.telegram.bot import _register_handlers
-from obs_chat_bot.presentation.vk.bot import _handle_update
-from obs_chat_bot.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
+from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.presentation.telegram.bot import _register_handlers
+from compadre_assistant.presentation.vk.bot import _handle_update
+from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
 from test_telegram_bot import FakeAiogram, TelegramMessage
 from test_vk_bot import FakeVkClient
 from test_process_incoming_message import FakeArticleUrlUseCase, FakeConfirmationService, _proposal
@@ -83,7 +83,7 @@ class AskChannelsTest(unittest.TestCase):
     def test_registered_questions_are_independent_and_do_not_select_mode(self) -> None:
         """Оба канала требуют завершённую регистрацию и выполняют только /ask."""
         for channel in ("telegram", "vk"):
-            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+            with self.subTest(channel=channel), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
                 model = model_type.return_value
                 model.answer.side_effect = lambda **kwargs: "Ответ: " + kwargs["question"]
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
@@ -112,7 +112,7 @@ class AskChannelsTest(unittest.TestCase):
             confirmation = FakeConfirmationService(proposal)
             article = FakeArticleUrlUseCase()
             obsidian = ObsidianMessageHandler(article_url_use_case=article, obsidian_confirmation_service=confirmation)
-            with self.subTest(channel=channel), patch("obs_chat_bot.bootstrap.ObsidianCapability", return_value=obsidian), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+            with self.subTest(channel=channel), patch("compadre_assistant.bootstrap.ObsidianCapability", return_value=obsidian), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
                 model = model_type.return_value
                 model.answer.return_value = "/confirm obsidian review 1 1 yes"
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("obsidian", "ask"), obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
@@ -143,7 +143,7 @@ class AskChannelsTest(unittest.TestCase):
 
     def test_disabled_ask_does_not_load_settings_or_create_model(self) -> None:
         """Отключённая команда доступна только как метаданные без внешнего клиента."""
-        with patch("obs_chat_bot.capabilities.ask.bootstrap.load_ask_config") as loader, patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model:
+        with patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config") as loader, patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model:
             with create_channel_message_processor(database_path=self.path, enabled_capabilities=()) as processor:
                 for channel in ("telegram", "vk"):
                     self.send(channel, processor, "/register")
@@ -164,7 +164,7 @@ class AskChannelsTest(unittest.TestCase):
                 self.send(channel, incoming_message_processor, "/name Тест")
                 self.assertEqual(self.send(channel, incoming_message_processor, "/ask вопрос"), "Ответ")
 
-            with self.subTest(channel=channel), patch("obs_chat_bot.bootstrap.load_ask_config", return_value=self.config), patch("obs_chat_bot.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot", side_effect=polling):
+            with self.subTest(channel=channel), patch("compadre_assistant.bootstrap.load_ask_config", return_value=self.config), patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot", side_effect=polling):
                 model_type.return_value.answer.return_value = "Ответ"
                 self.assertEqual(command(database_path=self.path, token="123456:ABCDEF_test_token_123456789", logger=self.logger, enabled_capabilities=("ask",), **extra), 0)
                 loader.assert_called_once_with()
@@ -172,7 +172,7 @@ class AskChannelsTest(unittest.TestCase):
 
     def test_registry_failure_closes_created_ask_client(self) -> None:
         """Сбой регистрации после сборки Ask освобождает принадлежащий ему клиент."""
-        with patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch("obs_chat_bot.bootstrap.ChannelMessageProcessor", side_effect=ValueError("registry")):
+        with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch("compadre_assistant.bootstrap.ChannelMessageProcessor", side_effect=ValueError("registry")):
             with self.assertRaisesRegex(ValueError, "registry"):
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config):
                     self.fail("Сбой регистрации должен прервать запуск")
@@ -186,7 +186,7 @@ class AskChannelsTest(unittest.TestCase):
             def respond(**_kwargs):
                 self.assertTrue(accepted.wait(2), "Подтверждение должно прийти до завершения API")
                 return answer
-            with self.subTest(channel=channel), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+            with self.subTest(channel=channel), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
                 model_type.return_value.answer.side_effect = respond
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
                     self.send(channel, processor, "/register")
@@ -201,7 +201,7 @@ class AskChannelsTest(unittest.TestCase):
     def test_help_matrix_matches_enabled_capabilities(self) -> None:
         """Справка обоих каналов показывает только включённые входы и верный выход."""
         for enabled in ((), ("obsidian",), ("ask",), ("obsidian", "ask")):
-            with self.subTest(enabled=enabled), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+            with self.subTest(enabled=enabled), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=enabled, obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
                     for channel in ("telegram", "vk"):
                         self.send(channel, processor, "/register")

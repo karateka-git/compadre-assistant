@@ -1,41 +1,41 @@
 """Тесты общего application-flow входящих сообщений."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
-from obs_chat_bot.core.domain.users.entities import IdentityRebindConfirmation
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
+from compadre_assistant.core.domain.users.entities import IdentityRebindConfirmation
 
 from dataclasses import replace
 from types import SimpleNamespace
 from datetime import UTC, datetime, timedelta
 import unittest
 
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import (
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.obsidian.domain.articles.incoming_messages import (
     ArticleIncomingMessage,
     SavedIncomingMessage,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.processing import (
+from compadre_assistant.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlResult,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import (
+from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
     AnalyzeArticleResult,
 )
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
-from obs_chat_bot.core.domain.chat_modes import ChatMode, ChatModeKey
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from test_incoming_boundary import MemoryChatModes
-from obs_chat_bot.capabilities.obsidian.presentation.results import ObsidianResultType
-from obs_chat_bot.core.presentation.incoming.dispatcher import (
+from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
+from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     IncomingMessageDispatcher,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewError
-from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewError
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
     ObsidianConfirmationStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
     GitHubConnectionStartResult,
@@ -43,34 +43,34 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubDeviceAuthorization,
     GitHubGatewayError,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubAccountNotConnectedError,
     VaultDisconnectResult,
     VaultDisconnectStatus,
     VaultSelectionResult,
     VaultSelectionStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultStatus,
     VaultSyncResult,
     VaultSyncStatus,
     VaultSyncWarningReason,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
     ObsidianProposalStatus,
 )
-from obs_chat_bot.core.domain.users.identity import IdentityAlreadyBoundError
-from obs_chat_bot.core.domain.users.entities import AppUser, IncomingIdentity
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
+from compadre_assistant.core.domain.users.identity import IdentityAlreadyBoundError
+from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 
 
 class FakeArticleUrlUseCase:
@@ -405,7 +405,7 @@ class FakeGitHubConnectionStarter:
     @property
     def installation_url(self) -> str:
         """Возвращает тестовую страницу установки App."""
-        return "https://github.com/apps/obs-chat-bot/installations/new"
+        return "https://github.com/apps/compadre-assistant/installations/new"
 
     def start(
         self,
@@ -420,7 +420,7 @@ class FakeGitHubConnectionStarter:
             raise self.error
         return GitHubConnectionStartResult(
             status=GitHubConnectionStartStatus.STARTED,
-            installation_url=("https://github.com/apps/obs-chat-bot/installations/new"),
+            installation_url=("https://github.com/apps/compadre-assistant/installations/new"),
             authorization=GitHubDeviceAuthorization(
                 device_code="device-secret",
                 user_code="ABCD-EFGH",

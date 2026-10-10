@@ -7,23 +7,23 @@ import sys
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import SQLiteObsidianVaultRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import SQLiteVaultChunkIndexRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_embedding_index_repository import SQLiteVaultEmbeddingIndexRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_instruction_repository import SQLiteVaultInstructionRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import SQLiteVaultSyncLeaseRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_process_lock import vault_process_lock
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import VaultNote
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_vault_repository import SQLiteObsidianVaultRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_chunk_index_repository import SQLiteVaultChunkIndexRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_embedding_index_repository import SQLiteVaultEmbeddingIndexRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_instruction_repository import SQLiteVaultInstructionRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import SQLiteVaultSyncLeaseRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_process_lock import vault_process_lock
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultNote
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubMarkdownFile, GitHubVaultSnapshot, GitHubVaultSnapshotStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.lease_scope import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.lease_scope import (
     VaultLeaseLostError, VaultLeaseScope, active_vault_lease,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncService
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncService
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from sqlite_helpers import ensure_app_user
 
 
@@ -176,7 +176,7 @@ class VaultLeaseFencingTest(unittest.TestCase):
 import os
 import sqlite3
 import sys
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_process_lock import vault_process_lock
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_process_lock import vault_process_lock
 connection = sqlite3.connect(sys.argv[1])
 with vault_process_lock(connection, 1):
     os._exit(0)

@@ -10,19 +10,19 @@ from unittest.mock import Mock, patch
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from obs_chat_bot.capabilities.obsidian.bootstrap import (
+from compadre_assistant.capabilities.obsidian.bootstrap import (
     ObsidianProcessRuntime,
     create_prepare_obsidian_review_use_case,
 )
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import (
+from compadre_assistant.capabilities.obsidian.data.configuration.config import (
     ObsidianConfigError, load_obsidian_config, ObsidianConfig,
 )
-from obs_chat_bot.core.data.config import load_config
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.presentation.cli.main import main, run_healthcheck
-from obs_chat_bot.capabilities.obsidian.domain.search.hybrid import VaultFtsFallbackSearchService
+from compadre_assistant.core.data.config import load_config
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.presentation.cli.main import main, run_healthcheck
+from compadre_assistant.capabilities.obsidian.domain.search.hybrid import VaultFtsFallbackSearchService
 from test_process_incoming_message import FakeVaultSelectionManager
 
 
@@ -45,7 +45,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             encryption_algorithm=serialization.NoEncryption(),
         ))
         for target, options in (
-            ("obs_chat_bot.core.data.config.load_dotenv", {"new": None}),
+            ("compadre_assistant.core.data.config.load_dotenv", {"new": None}),
             ("httpx.Client.send", {"side_effect": AssertionError("HTTP запрещён в автономной проверке")}),
             ("urllib.request.urlopen", {"side_effect": AssertionError("HTTP запрещён в автономной проверке")}),
         ):
@@ -82,9 +82,9 @@ class RuntimeConfigurationTest(unittest.TestCase):
     def run_cli(self, args: list[str], env: dict[str, str]) -> tuple[int, Mock]:
         """Выполняет настоящий main с окружением теста и безопасным logger."""
         logger = Mock()
-        with patch.dict(os.environ, env, clear=True), patch("sys.argv", ["obs-chat-bot", *args]), patch(
-            "obs_chat_bot.presentation.cli.main.configure_logging"
-        ), patch("obs_chat_bot.presentation.cli.main.logging.getLogger", return_value=logger):
+        with patch.dict(os.environ, env, clear=True), patch("sys.argv", ["compadre-assistant", *args]), patch(
+            "compadre_assistant.presentation.cli.main.configure_logging"
+        ), patch("compadre_assistant.presentation.cli.main.logging.getLogger", return_value=logger):
             code = main()
         return code, logger
 
@@ -100,7 +100,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                             env.update(VK_GROUP_ID="bad", VK_BOT_TOKEN="")
                         else:
                             env.update(TELEGRAM_BOT_TOKEN="bad", TELEGRAM_PROXY_URL="secret://bad")
-                        with patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot") as runner:
+                        with patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                             code, _logger = self.run_cli([f"--{channel}-bot"], env)
                         if enabled and state == "invalid":
                             self.assertEqual(code, 2)
@@ -110,9 +110,9 @@ class RuntimeConfigurationTest(unittest.TestCase):
                         runner.assert_called_once()
                         processor = runner.call_args.kwargs["incoming_message_processor"]
                         if state == "absent" or not enabled:
-                            with patch("obs_chat_bot.capabilities.obsidian.bootstrap.OpenAIArticleAnalyzer") as analyzer, patch(
-                                "obs_chat_bot.capabilities.obsidian.bootstrap.OpenAIObsidianProposalGenerator"
-                            ) as proposal, patch("obs_chat_bot.capabilities.obsidian.bootstrap.OpenAICompatibleEmbeddingProvider") as embedding:
+                            with patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAIArticleAnalyzer") as analyzer, patch(
+                                "compadre_assistant.capabilities.obsidian.bootstrap.OpenAIObsidianProposalGenerator"
+                            ) as proposal, patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAICompatibleEmbeddingProvider") as embedding:
                                 for text in ("/register", "/name Имя", "/help", "/status", "/exit", "/obsidian"):
                                     reply = processor(IncomingEvent(channel, channel, text, text, channel), None)
                                     if text == "/obsidian":
@@ -126,9 +126,9 @@ class RuntimeConfigurationTest(unittest.TestCase):
         """Неверный выключенный провайдер не создаёт GitHub, embedding или LLM-клиенты."""
         for channel in ("telegram", "vk"):
             with self.subTest(channel=channel), patch(
-                "obs_chat_bot.presentation.cli.main.create_obsidian_process_runtime",
+                "compadre_assistant.presentation.cli.main.create_obsidian_process_runtime",
                 side_effect=AssertionError("Отключённая возможность не собирается"),
-            ), patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot"):
+            ), patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot"):
                 code, _ = self.run_cli([f"--{channel}-bot"], self.env(channel, False, "invalid"))
                 self.assertEqual(code, 0)
 
@@ -149,7 +149,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
     def test_selected_channel_missing_settings_blocks_polling(self) -> None:
         """Незаполненный выбранный канал не открывает polling или рабочую SQLite."""
         for channel, missing in (("telegram", "TELEGRAM_BOT_TOKEN"), ("vk", "VK_BOT_TOKEN"), ("vk", "VK_GROUP_ID")):
-            with self.subTest(channel=channel, missing=missing), patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot") as runner:
+            with self.subTest(channel=channel, missing=missing), patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                 env = self.env(channel, False, "absent")
                 env[missing] = " "
                 code, logger = self.run_cli([f"--{channel}-bot"], env)
@@ -168,7 +168,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             ("vk", {"GITHUB_PRIVATE_KEY_PATH": str(self.root / "missing.pem")}, "GitHub"),
         )
         for channel, override, diagnostic in cases:
-            with self.subTest(override=override), patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot") as runner:
+            with self.subTest(override=override), patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                 env = self.env(channel, True, "valid")
                 env.update(override)
                 code, logger = self.run_cli([f"--{channel}-bot"], env)
@@ -224,7 +224,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
         """CLI extraction не требует токенов каналов или провайдеров анализа."""
         env = self.env("telegram", True, "invalid")
         env["TELEGRAM_BOT_TOKEN"] = ""
-        with patch("obs_chat_bot.presentation.cli.main.run_process_url_command", return_value=0) as pipeline:
+        with patch("compadre_assistant.presentation.cli.main.run_process_url_command", return_value=0) as pipeline:
             code, _ = self.run_cli(["--process-url", "https://article.example/page"], env)
         self.assertEqual(code, 0)
         pipeline.assert_called_once()
@@ -246,7 +246,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
     def test_fts_composition_without_embedding_provider(self) -> None:
         """Незаполненный embedding provider собирает настоящий FTS fallback review."""
         with connect_database(self.root / "fts.db") as connection, patch(
-            "obs_chat_bot.capabilities.obsidian.bootstrap.create_embedding_provider",
+            "compadre_assistant.capabilities.obsidian.bootstrap.create_embedding_provider",
             side_effect=AssertionError("FTS не создаёт embedding client"),
         ):
             apply_migrations(connection)
@@ -258,7 +258,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
 
     def test_llm_unavailable_is_reported_before_missing_user_vault(self) -> None:
         """Отсутствующий LLM не маскируется требованием выбрать vault."""
-        with patch("obs_chat_bot.presentation.cli.main.run_telegram_bot") as runner:
+        with patch("compadre_assistant.presentation.cli.main.run_telegram_bot") as runner:
             code, _ = self.run_cli(["--telegram-bot"], self.env("telegram", True, "absent"))
         self.assertEqual(code, 0)
         processor = runner.call_args.kwargs["incoming_message_processor"]
@@ -267,7 +267,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
         # Gateway есть, но пользователь ещё не выбрал vault; LLM отсутствует.
         runtime = ObsidianProcessRuntime(None, object())
         from channel_helpers import process_channel_incoming_message
-        with patch("obs_chat_bot.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager()):
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager()):
             reply = process_channel_incoming_message(
                 database_path=self.root / "app.db", incoming_message=IncomingEvent(
                     "telegram", "chat", "article", "/obsidian https://article.example/page", "user"
@@ -285,7 +285,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                     env["ENABLED_CAPABILITIES"] = enabled
                     env.update(ASK_BASE_URL="https://ask.example/v1", ASK_API_KEY="ask-secret", ASK_MODEL="model" if valid else "")
                     for health in (False, True):
-                        with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("obs_chat_bot.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"obs_chat_bot.presentation.cli.main.run_{channel}_bot") as runner:
+                        with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                             code, logger = self.run_cli(["--healthcheck"] if health else [f"--{channel}-bot"], env)
                             invalid = "ask" in enabled and not valid
                             self.assertEqual(code, (1 if health else 2) if invalid else 0)

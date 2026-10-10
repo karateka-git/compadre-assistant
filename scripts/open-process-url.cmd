@@ -6,4 +6,4 @@ if "%~1"=="" (
     exit /b 1
 )
 
-start "obsChatBot process-url" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0process-url.ps1" "%~1"
+start "Compadre Assistant process-url" powershell.exe -NoExit -ExecutionPolicy Bypass -File "%~dp0process-url.ps1" "%~1"

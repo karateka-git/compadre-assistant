@@ -1,5 +1,12 @@
 # Эксплуатация Knowledge Catcher
 
+
+Локальная версия после шага 4.2 использует пакет `compadre_assistant` и
+Compose-сервисы `tg_assistant`/`vk_assistant`. Приведённые ниже production-пути
+и имена сервисов описывают прежнее развёртывание. Перед выкладкой новой версии
+нужно отдельно обновить команды и systemd override, остановить прежние сервисы
+и исключить параллельный polling; обычный рецепт обновления прежней версии
+не является инструкцией перехода на переименованную сборку.
 Порядок запуска и диагностики локальных Telegram/VK и существующего VPS.
 Подготовка новой рабочей копии описана в [SETUP.md](SETUP.md).
 
@@ -116,7 +123,7 @@ backup через SQLite API. Копии лежат на том же диске 
 
 ```powershell
 Get-CimInstance Win32_Process |
-  Where-Object { $_.CommandLine -match 'obs_chat_bot|--telegram-bot' } |
+  Where-Object { $_.CommandLine -match 'compadre_assistant|--telegram-bot' } |
   Select-Object ProcessId,Name,CommandLine
 ```
 
@@ -158,8 +165,8 @@ Get-CimInstance Win32_Process |
 
 ```powershell
 python -m unittest discover -s tests
-python -m obs_chat_bot --pipeline-smoke
-python -m obs_chat_bot --analysis-smoke
+python -m compadre_assistant --pipeline-smoke
+python -m compadre_assistant --analysis-smoke
 ```
 
 ## Запуск бота
@@ -180,7 +187,7 @@ python -m obs_chat_bot --analysis-smoke
 Отдельная команда ниже нужна только для изолированной диагностики VK:
 
 ```powershell
-docker compose run --rm --entrypoint python vk_catcher -m obs_chat_bot --vk-bot
+docker compose run --rm --entrypoint python vk_assistant -m compadre_assistant --vk-bot
 ```
 
 VK использует тот же flow регистрации, привязки каналов, сохранения статей и
@@ -228,7 +235,7 @@ aiogram восстанавливает получение updates, а ошибк
 
 ## Диагностика SQLite
 
-При одновременном старте `tg_catcher` и `vk_catcher` начальная схема применяется
+При одновременном старте `tg_assistant` и `vk_assistant` начальная схема применяется
 одним процессом под `BEGIN IMMEDIATE`; второй процесс ждёт SQLite lock, повторно
 проверяет `schema_migrations` и не выполняет тот же SQL второй раз. Сообщения вида
 `table ... already exists` на чистой базе означают регрессию этой блокировки.
@@ -261,13 +268,13 @@ Embedding-события используют тот же стандартный
 Посмотреть события обоих каналов:
 
 ```powershell
-docker compose logs tg_catcher vk_catcher | Select-String "event=embedding_"
+docker compose logs tg_assistant vk_assistant | Select-String "event=embedding_"
 ```
 
 Только окончательные сбои и переходы на FTS fallback:
 
 ```powershell
-docker compose logs tg_catcher vk_catcher |
+docker compose logs tg_assistant vk_assistant |
   Select-String "event=embedding_operation_failed|event=embedding_fallback"
 ```
 

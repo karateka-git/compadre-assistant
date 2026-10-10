@@ -10,83 +10,83 @@ from threading import Event
 import sqlite3
 import unittest
 
-from obs_chat_bot.bootstrap import create_user_identity_service
-from obs_chat_bot.capabilities.obsidian.data.sqlite.analysis_result_repository import (
+from compadre_assistant.bootstrap import create_user_identity_service
+from compadre_assistant.capabilities.obsidian.data.sqlite.analysis_result_repository import (
     SQLiteArticleAnalysisResultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_flow_lease_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_flow_lease_repository import (
     SQLiteArticleFlowLeaseRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import (
     SQLiteArticleRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import (
     SQLiteObsidianProposalRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
     SQLiteVaultActionConfirmationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_instruction_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_instruction_repository import (
     SQLiteVaultInstructionRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_note_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_note_repository import (
     SQLiteVaultNoteRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import (
     SQLiteVaultSyncLeaseRepository,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
-from obs_chat_bot.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
-from obs_chat_bot.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
-from obs_chat_bot.capabilities.obsidian.domain.articles.html import ArticleHtml
-from obs_chat_bot.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
-from obs_chat_bot.capabilities.obsidian.domain.pending import (
+from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
+from compadre_assistant.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
+from compadre_assistant.capabilities.obsidian.domain.articles.html import ArticleHtml
+from compadre_assistant.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
+from compadre_assistant.capabilities.obsidian.domain.pending import (
     PendingOrigin,
     PendingOperationError,
     VaultResourceBusyError,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.confirmation import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationStatus,
     ObsidianProposalConfirmationService,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.entities import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposalAction,
     ObsidianProposalStatus,
     ObsidianReviewPlan,
 )
-from obs_chat_bot.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
-from obs_chat_bot.capabilities.obsidian.domain.search.models import VaultSearchResult
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
+from compadre_assistant.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
+from compadre_assistant.capabilities.obsidian.domain.search.models import VaultSearchResult
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     VaultActionConfirmation,
     VaultConfirmationAction,
     VaultNote,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubVaultTargetState,
     GitHubVaultCommitResult,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_selection import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import (
     GitHubVaultSelectionService,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultSyncService,
     VaultSyncStatus,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from obs_chat_bot.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.core.domain.users.entities import IncomingIdentity
-from obs_chat_bot.core.domain.users.identity import InvalidLinkCodeError, IdentityAlreadyBoundError
-from obs_chat_bot.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from obs_chat_bot.core.presentation.incoming.events import IncomingEvent
-from obs_chat_bot.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.domain.users.identity import InvalidLinkCodeError, IdentityAlreadyBoundError
+from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from sqlite_helpers import ensure_app_user
 
 TG = PendingOrigin("telegram", "tg-chat")

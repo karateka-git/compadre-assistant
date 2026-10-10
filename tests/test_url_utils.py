@@ -2,7 +2,7 @@
 
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.url_utils import (
+from compadre_assistant.capabilities.obsidian.domain.articles.url_utils import (
     InvalidUrlError,
     is_supported_article_url,
     normalize_article_url,

@@ -4,18 +4,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.articles.incoming_messages import ArticleIncomingMessage
-from obs_chat_bot.capabilities.obsidian.domain.articles.stages import ProcessingStage
-from obs_chat_bot.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.incoming_message_repository import (
+from compadre_assistant.capabilities.obsidian.domain.articles.incoming_messages import ArticleIncomingMessage
+from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
+from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.incoming_message_repository import (
     SQLiteIncomingMessageRepository,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.processing_error_repository import (
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.processing_error_repository import (
     SQLiteProcessingErrorRecorder,
 )
-from obs_chat_bot.capabilities.obsidian.domain.articles.entities import Article
+from compadre_assistant.capabilities.obsidian.domain.articles.entities import Article
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -24,7 +24,7 @@ class SQLiteProcessingErrorRecorderTest(unittest.TestCase):
 
     def test_record_saves_processing_error(self) -> None:
         """Recorder сохраняет этап, тип и текст ошибки."""
-        with TemporaryDirectory(prefix="obs-chat-bot-errors-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-errors-") as temporary_directory:
             database_path = Path(temporary_directory) / "test.db"
 
             with connect_database(database_path) as connection:
@@ -67,7 +67,7 @@ class SQLiteProcessingErrorRecorderTest(unittest.TestCase):
 
     def test_record_links_error_to_incoming_message(self) -> None:
         """Recorder сохраняет связь ошибки с входящим сообщением."""
-        with TemporaryDirectory(prefix="obs-chat-bot-errors-") as temporary_directory:
+        with TemporaryDirectory(prefix="compadre-assistant-errors-") as temporary_directory:
             database_path = Path(temporary_directory) / "test.db"
 
             with connect_database(database_path) as connection:

@@ -1,5 +1,5 @@
 """Тесты фонового application-сценария GitHub Device Flow."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,10 +7,10 @@ from threading import Event
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_connection import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_connection import (
     GitHubConnectionCoordinator,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubAuthenticatedAccount,
     GitHubConnectionCompletion,
     GitHubConnectionCompletionStatus,
@@ -20,17 +20,17 @@ from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
     GitHubDevicePollStatus,
     GitHubUserAccessToken,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_connection_state_store import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_connection_state_store import (
     SQLiteGitHubConnectionStateStore,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_writer import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_writer import (
     SQLiteGitHubAccountAccessWriter,
 )
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from tests.sqlite_helpers import ensure_app_user
 
 
@@ -202,7 +202,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=writer,
             state_store=FakeStateStore(),
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             clock=clock,
             sleeper=clock.sleep,
         )
@@ -229,7 +229,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
 
     def test_background_completion_uses_connection_after_message_closes(self) -> None:
         """Фоновый worker сохраняет installations после закрытия входного соединения."""
-        with TemporaryDirectory(prefix="obs-chat-bot-github-worker-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-worker-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)
@@ -247,7 +247,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
                 gateway=FakeGateway([GitHubDevicePollStatus.AUTHORIZED]),
                 account_writer=SQLiteGitHubAccountAccessWriter(database_path),
                 state_store=SQLiteGitHubConnectionStateStore(database_path),
-                installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+                installation_url="https://github.com/apps/compadre-assistant/installations/new",
                 clock=clock,
                 sleeper=clock.sleep,
             )
@@ -281,7 +281,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=writer,
             state_store=FakeStateStore(),
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             clock=clock,
             sleeper=clock.sleep,
         )
@@ -315,7 +315,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=writer,
             state_store=FakeStateStore(),
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             clock=clock,
             sleeper=clock.sleep,
         )
@@ -344,7 +344,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=FakeWriter(),
             state_store=FakeStateStore(),
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             clock=clock,
             sleeper=clock.sleep,
         )
@@ -364,7 +364,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=FakeWriter(),
             state_store=FakeStateStore(),
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             sleeper=lambda _seconds: None,
         )
 
@@ -398,14 +398,14 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             gateway=gateway,
             account_writer=FakeWriter(),
             state_store=state_store,
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             sleeper=lambda _seconds: None,
         )
         second = GitHubConnectionCoordinator(
             gateway=FakeGateway([GitHubDevicePollStatus.DENIED]),
             account_writer=FakeWriter(),
             state_store=state_store,
-            installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+            installation_url="https://github.com/apps/compadre-assistant/installations/new",
             sleeper=lambda _seconds: None,
         )
 
@@ -421,7 +421,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
 
     def test_restarted_coordinator_starts_after_orphan_claim_expires(self) -> None:
         """После утраты процесса новый coordinator ждёт TTL и начинает flow."""
-        with TemporaryDirectory(prefix="obs-chat-bot-github-retry-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-retry-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as connection:
                 apply_migrations(connection)
@@ -443,7 +443,7 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
                 gateway=gateway,
                 account_writer=SQLiteGitHubAccountAccessWriter(database_path),
                 state_store=SQLiteGitHubConnectionStateStore(database_path),
-                installation_url="https://github.com/apps/obs-chat-bot/installations/new",
+                installation_url="https://github.com/apps/compadre-assistant/installations/new",
                 clock=clock,
                 sleeper=clock.sleep,
             )

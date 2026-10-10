@@ -4,22 +4,22 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubInstructionFile,
     GitHubMarkdownFile,
     GitHubVaultSnapshot,
     GitHubVaultSnapshotStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
-from obs_chat_bot.capabilities.obsidian.domain.search.models import (
+from compadre_assistant.capabilities.obsidian.domain.search.errors import EmbeddingProviderError
+from compadre_assistant.capabilities.obsidian.domain.search.models import (
     ChunkIndexUpdate,
     EmbeddingIndexCoverage,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_sync import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import (
     VaultSyncService,
     VaultSyncStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultInstruction,
     VaultNote,

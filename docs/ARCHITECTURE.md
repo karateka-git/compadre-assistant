@@ -91,7 +91,7 @@ Telegram и VK отображают общий ответ, включая тек
 статьи остаются внутри Obsidian; ядро не журналирует каждое сообщение.
 
 Одна начальная SQL-схема находится в
-`obs_chat_bot/core/data/sqlite/migrations/0001_initial_schema.sql`. Ядро владеет
+`compadre_assistant/core/data/sqlite/migrations/0001_initial_schema.sql`. Ядро владеет
 таблицами пользователей, identities и `active_chat_modes`. Ключ режима —
 `app_user_id`, `channel`, `chat_id`; значение — nullable `capability_id`,
 положительная `revision` и технический `updated_at`. Отсутствие строки означает
@@ -210,7 +210,7 @@ Obsidian не перехватывается ожиданием identity.
 
 ### Composition root
 
-`obs_chat_bot/bootstrap.py` один раз при старте процесса регистрирует включённые
+`compadre_assistant/bootstrap.py` один раз при старте процесса регистрирует включённые
 входы в `ChannelMessageProcessor`. Для каждого события он открывает отдельное
 core SQLite-соединение для identity, общих команд и режима чата. Зарегистрированный
 `ObsidianCapability` не хранит SQLite-соединение или repositories: только при
@@ -237,7 +237,7 @@ scope операции, поэтому их изменяемые поля не �
 `capabilities/obsidian/smoke.py`.
 
 Docker Compose запускает два независимых worker-контейнера из одного образа:
-`tg_catcher` с Telegram polling и `vk_catcher` с VK Long Poll. Каждый контейнер
+`tg_assistant` с Telegram polling и `vk_assistant` с VK Long Poll. Каждый контейнер
 проверяет в healthcheck только свой канал. Scripts выбирают сервисы по
 `ENABLED_CHANNELS` (по умолчанию оба). Оба используют
 общий том `data/` с SQLite и ключом GitHub App. Каждый adapter преобразует

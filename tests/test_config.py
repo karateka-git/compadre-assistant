@@ -5,8 +5,8 @@ import unittest
 from dataclasses import fields
 from unittest.mock import patch
 
-from obs_chat_bot.core.data.config import AppConfig, ConfigError, load_config
-from obs_chat_bot.capabilities.obsidian.data.configuration.config import (
+from compadre_assistant.core.data.config import AppConfig, ConfigError, load_config
+from compadre_assistant.capabilities.obsidian.data.configuration.config import (
     ObsidianConfigError, load_obsidian_config,
 )
 
@@ -16,7 +16,7 @@ class ConfigTest(unittest.TestCase):
 
     def setUp(self) -> None:
         """Изолирует окружение теста от credentials локального `.env`."""
-        self.dotenv = patch("obs_chat_bot.core.data.config.load_dotenv", None)
+        self.dotenv = patch("compadre_assistant.core.data.config.load_dotenv", None)
         self.dotenv.start()
         self.addCleanup(self.dotenv.stop)
 
@@ -222,7 +222,7 @@ class ConfigTest(unittest.TestCase):
             _env(
                 GITHUB_APP_ID="12345",
                 GITHUB_CLIENT_ID="Iv1.client",
-                GITHUB_APP_SLUG="obs-chat-bot",
+                GITHUB_APP_SLUG="compadre-assistant",
                 GITHUB_PRIVATE_KEY_PATH="data/github-app.pem",
             ),
             clear=True,
@@ -233,7 +233,7 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.github_app.client_id, "Iv1.client")
         self.assertEqual(
             config.github_app.installation_url,
-            "https://github.com/apps/obs-chat-bot/installations/new",
+            "https://github.com/apps/compadre-assistant/installations/new",
         )
         self.assertNotIn("Iv1.client", config.safe_summary().values())
 

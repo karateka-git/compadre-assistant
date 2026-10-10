@@ -4,10 +4,10 @@ import ast
 from pathlib import Path
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.presentation.processing import should_acknowledge
+from compadre_assistant.capabilities.obsidian.presentation.processing import should_acknowledge
 
 
-ROOT = Path(__file__).resolve().parents[1] / "obs_chat_bot"
+ROOT = Path(__file__).resolve().parents[1] / "compadre_assistant"
 
 
 class PresentationBoundaryTest(unittest.TestCase):
@@ -31,7 +31,7 @@ class PresentationBoundaryTest(unittest.TestCase):
                         elif isinstance(node, ast.Import):
                             modules = [alias.name for alias in node.names]
                         for module in modules:
-                            if module.startswith("obs_chat_bot."):
+                            if module.startswith("compadre_assistant."):
                                 self.assertIn("domain", module.split("."))
                                 self.assertNotIn("data", module.split("."))
                                 self.assertNotIn("presentation", module.split("."))
@@ -46,9 +46,9 @@ class PresentationBoundaryTest(unittest.TestCase):
                 syntax = ast.parse(path.read_text(encoding="utf-8"))
                 for node in ast.walk(syntax):
                     if isinstance(node, ast.ImportFrom):
-                        self.assertFalse(node.module and node.module.startswith("obs_chat_bot.capabilities"))
+                        self.assertFalse(node.module and node.module.startswith("compadre_assistant.capabilities"))
                     elif isinstance(node, ast.Import):
-                        self.assertFalse(any(alias.name.startswith("obs_chat_bot.capabilities") for alias in node.names))
+                        self.assertFalse(any(alias.name.startswith("compadre_assistant.capabilities") for alias in node.names))
 
     def test_core_and_channels_do_not_import_obsidian(self) -> None:
         """Общий вход и адаптеры не зависят от внутренних модулей Obsidian."""
@@ -68,7 +68,7 @@ class PresentationBoundaryTest(unittest.TestCase):
                     if isinstance(node, ast.ImportFrom)
                 )
                 self.assertFalse(
-                    any(module and module.startswith("obs_chat_bot.capabilities") for module in imports)
+                    any(module and module.startswith("compadre_assistant.capabilities") for module in imports)
                 )
 
     def test_obsidian_ack_predicate_preserves_existing_triggers(self) -> None:
@@ -88,7 +88,7 @@ class PresentationBoundaryTest(unittest.TestCase):
             if isinstance(node, ast.ImportFrom)
         )
         self.assertFalse(
-            any(module and module.startswith("obs_chat_bot.capabilities") for module in modules)
+            any(module and module.startswith("compadre_assistant.capabilities") for module in modules)
         )
 
     def test_root_imports_only_obsidian_assembly(self) -> None:
@@ -100,13 +100,13 @@ class PresentationBoundaryTest(unittest.TestCase):
             for node in ast.walk(syntax)
             if isinstance(node, ast.ImportFrom)
             and node.module
-            and node.module.startswith("obs_chat_bot.capabilities.obsidian")
+            and node.module.startswith("compadre_assistant.capabilities.obsidian")
         }
         self.assertEqual(
             modules,
             {
-                "obs_chat_bot.capabilities.obsidian.bootstrap",
-                "obs_chat_bot.capabilities.obsidian.smoke",
+                "compadre_assistant.capabilities.obsidian.bootstrap",
+                "compadre_assistant.capabilities.obsidian.smoke",
             },
         )
 

@@ -13,21 +13,21 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs
 from zipfile import ZipFile
 
-from obs_chat_bot.capabilities.obsidian.domain.vaults.github_models import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import (
     GitHubDevicePollStatus,
     GitHubGatewayError,
     GitHubInstallationAccessToken,
     GitHubUserAccessToken,
     GitHubVaultSnapshotStatus,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.vault_configuration import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_configuration import (
     VaultConfigurationError,
     VaultConfigurationErrorCode,
 )
-from obs_chat_bot.capabilities.obsidian.data.github import github_app_client as github_client_module
-from obs_chat_bot.capabilities.obsidian.data.github.github_app_client import HttpxGitHubAppClient
-from obs_chat_bot.capabilities.obsidian.data.github.jwt_signer import PyJwtGitHubAppSigner
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import ObsidianVault
+from compadre_assistant.capabilities.obsidian.data.github import github_app_client as github_client_module
+from compadre_assistant.capabilities.obsidian.data.github.github_app_client import HttpxGitHubAppClient
+from compadre_assistant.capabilities.obsidian.data.github.jwt_signer import PyJwtGitHubAppSigner
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 
 
 class FakeResponse:
@@ -84,7 +84,7 @@ class GitHubAppClientTest(unittest.TestCase):
                 return_value=_installation_token(),
             ) as token_factory,
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
                 side_effect=responses,
             ),
         ):
@@ -118,7 +118,7 @@ class GitHubAppClientTest(unittest.TestCase):
                 return_value=_installation_token(),
             ),
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
                 return_value=response,
             ) as opener,
         ):
@@ -151,7 +151,7 @@ class GitHubAppClientTest(unittest.TestCase):
             "interval": 5,
         }
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             return_value=FakeResponse(payload),
         ) as opener:
             result = _client().request_device_authorization()
@@ -170,7 +170,7 @@ class GitHubAppClientTest(unittest.TestCase):
             FakeResponse({"access_token": "ghu-secret", "token_type": "bearer"}),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ):
             client = _client()
@@ -189,7 +189,7 @@ class GitHubAppClientTest(unittest.TestCase):
         first_page = [{"id": value} for value in range(1, 101)]
         second_page = [{"id": 101}]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=[
                 FakeResponse({"total_count": 101, "installations": first_page}),
                 FakeResponse({"total_count": 101, "installations": second_page}),
@@ -209,7 +209,7 @@ class GitHubAppClientTest(unittest.TestCase):
     def test_get_authenticated_account_reads_public_id_and_login(self) -> None:
         """Авторизованный user endpoint определяет аккаунт без сохранения token."""
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             return_value=FakeResponse({"id": 777, "login": "octocat"}),
         ) as opener:
             account = _client().get_authenticated_account(
@@ -229,7 +229,7 @@ class GitHubAppClientTest(unittest.TestCase):
             "expires_at": "2026-07-22T12:00:00Z",
         }
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             return_value=FakeResponse(payload),
         ) as opener:
             token = _client().create_installation_token(
@@ -270,7 +270,7 @@ class GitHubAppClientTest(unittest.TestCase):
             FakeResponse([{"type": "file", "name": "Index.md"}]),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             inspection = _client().inspect_repository(
@@ -321,7 +321,7 @@ class GitHubAppClientTest(unittest.TestCase):
                 fp=None,
             )
             with self.subTest(status=status), patch(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
                 side_effect=denied,
             ) as opener:
                 inspection = _client().inspect_repository(
@@ -337,7 +337,7 @@ class GitHubAppClientTest(unittest.TestCase):
     def test_inspect_repository_rejects_read_only_token(self) -> None:
         """Даже выданный token без `Contents: write` не разрешает vault."""
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             return_value=FakeResponse(
                 {
                     "token": "ghs-secret",
@@ -389,7 +389,7 @@ class GitHubAppClientTest(unittest.TestCase):
             ),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             inspection = _client().inspect_repository(
@@ -420,7 +420,7 @@ class GitHubAppClientTest(unittest.TestCase):
             ),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             inspection = _client().inspect_repository(
@@ -443,7 +443,7 @@ class GitHubAppClientTest(unittest.TestCase):
             fp=None,
         )
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=error,
         ):
             with self.assertRaises(GitHubGatewayError) as context:
@@ -464,7 +464,7 @@ class GitHubAppClientTest(unittest.TestCase):
         )
         with (
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
                 side_effect=[
                     timeout,
                     timeout,
@@ -472,7 +472,7 @@ class GitHubAppClientTest(unittest.TestCase):
                 ],
             ) as opener,
             self.assertLogs(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client",
                 level="WARNING",
             ) as logs,
         ):
@@ -503,14 +503,14 @@ class GitHubAppClientTest(unittest.TestCase):
         )
         with (
             patch(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
                 side_effect=[
                     unavailable,
                     FakeResponse({"id": 777, "login": "octocat"}),
                 ],
             ),
             self.assertLogs(
-                "obs_chat_bot.capabilities.obsidian.data.github.github_app_client",
+                "compadre_assistant.capabilities.obsidian.data.github.github_app_client",
                 level="WARNING",
             ),
         ):
@@ -560,7 +560,7 @@ class GitHubAppClientTest(unittest.TestCase):
             FakeResponse({"encoding": "base64", "content": rules}),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             snapshot = _client().fetch_vault_snapshot(
@@ -645,7 +645,7 @@ class GitHubAppClientTest(unittest.TestCase):
             request_opener=_test_request_opener,
         )
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             snapshot = client.fetch_vault_snapshot(
@@ -683,7 +683,7 @@ class GitHubAppClientTest(unittest.TestCase):
             not_modified,
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ) as opener:
             snapshot = _client().fetch_vault_snapshot(
@@ -729,7 +729,7 @@ class GitHubAppClientTest(unittest.TestCase):
             FakeResponse({"encoding": "base64", "content": rules}),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ):
             snapshot = _client().fetch_vault_snapshot(
@@ -761,7 +761,7 @@ class GitHubAppClientTest(unittest.TestCase):
             ),
         ]
         with patch(
-            "obs_chat_bot.capabilities.obsidian.data.github.github_app_client.urlopen",
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
             side_effect=responses,
         ):
             with self.assertRaises(VaultConfigurationError) as context:
@@ -786,7 +786,7 @@ class GitHubAppClientTest(unittest.TestCase):
             return "signed-jwt"
 
         fake_jwt = types.SimpleNamespace(encode=encode)
-        with TemporaryDirectory(prefix="obs-chat-bot-github-jwt-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-jwt-") as directory:
             key_path = Path(directory) / "app.pem"
             key_path.write_bytes(b"private-key")
             with patch.dict("sys.modules", {"jwt": fake_jwt}):
@@ -815,7 +815,7 @@ class GitHubAppClientTest(unittest.TestCase):
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         )
-        with TemporaryDirectory(prefix="obs-chat-bot-github-rs256-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-github-rs256-") as directory:
             key_path = Path(directory) / "app.pem"
             key_path.write_bytes(private_pem)
             token = PyJwtGitHubAppSigner(

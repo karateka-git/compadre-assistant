@@ -1,10 +1,10 @@
 """Тесты доменных правил GitHub и Obsidian vault."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 import unittest
 
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     GitHubInstallation,
     ObsidianVault,
     VaultActionConfirmation,

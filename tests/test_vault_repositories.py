@@ -1,5 +1,5 @@
 """Интеграционные тесты SQLite-хранилищ Этапа 9.1."""
-from obs_chat_bot.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,25 +7,25 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
-from obs_chat_bot.core.data.sqlite.connection import connect_database
-from obs_chat_bot.capabilities.obsidian.data.sqlite.github_installation_repository import (
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_repository import (
     SQLiteGitHubInstallationRepository,
 )
-from obs_chat_bot.core.data.sqlite.migration_runner import apply_migrations
-from obs_chat_bot.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_vault_repository import (
     SQLiteObsidianVaultRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_instruction_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_note_repository import SQLiteVaultNoteRepository
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_instruction_repository import (
     SQLiteVaultInstructionRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_confirmation_repository import (
     SQLiteVaultActionConfirmationRepository,
 )
-from obs_chat_bot.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import (
+from compadre_assistant.capabilities.obsidian.data.sqlite.vault_sync_lease_repository import (
     SQLiteVaultSyncLeaseRepository,
 )
-from obs_chat_bot.capabilities.obsidian.domain.vaults.entities import (
+from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultActionConfirmation,
     VaultConfirmationAction,
@@ -40,7 +40,7 @@ class VaultRepositoriesTest(unittest.TestCase):
 
     def test_installation_diff_preserves_or_cascades_active_vault(self) -> None:
         """Неизменная installation сохраняет vault, отозванная удаляет его."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-installations-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-installations-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 installations = SQLiteGitHubInstallationRepository(connection)
@@ -67,7 +67,7 @@ class VaultRepositoriesTest(unittest.TestCase):
 
     def test_replacing_vault_removes_previous_notes(self) -> None:
         """Замена единственного vault каскадно очищает старый Markdown."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-replace-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-replace-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 installations = SQLiteGitHubInstallationRepository(connection)
@@ -97,7 +97,7 @@ class VaultRepositoriesTest(unittest.TestCase):
 
     def test_note_upsert_replaces_markdown_and_ordered_metadata(self) -> None:
         """Upsert сохраняет полный Markdown и заменяет tags и wikilinks."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-note-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-note-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 vault = _prepare_vault(connection, app_user_id=1, installation_id=101)
@@ -128,7 +128,7 @@ class VaultRepositoriesTest(unittest.TestCase):
 
     def test_note_queries_and_foreign_keys_enforce_user_isolation(self) -> None:
         """Один пользователь не читает и не изменяет заметки другого."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-isolation-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-isolation-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 connection.execute(
@@ -172,7 +172,7 @@ class VaultRepositoriesTest(unittest.TestCase):
 
     def test_instruction_replace_preserves_order_and_isolates_vault(self) -> None:
         """Полный набор правил заменяется атомарно внутри области пользователя."""
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-rules-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-rules-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 vault = _prepare_vault(
@@ -222,7 +222,7 @@ class VaultRepositoriesTest(unittest.TestCase):
     def test_sync_state_update_is_scoped_by_user(self) -> None:
         """Source SHA нельзя обновить через ID другого пользователя."""
         checked_at = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-state-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-state-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 vault = _prepare_vault(connection, app_user_id=1, installation_id=101)
@@ -256,7 +256,7 @@ class VaultRepositoriesTest(unittest.TestCase):
     def test_confirmation_persists_replacement_and_disconnect_with_ttl(self) -> None:
         """Ожидающее действие доступно обоим adapters и ограничено TTL."""
         now = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-confirm-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-confirm-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 _ensure_github_account(connection, app_user_id=1)
@@ -310,7 +310,7 @@ class VaultRepositoriesTest(unittest.TestCase):
     def test_lease_blocks_second_connection_until_expiration(self) -> None:
         """SQLite lease координирует два независимых процесса adapters."""
         now = datetime(2026, 7, 22, 10, 0, tzinfo=UTC)
-        with TemporaryDirectory(prefix="obs-chat-bot-vault-lease-") as directory:
+        with TemporaryDirectory(prefix="compadre-assistant-vault-lease-") as directory:
             database_path = Path(directory) / "test.db"
             with connect_database(database_path) as first_connection:
                 apply_migrations(first_connection)
