@@ -7,6 +7,11 @@ GitHub connector читает выбранный repository и после явн
 user access token, App JWT и
 installation access token существуют только в памяти процесса.
 
+При ребрендинге в Compadre Assistant используется существующая GitHub App:
+её переименование запланировано в шаге 4.6 дорожной карты. Повторно создавать
+App, ключи и installations для этого не требуется. Раздел регистрации ниже
+предназначен для первичной настройки отдельной установки проекта.
+
 ## 1. Зарегистрировать GitHub App
 
 Открыть настройки GitHub account:
@@ -46,14 +51,25 @@ Device Flow не требуется.
 ```dotenv
 GITHUB_APP_ID=123456
 GITHUB_CLIENT_ID=Iv1.example
-GITHUB_APP_SLUG=obs-chat-bot-example
+GITHUB_APP_SLUG=compadre-assistant-example
 GITHUB_PRIVATE_KEY_PATH=data/github-app.pem
 ```
 
 GitHub connector считается выключенным, если все четыре значения отсутствуют.
 Частично заполненная группа считается ошибкой конфигурации.
 
+Значения выше — примеры. `GITHUB_APP_SLUG` должен совпадать с фактическим slug
+App: ссылка установки строится из него как
+`https://github.com/apps/<app-slug>/installations/new`. Для текущей App сохраняется
+`my-knowledge-catcher` до её фактического переименования; после сохранения имени
+проверьте новый slug и обновите значение окружения. Названия env-ключей,
+App ID, Client ID и путь к действующему PEM при ребрендинге сохраняются.
+
 ## Подготовить vault
+
+Compadre Assistant сохраняет публичный формат `.knowledge-catcher.yml` версии
+`1` и default служебного тега `knowledge-catcher` (`OBSIDIAN_CREATED_NOTE_TAG`).
+Уже настроенные vault-файлы и теги заметок вследствие ребрендинга менять не нужно.
 
 До подключения создайте в корне выбранного vault `.knowledge-catcher.yml`
 версии `1` с непустым списком `instructions`. Каждый путь должен вести к
