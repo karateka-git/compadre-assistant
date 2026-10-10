@@ -8,9 +8,13 @@ Compadre Assistant — личный ассистент в Telegram и VK с во
 
 Ветка `codex/assistant-rebirth` содержит автономно проверенные режимы по чатам,
 адресные операции, независимые настройки каналов/возможностей и Ask.
-Локальное переименование в Compadre Assistant выполняется на этапе 4;
-новый Telegram-бот и внешние адреса ещё не переключены. Описанный ниже новый контракт относится
-к этой ветке; его deployment и live-проверки ещё не выполнялись.
+Локальное переименование в Compadre Assistant выполнено. Создан новый
+Telegram-бот `@CompadreAssistant_bot`, сообщество VK доступно по адресу
+`vk.com/compadre_assistant`, репозиторий переименован в
+[`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant).
+Переименование существующей GitHub App ещё не выполнено; её действующий slug —
+`my-knowledge-catcher`. Описанный ниже новый контракт относится к этой ветке;
+его production deployment и полный живой пользовательский сценарий ещё не проверены.
 
 Дальнейшая работа перечислена в [бэклоге](docs/BACKLOG.md): среди возможных задач — фоновое ревью статей и переход на внешнюю PostgreSQL для App Platform. Завершённые работы сохранены в [истории](docs/HISTORY.md).
 

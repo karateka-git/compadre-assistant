@@ -12,6 +12,13 @@ installation access token существуют только в памяти пр
 App, ключи и installations для этого не требуется. Раздел регистрации ниже
 предназначен для первичной настройки отдельной установки проекта.
 
+На 2026-10-10 репозиторий уже переименован в
+[`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant),
+но GitHub App остаётся **My Knowledge Catcher**, ID `4363317`, slug
+`my-knowledge-catcher`. Её действующая ссылка установки:
+https://github.com/apps/my-knowledge-catcher/installations/new.
+Переименование репозитория само по себе не меняет имя и slug App.
+
 ## 1. Зарегистрировать GitHub App
 
 Открыть настройки GitHub account:

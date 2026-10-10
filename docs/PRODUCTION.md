@@ -25,7 +25,7 @@ Unit-файлы systemd и backup script в репозитории отсутс�
   или безопасно получить отдельный SSH-ключ, затем добавить его в H3LLO.
 - Для чтения кода на VPS используется отдельный GitHub deploy key в
   `/home/user/.ssh/obs-chat-bot_deploy`. Он имеет доступ только на чтение к
-  `karateka-git/obsChatBot`.
+  `karateka-git/compadre-assistant` (до 2026-10-10 — `karateka-git/obsChatBot`).
 
 Подключение с текущего компьютера:
 
@@ -37,7 +37,10 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 
 - ОС: Ubuntu 26.04.1 LTS.
 - Проект на VPS: `/opt/obs-chat-bot`.
-- Код: ветка `main` репозитория `karateka-git/obsChatBot`.
+- Код: ветка `main` репозитория `karateka-git/compadre-assistant`.
+  На VPS `origin` пока содержит прежний адрес `git@github.com:karateka-git/obsChatBot.git`;
+  его перенаправление работает. При отдельном развёртывании обновить `origin`
+  на `git@github.com:karateka-git/compadre-assistant.git`.
 - Конфигурация: `/opt/obs-chat-bot/.env`, права `600`, не хранится в Git.
 - GitHub App PEM: `/opt/obs-chat-bot/data/github-app.pem`, права `600`, не
   хранится в Git.
@@ -63,6 +66,17 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 подтверждена журналом контейнера.
 
 ## Проверенный сценарий
+
+Проверка 2026-10-10 после переименования GitHub-репозитория выполнена только
+чтением: рабочая копия VPS чистая; deploy key успешно читает `HEAD` как по
+старому, так и по новому SSH-адресу. GitHub сохранил read-only deploy key
+`H3llo VPS` (ID `163139906`). `obs-chat-bot.service` и backup timer активны,
+оба прежних контейнера `tg_catcher`/`vk_catcher` имеют статус `healthy`.
+Unit, override и backup script проверены: они используют локальные пути
+`/opt/obs-chat-bot`, `/usr/local/lib/obs-chat-bot` и `/var/backups/obs-chat-bot`,
+а не URL репозитория. Само переименование GitHub не требует изменения этих
+путей. Переход на новые Compose-сервисы остаётся отдельным действием при
+развёртывании. VPS, его конфигурация, процессы и SQLite не изменялись.
 
 VK работает в production: регистрация, подключение vault
 `karateka-git/my_obs_data`, синхронизация, embeddings, обработка статьи и

@@ -7,8 +7,8 @@
 и тестов вне Docker; образ уже содержит Python 3.12.
 
 ```powershell
-git clone https://github.com/karateka-git/obsChatBot.git
-cd obsChatBot
+git clone https://github.com/karateka-git/compadre-assistant.git
+cd compadre-assistant
 Copy-Item .env.example .env
 ```
 
