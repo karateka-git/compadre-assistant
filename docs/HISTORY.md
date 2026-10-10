@@ -8,6 +8,29 @@
 [архитектуре](ARCHITECTURE.md), сведения о сервере — в
 [production-инструкции](PRODUCTION.md).
 
+## Assistant Rebirth: локальный ребрендинг и сверка 4.7 (2026-10-10)
+
+Проект и Python-пакет переименованы в **Compadre Assistant** и
+`compadre_assistant`; обновлены CLI, Compose-сервисы, scripts и пользовательские
+тексты. Формат `.knowledge-catcher.yml`, тег `knowledge-catcher`, env-ключи,
+предметные IDs и начальная схема БД сохранены. Локальный ребрендинг выполнен
+без очистки рабочей БД. Перенос журнала старого Telegram-бота не планируется:
+перед отдельным production-развёртыванием предусмотрена чистая БД.
+
+Создан `@CompadreAssistant_bot`, существующее VK-сообщество сохранило ID
+`240322403` и получило имя Compadre Assistant; пользователь установил адрес
+`compadre_assistant`. Репозиторий переименован в `karateka-git/compadre-assistant`,
+его ID `1269089612` сохранён. Runtime Telegram пока использует прежнего бота;
+существующая GitHub App остаётся `My Knowledge Catcher` / `my-knowledge-catcher`.
+
+Итоговая сверка: 548 unittest, CLI help, SQLite/pipeline/analysis smoke и
+healthcheck локального профиля с временной БД прошли. Read-only API подтвердили
+профили Telegram/VK, репозиторий и фактическую App. Docker daemon недоступен,
+сборка контейнера не проверена. Live-команды каналов, Device Flow, установка
+переименованной App и тестовый vault остаются открытыми в
+[roadmap 4.5–4.7](ASSISTANT_REBIRTH_ROADMAP.md#45-переключить-telegram-и-обновить-профиль-vk).
+Этап 4 целиком не завершён; production не обновлялся.
+
 ## Assistant Rebirth: шаг 2.4 — ожидания конкретных операций (2026-10-07)
 
 Реализованы независимые article flows связанных TG/VK-чатов, несколько pending
