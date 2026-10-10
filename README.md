@@ -12,13 +12,17 @@ Compadre Assistant — личный ассистент в Telegram и VK с во
 Telegram-бот `@CompadreAssistant_bot`, сообщество VK доступно по адресу
 `vk.com/compadre_assistant`, репозиторий переименован в
 [`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant).
-Переименование существующей GitHub App ещё не выполнено; её действующий slug —
-`my-knowledge-catcher`. Описанный ниже новый контракт относится к этой ветке;
+Существующая GitHub App переименована в **Compadre Assistant**, её действующий
+slug — `compadre-assistant`; прежний App ID и доступ к vault сохранены.
+Описанный ниже новый контракт относится к этой ветке;
 его production deployment и полный живой пользовательский сценарий ещё не проверены.
-Новый Telegram-бот пока не обслуживает команды: runtime использует прежний
-`@KnowledgeCatcher_bot`. Итоговая проверка 2026-10-10: 548 unittest, три автономных
+Production runtime использует прежний `@KnowledgeCatcher_bot`. Новый
+`@CompadreAssistant_bot` запущен локально в polling с временной БД и ожидает
+команд пользователя; живые сценарии ещё не подтверждены.
+Итоговая проверка 2026-10-10: 548 unittest, три автономных
 smoke и healthcheck локального профиля с временной БД прошли. Read-only API
-подтвердили внешние имена; живые сценарии каналов, Device Flow и тестового vault
+подтвердили внешние имена и чтение существующего vault через прежний PEM после
+переименования App. Живые сценарии каналов, Device Flow и запись в тестовый vault
 остаются открытыми. Контейнерная сборка не проверена из-за недоступного Docker daemon.
 
 Дальнейшая работа перечислена в [бэклоге](docs/BACKLOG.md): среди возможных задач — фоновое ревью статей и переход на внешнюю PostgreSQL для App Platform. Завершённые работы сохранены в [истории](docs/HISTORY.md).

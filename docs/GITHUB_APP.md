@@ -8,16 +8,24 @@ user access token, App JWT и
 installation access token существуют только в памяти процесса.
 
 При ребрендинге в Compadre Assistant используется существующая GitHub App:
-её переименование запланировано в шаге 4.6 дорожной карты. Повторно создавать
+её переименование выполнено в шаге 4.6 дорожной карты. Повторно создавать
 App, ключи и installations для этого не требуется. Раздел регистрации ниже
 предназначен для первичной настройки отдельной установки проекта.
 
 На 2026-10-10 репозиторий уже переименован в
 [`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant),
-но GitHub App остаётся **My Knowledge Catcher**, ID `4363317`, slug
-`my-knowledge-catcher`. Её действующая ссылка установки:
-https://github.com/apps/my-knowledge-catcher/installations/new.
-Переименование репозитория само по себе не меняет имя и slug App.
+GitHub App также переименована в **Compadre Assistant**, прежний ID `4363317`
+сохранён, новый slug — `compadre-assistant`. Её действующая ссылка установки:
+https://github.com/apps/compadre-assistant/installations/new.
+Локальный `GITHUB_APP_SLUG` обновлён; остальные настройки и PEM сохранены.
+
+Проверка 2026-10-10 через API подтвердила авторизацию прежним PEM, имя и ID
+App, существующую installation `148238219` с разрешением `Contents: write`
+для `karateka-git/my_obs_data`. Отдельный временный token, ограниченный этим
+репозиторием и `Contents: read`, успешно прочитал metadata и
+`.knowledge-catcher.yml`, после проверки token отозван. Записи в vault и БД
+не выполнялись. Повторный Device Flow и пользовательский сценарий записи
+остаются отдельными живыми проверками.
 
 ## 1. Зарегистрировать GitHub App
 
@@ -67,9 +75,9 @@ GitHub connector считается выключенным, если все че
 
 Значения выше — примеры. `GITHUB_APP_SLUG` должен совпадать с фактическим slug
 App: ссылка установки строится из него как
-`https://github.com/apps/<app-slug>/installations/new`. Для текущей App сохраняется
-`my-knowledge-catcher` до её фактического переименования; после сохранения имени
-проверьте новый slug и обновите значение окружения. Названия env-ключей,
+`https://github.com/apps/<app-slug>/installations/new`. Для текущей App используется
+`compadre-assistant`; прежнее значение `my-knowledge-catcher` нужно заменить
+в окружениях при отдельном развёртывании. Названия env-ключей,
 App ID, Client ID и путь к действующему PEM при ребрендинге сохраняются.
 
 ## Подготовить vault
