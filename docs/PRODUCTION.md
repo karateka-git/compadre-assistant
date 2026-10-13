@@ -1,16 +1,11 @@
 # Production VPS
 
-Локальная версия после шага 4.2 использует пакет `compadre_assistant` и
-Compose-сервисы `tg_assistant`/`vk_assistant`. Приведённые ниже production-пути
-и имена сервисов описывают прежнее развёртывание. Перед выкладкой новой версии
-нужно отдельно обновить команды и systemd override, остановить прежние сервисы
-и исключить параллельный polling; обычный рецепт обновления прежней версии
-не является инструкцией перехода на переименованную сборку.
-
-Конкретный подготовленный план перехода с backup, чистой SQLite и rollback:
-[DEPLOY_COMPADRE_ASSISTANT.md](DEPLOY_COMPADRE_ASSISTANT.md).
-Это руководство отдельного развёртывания; его подготовка не означает,
-что переключение production уже выполнено.
+Production переключён на Compadre Assistant 2026-10-13 по отдельному разрешению
+пользователя, с остановкой старых каналов и чистой SQLite после проверенного backup.
+Развёрнут SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` из
+`codex/assistant-rebirth`; checkout находится в detached HEAD и чистый.
+Это выполненный переход; повторять очистку БД при обычном обновлении нельзя.
+Подробная процедура и rollback: [DEPLOY_COMPADRE_ASSISTANT.md](DEPLOY_COMPADRE_ASSISTANT.md).
 
 Существующая GitHub App 2026-10-10 переименована в **Compadre Assistant**,
 ID `4363317` сохранён, новый slug — `compadre-assistant`. Локальная конфигурация
@@ -26,6 +21,7 @@ App ID, Client ID, PEM и остальные переменные окружен
 systemd unit, его override и backup timer, но состояние сервиса и сети может
 измениться. Перед эксплуатационными действиями проверяйте их заново.
 Unit-файлы systemd и backup script в репозитории отсутствуют.
+Текущий snapshot после перехода приведён ниже; старые проверки сохранены как история.
 
 ## Доступ
 
@@ -49,10 +45,15 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 
 - ОС: Ubuntu 26.04.1 LTS.
 - Проект на VPS: `/opt/obs-chat-bot`.
-- Код: ветка `main` репозитория `karateka-git/compadre-assistant`.
-  На VPS `origin` пока содержит прежний адрес `git@github.com:karateka-git/obsChatBot.git`;
-  его перенаправление работает. При отдельном развёртывании обновить `origin`
-  на `git@github.com:karateka-git/compadre-assistant.git`.
+- Код: detached HEAD `ac2ac981ba628a881b483238a4eaf191a644de6a`.
+- Origin: `git@github.com:karateka-git/compadre-assistant.git`.
+  Fetch refspec ограничен `main`; другие ветки получать явным refspec из runbook.
+- Runtime: `compadre_assistant`, Compose `tg_assistant`/`vk_assistant`,
+  image `compadre-assistant:dev`, Docker 29.8.0 / Compose v5.5.1.
+- Telegram: `@CompadreAssistant_bot`, ID `8870763711`; VK group ID `240322403`.
+- Включены `obsidian,ask` и `telegram,vk`, `APP_DEBUG=false`.
+  Постоянный Ask: `https://api.timeweb.ai/v1`, `dashscope/qwen3.5-flash`;
+  источник ключа явно утверждён пользователем, значение не публикуется.
 - Конфигурация: `/opt/obs-chat-bot/.env`, права `600`, не хранится в Git.
 - GitHub App PEM: `/opt/obs-chat-bot/data/github-app.pem`, права `600`, не
   хранится в Git.
@@ -65,9 +66,37 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
   `/etc/wireguard/` соответствующих серверов.
 - Запуск после reboot: `obs-chat-bot.service` через systemd. Override
   `/etc/systemd/system/obs-chat-bot.service.d/channels.conf` запускает и
-  останавливает `vk_catcher` и `tg_catcher`; проверен перезапуском unit.
+  останавливает `vk_assistant` и `tg_assistant`; проверен перезапуском unit.
 - Ночные локальные SQLite-копии: `obs-chat-bot-backup.timer`; запуск в 03:15
   UTC, семь последних файлов в `/var/backups/obs-chat-bot`.
+
+### Результат переключения 2026-10-13
+
+После controlled restart оба новых контейнера healthy, restarts=0,
+restart policy `unless-stopped`. Безопасная проверка журналов подтвердила
+Telegram polling и VK Long Poll; traceback и TelegramConflictError отсутствовали.
+GetMe через штатный proxy подтвердил новый ID; VK getLongPollServer успешен.
+Проверка процессов: два новых runtime, ни одного старого. Старые контейнеры
+остановлены и оставлены для rollback. PEM checksum прежний; конфигурация
+изменилась только в согласованных ключах. Новая SQLite прошла integrity check.
+До остановки короткий Ask API-запрос с утверждённым профилем вернул HTTP 200.
+
+Backup перед переходом: `app-20261013T074041Z.db`; после запуска и restart:
+`app-20261013T074327Z.db`. Service и backup timer активны, следующий запуск
+на момент проверки — 2026-10-14 03:15 UTC. Rollback bundle:
+`/home/user/.compadre-deploy/rollback-r5iZV59g` (каталог 700, файлы 600),
+содержит прежний env/override/SHA/origin и `app-before.db` с проверенной integrity.
+Прежний image сохранён как `compadre-assistant:rollback`.
+Staging `secrets.env` удалён; срок удаления rollback bundle ещё не согласован.
+
+Открыта пользовательская приёмка в обоих каналах: регистрация, привязка,
+независимые режимы, Ask с подтверждением и без истории, Device Flow,
+подключение/синхронизация тестового vault, подтверждение записи и отмена.
+Пользователь выбрал для приёмки vault `karateka-git/my_obs_data`;
+Device Flow и подтверждение записи выполняет самостоятельно. Рассылка и удаление старого
+бота не выполнялись. Этап 4 целиком не закрыт.
+
+### Исторические проверки до переключения
 
 Проверка 2026-09-29: код обновлён до `5dc80ca`, оба контейнера работают
 (`healthy`, ноль автоматических перезапусков), Docker подтвердил
@@ -121,18 +150,20 @@ ssh user@91.188.213.142
 cd /opt/obs-chat-bot
 sudo systemctl status obs-chat-bot.service
 docker compose ps
-docker compose logs --tail=100 vk_catcher
-docker compose logs --tail=100 tg_catcher
+docker compose ps -q | xargs -r docker inspect --format '{{.Name}} {{.State.Status}} restarts={{.RestartCount}}'
 ```
 
-После обновления кода:
+Для healthcheck текущей сборки:
 
 ```bash
 cd /opt/obs-chat-bot
-git pull --ff-only
-docker compose up -d --build vk_catcher tg_catcher
-docker compose run --rm tg_catcher python -m obs_chat_bot --healthcheck
+docker compose run --rm -T --no-deps tg_assistant python -m compadre_assistant --healthcheck --channels telegram,vk </dev/null
 ```
+
+Обычное обновление выполнять на конкретный опубликованный SHA с планом
+сохранения данных; `git pull` на текущем detached HEAD не использовать.
+Разрешение очистки SQLite 2026-10-13 не распространяется на будущие обновления.
+Не публиковать полные logs/inspect; выводить только безопасные поля и итоги.
 
 После следующих обновлений проверить оба сервиса, журналы и
 `RestartPolicy.Name=unless-stopped` через `docker inspect`; не очищать

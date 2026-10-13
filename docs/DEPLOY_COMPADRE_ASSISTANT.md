@@ -1,11 +1,17 @@
 # Переход production на Compadre Assistant
 
-Это подготовленный runbook отдельного развёртывания, а не отчёт о выполнении.
-Команды изменения VPS, публикации кода и переключения ботов при подготовке
-документа не запускались. Desktop/browser UI не используется.
-Перед исполнением перечитать [PRODUCTION.md](PRODUCTION.md) и `AGENTS.md`.
-Сначала согласовать окно переключения и конкретный опубликованный commit.
-`git push` требует отдельного явного согласия пользователя.
+Переход выполнен 2026-10-13 на опубликованный SHA
+`ac2ac981ba628a881b483238a4eaf191a644de6a` из `codex/assistant-rebirth`
+с отдельным разрешением пользователя на остановку старых каналов и чистую SQLite.
+Оба новых канала healthy после controlled restart, старые pollers остановлены,
+backup проверен, timer активен. Текущий snapshot — в [PRODUCTION.md](PRODUCTION.md).
+Ниже сохранена процедура перехода и rollback; повторять очистку текущей БД нельзя.
+Пользовательская приёмка ещё открыта. Для неё выбран `karateka-git/my_obs_data`;
+Device Flow и подтверждение записи выполняет пользователь.
+Desktop/browser UI при переключении не использовался.
+
+Перед новым исполнением перечитать [PRODUCTION.md](PRODUCTION.md) и `AGENTS.md`,
+согласовать конкретный SHA и окно. `git push` требует отдельного разрешения.
 
 ## Исходное состояние и готовые данные
 
@@ -49,7 +55,9 @@ Read-only проверка 2026-10-10 подтвердила:
    SQLite. Пользователь уже определил очистку перед production; это отдельный
    шаг данного перехода, а не применение development-правила к серверу.
 3. Заполнить постоянные `ASK_BASE_URL`, `ASK_API_KEY`, `ASK_MODEL` и включить
-   `ENABLED_CAPABILITIES=obsidian,ask`. Пока постоянного Ask-профиля нет.
+   `ENABLED_CAPABILITIES=obsidian,ask`. Для перехода 2026-10-13 утверждены `https://api.timeweb.ai/v1`,
+   `dashscope/qwen3.5-flash` и ключ из локального `EMBEDDING_API_KEY`.
+   Короткий запрос до остановки вернул HTTP 200 и ответ модели.
    Успешный локальный smoke использовал endpoint/model Obsidian и ключ embeddings
    того же endpoint, явно переданные в process env. Для production утвердить
    этот профиль либо предоставить другой через секретный файл; не выбирать
@@ -77,7 +85,16 @@ scp -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" data/compadre-prod
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142 'chmod 600 /home/user/.compadre-deploy/secrets.env'
 ```
 
-Далее все bash-блоки выполняются в **одной SSH-сессии**. Не включать `set -x`.
+Bash-блоки шагов 1–4 объединяются в один файл с окончаниями строк **LF**
+(блок rollback в него не включать),
+передаются в закрытый staging-каталог и выполняются одной SSH-сессией через
+`bash /home/user/.compadre-deploy/deploy.sh </dev/null`. Не включать `set -x`.
+Не передавать программу через `bash -s`, когда вложенная команда Docker читает
+stdin: при реальном переходе `docker compose run` поглотил остаток программы
+после успешного healthcheck, поэтому запуск продолжили отдельным LF-файлом.
+Для неинтерактивных Compose-команд использовать `-T` **и** `</dev/null`;
+один `-T` отключает TTY, но не закрывает stdin. Docker-команды с Python heredoc
+получают только свой heredoc.
 Подставить утверждённый SHA вместо маркера; не продолжать с маркером.
 
 ```bash
@@ -87,6 +104,7 @@ cd /opt/obs-chat-bot
 git status --short
 test -z "$(git status --porcelain)"
 deploy_sha='REPLACE_WITH_APPROVED_PUBLISHED_SHA'
+deploy_branch='codex/assistant-rebirth'
 test "$deploy_sha" != REPLACE_WITH_APPROVED_PUBLISHED_SHA
 old_sha=$(git rev-parse HEAD)
 old_branch=$(git symbolic-ref --short -q HEAD || true)
@@ -106,8 +124,12 @@ test "$old_image" = "$(docker inspect --format '{{.Image}}' "$(docker compose ps
 docker tag "$old_image" compadre-assistant:rollback
 docker compose config --images | sort -u > "$rollback_dir/old-image-tags"
 git remote set-url origin git@github.com:karateka-git/compadre-assistant.git
-git fetch origin
+# VPS настроен на single-branch fetch main; нужную ветку получаем явно.
+test "$(git ls-remote origin "refs/heads/$deploy_branch" | cut -f1)" = "$deploy_sha"
+git fetch origin "refs/heads/$deploy_branch:refs/remotes/origin/$deploy_branch"
 git cat-file -e "$deploy_sha^{commit}"
+test "$(git rev-parse "origin/$deploy_branch")" = "$deploy_sha"
+test "$(git rev-parse HEAD)" = "$old_sha"
 git branch -r --contains "$deploy_sha"
 ```
 
@@ -215,7 +237,7 @@ PEM и его путь не меняются. Не запускать серви
 test -f "$rollback_dir/app-before.db"
 test -f /opt/obs-chat-bot/data/github-app.pem
 rm -f -- /opt/obs-chat-bot/data/app.db /opt/obs-chat-bot/data/app.db-wal /opt/obs-chat-bot/data/app.db-shm
-docker compose run --rm --no-deps tg_assistant python -m compadre_assistant --healthcheck --channels telegram,vk
+docker compose run --rm -T --no-deps tg_assistant python -m compadre_assistant --healthcheck --channels telegram,vk </dev/null
 sudo systemctl start obs-chat-bot.service
 docker compose ps
 ```
@@ -226,13 +248,21 @@ Healthcheck проверяет конфигурацию/SQLite, но не зам
 
 ```bash
 docker compose ps -q | xargs -r docker inspect --format '{{.Name}} {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}} restarts={{.RestartCount}} restart={{.HostConfig.RestartPolicy.Name}}'
-docker compose run --rm --no-deps tg_assistant python -m compadre_assistant --healthcheck --channels telegram,vk
+docker compose run --rm -T --no-deps tg_assistant python -m compadre_assistant --healthcheck --channels telegram,vk </dev/null
 ```
 
 Дождаться `healthy`, подтвердить новый Telegram ID и VK Long Poll по безопасной
 диагностике. Не публиковать полные logs, inspect или `.env`: они могут содержать
 личные сообщения/секреты. Проверить `getMe` через штатный Telegram proxy с токеном
 из окружения процесса, выводить только ID/name/username; не помещать токен в CLI.
+
+После автоматической проверки старта выполнить контролируемый
+`sudo systemctl restart obs-chat-bot.service`, снова дождаться healthy и проверить
+polling/restarts. Затем запустить `/usr/local/lib/obs-chat-bot/backup_sqlite.py`,
+проверить успешный integrity, включить `obs-chat-bot-backup.timer` и проверить
+`systemctl list-timers obs-chat-bot-backup.timer`. Не оставлять timer выключенным
+на время пользовательской приёмки: этот порядок согласован при переходе.
+После технического успеха удалить staging `secrets.env`; rollback bundle сохранить.
 
 ## 5. Приёмка и завершение
 
@@ -248,15 +278,14 @@ docker compose run --rm --no-deps tg_assistant python -m compadre_assistant --he
 5. Статья → предложение → явное подтверждение → проверка записи в тестовом
    vault. Проверить также отмену предложения без записи. Не подтверждать
    изменение пользовательского vault от имени пользователя.
-6. Контролируемый `sudo systemctl restart obs-chat-bot.service`; оба канала снова
-   healthy, регистрация/привязка/режимы сохранены, повторного polling нет.
+6. После регистрации проверить сохранение привязки/режимов при согласованном
+   restart; технический restart до приёмки уже выполнен, но сохранность новых
+   пользовательских настроек этим ещё не проверена.
 
-После приёмки: запустить `/usr/local/lib/obs-chat-bot/backup_sqlite.py`, проверить
-успешный integrity, затем `sudo systemctl start obs-chat-bot-backup.timer` и
-`systemctl list-timers obs-chat-bot-backup.timer`. Backup service и пути менять
-не требуется. Удалить только staging `/home/user/.compadre-deploy/secrets.env`;
-rollback bundle оставить с правами `700`/`600` до окончания согласованного окна
-возврата, не отдавать его в Git. Обновить production snapshot, HISTORY и roadmap
+После приёмки подтвердить, что backup timer остаётся активным. Backup service
+и пути менять не требуется. Rollback bundle оставить с правами `700`/`600`
+до окончания согласованного окна возврата, не отдавать его в Git.
+Обновить production snapshot, HISTORY и roadmap
 фактическими результатами. Отключение прежнего polling уже сделано остановкой
 старых контейнеров; удаление старого бота и рассылка не входят в процедуру.
 
