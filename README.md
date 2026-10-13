@@ -53,53 +53,60 @@ CLI smoke и healthcheck прошли без сети на временной Б
 Команда `/ask <вопрос>` даёт разовый ответ без истории переписки и не меняет
 режим чата. Доступные возможности и команды перечислены в `/help`.
 
-## Техническая схема
+## Устройство ассистента
+
+```mermaid
+flowchart TB
+    Channels[Telegram и VK] --> Core[Ядро: пользователи, команды, режимы]
+    Core --> Ports[Общий интерфейс возможностей]
+    Ports --> Ask["Ask<br/>вопрос → LLM → ответ"]
+    Ports --> Obsidian["Obsidian<br/>статья → анализ → предложение → vault"]
+    Config[Настройки запуска] -. подключают или отключают .-> Ask
+    Config -. подключают или отключают .-> Obsidian
+```
+
+Ядро обрабатывает общие команды и выбирает маршрут сообщения. Ask и Obsidian —
+отдельные модули со своими сценариями и внешними зависимостями. При запуске
+приложение собирает только возможности из `ENABLED_CAPABILITIES`; отключённая
+возможность не принимает команды, а её данные сохраняются. Выбор возможностей
+самим пользователем запланирован отдельно в [бэклоге](docs/BACKLOG.md#выбор-возможностей-пользователем).
+
+### Возможность Ask
 
 ```mermaid
 flowchart LR
-    Channels[VK / Telegram] --> Adapters[Адаптеры каналов]
-    Adapters --> Incoming[Core presentation: identity и диспетчер]
-    Incoming --> Modes[(Режим конкретного чата)]
-    Incoming --> Obsidian[Obsidian presentation: команды и ответы]
-    Obsidian --> Domain[Obsidian domain: модели, сценарии и ports]
-    Incoming --> Ask[Ask presentation: команда и ответ]
-    Ask --> AskDomain[Ask domain: вопрос и port модели]
-    CLI[CLI: диагностика и process-url] --> Bootstrap[Общий bootstrap.py]
-    Bootstrap --> ObsidianBootstrap[Obsidian bootstrap и smoke]
-    ObsidianBootstrap --> Domain
-    Bootstrap --> AskBootstrap[Ask bootstrap]
-    AskBootstrap --> AskDomain
-    ObsidianData[Obsidian data: SQLite, GitHub, HTTP, LLM, embeddings] -. реализует ports .-> Domain
-    AskData[Ask data: конфигурация и LLM-клиент] -. реализует port .-> AskDomain
-    Incoming --> Users[Core domain: пользователи и identities]
-    CoreData[Core data: config и SQLite] -. реализует ports .-> Users
-    CoreData --> Modes
-    ObsidianData --> SQLite[(Единая SQLite-БД)]
-    ObsidianData --> GitHub[GitHub App и Obsidian vault]
-    ObsidianData --> Chunker[Независимый document_chunker]
-    AskData --> AskProvider[Провайдер LLM]
+    Question["/ask вопрос"] --> Ask[Модуль Ask]
+    Ask --> Ack[Подтверждение приёма]
+    Ask --> LLM[Провайдер LLM]
+    LLM --> Answer[Ответ в исходный чат]
 ```
 
-Модули разделены на `domain`, `data` и
-`presentation`; возможности явно регистрируются по конфигурации. Регистрация
-завершается созданием профиля и именем. `/obsidian [текст или URL]` включает
-режим текущего чата и обрабатывает аргумент, `/exit` завершает его без удаления
-данных. Подключение GitHub/vault выполняется внутри Obsidian. Вне режима текст
-и URL предлагают доступные входы. Режим сохраняется между процессами по
-пользователю, каналу и ID чата. `ENABLED_CAPABILITIES=obsidian` включает Obsidian;
-пустое значение отключает возможности, сохраняя общие команды профиля.
-`ENABLED_CHANNELS=telegram,vk` выбирает каналы для scripts и общего healthcheck;
-отдельный запуск бота проверяет только его канал. При отключённом Obsidian
-его настройки полностью игнорируются и клиенты не создаются. Пустые группы
-GitHub/LLM позволяют пользоваться профилем; Obsidian сообщает о недоступном
-провайдере. Частичные или некорректные включённые группы блокируют запуск.
-Без embeddings используется FTS fallback; ключи LLM и embeddings независимы.
-Ask доступен через `/ask <вопрос>` после регистрации и имени, без GitHub/vault.
-Для включения задайте `ENABLED_CAPABILITIES=ask` либо `obsidian,ask` и отдельные
-`ASK_BASE_URL`, `ASK_API_KEY`, `ASK_MODEL` (см. [SETUP](docs/SETUP.md#настройка-ask)).
-Каждый вопрос независим; бот подтверждает приём и присылает ответ частями.
-Режим Obsidian и ожидающие подтверждения сохраняются. Подробная схема находится в
-[ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Ask отвечает на один вопрос без истории переписки и доступа к vault. Он не
+меняет активный режим чата; длинный ответ отправляется частями.
+
+### Возможность Obsidian
+
+```mermaid
+flowchart TB
+    Repo[GitHub vault] --> Sync[Синхронизация заметок]
+    Sync --> Index[Локальный индекс для поиска]
+    URL[Ссылка на статью] --> Analysis[Извлечение и анализ текста]
+    Index --> Proposal[Предложение изменить заметку]
+    Analysis --> Proposal
+    Proposal --> Decision{Решение пользователя}
+    Decision -->|Подтвердить add или update| Write[Запись в GitHub vault]
+    Decision -->|Подтвердить skip или отменить| Cancel[Vault без изменений]
+```
+
+После входа через `/obsidian` пользователь подключает vault и отправляет ссылку
+на статью. Модуль использует связанные заметки для предложения; запись в GitHub
+требует явного подтверждения в исходном чате. `/exit` завершает режим только
+этого чата и не удаляет данные или ожидающие предложения. При недоступных
+embeddings поиск использует FTS fallback.
+
+Подробное устройство слоёв `domain`, `data`, `presentation`, хранилища и
+зависимостей описано в [ARCHITECTURE.md](docs/ARCHITECTURE.md). Настройка
+возможностей и каналов — в [SETUP.md](docs/SETUP.md).
 
 ## Быстрый старт
 
