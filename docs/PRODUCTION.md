@@ -5,7 +5,9 @@ Production переключён на Compadre Assistant 2026-10-13 по отде
 Развёрнут SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` из
 `codex/assistant-rebirth`; checkout находится в detached HEAD и чистый.
 Это выполненный переход; повторять очистку БД при обычном обновлении нельзя.
-Подробная процедура и rollback: [DEPLOY_COMPADRE_ASSISTANT.md](DEPLOY_COMPADRE_ASSISTANT.md).
+Подробная процедура и ограничения rollback: [DEPLOY_COMPADRE_ASSISTANT.md](DEPLOY_COMPADRE_ASSISTANT.md).
+Старые копии SQLite удалены 2026-10-13 по отдельному разрешению пользователя;
+откат БД к состоянию до перехода недоступен.
 
 Существующая GitHub App 2026-10-10 переименована в **Compadre Assistant**,
 ID `4363317` сохранён, новый slug — `compadre-assistant`. Локальная конфигурация
@@ -81,13 +83,28 @@ GetMe через штатный proxy подтвердил новый ID; VK get
 изменилась только в согласованных ключах. Новая SQLite прошла integrity check.
 До остановки короткий Ask API-запрос с утверждённым профилем вернул HTTP 200.
 
-Backup перед переходом: `app-20261013T074041Z.db`; после запуска и restart:
-`app-20261013T074327Z.db`. Service и backup timer активны, следующий запуск
+Backup после запуска и restart: `app-20261013T074327Z.db` сохранён.
+Service и backup timer активны, следующий запуск
 на момент проверки — 2026-10-14 03:15 UTC. Rollback bundle:
 `/home/user/.compadre-deploy/rollback-r5iZV59g` (каталог 700, файлы 600),
-содержит прежний env/override/SHA/origin и `app-before.db` с проверенной integrity.
+содержит прежний env/override/SHA/origin; `app-before.db` удалён по отдельному
+разрешению пользователя. Остальные файлы bundle сохранены.
 Прежний image сохранён как `compadre-assistant:rollback`.
 Staging `secrets.env` удалён; срок удаления rollback bundle ещё не согласован.
+
+После переключения 2026-10-13 по отдельному разрешению удалены только шесть
+старых файлов из `/var/backups/obs-chat-bot`: `app-20261009T031500Z.db`,
+`app-20261010T031517Z.db`, `app-20261011T031523Z.db`, `app-20261012T031500Z.db`,
+`app-20261013T031505Z.db`, `app-20261013T074041Z.db`, а также
+`/home/user/.compadre-deploy/rollback-r5iZV59g/app-before.db`.
+Текущая `/opt/obs-chat-bot/data/app.db` и новый backup сохранены; проверены
+их прежние inode и неизменность checksum backup. Все семь старых путей
+отсутствуют, остальные файлы rollback bundle сохранены. После удаления оба
+новых канала healthy, restarts=0, service и timer active. Backup script и
+timer не менялись. **DB rollback к прежнему runtime больше недоступен;
+исторический rollback-блок runbook нельзя применять как есть.** Любой возврат
+требует отдельного плана восстановления данных; сохранённый image и конфигурация
+не заменяют удалённые копии БД.
 
 Открыта пользовательская приёмка в обоих каналах: регистрация, привязка,
 независимые режимы, Ask с подтверждением и без истории, Device Flow,

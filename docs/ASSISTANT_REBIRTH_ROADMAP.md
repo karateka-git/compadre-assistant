@@ -1009,7 +1009,10 @@ vault и внешние сервисы в этом шаге не читалис�
 SQLite пересоздана после проверенного backup, новые каналы healthy после
 controlled restart. Telegram getMe и VK Long Poll проверены; старых runtime нет.
 Постоянный Ask-профиль утверждён, API-запрос успешен. Backup timer активен,
-rollback сохранён. Текущие технические результаты — в [PRODUCTION.md](PRODUCTION.md).
+backup новой версии сохранён. Старые копии SQLite удалены 2026-10-13 по отдельному
+разрешению пользователя: DB rollback недоступен, исторический rollback-блок
+нельзя применять как есть. Прежний image и остальные файлы rollback bundle
+сохранены. Текущие технические результаты — в [PRODUCTION.md](PRODUCTION.md).
 Пользовательская приёмка ещё открыта; выбран vault `karateka-git/my_obs_data`.
 
 - [x] Создать нового Telegram-бота `@CompadreAssistant_bot` с отображаемым именем

@@ -8,6 +8,23 @@
 [архитектуре](ARCHITECTURE.md), сведения о сервере — в
 [production-инструкции](PRODUCTION.md).
 
+## Assistant Rebirth: удаление старых production-копий SQLite (2026-10-13)
+
+По отдельному явному разрешению пользователя удалены шесть старых SQLite backup
+из `/var/backups/obs-chat-bot` за 2026-10-09–2026-10-13, включая
+`app-20261013T074041Z.db`, и
+`/home/user/.compadre-deploy/rollback-r5iZV59g/app-before.db`.
+Точный перечень — в [PRODUCTION.md](PRODUCTION.md).
+Текущая `/opt/obs-chat-bot/data/app.db` и новый backup
+`app-20261013T074327Z.db` сохранены: inode прежние, checksum backup совпадает.
+Все семь старых путей отсутствуют; остальные файлы rollback bundle сохранены.
+После удаления `tg_assistant`/`vk_assistant` healthy, restarts=0,
+systemd service и backup timer active. Backup script и timer не изменялись.
+
+DB rollback к состоянию до переключения больше недоступен. Исторический блок
+rollback в runbook нельзя применять как есть; возврат требует отдельного
+плана данных. Пользовательская приёмка и оставшиеся задачи этапа 4 остаются открытыми.
+
 ## Assistant Rebirth: production-переключение (2026-10-13)
 
 С отдельного разрешения пользователя развёрнут опубликованный SHA
