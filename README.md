@@ -4,29 +4,31 @@ Compadre Assistant — личный ассистент в Telegram и VK с во
 
 ## Статус
 
-Проект выпущен. Production-развёртывание на VPS завершено для VK: регистрация, синхронизация vault, обработка статьи и GitHub write-back проверены в полном сценарии. Telegram работает через отдельный WireGuard-туннель и SOCKS5-прокси: Bot API, polling и ответ на пользовательскую команду проверены.
+Статус на 2026-10-13: проект выпущен, переход Assistant Rebirth, включая
+этап 4, закрыт по решению пользователя. Production на VPS переключён на
+Compadre Assistant: Telegram-бот `@CompadreAssistant_bot` и сообщество VK
+`vk.com/compadre_assistant`. Оба контейнера `tg_assistant` и `vk_assistant`
+прошли проверку healthy после перезапуска; Telegram polling и VK Long Poll
+подтверждены. Telegram работает через отдельный WireGuard-туннель и SOCKS5-прокси.
 
-Ветка `codex/assistant-rebirth` содержит автономно проверенные режимы по чатам,
-адресные операции, независимые настройки каналов/возможностей и Ask.
-Локальное переименование в Compadre Assistant выполнено. Создан новый
-Telegram-бот `@CompadreAssistant_bot`, сообщество VK доступно по адресу
-`vk.com/compadre_assistant`, репозиторий переименован в
+Реализованы режимы по чатам, адресные операции, независимые настройки
+каналов/возможностей и Ask. Пользовательский Obsidian flow в Telegram прошёл
+анализ статьи, review и подтверждённую запись в vault `karateka-git/my_obs_data`.
+Подробности перехода и проверок — в [production-инструкции](docs/PRODUCTION.md)
+и [итоге Assistant Rebirth](docs/ASSISTANT_REBIRTH_ROADMAP.md#47-сверить-итог-перехода).
+
+Репозиторий переименован в
 [`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant).
 Существующая GitHub App переименована в **Compadre Assistant**, её действующий
 slug — `compadre-assistant`; прежний App ID и доступ к vault сохранены.
-Описанный ниже новый контракт относится к этой ветке;
-его production deployment и полный живой пользовательский сценарий ещё не проверены.
-Production runtime использует прежний `@KnowledgeCatcher_bot`. Новый
-`@CompadreAssistant_bot` прошёл локальную live-проверку на временной БД:
-`/start`, `/register` с сохранением имени и `/ask`; пять ответов доставлены
-без ошибок. Проверочный polling после этого остановлен.
-Итоговая проверка 2026-10-10: 548 unittest, три автономных
+
+Проверка 2026-10-10: 548 unittest, три автономных
 smoke и healthcheck локального профиля с временной БД прошли. Read-only API
 подтвердили внешние имена и чтение существующего vault через прежний PEM после
-переименования App. Telegram `/help`, `/obsidian`, `/exit`, живые сценарии VK,
-Device Flow и запись в тестовый vault остаются открытыми. Контейнерная сборка,
+переименования App. Локально на новом Telegram-боте с временной БД проверены
+`/start`, `/register` с сохранением имени и `/ask`. Контейнерная сборка,
 CLI smoke и healthcheck прошли без сети на временной БД и фиктивном профиле;
-контейнерный polling не запускался.
+контейнерный polling в рамках той проверки не запускался.
 
 Дальнейшая работа перечислена в [бэклоге](docs/BACKLOG.md): среди возможных задач — фоновое ревью статей и переход на внешнюю PostgreSQL для App Platform. Завершённые работы сохранены в [истории](docs/HISTORY.md).
 
@@ -72,7 +74,7 @@ flowchart LR
     ObsidianData --> Chunker[Независимый document_chunker]
 ```
 
-Этапы 1–2 и автономная реализация Ask завершены: модули разделены на `domain`, `data` и
+Модули разделены на `domain`, `data` и
 `presentation`; возможности явно регистрируются по конфигурации. Регистрация
 завершается созданием профиля и именем. `/obsidian [текст или URL]` включает
 режим текущего чата и обрабатывает аргумент, `/exit` завершает его без удаления
@@ -90,10 +92,7 @@ Ask доступен через `/ask <вопрос>` после регистр�
 Для включения задайте `ENABLED_CAPABILITIES=ask` либо `obsidian,ask` и отдельные
 `ASK_BASE_URL`, `ASK_API_KEY`, `ASK_MODEL` (см. [SETUP](docs/SETUP.md#настройка-ask)).
 Каждый вопрос независим; бот подтверждает приём и присылает ответ частями.
-Режим Obsidian и ожидающие подтверждения сохраняются. Автономно прошли 548 тестов и один
-реальный API запрос Ask. Дополнительно на новом Telegram-боте проверены
-`/start`, регистрация с именем и `/ask` на временной БД. Живые сценарии VK и
-полный Obsidian flow после изменений не проверялись. Подробная схема находится в
+Режим Obsidian и ожидающие подтверждения сохраняются. Подробная схема находится в
 [ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Быстрый старт
@@ -106,7 +105,7 @@ Ask доступен через `/ask <вопрос>` после регистр�
 
 ## Документация
 
-- [ASSISTANT REBIRTH ROADMAP](docs/ASSISTANT_REBIRTH_ROADMAP.md) — план перехода к модульному личному ассистенту.
+- [ASSISTANT REBIRTH ROADMAP](docs/ASSISTANT_REBIRTH_ROADMAP.md) — завершённый переход к модульному личному ассистенту и результаты проверок.
 - [Архитектура](docs/ARCHITECTURE.md) — слои, компоненты и потоки данных.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
