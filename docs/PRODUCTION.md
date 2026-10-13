@@ -5,7 +5,8 @@ Production переключён на Compadre Assistant 2026-10-13 по отде
 Развёрнут SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` из
 `codex/assistant-rebirth`; checkout находится в detached HEAD и чистый.
 Это выполненный переход; повторять очистку БД при обычном обновлении нельзя.
-Подробная процедура и ограничения rollback: [DEPLOY_COMPADRE_ASSISTANT.md](DEPLOY_COMPADRE_ASSISTANT.md).
+Порядок обычных обновлений — в [OPERATIONS.md](OPERATIONS.md). Историческую
+процедуру первого переключения повторять нельзя.
 Старые копии SQLite удалены 2026-10-13 по отдельному разрешению пользователя;
 откат БД к состоянию до перехода недоступен.
 

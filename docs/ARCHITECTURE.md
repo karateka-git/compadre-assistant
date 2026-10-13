@@ -393,7 +393,6 @@ remote Markdown с ожидаемым: если commit уже создан, ло
 
 ## Связанные документы
 
-- [ASSISTANT REBIRTH ROADMAP](ASSISTANT_REBIRTH_ROADMAP.md) — этапы перехода.
 - [RUN.md](RUN.md) — локальный запуск, smoke-проверки и команды.
 - [OPERATIONS.md](OPERATIONS.md) — эксплуатация VPS, обновление, логи и backup.
 - [GITHUB_APP.md](GITHUB_APP.md) — создание и настройка GitHub App.

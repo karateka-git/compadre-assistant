@@ -122,8 +122,8 @@ healthcheck локального профиля с временной БД пр�
 три smoke и healthcheck прошли без сети, с временной SQLite в tmpfs и фиктивным
 профилем, без host volumes и `.env`. Контейнерный polling не запускался.
 Telegram `/help`, `/obsidian`, `/exit`,
-живые сценарии VK, Device Flow и запись в тестовый vault остаются открытыми в
-[roadmap 4.5–4.7](ASSISTANT_REBIRTH_ROADMAP.md#45-переключить-telegram-и-обновить-профиль-vk).
+живые сценарии VK, Device Flow и запись в тестовый vault на момент этой проверки
+оставались открытыми.
 Этап 4 целиком не завершён; production не обновлялся.
 
 ## Assistant Rebirth: шаг 2.4 — ожидания конкретных операций (2026-10-07)
@@ -138,7 +138,7 @@ article flow. Конфигурация vault, Device Flow и общий sync/wri
 
 Проверено 481 автономным тестом, включая реальные SQLite-конфликты и два worker
 при подтверждении записи. Обновлена начальная development-схема, документация
-и критерии [roadmap](ASSISTANT_REBIRTH_ROADMAP.md). Перед запуском со старой
+и критерии перехода. Перед запуском со старой
 development-БД нужно пересоздать её по `AGENTS.md`. Рабочая БД и live API
 не использовались; production не обновлялся.
 
