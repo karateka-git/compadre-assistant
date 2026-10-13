@@ -62,16 +62,22 @@ flowchart LR
     Incoming --> Modes[(Режим конкретного чата)]
     Incoming --> Obsidian[Obsidian presentation: команды и ответы]
     Obsidian --> Domain[Obsidian domain: модели, сценарии и ports]
+    Incoming --> Ask[Ask presentation: команда и ответ]
+    Ask --> AskDomain[Ask domain: вопрос и port модели]
     CLI[CLI: диагностика и process-url] --> Bootstrap[Общий bootstrap.py]
     Bootstrap --> ObsidianBootstrap[Obsidian bootstrap и smoke]
     ObsidianBootstrap --> Domain
+    Bootstrap --> AskBootstrap[Ask bootstrap]
+    AskBootstrap --> AskDomain
     ObsidianData[Obsidian data: SQLite, GitHub, HTTP, LLM, embeddings] -. реализует ports .-> Domain
+    AskData[Ask data: конфигурация и LLM-клиент] -. реализует port .-> AskDomain
     Incoming --> Users[Core domain: пользователи и identities]
     CoreData[Core data: config и SQLite] -. реализует ports .-> Users
     CoreData --> Modes
     ObsidianData --> SQLite[(Единая SQLite-БД)]
     ObsidianData --> GitHub[GitHub App и Obsidian vault]
     ObsidianData --> Chunker[Независимый document_chunker]
+    AskData --> AskProvider[Провайдер LLM]
 ```
 
 Модули разделены на `domain`, `data` и
