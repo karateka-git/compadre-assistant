@@ -4,8 +4,8 @@ Compadre Assistant — личный ассистент в Telegram и VK с во
 
 ## Статус
 
-Статус на 2026-10-13: проект выпущен, переход Assistant Rebirth, включая
-этап 4, закрыт по решению пользователя. Production на VPS переключён на
+Статус на 2026-10-13: проект выпущен, переход к модульному ассистенту завершён.
+Production на VPS переключён на
 Compadre Assistant: Telegram-бот `@CompadreAssistant_bot` и сообщество VK
 `vk.com/compadre_assistant`. Оба контейнера `tg_assistant` и `vk_assistant`
 прошли проверку healthy после перезапуска; Telegram polling и VK Long Poll
@@ -14,8 +14,8 @@ Compadre Assistant: Telegram-бот `@CompadreAssistant_bot` и сообщест
 Реализованы режимы по чатам, адресные операции, независимые настройки
 каналов/возможностей и Ask. Пользовательский Obsidian flow в Telegram прошёл
 анализ статьи, review и подтверждённую запись в vault `karateka-git/my_obs_data`.
-Подробности перехода и проверок — в [production-инструкции](docs/PRODUCTION.md)
-и [итоге Assistant Rebirth](docs/ASSISTANT_REBIRTH_ROADMAP.md#47-сверить-итог-перехода).
+Текущее развёртывание описано в [production-инструкции](docs/PRODUCTION.md),
+завершённые работы — в [истории](docs/HISTORY.md).
 
 Репозиторий переименован в
 [`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant).
@@ -118,7 +118,6 @@ embeddings поиск использует FTS fallback.
 
 ## Документация
 
-- [ASSISTANT REBIRTH ROADMAP](docs/ASSISTANT_REBIRTH_ROADMAP.md) — завершённый переход к модульному личному ассистенту и результаты проверок.
 - [Архитектура](docs/ARCHITECTURE.md) — слои, компоненты и потоки данных.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
