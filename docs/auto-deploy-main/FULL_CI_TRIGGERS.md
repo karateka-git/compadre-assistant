@@ -1,6 +1,6 @@
 # Этап 3, шаг 3: события полного CI
 
-Реализация подготовлена локально 2026-10-14. Рабочий документ временный; после
+Реализация и проба GitHub выполнены 2026-10-14. Рабочий документ временный; после
 приёмки этапа перенести действующие правила в постоянную документацию по
 матрице [PLAN.md](PLAN.md).
 
@@ -68,7 +68,7 @@ production secrets. Нет `workflow_run`, `repository_dispatch`, write token
 или deploy будет независимо проверяться selector на шаге 4; здесь selector
 VPS не создаётся.
 
-## Локальная проверка и ожидаемая проверка GitHub
+## Локальная и фактическая проверка GitHub
 
 Локальные fixtures проверяют порог трёх, игнорирование побочного merge,
 отличие лёгкого run от полного и обязательность всех шагов job, bootstrap
@@ -78,7 +78,36 @@ SHA и отказ для несовместимой линии выпуска:
 .\.venv\Scripts\python.exe -m unittest tests.test_full_ci_controller -v
 ```
 
-До `push` и слияния этой ветки невозможно подтвердить реальные payload
-`push.created`, имена reusable jobs и steps в GitHub API, отмену run и
-прохождение обоих caller на GitHub. Эти проверки остаются pending; `push`
-требует отдельного явного согласия пользователя по `AGENTS.md`.
+Ветка `codex/auto-deploy-production-main` отправлена по SSH с разрешения
+пользователя. HTTPS push был отклонён GitHub из-за отсутствия `workflow`
+scope у OAuth token; SSH push с существующим ключом прошёл без изменения
+настроек доступа.
+
+Для пробы создана только временная `release/0.0` от SHA
+`c266347658544c2275825988d778dcc8f6805115`. Её первый
+[run 38604417209](https://github.com/karateka-git/compadre-assistant/actions/runs/38604417209)
+получил `BRANCH_CREATED=true` и завершился с ошибкой до полного набора:
+`main-full` не зарегистрирован на default branch, поэтому API вернул 404.
+Это ожидаемый отказ для ветки, созданной без успешного `main-full` её SHA.
+
+Пробный [PR #8](https://github.com/karateka-git/compadre-assistant/pull/8)
+в эту ветку прошёл
+[pr-fast](https://github.com/karateka-git/compadre-assistant/actions/runs/38604633951)
+и слит способом merge в SHA
+`15e6800b10f08155e8efca4a2dd4b5f8ea58358a`. Его
+[release-full run 38604745834](https://github.com/karateka-git/compadre-assistant/actions/runs/38604745834)
+завершился `success`: `release-full-controller`, reusable
+`release-full / full-suite`, все обязательные шаги включая миграции,
+Docker build и candidate healthcheck завершились успешно. В ответе GitHub
+`run.path` равен `.github/workflows/release-full.yml` без `@ref`; selector
+исправлен для этой реальной формы. При изменении существующей release-ветки
+controller теперь не запрашивает недоступный `main-full`: новый merge SHA
+не мог иметь полного результата `main` при принятой политике merge commit.
+После пробы временная `release/0.0` удалена; PR #8 остался слитым как
+историческое свидетельство проверки. `main` и реальные `release/*` не менялись.
+
+Автоматический счёт трёх PR в `main`, ручной `main-full`, повторное
+использование его результата при создании настоящей релизной ветки и
+фактическая отмена устаревших runs остаются pending до слияния caller в
+`main` и соответствующих событий. Для проверки отмены не создавали
+лишний второй полный прогон.

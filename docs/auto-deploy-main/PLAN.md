@@ -168,12 +168,13 @@ commit PR и выполненных правилах PR; аварийное ис
 `0001_initial_schema.sql` не менялся; production-миграции не запускались.
 Шаг 2 выполнен локально: общий reusable набор, искусственные БД прежней и
 новой схемы, synthetic pending SQL и границы Docker-проверки описаны в
-[FULL_CI.md](FULL_CI.md). Шаг 3 реализован локально: callers и лёгкий
-controller, точка отсчёта, выбор прежнего выпуска и pending-проверки GitHub
-описаны в [FULL_CI_TRIGGERS.md](FULL_CI_TRIGGERS.md). Шаг 4 реализован
-локально: read-only selector точного SHA и проверки rerun/устаревших запусков
-описаны в [FULL_CI_ADMISSION.md](FULL_CI_ADMISSION.md); фактические результаты
-GitHub остаются pending до разрешённого push.
+[FULL_CI.md](FULL_CI.md). Шаг 3 реализован: callers, controller и успешный
+пробный `release-full` описаны в
+[FULL_CI_TRIGGERS.md](FULL_CI_TRIGGERS.md); `main-full` ждёт появления в
+`main`. Шаг 4 реализован: read-only selector точного SHA локально и на
+реальном `release-full` run проверен в
+[FULL_CI_ADMISSION.md](FULL_CI_ADMISSION.md); rerun и отмена устаревшего
+run остаются фактическими проверками следующих событий.
 
 Готово, когда полный CI однозначно подтверждает конкретный commit и не использует production-секреты или БД.
 

@@ -49,7 +49,16 @@ selector впоследствии читает только его текущу�
 
 Локальные fixtures покрывают точный SHA, repo, workflow, ref, обязательные
 jobs/steps, release reuse, rerun, queued/cancelled/skipped/failure,
-некорректный API, старый tip и повторный dispatch. Реальные ответы GitHub,
-имена reusable job, payload `push.created` и фактическая отмена concurrency
-могут быть подтверждены только после разрешённого push и запуска workflows.
-До такой проверки опубликованный выпуск и production deploy не допускаются.
+некорректный API, старый tip и повторный dispatch. На фактическом
+[release-full run 38604745834](https://github.com/karateka-git/compadre-assistant/actions/runs/38604745834)
+selector вернул `Admission` для SHA
+`15e6800b10f08155e8efca4a2dd4b5f8ea58358a`, ветки `release/0.0`,
+workflow `release-full.yml`, run ID `38604745834`, attempt `1`. Неверные
+ветка `release/0.1` и SHA `000…000` вернули `None`. После удаления временной
+ветки исторический run того же SHA по-прежнему читается; проверка актуального
+ref и тега относится к будущему сценарию выпуска. GitHub возвращает
+`run.path` без `@ref`, что учтено после пробы.
+
+Selector для `main-full` и реальный rerun/отмена concurrency остаются
+непроверенными до появления caller в `main` и соответствующих событий.
+Публикация выпуска и production deploy на этой пробе не выполнялись.
