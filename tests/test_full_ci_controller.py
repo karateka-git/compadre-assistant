@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import ANY, patch
 
+from scripts import check_full_migrations
 from scripts import full_ci_controller as controller
 
 
@@ -113,15 +116,27 @@ class FullCiControllerTests(unittest.TestCase):
         }] for sha in (SHA_D, SHA_C, SHA_B)}
         self.assertEqual(controller.merged_since_last_success(FakeGitHub(prs=prs), SHA_D), (3, SHA_A))
 
-    @patch.object(controller, "is_ancestor", return_value=False)
-    def test_previous_release_must_be_ancestor(self, _ancestor) -> None:
-        """При расхождении линий выпусков выбор прежней схемы закрывается."""
+    @patch.object(controller, "is_ancestor", side_effect=AssertionError("ancestry is irrelevant"))
+    def test_sibling_release_is_valid_migration_base(self, _ancestor) -> None:
+        """Опубликованный PATCH из соседней линии выбирается по тегу."""
         api = FakeGitHub(releases=[{
             "tag_name": "v1.0.1", "draft": False, "prerelease": False,
             "published_at": "2026-10-14T00:00:00Z",
         }])
-        with self.assertRaises(controller.ControllerError):
-            controller.previous_release_sha(api, SHA_D, "release/1.0")
+        self.assertEqual(controller.previous_release_sha(api, SHA_D, "main"), SHA_B)
+
+    @patch.object(controller, "is_ancestor", side_effect=AssertionError("ancestry is irrelevant"))
+    def test_new_release_line_uses_latest_global_publication(self, _ancestor) -> None:
+        """Новая линия сравнивается с последним опубликованным выпуском."""
+        api = FakeGitHub(releases=[
+            {"tag_name": "v1.1.0", "draft": False, "prerelease": False,
+             "published_at": "2026-10-13T00:00:00Z"},
+            {"tag_name": "v1.0.2", "draft": False, "prerelease": False,
+             "published_at": "2026-10-14T00:00:00Z"},
+        ])
+        with patch.object(controller, "tag_commit", return_value=SHA_B) as tag:
+            self.assertEqual(controller.previous_release_sha(api, SHA_D, "release/2.0"), SHA_B)
+        tag.assert_called_once_with(api, "v1.0.2")
 
     @patch.object(controller, "is_ancestor", return_value=True)
     def test_latest_published_backport_takes_precedence(self, _ancestor) -> None:
@@ -143,6 +158,30 @@ class FullCiControllerTests(unittest.TestCase):
             controller.previous_release_sha(FakeGitHub(), SHA_D, "main"),
             controller.BOOTSTRAP_PRODUCTION_SHA,
         )
+
+    @patch.object(controller, "is_ancestor", return_value=False)
+    def test_bootstrap_still_requires_ancestry(self, _ancestor) -> None:
+        """До первого выпуска прежняя production точка должна быть предком."""
+        with self.assertRaises(controller.ControllerError):
+            controller.previous_release_sha(FakeGitHub(), SHA_D, "main")
+
+    def test_sibling_schema_prefix_mismatch_fails_closed(self) -> None:
+        """Несовпадающие имена и SQL соседней линии останавливают набор."""
+        with TemporaryDirectory() as temporary:
+            migrations = Path(temporary)
+            (migrations / "0001_initial_schema.sql").write_bytes(b"CREATE TABLE fresh (id INTEGER);")
+            with (patch.object(check_full_migrations, "MIGRATIONS_DIR", migrations),
+                  patch.object(check_full_migrations, "previous_migrations", return_value={
+                      "0001_other_schema.sql": b"CREATE TABLE old (id INTEGER);",
+                  })):
+                with self.assertRaisesRegex(ValueError, "not a prefix"):
+                    check_full_migrations.check_migrations(SHA_B)
+            with (patch.object(check_full_migrations, "MIGRATIONS_DIR", migrations),
+                  patch.object(check_full_migrations, "previous_migrations", return_value={
+                      "0001_initial_schema.sql": b"CREATE TABLE old (id INTEGER);",
+                  })):
+                with self.assertRaisesRegex(ValueError, "previous migration changed"):
+                    check_full_migrations.check_migrations(SHA_B)
 
     @patch.object(controller, "git", return_value=SHA_D)
     @patch.object(controller, "full_success", return_value=True)

@@ -209,7 +209,7 @@ def previous_release_sha(api: GitHub, candidate: str, branch: str) -> str:
         SHA предыдущего опубликованного выпуска.
 
     Raises:
-        ControllerError: Выпуск, тег или родство commit неоднозначны.
+        ControllerError: Выпуск или тег неоднозначны, либо bootstrap недостижим.
     """
     match = RELEASE_BRANCH_PATTERN.fullmatch(branch)
     if branch != "main" and not match:
@@ -238,10 +238,9 @@ def previous_release_sha(api: GitHub, candidate: str, branch: str) -> str:
     if len(matches) != 1:
         raise ControllerError("Неоднозначное время последнего опубликованного выпуска")
     _, _, tag = matches[0]
-    previous = tag_commit(api, tag)
-    if not is_ancestor(previous, candidate):
-        raise ControllerError(f"Последний опубликованный {tag} не является предком candidate")
-    return previous
+    # PATCH поддерживаемой линии может жить в соседней Git-ветке. Совместимость
+    # её схемы с candidate доказывает строгий prefix/content тест full-suite.
+    return tag_commit(api, tag)
 
 
 def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict[str, str]:
