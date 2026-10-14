@@ -1,4 +1,4 @@
-"""Создаёт локальную релизную ветку от проверенного полного SHA main."""
+"""Создаёт релизную ветку от проверенного полного SHA main."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from scripts.full_ci_admission import (
     Admission, AdmissionError, MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN,
     SHA_PATTERN, ReadOnlyGitHub, select_successful_run,
 )
-from scripts.full_ci_controller import ControllerError, GitHub
+from scripts.full_ci_controller import ControllerError
+from scripts.github_publishing import PublishingError, PublishingGitHub
 
 
 EXPECTED_REPOSITORY = "karateka-git/compadre-assistant"
@@ -104,13 +105,14 @@ def _ensure_remote_branch_absent(api: ReadOnlyGitHub, branch: str) -> None:
         raise ReleaseBranchError("Удалённая релизная ветка уже существует")
 
 
-def prepare(api: ReadOnlyGitHub, branch: str, sha: str) -> Admission:
-    """Проверяет точный commit, успешный main-full и свободное имя ветки.
+def prepare(api: ReadOnlyGitHub, branch: str, sha: str, *, publish_remote: bool = False) -> Admission:
+    """Проверяет точный commit, успешный main-full и состояние ветки.
 
     Args:
         api: Клиент GitHub API с доступом на чтение.
         branch: Новое имя release/X.Y.
         sha: Полный SHA кандидата из main.
+        publish_remote: Требовать уже созданный локальный ref того же SHA.
 
     Returns:
         Проверенная попытка полного CI.
@@ -127,7 +129,12 @@ def prepare(api: ReadOnlyGitHub, branch: str, sha: str) -> Admission:
         raise ReleaseBranchError("Репозиторий API и origin должны совпадать с проектом")
     if git("cat-file", "-t", sha).stdout.strip() != "commit":
         raise ReleaseBranchError("SHA отсутствует как commit в локальном Git; сначала выполните fetch")
-    if git("show-ref", "--verify", "--quiet", f"refs/heads/{branch}", allowed_codes=(0, 1)).returncode == 0:
+    local_ref = f"refs/heads/{branch}"
+    local_exists = git("show-ref", "--verify", "--quiet", local_ref, allowed_codes=(0, 1)).returncode == 0
+    if publish_remote:
+        if not local_exists or git("rev-parse", "--verify", local_ref).stdout.strip() != sha:
+            raise ReleaseBranchError("Локальная релизная ветка отсутствует или указывает на другой SHA")
+    elif local_exists:
         raise ReleaseBranchError("Локальная релизная ветка уже существует")
     _ensure_remote_branch_absent(api, branch)
     checked_main_head(api, sha)
@@ -153,22 +160,61 @@ def create_local_branch(branch: str, sha: str) -> None:
     git("update-ref", f"refs/heads/{branch}", sha, ZERO_SHA)
 
 
+def publish_remote_branch(api: PublishingGitHub, branch: str, sha: str) -> Admission:
+    """Атомарно создаёт удалённый ref и подтверждает его чтением GitHub API.
+
+    Args:
+        api: GitHub-клиент с правом записи Git refs.
+        branch: Имя release/X.Y, ранее созданное локально.
+        sha: Полный SHA успешного main-full.
+
+    Returns:
+        Повторно проверенный допуск полного CI.
+
+    Raises:
+        ReleaseBranchError: Ответ или read-back не подтверждает точный ref.
+        PublishingError: GitHub отверг создание, включая конфликт имени.
+    """
+    admission = prepare(api, branch, sha, publish_remote=True)
+    ref = f"refs/heads/{branch}"
+    created = api.post("/git/refs", {"ref": ref, "sha": sha})
+    if (not isinstance(created, dict) or created.get("ref") != ref
+            or not isinstance(created.get("object"), dict)
+            or created["object"].get("sha") != sha):
+        raise ReleaseBranchError("Ответ создания ветки не подтверждает ref и SHA; проверьте GitHub вручную")
+    read_back = api.get(f"/git/ref/heads/{branch}")
+    if (not isinstance(read_back, dict) or read_back.get("ref") != ref
+            or not isinstance(read_back.get("object"), dict)
+            or read_back["object"].get("sha") != sha):
+        raise ReleaseBranchError("GitHub не подтвердил созданную ветку при повторном чтении")
+    return admission
+
+
 def main() -> None:
-    """Проверяет допуск и по запросу создаёт только локальную ветку."""
+    """Проверяет допуск и явно создаёт локальную либо удалённую ветку."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("branch", help="новая ветка release/X.Y")
     parser.add_argument("sha", help="полный SHA успешного main-full")
-    parser.add_argument("--check-only", action="store_true", help="только проверить допуск")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--check-only", action="store_true", help="только проверить допуск")
+    modes.add_argument("--publish-remote", action="store_true", help="создать ветку на GitHub после локальной")
     arguments = parser.parse_args()
     try:
-        api = GitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
-        admission = prepare(api, arguments.branch, arguments.sha)
-        if not arguments.check_only:
+        api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
+        if arguments.publish_remote:
+            admission = publish_remote_branch(api, arguments.branch, arguments.sha)
+            action = "Создана удалённая ветка"
+        else:
+            admission = prepare(api, arguments.branch, arguments.sha)
+        if not arguments.check_only and not arguments.publish_remote:
             create_local_branch(arguments.branch, arguments.sha)
-        action = "Проверено" if arguments.check_only else "Создана локальная ветка"
+            action = "Создана локальная ветка"
+        elif arguments.check_only:
+            action = "Проверено"
         print(f"{action}: {arguments.branch} -> {admission.sha}; "
               f"main-full run={admission.run_id}, attempt={admission.run_attempt}")
-    except (AdmissionError, ControllerError, ReleaseBranchError, KeyError, TypeError, ValueError) as error:
+    except (AdmissionError, ControllerError, PublishingError, ReleaseBranchError,
+            KeyError, TypeError, ValueError) as error:
         print(f"Release branch: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 

@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
-import json
 import os
 from pathlib import Path
 import sys
 from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 from scripts.check_hotfix_pairs import HotfixError, check_release
 from scripts.create_release_branch import (
@@ -20,6 +18,7 @@ from scripts.full_ci_admission import (
     select_successful_run,
 )
 from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, tag_commit
+from scripts.github_publishing import PublishingError, PublishingGitHub
 
 
 class PublishError(RuntimeError):
@@ -39,42 +38,6 @@ class PreparedRelease:
     change: str
     notes: str
     make_latest: str
-
-
-class PublishingGitHub(GitHub):
-    """Добавляет к читающему клиенту два явных запроса публикации."""
-
-    def post(self, path: str, payload: dict[str, object]) -> dict:
-        """Создаёт объект GitHub API и отвергает сетевую ошибку или плохой ответ.
-
-        Args:
-            path: Путь REST API относительно репозитория.
-            payload: Тело запроса в формате JSON.
-
-        Returns:
-            Полученный JSON-объект.
-
-        Raises:
-            PublishError: Запрос не завершился подтверждённым созданием.
-        """
-        request = Request(self.root + path, data=json.dumps(payload).encode("utf-8"),
-                          method="POST", headers={
-                              "Accept": "application/vnd.github+json",
-                              "Authorization": f"Bearer {self.token}",
-                              "X-GitHub-Api-Version": "2026-03-10",
-                              "Content-Type": "application/json",
-                              "User-Agent": "compadre-release-publisher",
-                          })
-        try:
-            with urlopen(request, timeout=20) as response:
-                if response.status != 201:
-                    raise PublishError(f"GitHub API не подтвердил создание {path}: HTTP {response.status}")
-                result = json.load(response)
-        except Exception as error:
-            raise PublishError(f"GitHub API не подтвердил создание {path}: {error}") from error
-        if not isinstance(result, dict):
-            raise PublishError(f"GitHub API вернул некорректный объект: {path}")
-        return result
 
 
 def _sha(value: object, label: str) -> str:
@@ -324,7 +287,7 @@ def main() -> None:
         if args.publish:
             print(f"Опубликовано: {publish(api, result)}")
     except (OSError, AdmissionError, ControllerError, HotfixError, ReleaseBranchError,
-            PublishError, KeyError,
+            PublishError, PublishingError, KeyError,
             TypeError, ValueError) as error:
         print(f"Release: {error}", file=sys.stderr)
         raise SystemExit(1) from error

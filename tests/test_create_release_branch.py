@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from contextlib import redirect_stdout
+from io import StringIO
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -27,6 +29,10 @@ class FakeApi:
         self.runs[0]["repository"]["full_name"] = self.repository
         self.runs[0]["head_repository"]["full_name"] = self.repository
         self.main_reads = 0
+        self.remote_sha: str | None = None
+        self.post_error: Exception | None = None
+        self.post_response: dict | None = None
+        self.posts: list[tuple[str, dict]] = []
 
     def get(self, path, **parameters):
         """Возвращает metadata workflow, ref main или сравнение commit."""
@@ -37,6 +43,8 @@ class FakeApi:
             return {"status": self.status, "base_commit": {"sha": self.base_sha}}
         if path == "/actions/workflows/main-full.yml":
             return {"id": 1, "path": ".github/workflows/main-full.yml"}
+        if path == "/git/ref/heads/release/1.0":
+            return {"ref": "refs/heads/release/1.0", "object": {"sha": self.remote_sha}}
         raise AssertionError(path)
 
     def pages(self, path, key=None, **parameters):
@@ -49,6 +57,19 @@ class FakeApi:
             return self.jobs
         raise AssertionError(path)
 
+    def post(self, path, payload):
+        """Имитирует атомарное создание удалённого Git ref."""
+        self.posts.append((path, payload))
+        if self.post_error:
+            raise self.post_error
+        if self.branches:
+            raise creator.PublishingError("HTTP 422: ref exists")
+        self.branches = [{"name": payload["ref"].removeprefix("refs/heads/")}]
+        self.remote_sha = payload["sha"]
+        return self.post_response if self.post_response is not None else {
+            "ref": payload["ref"], "object": {"sha": payload["sha"]},
+        }
+
 
 class ReleaseBranchTests(unittest.TestCase):
     """Проверяет отказ при неподтверждённом SHA и атомарное создание ref."""
@@ -57,6 +78,7 @@ class ReleaseBranchTests(unittest.TestCase):
         """Изолирует ответ API и команды локального Git."""
         self.api = FakeApi()
         self.commands: list[tuple[str, ...]] = []
+        self.local_sha: str | None = None
         self.origin = patch.object(creator, "repository_from_origin", return_value=creator.EXPECTED_REPOSITORY)
         self.origin.start()
         self.addCleanup(self.origin.stop)
@@ -70,7 +92,9 @@ class ReleaseBranchTests(unittest.TestCase):
         if arguments[:2] == ("cat-file", "-t"):
             return subprocess.CompletedProcess(arguments, 0, stdout="commit\n")
         if arguments[:2] == ("show-ref", "--verify"):
-            return subprocess.CompletedProcess(arguments, 1)
+            return subprocess.CompletedProcess(arguments, 0 if self.local_sha else 1)
+        if arguments[:2] == ("rev-parse", "--verify"):
+            return subprocess.CompletedProcess(arguments, 0, stdout=f"{self.local_sha}\n")
         if arguments[0] == "update-ref":
             return subprocess.CompletedProcess(arguments, 0)
         raise AssertionError(arguments)
@@ -163,6 +187,79 @@ class ReleaseBranchTests(unittest.TestCase):
         self.assertEqual(self.commands, [
             ("update-ref", "refs/heads/release/1.0", SHA_D, creator.ZERO_SHA),
         ])
+
+    def test_remote_publish_rechecks_and_confirms_exact_ref(self) -> None:
+        """POST получает точный SHA только после допуска и read-back."""
+        self.local_sha = SHA_D
+        result = creator.publish_remote_branch(self.api, "release/1.0", SHA_D)
+        self.assertEqual(result.sha, SHA_D)
+        self.assertEqual(self.api.posts, [("/git/refs", {
+            "ref": "refs/heads/release/1.0", "sha": SHA_D,
+        })])
+        self.assertEqual(self.api.remote_sha, SHA_D)
+        self.assertEqual(self.api.main_reads, 2)
+
+    def test_remote_publish_requires_exact_local_ref(self) -> None:
+        """Отсутствующий или иной локальный SHA не вызывает POST."""
+        for local_sha in (None, SHA_C):
+            with self.subTest(local_sha=local_sha):
+                self.local_sha = local_sha
+                with self.assertRaisesRegex(creator.ReleaseBranchError, "Локальная"):
+                    creator.publish_remote_branch(self.api, "release/1.0", SHA_D)
+        self.assertEqual(self.api.posts, [])
+
+    def test_remote_race_is_rejected_by_atomic_post(self) -> None:
+        """GitHub 422 при параллельном создании не переиспользует ref."""
+        self.local_sha = SHA_D
+        self.api.post_error = creator.PublishingError("HTTP 422")
+        with self.assertRaisesRegex(creator.PublishingError, "422"):
+            creator.publish_remote_branch(self.api, "release/1.0", SHA_D)
+        self.assertEqual(len(self.api.posts), 1)
+
+    def test_remote_response_and_readback_mismatch_fail_closed(self) -> None:
+        """Ошибочный ответ POST и сдвинутый read-back не подтверждают ветку."""
+        self.local_sha = SHA_D
+        self.api.post_response = {"ref": "refs/heads/release/1.0", "object": {"sha": SHA_C}}
+        with self.assertRaisesRegex(creator.ReleaseBranchError, "Ответ создания"):
+            creator.publish_remote_branch(self.api, "release/1.0", SHA_D)
+        self.api.branches = []
+        self.api.post_response = None
+        original_get = self.api.get
+
+        def moved_ref(path, **parameters):
+            if path == "/git/ref/heads/release/1.0":
+                return {"ref": "refs/heads/release/1.0", "object": {"sha": SHA_C}}
+            return original_get(path, **parameters)
+
+        self.api.get = moved_ref
+        with self.assertRaisesRegex(creator.ReleaseBranchError, "повторном чтении"):
+            creator.publish_remote_branch(self.api, "release/1.0", SHA_D)
+
+    def test_check_only_and_local_mode_do_not_post(self) -> None:
+        """Обычный запуск и --check-only не обращаются к POST."""
+        output = StringIO()
+        with patch.object(creator, "PublishingGitHub", return_value=self.api), \
+             patch.object(creator.sys, "argv", ["create_release_branch", "release/1.0", SHA_D, "--check-only"]), \
+             redirect_stdout(output):
+            creator.main()
+        self.assertIn("Проверено", output.getvalue())
+        with patch.object(creator, "PublishingGitHub", return_value=self.api), \
+             patch.object(creator.sys, "argv", ["create_release_branch", "release/1.0", SHA_D]), \
+             redirect_stdout(StringIO()):
+            creator.main()
+        self.assertEqual(self.api.posts, [])
+
+    def test_publish_remote_cli_uses_explicit_post_mode(self) -> None:
+        """Флаг публикации вызывает POST и подтверждает удалённую ветку."""
+        self.local_sha = SHA_D
+        output = StringIO()
+        with patch.object(creator, "PublishingGitHub", return_value=self.api), \
+             patch.object(creator.sys, "argv", ["create_release_branch", "release/1.0", SHA_D,
+                                               "--publish-remote"]), \
+             redirect_stdout(output):
+            creator.main()
+        self.assertIn("Создана удалённая ветка", output.getvalue())
+        self.assertEqual(len(self.api.posts), 1)
 
 
 if __name__ == "__main__":
