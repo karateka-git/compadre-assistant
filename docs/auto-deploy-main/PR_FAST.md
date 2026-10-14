@@ -26,7 +26,7 @@ run того же PR отменяется при следующем событи
 4. `docker compose config --quiet` с созданным из `.env.example`
    синтетическим `.env`; сервисы и внешние API не запускаются.
 
-Зависимости Actions закреплены по SHA: checkout v4.2.2 и setup-python v6.0.0.
+Зависимости Actions закреплены по SHA: checkout v5.0.1 и setup-python v6.0.0.
 На локальной Windows-машине установка requirements в чистое venv заняла
 67,2 с, все 42 теста — 2,8 с, проверка Compose — около 3 с. Это измерение
 не является временем GitHub-hosted Ubuntu runner: его нужно записать после
