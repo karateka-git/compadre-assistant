@@ -1,0 +1,46 @@
+name: Release full
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: release-full-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  controller:
+    name: release-full-controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      run-full: ${{ steps.decide.outputs.run-full }}
+      previous-release-sha: ${{ steps.decide.outputs.previous-release-sha }}
+    steps:
+      - name: Checkout exact release commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Decide full run
+        id: decide
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          BRANCH_CREATED: ${{ github.event.created }}
+        run: python -m scripts.full_ci_controller release
+
+  full-suite:
+    name: release-full
+    needs: controller
+    if: needs.controller.outputs.run-full == 'true'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/full-suite.yml
+    with:
+      previous-release-sha: ${{ needs.controller.outputs.previous-release-sha }}
