@@ -1,7 +1,8 @@
 # Шаг 2.1: быстрый CI для PR
 
-Реализация подготовлена локально; проверка на реальном PR остаётся условием
-приёмки шага. Настройки GitHub и production не менялись.
+Реализация проверена локально и на временном GitHub PR
+[#1](https://github.com/karateka-git/compadre-assistant/pull/1). Настройки
+защиты веток и production не менялись; пробный PR не сливался.
 
 ## Что запускается
 
@@ -27,10 +28,12 @@ run того же PR отменяется при следующем событи
    синтетическим `.env`; сервисы и внешние API не запускаются.
 
 Зависимости Actions закреплены по SHA: checkout v5.0.1 и setup-python v6.0.0.
+После первого пробного run checkout v4.2.2 заменён на v5.0.1, потому что
+GitHub предупреждал об устаревшем Node 20; следующий run с v5.0.1 прошёл.
 На локальной Windows-машине установка requirements в чистое venv заняла
 67,2 с, все 42 теста — 2,8 с, проверка Compose — около 3 с. Это измерение
-не является временем GitHub-hosted Ubuntu runner: его нужно записать после
-первого реального run. Предельное время job — 10 минут.
+не является временем GitHub-hosted Ubuntu runner: успешные пробные jobs
+заняли 17–21 с без учёта ожидания runner. Предельное время job — 10 минут.
 
 ## Что проверено локально
 
@@ -40,18 +43,24 @@ run того же PR отменяется при следующем событи
 - `compileall`, фиксированный набор из 42 тестов и Compose на синтетическом
   `.env` завершились успешно. `git diff --check` выполнен.
 
-## Оставшийся gate перед отметкой шага выполненным
+## Проверка на GitHub
 
-После разрешённого push создать пробные PR в `main` и `release/*` и проверить
-в интерфейсе GitHub:
+Временный PR #1 сначала был направлен в `main`, затем в созданную только для
+пробы `release/0.0-pr-fast-probe`. PR закрыт без merge; обе временные
+удалённые ветки и локальный пробный worktree удалены. Ни один пробный commit
+не попал в `main` или production release.
 
-1. Успешный PR создаёт один check `pr-fast` с `success`.
-2. Намеренно ошибочный PR создаёт `failure` (после настройки защиты веток
-   на шаге 2.2 он должен блокировать обычное слияние).
-3. Новый commit PR запускает новый check, отменяет незавершённый старый run,
-   а прежний success не считается допуском нового commit.
-4. Смена целевой ветки запускает check для нового тестового merge; для PR
-   с изменившейся базой без новых commits автоматический повтор не требуется.
+| Сценарий | Наблюдение |
+| --- | --- |
+| `opened` в `main` | [Run 38541749204](https://github.com/karateka-git/compadre-assistant/actions/runs/38541749204): `pr-fast` = `success`, 17 с |
+| `synchronize` с tracked `.env` | [Run 38541899373](https://github.com/karateka-git/compadre-assistant/actions/runs/38541899373): `pr-fast` = `failure` на проверке файлов, 7 с |
+| Два последовательных новых commit | [Run 38542112822](https://github.com/karateka-git/compadre-assistant/actions/runs/38542112822) для старого commit отменён; [run 38542149579](https://github.com/karateka-git/compadre-assistant/actions/runs/38542149579) для нового commit = `success`, 21 с |
+| `edited`: цель изменена на `release/*` | [Run 38542242756](https://github.com/karateka-git/compadre-assistant/actions/runs/38542242756): новый тестовый merge, `pr-fast` = `success`, 20 с |
+| `reopened` | [Run 38542330948](https://github.com/karateka-git/compadre-assistant/actions/runs/38542330948): `pr-fast` = `success`, 18 с |
+
+На шаге 2.2 ещё предстоит сделать check обязательным и убедиться, что
+`failure` блокирует обычное слияние. Изменение базы без новых commits и
+строгость требования актуальной базы относятся к проверке шага 2.3.
 
 Изменения workflow, deploy-скриптов и миграций требуют просмотра владельцем;
 само правило review настраивается вместе с защитой веток на шаге 2.2.
