@@ -9,6 +9,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: pr-fast-${{ github.event.pull_request.number }}
@@ -38,6 +39,14 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python scripts/check_pr_fast.py --base-sha "$BASE_SHA"
+
+      - name: Check linked hotfix PRs
+        if: startsWith(github.event.pull_request.base.ref, 'release/') || contains(github.event.pull_request.body, 'Hotfix-Pair:')
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+        run: python -m scripts.check_hotfix_pairs pr "$PR_NUMBER" "$PR_BASE"
 
       - name: Install runtime dependencies
         run: python -m pip install -r requirements.txt
