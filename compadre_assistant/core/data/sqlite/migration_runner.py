@@ -16,7 +16,7 @@ class MigrationError(RuntimeError):
 
 @dataclass(frozen=True)
 class Migration:
-    """Описывает версию и файл начальной SQL-схемы."""
+    """Описывает версию и неизменяемый SQL-файл изменения схемы."""
     version: int
     name: str
     path: Path
@@ -41,6 +41,7 @@ def apply_migrations(
     migrations = _discover_migrations(migrations_dir)
     _ensure_migrations_table(connection)
     applied = _get_applied_migrations(connection)
+    _validate_applied_migrations(migrations, applied)
     completed: list[Migration] = []
 
     for migration in migrations:
@@ -78,7 +79,26 @@ def _discover_migrations(migrations_dir: Path) -> list[Migration]:
         versions.add(version)
         migrations.append(Migration(version=version, name=path.name, path=path))
 
-    return sorted(migrations, key=lambda migration: migration.version)
+    ordered = sorted(migrations, key=lambda migration: migration.version)
+    if not ordered or [migration.version for migration in ordered] != list(
+        range(1, len(ordered) + 1)
+    ):
+        raise MigrationError("Migration versions must be consecutive starting at 0001")
+    return ordered
+
+
+def _validate_applied_migrations(
+    migrations: list[Migration], applied: dict[int, str],
+) -> None:
+    """Отклоняет неизвестную схему и пропуски до выполнения нового SQL."""
+    available = {migration.version: migration.name for migration in migrations}
+    for version, name in applied.items():
+        if available.get(version) != name:
+            raise MigrationError(
+                f"Applied migration {version:04d}:{name} does not match available files"
+            )
+    if sorted(applied) != list(range(1, len(applied) + 1)):
+        raise MigrationError("Applied migrations must form a consecutive prefix from 0001")
 
 
 def _ensure_migrations_table(connection: sqlite3.Connection) -> None:
