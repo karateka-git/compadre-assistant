@@ -9,12 +9,37 @@ from unittest.mock import ANY, patch
 
 from scripts import check_full_migrations
 from scripts import full_ci_controller as controller
+from scripts import full_ci_admission as admission
 
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
 SHA_D = "d" * 40
+
+
+def admission_run(sha: str) -> dict:
+    """Создаёт успешный run полного caller на точном SHA."""
+    repository = {"full_name": "owner/repo"}
+    return {
+        "id": 1, "run_attempt": 1, "head_sha": sha, "head_branch": "main",
+        "repository": repository, "head_repository": repository,
+        "workflow_id": 1, "path": ".github/workflows/main-full.yml@main",
+        "event": "push", "status": "completed", "conclusion": "success",
+    }
+
+
+def admission_jobs(sha: str) -> list[dict]:
+    """Создаёт обязательные успешные jobs и steps полного caller."""
+    def steps(names):
+        return [{"name": name, "status": "completed", "conclusion": "success"} for name in names]
+
+    return [
+        {"name": "main-full-controller", "head_sha": sha, "status": "completed",
+         "conclusion": "success", "steps": steps(("Checkout exact main commit", "Decide full run"))},
+        {"name": "main-full / full-suite", "head_sha": sha, "status": "completed",
+         "conclusion": "success", "steps": steps(admission.FULL_STEPS)},
+    ]
 
 
 class FakeGitHub:
@@ -26,6 +51,7 @@ class FakeGitHub:
         self.runs = runs or {}
         self.jobs = jobs or {}
         self.prs = prs or {}
+        self.repository = "owner/repo"
 
     def pages(self, path, key=None, **parameters):
         """Возвращает одну подготовленную страницу API."""
@@ -41,6 +67,10 @@ class FakeGitHub:
 
     def get(self, path, **parameters):
         """Возвращает Git ref для текущего SHA или опубликованного тега."""
+        if path == "/actions/workflows/main-full.yml":
+            return {"id": 1, "path": ".github/workflows/main-full.yml"}
+        if path == "/actions/workflows/release-full.yml":
+            return {"id": 2, "path": ".github/workflows/release-full.yml"}
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": SHA_D}}
         if path.startswith("/git/ref/tags/"):
@@ -53,29 +83,25 @@ class FullCiControllerTests(unittest.TestCase):
 
     def test_light_controller_success_does_not_count_as_full_success(self) -> None:
         """Run без полного job не сбрасывает счётчик PR."""
-        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "conclusion": "success"}
-        api = FakeGitHub(runs={("/actions/workflows/main-full.yml/runs", SHA_D, "success"): [run]})
+        run = admission_run(SHA_D)
+        api = FakeGitHub(runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]})
         self.assertFalse(controller.full_success(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 
     def test_full_success_requires_every_reusable_step(self) -> None:
         """Успех полного job требует всех обязательных шагов."""
-        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "conclusion": "success"}
-        jobs = [{"name": "main-full / full-suite", "head_sha": SHA_D,
-                 "conclusion": "success", "steps": [
-                     {"name": name, "conclusion": "success"}
-                     for name in controller.REQUIRED_STEPS
-                 ]}]
+        run = admission_run(SHA_D)
+        jobs = admission_jobs(SHA_D)
         api = FakeGitHub(
-            runs={("/actions/workflows/main-full.yml/runs", SHA_D, "success"): [run]},
-            jobs={"/actions/runs/1/jobs": jobs},
+            runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]},
+            jobs={"/actions/runs/1/attempts/1/jobs": jobs},
         )
         self.assertTrue(controller.full_success(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
-        jobs[0]["steps"][0]["conclusion"] = "skipped"
+        jobs[1]["steps"][0]["conclusion"] = "skipped"
         self.assertFalse(controller.full_success(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 
     def test_skipped_suite_does_not_block_manual_dispatch(self) -> None:
         """Предыдущий лёгкий run не считается попыткой полного прогона."""
-        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main"}
+        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "completed"}
         api = FakeGitHub(
             runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]},
             jobs={"/actions/runs/1/jobs": [{
@@ -83,6 +109,21 @@ class FullCiControllerTests(unittest.TestCase):
             }]},
         )
         self.assertFalse(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
+
+    def test_queued_full_attempt_blocks_parallel_dispatch(self) -> None:
+        """Ожидающая попытка без steps требует дождаться результата или rerun."""
+        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "queued"}
+        api = FakeGitHub(runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]})
+        self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
+
+    def test_failed_full_job_without_steps_blocks_new_dispatch(self) -> None:
+        """Неуспешный полный job без steps остаётся прежней попыткой."""
+        run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "completed"}
+        api = FakeGitHub(
+            runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]},
+            jobs={"/actions/runs/1/jobs": [{"name": "main-full / full-suite", "conclusion": "cancelled"}]},
+        )
+        self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 
     @patch.object(controller, "activation_sha", return_value=SHA_A)
     @patch.object(controller, "git")
@@ -197,6 +238,27 @@ class FullCiControllerTests(unittest.TestCase):
         """Создание release от непроверенного SHA не даёт допуска."""
         with self.assertRaises(controller.ControllerError):
             controller.decide(FakeGitHub(), "release", SHA_D, "release/1.0", True)
+
+    @patch.object(controller, "git", return_value=SHA_C)
+    def test_stale_checkout_is_rejected_before_api(self, _git) -> None:
+        """Устаревший или подменённый checkout не запускает полный набор."""
+        with self.assertRaises(controller.ControllerError):
+            controller.decide(FakeGitHub(), "main", SHA_D, "main", False)
+
+    @patch.object(controller, "git", return_value=SHA_D)
+    def test_moved_ref_rejects_old_run(self, _git) -> None:
+        """После смены tip run прежнего SHA прекращается на controller."""
+        class MovedRef(FakeGitHub):
+            """Возвращает новый SHA для ветки."""
+
+            def get(self, path, **parameters):
+                """Имитирует новое состояние ref GitHub."""
+                if path.startswith("/git/ref/heads/"):
+                    return {"object": {"sha": SHA_C}}
+                return super().get(path, **parameters)
+
+        with self.assertRaisesRegex(controller.ControllerError, "устаревший run"):
+            controller.decide(MovedRef(), "main", SHA_D, "main", False)
 
 
 if __name__ == "__main__":

@@ -12,24 +12,14 @@ import sys
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from scripts.full_ci_admission import (
+    AdmissionError, MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN, RELEASE_WORKFLOW,
+    SHA_PATTERN, select_successful_run,
+)
+
 
 BOOTSTRAP_PRODUCTION_SHA = "ac2ac981ba628a881b483238a4eaf191a644de6a"
-MAIN_WORKFLOW = "main-full.yml"
-RELEASE_WORKFLOW = "release-full.yml"
-REQUIRED_STEPS = {
-    "Checkout exact candidate",
-    "Verify candidate commit",
-    "Setup Python",
-    "Install runtime dependencies",
-    "Run full unittest suite",
-    "Run three autonomous smoke checks",
-    "Check fresh and previous SQLite schemas",
-    "Build and healthcheck candidate image",
-    "Publish check manifest",
-}
-SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 VERSION_PATTERN = re.compile(r"v(\d+)\.(\d+)\.(\d+)\Z")
-RELEASE_BRANCH_PATTERN = re.compile(r"release/(\d+)\.(\d+)\Z")
 
 
 class ControllerError(RuntimeError):
@@ -69,6 +59,7 @@ class GitHub:
         """
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or not token:
             raise ControllerError("Не заданы GITHUB_REPOSITORY или GITHUB_TOKEN")
+        self.repository = repository
         self.root = f"https://api.github.com/repos/{repository}"
         self.token = token
 
@@ -104,41 +95,24 @@ class GitHub:
 
 
 def full_success(api: GitHub, workflow: str, sha: str, branch: str) -> bool:
-    """Ищет полный успешный job на точном SHA, игнорируя успех контроллера."""
-    runs = api.pages(
-        f"/actions/workflows/{workflow}/runs", key="workflow_runs",
-        head_sha=sha, status="success",
-    )
-    for run in runs:
-        if (run.get("head_sha") != sha or run.get("conclusion") != "success"
-                or run.get("head_branch") != branch):
-            continue
-        jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs")
-        for job in jobs:
-            if not (job.get("name") == "full-suite" or job.get("name", "").endswith(" / full-suite")):
-                continue
-            if job.get("conclusion") != "success" or job.get("head_sha") != sha:
-                continue
-            steps = {step.get("name"): step.get("conclusion") for step in job.get("steps", [])}
-            if all(steps.get(name) == "success" for name in REQUIRED_STEPS):
-                return True
-    return False
+    """Проверяет допуск через общий selector точного полного CI."""
+    return select_successful_run(api, api.repository, workflow, sha, branch) is not None
 
 
 def prior_full_attempt(api: GitHub, workflow: str, sha: str, branch: str) -> bool:
     """Находит прежний полный запуск, чтобы новый dispatch не заменял rerun."""
-    runs = api.pages(
-        f"/actions/workflows/{workflow}/runs", key="workflow_runs", head_sha=sha,
-    )
+    runs = api.pages(f"/actions/workflows/{workflow}/runs", key="workflow_runs", head_sha=sha)
     current_run = os.environ.get("GITHUB_RUN_ID")
     for run in runs:
         if (run.get("head_sha") != sha or run.get("head_branch") != branch
                 or str(run.get("id")) == current_run):
             continue
-        jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs")
+        if run.get("status") != "completed":
+            return True
+        jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs", filter="latest")
         if any((job.get("name") == "full-suite" or
                 job.get("name", "").endswith(" / full-suite"))
-               and job.get("conclusion") != "skipped" and job.get("steps")
+               and job.get("conclusion") != "skipped"
                for job in jobs):
             return True
     return False
@@ -295,7 +269,7 @@ def main() -> None:
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for key, value in result.items():
                 output.write(f"{key}={value}\n")
-    except (ControllerError, KeyError, TypeError, ValueError) as error:
+    except (AdmissionError, ControllerError, KeyError, TypeError, ValueError) as error:
         print(f"Full CI controller: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 

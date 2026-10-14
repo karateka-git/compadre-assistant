@@ -170,8 +170,10 @@ commit PR и выполненных правилах PR; аварийное ис
 новой схемы, synthetic pending SQL и границы Docker-проверки описаны в
 [FULL_CI.md](FULL_CI.md). Шаг 3 реализован локально: callers и лёгкий
 controller, точка отсчёта, выбор прежнего выпуска и pending-проверки GitHub
-описаны в [FULL_CI_TRIGGERS.md](FULL_CI_TRIGGERS.md). Шаг 4 остаётся
-запланированным.
+описаны в [FULL_CI_TRIGGERS.md](FULL_CI_TRIGGERS.md). Шаг 4 реализован
+локально: read-only selector точного SHA и проверки rerun/устаревших запусков
+описаны в [FULL_CI_ADMISSION.md](FULL_CI_ADMISSION.md); фактические результаты
+GitHub остаются pending до разрешённого push.
 
 Готово, когда полный CI однозначно подтверждает конкретный commit и не использует production-секреты или БД.
 
