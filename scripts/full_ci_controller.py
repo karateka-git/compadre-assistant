@@ -242,8 +242,9 @@ def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict
             if not full_success(api, MAIN_WORKFLOW, sha, "main"):
                 raise ControllerError("Созданная release ветка не имеет успешного main-full этого SHA")
             return {"run-full": "false", "previous-release-sha": ""}
-        if (full_success(api, RELEASE_WORKFLOW, sha, branch)
-                or full_success(api, MAIN_WORKFLOW, sha, "main")):
+        # После PR merge в существующую release-ветку появляется новый SHA:
+        # результат main для него невозможен при разрешённом merge commit.
+        if full_success(api, RELEASE_WORKFLOW, sha, branch):
             return {"run-full": "false", "previous-release-sha": ""}
         if prior_full_attempt(api, RELEASE_WORKFLOW, sha, branch):
             raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный rerun")

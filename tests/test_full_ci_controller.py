@@ -239,6 +239,18 @@ class FullCiControllerTests(unittest.TestCase):
         with self.assertRaises(controller.ControllerError):
             controller.decide(FakeGitHub(), "release", SHA_D, "release/1.0", True)
 
+    @patch.object(controller, "git", return_value=SHA_D)
+    @patch.object(controller, "previous_release_sha", return_value=SHA_A)
+    @patch.object(controller, "prior_full_attempt", return_value=False)
+    @patch.object(controller, "full_success", return_value=False)
+    def test_changed_release_does_not_query_main_workflow(
+        self, success, _attempt, _previous, _git,
+    ) -> None:
+        """PR merge release запускает suite даже до регистрации main-full."""
+        result = controller.decide(FakeGitHub(), "release", SHA_D, "release/0.0", False)
+        self.assertEqual(result, {"run-full": "true", "previous-release-sha": SHA_A})
+        success.assert_called_once_with(ANY, controller.RELEASE_WORKFLOW, SHA_D, "release/0.0")
+
     @patch.object(controller, "git", return_value=SHA_C)
     def test_stale_checkout_is_rejected_before_api(self, _git) -> None:
         """Устаревший или подменённый checkout не запускает полный набор."""

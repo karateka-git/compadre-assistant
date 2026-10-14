@@ -60,6 +60,11 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual((result.sha, result.run_id, result.run_attempt), (SHA_D, 1, 1))
         self.assertEqual(self.api.requested_jobs, ["/actions/runs/1/attempts/1/jobs"])
 
+    def test_github_run_path_without_ref_is_accepted(self) -> None:
+        """GitHub может вернуть только путь файла workflow без @ref."""
+        self.api.runs[0]["path"] = ".github/workflows/main-full.yml"
+        self.assertIsNotNone(self.select())
+
     def test_release_branch_requires_own_full_run(self) -> None:
         """Изменённая release ветка допускается собственным release-full."""
         self.api.workflow = {"id": 2, "path": ".github/workflows/release-full.yml"}

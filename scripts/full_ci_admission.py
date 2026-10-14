@@ -145,7 +145,7 @@ def select_successful_run(
         if (_object(run.get("repository"), "run.repository").get("full_name") != api.repository or
                 _object(run.get("head_repository"), "run.head_repository").get("full_name") != api.repository or
                 run.get("workflow_id") != workflow_id or
-                run.get("path") not in (f"{expected_path}@{branch}",
+                run.get("path") not in (expected_path, f"{expected_path}@{branch}",
                                         f"{expected_path}@refs/heads/{branch}")):
             continue
         if run.get("event") not in ("push", "workflow_dispatch"):
