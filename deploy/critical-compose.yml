@@ -1,0 +1,5 @@
+services:
+  tg_assistant:
+    restart: "no"
+  vk_assistant:
+    restart: "no"
