@@ -45,19 +45,21 @@ def is_ancestor(older: str, newer: str) -> bool:
 
 
 class GitHub:
-    """Читает только REST API репозитория с кратким сроком жизни token."""
+    """Читает REST API репозитория с token или без него для публичных данных."""
 
-    def __init__(self, repository: str, token: str) -> None:
+    def __init__(self, repository: str, token: str, *, allow_anonymous: bool = False) -> None:
         """Сохраняет проверенные реквизиты API.
 
         Args:
             repository: Полное имя репозитория owner/repo.
             token: Выданный GitHub Actions token с правами чтения.
+            allow_anonymous: Разрешить запросы без token для публичного репозитория.
 
         Raises:
             ControllerError: Имя репозитория или token отсутствует.
         """
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or not token:
+        if (not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)
+                or (not token and not allow_anonymous)):
             raise ControllerError("Не заданы GITHUB_REPOSITORY или GITHUB_TOKEN")
         self.repository = repository
         self.root = f"https://api.github.com/repos/{repository}"
@@ -68,12 +70,14 @@ class GitHub:
         url = self.root + path
         if parameters:
             url += "?" + urlencode(parameters)
-        request = Request(url, headers={
+        headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "compadre-full-ci-controller",
-        })
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        request = Request(url, headers=headers)
         try:
             with urlopen(request, timeout=20) as response:
                 return json.load(response)

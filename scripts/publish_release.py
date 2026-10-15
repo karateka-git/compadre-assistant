@@ -89,6 +89,19 @@ def _protection(api: GitHub, version: str) -> None:
     immutable = api.get("/immutable-releases")
     if not isinstance(immutable, dict) or immutable.get("enabled") is not True:
         raise PublishError("Immutable Releases не включены")
+    _tag_protection(api, version)
+
+
+def _tag_protection(api: GitHub, version: str, *, require_visible_bypass: bool = True) -> None:
+    """Требует активный tag ruleset для выбранной версии.
+
+    Args:
+        api: Клиент GitHub для чтения правил репозитория.
+        version: Проверяемый tag выпуска.
+        require_visible_bypass: Требовать явный пустой bypass list. Публичный
+            API скрывает это поле; selector компенсирует его проверкой
+            immutable Release и точного SHA.
+    """
     rulesets = api.pages("/rulesets")
     protected = False
     for summary in rulesets:
@@ -108,10 +121,15 @@ def _protection(api: GitHub, version: str) -> None:
                    for pattern in names["include"]):
             continue
         types = {entry.get("type") for entry in rule.get("rules", []) if isinstance(entry, dict)}
-        if {"update", "deletion"} <= types and rule.get("bypass_actors") == []:
+        bypass = rule.get("bypass_actors")
+        acceptable_bypass = (bypass == [] if require_visible_bypass else
+                             ("bypass_actors" not in rule or bypass == []))
+        if {"update", "deletion"} <= types and acceptable_bypass:
             protected = True
     if not protected:
-        raise PublishError("Нет активного tag ruleset v* с запретом update/deletion без bypass")
+        if require_visible_bypass:
+            raise PublishError("Нет активного tag ruleset v* с запретом update/deletion без bypass")
+        raise PublishError("Нет активного tag ruleset v* с запретом update/deletion")
 
 
 def _check_number(parts: tuple[int, int, int], change: str,
@@ -174,6 +192,9 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         raise PublishError("Требуется полный 40-символьный SHA")
     if not notes.strip():
         raise PublishError("Release notes не должны быть пустыми")
+    reserved = ("Тип выпуска:", "Commit:", "Ветка:", "Полный CI:")
+    if any(line.startswith(reserved) for line in notes.splitlines()):
+        raise PublishError("Release notes содержат служебное поле манифеста")
     branch = f"release/{major}.{minor}"
     _candidate(api, branch, sha)
     history = _published_versions(api)
@@ -196,7 +217,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
     pair_lines = "\n".join(f"- release #{r}, main #{m}: {method}" for r, m, method in pairs)
-    body = (f"{notes.strip()}\n\nCommit: `{sha}`\nВетка: `{branch}`\n"
+    body = (f"{notes.strip()}\n\nТип выпуска: обычный\nCommit: `{sha}`\nВетка: `{branch}`\n"
             f"Полный CI: {run_url}\n")
     if pair_lines:
         body += f"\nПарные PR исправлений:\n{pair_lines}\n"
@@ -257,6 +278,7 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
             confirmed.get("body") != prepared.body or
             confirmed.get("draft") is not False or
             confirmed.get("prerelease") is not False or
+            confirmed.get("immutable") is not True or
             not confirmed.get("published_at")):
         raise PublishError("Опубликованный Release не совпадает с подготовленным")
     if tag_commit(api, prepared.version) != prepared.sha:

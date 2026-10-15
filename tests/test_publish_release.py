@@ -25,6 +25,7 @@ class FakeApi:
         self.releases: list[dict] = []
         self.tags: list[dict] = []
         self.immutable = True
+        self.release_immutable = True
         self.rules: list[dict] = [{"id": 7, "target": "tag", "enforcement": "active"}]
         self.rule: dict = {
             "target": "tag", "enforcement": "active", "bypass_actors": [],
@@ -45,7 +46,8 @@ class FakeApi:
         if path == "/releases/tags/v1.0.0":
             return {"id": 42, "tag_name": "v1.0.0", "target_commitish": SHA,
                     "body": self.posts[-1][1]["body"], "draft": False,
-                    "prerelease": False, "published_at": "2026-10-14T00:00:00Z"}
+                    "prerelease": False, "immutable": self.release_immutable,
+                    "published_at": "2026-10-14T00:00:00Z"}
         raise AssertionError(path)
 
     def pages(self, path, key=None, **parameters):
@@ -104,8 +106,14 @@ class PublishTests(unittest.TestCase):
         result = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
         self.assertEqual(result.admission.workflow, MAIN_WORKFLOW)
         self.assertEqual(result.make_latest, "true")
+        self.assertIn("Тип выпуска: обычный", result.body)
         self.assertIn("/actions/runs/123/attempts/1", result.body)
         self.assertEqual(self.api.posts, [])
+
+    def test_notes_cannot_override_machine_manifest(self) -> None:
+        """Текст владельца не подменяет служебные поля выпуска."""
+        with self.assertRaisesRegex(publisher.PublishError, "служебное поле"):
+            publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения\nCommit: `" + OLD + "`")
 
     def test_patch_requires_pair_and_release_full(self) -> None:
         """Следующий PATCH вызывает проверку пары и release-full."""
@@ -162,6 +170,13 @@ class PublishTests(unittest.TestCase):
         self.assertEqual([path for path, _ in self.api.posts], ["/git/refs", "/releases"])
         self.assertEqual(self.api.posts[0][1]["sha"], SHA)
         self.assertEqual(self.api.posts[1][1]["target_commitish"], SHA)
+
+    def test_publish_requires_immutable_release_confirmation(self) -> None:
+        """Настройка репозитория без immutable выпуска не подтверждает публикацию."""
+        prepared = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        self.api.release_immutable = False
+        with self.assertRaisesRegex(publisher.PublishError, "не совпадает"):
+            publisher.publish(self.api, prepared)
 
     def test_race_or_branch_move_stops_before_release(self) -> None:
         """Занятый ref и сдвиг ветки после тега не создают Release."""

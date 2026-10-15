@@ -121,6 +121,15 @@ class AdmissionTests(unittest.TestCase):
         self.api.jobs = admission_jobs(SHA_D)
         self.assertEqual(self.select().run_attempt, 2)
 
+    def test_pinned_run_and_attempt_do_not_select_another_success(self) -> None:
+        """Манифест выпуска нельзя заменить другим успешным запуском того же SHA."""
+        self.assertIsNotNone(admission.select_successful_run(
+            self.api, "owner/repo", admission.MAIN_WORKFLOW, SHA_D, "main", 1, 1))
+        self.assertIsNone(admission.select_successful_run(
+            self.api, "owner/repo", admission.MAIN_WORKFLOW, SHA_D, "main", 2, 1))
+        self.assertIsNone(admission.select_successful_run(
+            self.api, "owner/repo", admission.MAIN_WORKFLOW, SHA_D, "main", 1, 2))
+
     def test_invalid_api_response_fails_closed(self) -> None:
         """Неверная структура API вызывает ошибку и не выдаёт допуск."""
         self.api.workflow["path"] = ".github/workflows/other.yml"

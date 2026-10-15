@@ -102,6 +102,7 @@ def _names_and_steps(jobs: list[object], workflow: str, sha: str) -> bool:
 
 def select_successful_run(
     api: ReadOnlyGitHub, repository: str, workflow: str, sha: str, branch: str,
+    run_id: int | None = None, run_attempt: int | None = None,
 ) -> Admission | None:
     """Находит успешную полную попытку CI для точного SHA и ветки.
 
@@ -111,6 +112,8 @@ def select_successful_run(
         workflow: Имя разрешённого caller workflow.
         sha: Полный commit SHA, который требуется допустить.
         branch: Ветка исходного запуска, main либо release/X.Y.
+        run_id: Обязательный ID запуска, если выпуск уже закрепил его.
+        run_attempt: Обязательный номер попытки закреплённого запуска.
 
     Returns:
         Данные проверенной попытки или None, если допуска нет.
@@ -120,6 +123,11 @@ def select_successful_run(
     """
     if workflow not in (MAIN_WORKFLOW, RELEASE_WORKFLOW):
         raise AdmissionError("Неизвестный caller workflow")
+    if (run_id is None) != (run_attempt is None):
+        raise AdmissionError("ID запуска и попытка должны задаваться вместе")
+    if run_id is not None:
+        _positive_int(run_id, "ожидаемый run_id")
+        _positive_int(run_attempt, "ожидаемый run_attempt")
     if not SHA_PATTERN.fullmatch(sha):
         raise AdmissionError("Требуется полный commit SHA")
     if ((workflow == MAIN_WORKFLOW and branch != "main") or
@@ -152,9 +160,11 @@ def select_successful_run(
             continue
         if run.get("status") != "completed" or run.get("conclusion") != "success":
             continue
-        run_id = _positive_int(run.get("id"), "run")
+        actual_run_id = _positive_int(run.get("id"), "run")
         attempt = _positive_int(run.get("run_attempt"), "run_attempt")
-        jobs = api.pages(f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs")
+        if run_id is not None and (actual_run_id, attempt) != (run_id, run_attempt):
+            continue
+        jobs = api.pages(f"/actions/runs/{actual_run_id}/attempts/{attempt}/jobs", key="jobs")
         if _names_and_steps(jobs, workflow, sha):
-            return Admission(api.repository, workflow, branch, sha, run_id, attempt)
+            return Admission(api.repository, workflow, branch, sha, actual_run_id, attempt)
     return None
