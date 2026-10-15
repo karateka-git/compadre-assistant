@@ -1,0 +1,7 @@
+services:
+  tg_assistant:
+    image: ${ASSISTANT_IMAGE:?ASSISTANT_IMAGE must be pinned}
+    pull_policy: never
+  vk_assistant:
+    image: ${ASSISTANT_IMAGE:?ASSISTANT_IMAGE must be pinned}
+    pull_policy: never
