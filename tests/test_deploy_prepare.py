@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from contextlib import closing
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -34,6 +35,20 @@ class DeployPrepareTests(unittest.TestCase):
             self.assertEqual(list(state_dir.glob(".state-*")), [])
             with self.assertRaises(prepare.PreparationError):
                 prepare.write_state(checkout / "state", checkout, {})
+
+    @unittest.skipUnless(os.name == "posix", "flock проверяется только на Linux")
+    def test_second_deploy_lock_is_rejected_without_removing_lock_file(self) -> None:
+        """Второй процесс не получает lock, пока первый держит inode."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            checkout.mkdir()
+            state = root / "state"
+            with prepare.deploy_lock(state, checkout):
+                with self.assertRaises(prepare.PreparationError):
+                    with prepare.deploy_lock(state, checkout):
+                        self.fail("Второй запуск получил lock")
+            self.assertTrue((state / "deploy.lock").is_file())
 
     def test_backup_preserves_wal_data_and_validates_copy(self) -> None:
         """SQLite backup API сохраняет подтверждённые строки из WAL."""

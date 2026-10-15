@@ -496,19 +496,25 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
     stage = state.get("stage")
     if stage == "degraded":
         raise DeployError("Degraded state требует ручного восстановления")
-    if stage in (None, "success", "rolled_back", "failed_preflight"):
+    if stage in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
         return
-    if stage == "ready" and not (host.state_dir / "deploy-in-progress").exists():
+    if stage in ("preparing", "ready") and not (host.state_dir / "deploy-in-progress").exists():
         old_sha = state.get("old_sha")
-        if not isinstance(old_sha, str):
+        old_id = state.get("old_image_id")
+        old_tag = state.get("old_tag")
+        if not all(isinstance(value, str) for value in (old_sha, old_id, old_tag)):
             _degrade(host, state, "Нет прежнего SHA после прерванной подготовки")
             raise DeployError("Не удалось восстановить checkout после подготовки")
         try:
+            if (_current_image(host) != old_id or host.runtime_tag() != old_tag or
+                    host.image(old_tag)["Id"] != old_id):
+                raise DeployError("Работающие каналы изменились во время подготовки")
             host.restore_checkout(old_sha)
         except Exception as error:
             _degrade(host, state, "Не удалось вернуть checkout после подготовки")
             raise DeployError("Не удалось восстановить checkout после подготовки") from error
-        _state(host, state, "failed_preflight", error="Предыдущая подготовка прервана")
+        _state(host, state, "failed_preflight", error="Предыдущая подготовка прервана",
+               retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
         return
     old = state.get("old_image_id")
     old_sha = state.get("old_sha")
@@ -544,7 +550,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
         host.verify_both(old, None)
         host.timer_restore(state["timer_before"])
         host.restore_checkout(old_sha)
-        _state(host, state, "rolled_back", error="Предыдущий выпуск прерван")
+        cooldown = ({"retry_after": (datetime.now(timezone.utc) + COOLDOWN).isoformat()}
+                    if isinstance(state.get("failed_version"), str) else {})
+        _state(host, state, "rolled_back", error="Предыдущий выпуск прерван", **cooldown)
     except Exception as error:
         _degrade(host, state, type(error).__name__)
         raise DeployError("Автоматический возврат не подтвердил оба канала") from error
@@ -577,7 +585,7 @@ def deploy(host: Host, version: str) -> None:
         state = prep.read_state(host.state_dir, host.checkout) or {}
         previous_stage = state.get("stage")
         _recover(host, state)
-        if previous_stage not in (None, "success", "rolled_back", "failed_preflight"):
+        if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
             raise DeployError("Незавершённый предыдущий выпуск обработан; проверьте состояние перед новым запуском")
         if state.get("stage") == "degraded":
             raise DeployError("Degraded state требует ручного восстановления")
@@ -601,11 +609,20 @@ def deploy(host: Host, version: str) -> None:
         except Exception as error:
             _state(host, state, "failed_preflight", error=type(error).__name__)
             raise DeployError("Исходное состояние production не прошло preflight") from error
+        state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
+                     failed_version=version)
+        _state(host, state, "preparing")
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
                 host, version, old_sha, old_id, old_tag,
             )
         except Exception as error:
+            try:
+                prep.require_clean_checkout(host.checkout, old_sha)
+            except Exception:
+                # Не теряем rollback manifest при неудачном возврате checkout.
+                _state(host, state, "preparing", error=type(error).__name__)
+                raise DeployError("Checkout не возвращён после подготовки; нужен recovery") from error
             _state(host, state, "failed_preflight", error=type(error).__name__,
                    failed_version=version,
                    retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
@@ -616,7 +633,7 @@ def deploy(host: Host, version: str) -> None:
                 "candidate": asdict(selected) | {"image_id": candidate_id, "tag": tag},
                 "old_sha": old_sha, "old_image_id": old_id, "old_tag": old_tag,
                 "schema_before": before, "last_good": last_good,
-                "timer_before": host.timer_snapshot(),
+                "timer_before": host.timer_snapshot(), "failed_version": version,
             }
             _state(host, state, "ready")
         except Exception as error:
@@ -674,15 +691,87 @@ def deploy(host: Host, version: str) -> None:
             raise DeployError(f"Выпуск не установлен: {type(error).__name__}") from error
 
 
+def verify_pinned(host: Host) -> None:
+    """Проверяет stop/start и recovery обоих каналов на текущем закреплённом образе.
+
+    Команда предназначена для контролируемой приёмки установки до первого
+    выпуска; она не меняет код, схему SQLite или выбранную версию.
+
+    Args:
+        host: Адаптер системных операций production VPS.
+
+    Raises:
+        DeployError: Pin, проверка обоих каналов или возврат не подтвердились.
+    """
+    with prep.deploy_lock(host.state_dir, host.checkout):
+        state = prep.read_state(host.state_dir, host.checkout) or {}
+        previous_stage = state.get("stage")
+        _recover(host, state)
+        if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
+            raise DeployError("Предыдущий переход обработан; проверьте состояние перед повтором")
+        if state.get("stage") == "degraded":
+            raise DeployError("Degraded state требует ручного восстановления")
+        try:
+            old_id = _current_image(host)
+            old_sha = host.run("git", "rev-parse", "HEAD")
+            prep.require_clean_checkout(host.checkout, old_sha)
+            old_tag = prep.pinned_tag(old_sha)
+            host.installed(old_id, old_sha)
+            host.require_no_duplicate_polling()
+            schema = _applied_names(host.checkout / "data/app.db")
+            prep.validate_schema(host.checkout / "data/app.db", schema)
+            state.pop("failed_version", None)
+            state.pop("retry_after", None)
+            state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
+                         schema_before=schema, timer_before=host.timer_snapshot())
+            _state(host, state, "ready")
+        except Exception as error:
+            _state(host, state, "failed_preflight", error=type(error).__name__)
+            raise DeployError("Текущий pin не прошёл проверку") from error
+        try:
+            host.marker(True)
+            _state(host, state, "critical")
+            host.timer_suspend()
+            host.restart_policy("no")
+            host.stop_both()
+            _state(host, state, "writers_stopped")
+            host.set_runtime(old_tag, old_id)
+            host.start_both(old_tag, old_id)
+            host.verify_both(old_id, None)
+            host.restart_policy("unless-stopped")
+            host.marker(False)
+            host.activate_unit()
+            host.verify_both(old_id, None)
+            host.timer_restore(state["timer_before"])
+            _state(host, state, "pinned_verified", error=None)
+        except Exception as error:
+            try:
+                _state(host, state, "rollback_started", error=type(error).__name__)
+            except Exception:
+                state.update(stage="rollback_started", error=type(error).__name__)
+            try:
+                _recover(host, state)
+            except Exception as rollback_error:
+                raise DeployError("Проверка pin и возврат не прошли; degraded state") from rollback_error
+            raise DeployError("Проверка pin не прошла; оба канала возвращены") from error
+
+
 def main() -> None:
-    """Обрабатывает `sudo deploy-prod vX.Y.Z` с одним обязательным аргументом."""
+    """Обрабатывает выпуск по версии или проверку текущего pin."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("version")
+    parser.add_argument("version", nargs="?")
+    parser.add_argument("--verify-pinned", action="store_true",
+                        help="контролируемый stop/start обоих каналов на текущем pin")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
-        deploy(Host(), args.version)
+        if args.verify_pinned == (args.version is not None):
+            raise DeployError("Укажите версию или --verify-pinned")
+        if args.verify_pinned:
+            verify_pinned(Host())
+        else:
+            deploy(Host(), args.version)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error

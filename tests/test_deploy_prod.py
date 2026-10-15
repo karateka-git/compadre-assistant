@@ -266,12 +266,14 @@ class DeployProdTests(unittest.TestCase):
                 "old_tag": prep.pinned_tag(OLD_SHA),
                 "schema_before": ["0001_initial_schema.sql"],
                 "timer_before": {"enabled": True, "active": True},
+                "failed_version": "v1.0.1",
             })
             with patch.object(prep, "deploy_lock", return_value=nullcontext()):
                 with self.assertRaises(prod.DeployError):
                     prod.deploy(host, "v1.0.1")
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
             self.assertEqual(host.current_image, OLD_IMAGE)
+            self.assertTrue(prep.read_state(host.state_dir, host.checkout)["retry_after"])
 
     def test_changed_schema_after_reboot_stays_degraded(self) -> None:
         """Частичная миграция не вызывает restore backup или запуск старого кода."""
@@ -315,6 +317,140 @@ class DeployProdTests(unittest.TestCase):
             self.assertTrue(host.running)
             self.assertNotIn("stop_both", host.actions)
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
+
+    def test_process_death_during_build_recovers_original_checkout(self) -> None:
+        """Аварийное завершение после fetch оставляет rollback manifest до смены checkout."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patch.object(
+                prep, "build_pinned_image", side_effect=SystemExit(77),
+            ), patches[4], patches[5]:
+                with self.assertRaises(SystemExit):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "preparing")
+            self.assertEqual(state["old_sha"], OLD_SHA)
+            self.assertEqual(host.head, NEW_SHA)
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "failed_preflight")
+            self.assertEqual(state["failed_version"], "v1.0.0")
+            self.assertEqual(host.head, OLD_SHA)
+            self.assertTrue(host.running)
+            self.assertNotIn("stop_both", host.actions)
+            before = host.actions.copy()
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()):
+                with self.assertRaisesRegex(prod.DeployError, "временно закрыт"):
+                    prod.deploy(host, "v1.0.0")
+            self.assertEqual(host.actions, before)
+
+    def test_failed_checkout_restore_keeps_recovery_manifest(self) -> None:
+        """Ошибка возврата checkout не стирает manifest для следующего recovery."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            with patches[0], patches[1] as clean, patches[2], patch.object(
+                prep, "build_pinned_image", side_effect=prod.DeployError("build"),
+            ), patches[4], patches[5], patch.object(
+                host, "restore_checkout", side_effect=prod.DeployError("checkout"),
+            ):
+                clean.side_effect = lambda _checkout, sha: (
+                    None if host.head == sha else (_ for _ in ()).throw(prod.DeployError("HEAD"))
+                )
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "preparing")
+            self.assertEqual(state["old_sha"], OLD_SHA)
+            self.assertEqual(host.head, NEW_SHA)
+
+    def test_backup_and_migration_faults_restore_both_channels(self) -> None:
+        """Отказы после stop возвращают два старых канала и не теряют timer."""
+        for fault in ("backup", "migrate"):
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                patches = self._patches()
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                    prep if fault == "backup" else host,
+                    "backup_sqlite" if fault == "backup" else "migrate",
+                    side_effect=prod.DeployError(fault),
+                ):
+                    with self.assertRaises(prod.DeployError):
+                        prod.deploy(host, "v1.0.0")
+                self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
+                self.assertEqual(host.current_image, OLD_IMAGE)
+                self.assertEqual(host.timer_state, {"enabled": True, "active": True})
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+
+    def test_state_write_failure_after_marker_uses_rollback(self) -> None:
+        """Ошибка записи стадии после marker не оставляет один работающий канал."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            real_write = prep.write_state
+            failed = False
+
+            def flaky_write(state_dir, checkout, state):
+                """Один раз имитирует потерю записи на границе critical."""
+                nonlocal failed
+                if state.get("stage") == "critical" and not failed:
+                    failed = True
+                    raise OSError("temporary state failure")
+                real_write(state_dir, checkout, state)
+
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                prep, "write_state", side_effect=flaky_write,
+            ):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
+            self.assertEqual(host.current_image, OLD_IMAGE)
+            self.assertTrue(host.running)
+            self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+
+    def test_verify_pinned_exercises_two_channels_without_new_release(self) -> None:
+        """Контролируемая проверка старого pin использует полный recovery path."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()), patch.object(
+                prep, "require_clean_checkout",
+            ):
+                prod.verify_pinned(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "pinned_verified")
+            self.assertEqual(host.head, OLD_SHA)
+            self.assertEqual(host.current_image, OLD_IMAGE)
+            self.assertTrue(host.running)
+            self.assertLess(host.actions.index("marker_on"), host.actions.index("stop_both"))
+            self.assertEqual(host.actions.count("verify_both"), 2)
+            self.assertEqual(host.timer_state, {"enabled": True, "active": True})
+
+    def test_verify_pinned_failure_restores_old_channels(self) -> None:
+        """Отказ при пробном старте старого pin приводит к полному возврату."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            original_verify = host.verify_both
+            calls = 0
+
+            def fail_once(expected_id, expected_sha, *, timeout=120):
+                """Первый healthcheck падает, а rollback снова проверяет оба канала."""
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise prod.DeployError("failed health")
+                original_verify(expected_id, expected_sha, timeout=timeout)
+
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()), patch.object(
+                prep, "require_clean_checkout",
+            ), patch.object(host, "verify_both", side_effect=fail_once):
+                with self.assertRaises(prod.DeployError):
+                    prod.verify_pinned(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
+            self.assertEqual(host.current_image, OLD_IMAGE)
+            self.assertTrue(host.running)
+            self.assertEqual(host.timer_state, {"enabled": True, "active": True})
 
     def test_restores_original_disabled_timer_state(self) -> None:
         """После выпуска таймер остаётся выключенным, если таким был до него."""
@@ -394,6 +530,27 @@ class DeployProdTests(unittest.TestCase):
                 self.assertEqual(service["image"], prep.pinned_tag(NEW_SHA))
                 self.assertEqual(service["pull_policy"], "never")
                 self.assertEqual(service["restart"], "no")
+
+            # Внешний COMPOSE_FILE обязан сохранять имя проекта, mounts и build context.
+            environment["COMPOSE_FILE"] = os.pathsep.join((
+                str(root / "docker-compose.yml"), str(root / "deploy/pinned-compose.yml"),
+            ))
+            pinned = subprocess.run(["docker", "compose", "config", "--format", "json"],
+                                    cwd=root, env=environment, text=True, capture_output=True)
+            self.assertEqual(pinned.returncode, 0, pinned.stderr)
+            pinned_config = json.loads(pinned.stdout)
+            base = subprocess.run(["docker", "compose", "-f", str(root / "docker-compose.yml"),
+                                   "config", "--format", "json"], cwd=root, env=environment | {
+                                       "COMPOSE_FILE": str(root / "docker-compose.yml"),
+                                   }, text=True, capture_output=True)
+            self.assertEqual(base.returncode, 0, base.stderr)
+            base_config = json.loads(base.stdout)
+            self.assertEqual(pinned_config["name"], base_config["name"])
+            for name in prep.CHANNELS:
+                self.assertEqual(pinned_config["services"][name]["volumes"],
+                                 base_config["services"][name]["volumes"])
+                self.assertEqual(pinned_config["services"][name]["build"],
+                                 base_config["services"][name]["build"])
 
 
 if __name__ == "__main__":
