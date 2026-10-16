@@ -294,8 +294,10 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
         raise EmergencyPublishError("Требуется однострочная причина аварийного выпуска")
     if not notes.strip() or any(line.startswith(("Тип выпуска:", "Commit:", "Ветка:",
                                                 "Причина:", "Полный CI:", "PR #", "- PR #",
+                                                "PR и состояние на момент merge:",
                                                 "Парные PR исправлений:",
-                                                "Неподтверждённые или неуспешные проверки:"))
+                                                "Неподтверждённые или неуспешные проверки:",
+                                                "Все наблюдаемые проверки успешны; аварийный допуск всё равно явный."))
                                 for line in notes.splitlines()):
         raise EmergencyPublishError("Notes пусты или содержат служебные поля")
     if not pr_numbers or len(set(pr_numbers)) != len(pr_numbers) or any(type(n) is not int or n <= 0 for n in pr_numbers):

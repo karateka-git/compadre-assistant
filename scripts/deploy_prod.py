@@ -679,7 +679,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "published_ci_source": selected.published_ci_source,
             })
             print(f"deploy-prod АВАРИЙНЫЙ РЕЖИМ version={version} sha={selected.sha} "
-                  f"CI={selected.ci_state} reason={reason.strip()}", flush=True)
+                  f"CI={selected.ci_state} deploy_reason={reason.strip()} "
+                  f"published_reason={selected.reason}", flush=True)
         try:
             state = {
                 "candidate": asdict(selected) | {"image_id": candidate_id, "tag": tag},

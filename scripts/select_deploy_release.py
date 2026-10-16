@@ -246,6 +246,188 @@ def _emergency_manifest(body: str, version: str, repository: str,
     return sha_field[1:-1], branch, reason, ci[2], source
 
 
+def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
+                            sha: str, branch: str, patch: int) -> None:
+    """Сверяет журнал PR и пар в Release с независимыми данными GitHub.
+
+    Args:
+        api: Читающий клиент GitHub.
+        body: Полный текст опубликованного Release.
+        version: Версия опубликованного выпуска.
+        sha: SHA выпуска из защищённого тега.
+        branch: Релизная ветка версии.
+        patch: Номер PATCH версии.
+
+    Raises:
+        DeploySelectionError: Манифест неполон или противоречит данным API.
+    """
+    from scripts.check_hotfix_pairs import linked_pulls
+    from scripts.publish_emergency_release import _bypass_at_merge, _fast_at_merge, _pull
+
+    lines = body.splitlines()
+    if lines.count("PR и состояние на момент merge:") != 1:
+        raise DeploySelectionError("Журнал PR отсутствует или повторяется")
+    start = lines.index("PR и состояние на момент merge:") + 1
+    end = next((i for i in range(start, len(lines)) if not lines[i]), len(lines))
+    rows = lines[start:end]
+    if not rows or any(not re.fullmatch(r"- PR #([1-9][0-9]*) -> .*", row) for row in rows):
+        raise DeploySelectionError("Журнал PR неполон")
+    if sum(line.startswith("- PR #") for line in lines) != len(rows):
+        raise DeploySelectionError("Строки PR находятся вне журнала")
+    numbers = [int(re.match(r"- PR #([1-9][0-9]*)", row)[1]) for row in rows]
+    if len(set(numbers)) != len(numbers):
+        raise DeploySelectionError("PR в аварийном манифесте повторяется")
+    observed: dict[int, dict] = {}
+    for number, row in zip(numbers, rows):
+        # Повторное вычисление всей строки выявляет подмену времени, SHA,
+        # состояния CI, URL, bypass и rule suite одновременно.
+        expected_branch = "main"
+        branch_match = re.match(r"- PR #[1-9][0-9]* -> (main|release/[1-9][0-9]*\.[0-9]+);", row)
+        if branch_match is None:
+            raise DeploySelectionError("Некорректная целевая ветка PR")
+        expected_branch = branch_match[1]
+        if expected_branch not in ("main", branch) or (patch == 0 and expected_branch != "main"):
+            raise DeploySelectionError("PR не относится к выпускаемой линии")
+        pr = _pull(api, number, expected_branch, sha,
+                   main_current=patch > 0 and expected_branch == "main")
+        fast = _fast_at_merge(api, pr)
+        bypass, suite_id = _bypass_at_merge(api, pr)
+        suffix = f"; rule suite {suite_id}" if suite_id else ""
+        expected = (f"- PR #{number} -> {expected_branch}; merge `{pr['merge_commit_sha']}` "
+                    f"({pr['merged_at']}); pr-fast={fast.state} [{fast.source}]; "
+                    f"bypass={bypass}{suffix}")
+        if row != expected:
+            raise DeploySelectionError(f"Журнал PR #{number} не совпадает с GitHub")
+        observed[number] = {"branch": expected_branch, "fast": fast.state,
+                            "merge_sha": pr["merge_commit_sha"]}
+
+    pair_heading = "Парные PR исправлений:"
+    if patch:
+        if lines.count(pair_heading) != 1:
+            raise DeploySelectionError("PATCH не содержит парные PR")
+        pair_start = lines.index(pair_heading) + 1
+        pair_end = next((i for i in range(pair_start, len(lines)) if not lines[i]), len(lines))
+        pair_rows = lines[pair_start:pair_end]
+        if not pair_rows:
+            raise DeploySelectionError("Список парных PR пуст")
+        if sum(line.startswith("- release #") for line in lines) != len(pair_rows):
+            raise DeploySelectionError("Строки пар PR находятся вне журнала")
+        paired: set[int] = set()
+        for row in pair_rows:
+            match = re.fullmatch(r"- release #([1-9][0-9]*), main #([1-9][0-9]*): "
+                                 r"(точный Git diff SHA-256 [0-9a-f]{64}|ручное подтверждение владельца)", row)
+            if match is None:
+                raise DeploySelectionError("Некорректная пара PR")
+            release_number, main_number = int(match[1]), int(match[2])
+            if (release_number in paired or main_number in paired or
+                    observed.get(release_number, {}).get("branch") != branch or
+                    observed.get(main_number, {}).get("branch") != "main"):
+                raise DeploySelectionError("Пары PR не покрывают журнал однозначно")
+            release_pr, main_pr = linked_pulls(api, release_number)
+            if (release_pr["number"], main_pr["number"]) != (release_number, main_number):
+                raise DeploySelectionError("Связь парных PR изменилась")
+            paired.update((release_number, main_number))
+        if paired != set(numbers):
+            raise DeploySelectionError("Список парных PR не покрывает все PR")
+        _verify_patch_history(api, version, sha, branch, observed)
+    elif pair_heading in lines:
+        raise DeploySelectionError("Новая линия не должна содержать парные PR")
+
+    summary = "Неподтверждённые или неуспешные проверки:"
+    full_line = next(line for line in lines if line.startswith("Полный CI:"))
+    full_match = re.fullmatch(r"Полный CI: (main-full\.yml|release-full\.yml) "
+                              r"(success|failure|pending|not_run|unverified) — .+", full_line)
+    assert full_match is not None  # Поле уже разобрано в _emergency_manifest.
+    missing = [f"- pr-fast PR #{number}: {observed[number]['fast']}" for number in numbers
+               if observed[number]["fast"] != "success"]
+    if full_match[2] != "success":
+        missing.append(f"- {full_match[1]}: {full_match[2]}")
+    if missing:
+        if lines.count(summary) != 1:
+            raise DeploySelectionError("Итог непроверенных проверок отсутствует")
+        index = lines.index(summary) + 1
+        if lines[index:] != missing:
+            raise DeploySelectionError("Итог проверок не соответствует журналу")
+    elif summary in lines or lines.count("Все наблюдаемые проверки успешны; аварийный допуск всё равно явный.") != 1:
+        raise DeploySelectionError("Итог аварийных проверок некорректен")
+
+
+def _verify_patch_history(api: ReadOnlyGitHub, version: str, sha: str,
+                          branch: str, observed: dict[int, dict]) -> None:
+    """Доказывает, что журнал охватывает все merge commits после прошлого PATCH."""
+    major, minor, patch = _version(version)
+    previous: list[tuple[int, str]] = []
+    for release in api.pages("/releases"):
+        if not isinstance(release, dict) or not isinstance(release.get("tag_name"), str):
+            raise DeploySelectionError("История выпусков GitHub неполна")
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        try:
+            old_major, old_minor, old_patch = _version(release["tag_name"])
+        except PublishError:
+            continue
+        if (old_major, old_minor) == (major, minor) and old_patch < patch:
+            previous.append((old_patch, release["tag_name"]))
+    if not previous:
+        raise DeploySelectionError("Для PATCH не найден предыдущий выпуск линии")
+    prior_patch = max(item[0] for item in previous)
+    if prior_patch != patch - 1 or sum(item[0] == prior_patch for item in previous) != 1:
+        raise DeploySelectionError("Предыдущая версия PATCH неоднозначна")
+    baseline = _tag_commit(api, next(tag for number, tag in previous if number == prior_patch))
+    release_merges = {number: item["merge_sha"] for number, item in observed.items()
+                      if item["branch"] == branch}
+    if len(set(release_merges.values())) != len(release_merges):
+        raise DeploySelectionError("Разные PR ссылаются на один merge commit")
+    current = sha
+    walked: set[str] = set()
+    while current != baseline:
+        if current in walked or len(walked) >= 100:
+            raise DeploySelectionError("Линия PATCH циклична или слишком длинна")
+        walked.add(current)
+        commit = api.get(f"/git/commits/{current}")
+        parents = commit.get("parents") if isinstance(commit, dict) else None
+        if (not isinstance(parents, list) or len(parents) != 2 or
+                any(not isinstance(item, dict) for item in parents) or
+                not all(SHA_PATTERN.fullmatch(str(item.get("sha"))) for item in parents)):
+            raise DeploySelectionError("В линии PATCH есть изменение без PR merge")
+        current = parents[0]["sha"]
+    if set(release_merges.values()) != walked:
+        raise DeploySelectionError("Журнал PR не покрывает всю линию PATCH")
+
+
+def _verify_published_ci_source(api: ReadOnlyGitHub, workflow: str,
+                                sha: str, branch: str, source: str,
+                                published_at: str) -> None:
+    """Подтверждает, что URL в Release относится к CI точного SHA до публикации."""
+    from scripts.publish_emergency_release import _time
+
+    run_url = re.fullmatch(
+        rf"https://github\.com/{re.escape(api.repository)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+        source,
+    )
+    if run_url is None:
+        return  # Статические причины отсутствия run проверены парсером манифеста.
+    metadata = api.get(f"/actions/workflows/{workflow}")
+    if (not isinstance(metadata, dict) or type(metadata.get("id")) is not int or
+            metadata.get("path") != f".github/workflows/{workflow}"):
+        raise DeploySelectionError("Workflow опубликованного CI не подтверждён")
+    runs = api.pages(f"/actions/workflows/{workflow}/runs", key="workflow_runs", head_sha=sha)
+    if any(not isinstance(run, dict) for run in runs):
+        raise DeploySelectionError("Список опубликованных CI run некорректен")
+    published = _time(published_at)
+    matches = [run for run in runs if run.get("id") == int(run_url[1]) and
+               run.get("run_attempt", 0) >= int(run_url[2]) and
+               run.get("workflow_id") == metadata["id"] and
+               run.get("head_sha") == sha and run.get("head_branch") == branch and
+               run.get("event") in ("push", "workflow_dispatch") and
+               isinstance(run.get("repository"), dict) and
+               run["repository"].get("full_name") == api.repository and
+               _time(run.get("created_at")) is not None and
+               published is not None and _time(run["created_at"]) <= published]
+    if len(matches) != 1:
+        raise DeploySelectionError("Источник полного CI в Release не подтверждён")
+
+
 def select_emergency_release(api: ReadOnlyGitHub, version: str) -> SelectedRelease:
     """Выбирает только опубликованный аварийный Release точного SHA.
 
@@ -278,9 +460,20 @@ def select_emergency_release(api: ReadOnlyGitHub, version: str) -> SelectedRelea
     head = _branch_head(api, branch)
     _check_ancestor(api, tag_sha, head)
     _tag_protection(api, version, require_visible_bypass=False)
+    _verify_emergency_pulls(api, release["body"], version, tag_sha, branch, patch)
+    _verify_published_ci_source(api, workflow, tag_sha, ci_branch,
+                                published_source, release["published_at"])
     # Чтение состояния CI обязательно: ошибка API не считается отсутствием run.
     from scripts.publish_emergency_release import _full_snapshot
     current = _full_snapshot(api, workflow, tag_sha, ci_branch)
+    if published_state == "success":
+        run = re.fullmatch(
+            rf"https://github\.com/{re.escape(api.repository)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+            published_source,
+        )
+        if run is None or select_successful_run(api, api.repository, workflow, tag_sha,
+                                                ci_branch, int(run[1]), int(run[2])) is None:
+            raise DeploySelectionError("Успех полного CI в Release не подтверждён")
     if _release(api, version) != release or _tag_commit(api, version) != tag_sha or _branch_head(api, branch) != head:
         raise DeploySelectionError("GitHub Release, tag или ветка изменились во время проверки")
     run = re.fullmatch(

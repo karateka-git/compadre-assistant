@@ -239,7 +239,8 @@ class SelectDeployReleaseTests(unittest.TestCase):
                                   ("v1.0.1", selector.RELEASE_WORKFLOW)):
             with self.subTest(version=version):
                 api = self._emergency_api(version)
-                selected = selector.select_emergency_release(api, api.version)
+                with patch.object(selector, "_verify_emergency_pulls"):
+                    selected = selector.select_emergency_release(api, api.version)
                 self.assertEqual((selected.kind, selected.sha, selected.ci_state,
                                   selected.reason, selected.workflow),
                                  ("emergency", SHA, "failure", "срочный сбой", workflow))
@@ -255,27 +256,33 @@ class SelectDeployReleaseTests(unittest.TestCase):
             with self.subTest(old=old):
                 api = self._emergency_api()
                 api.release["body"] = api.release["body"].replace(old, new)
-                with self.assertRaises(selector.DeploySelectionError):
+                with patch.object(selector, "_verify_emergency_pulls"), \
+                     self.assertRaises(selector.DeploySelectionError):
                     selector.select_emergency_release(api, api.version)
         api = self._emergency_api()
         api.error = selector.ControllerError("API недоступен")
-        with self.assertRaises(selector.ControllerError):
+        with patch.object(selector, "_verify_emergency_pulls"), \
+             self.assertRaises(selector.ControllerError):
             selector.select_emergency_release(api, api.version)
         api = self._emergency_api()
         api.release["body"] += "Причина: вторая причина\n"
-        with self.assertRaises(selector.DeploySelectionError):
+        with patch.object(selector, "_verify_emergency_pulls"), \
+             self.assertRaises(selector.DeploySelectionError):
             selector.select_emergency_release(api, api.version)
         api = self._emergency_api()
         api.tag["object"]["sha"] = NEW_HEAD
-        with self.assertRaises(selector.DeploySelectionError):
+        with patch.object(selector, "_verify_emergency_pulls"), \
+             self.assertRaises(selector.DeploySelectionError):
             selector.select_emergency_release(api, api.version)
         api = self._emergency_api()
         api.release["body"] = api.release["body"].replace("bypass=yes", "bypass=unknown")
-        with self.assertRaises(selector.DeploySelectionError):
+        with patch.object(selector, "_verify_emergency_pulls"), \
+             self.assertRaises(selector.DeploySelectionError):
             selector.select_emergency_release(api, api.version)
         api = self._emergency_api()
         api.release["body"] = api.release["body"].replace("failure — https://", "not_run — https://")
-        with self.assertRaises(selector.DeploySelectionError):
+        with patch.object(selector, "_verify_emergency_pulls"), \
+             self.assertRaises(selector.DeploySelectionError):
             selector.select_emergency_release(api, api.version)
 
 
