@@ -473,15 +473,15 @@ SHA релизной ветки; прежний production SHA не объявл
 3. Реализовать `deploy-prod --emergency`, сохранив проверку версии, backup, миграций, двух контейнеров и возврата.
 4. Проверить оба сценария: два PR для исправления действующего релиза и новая линия из `main`; обычная команда должна отвергать аварийную непроверенную версию.
 
-Шаг 1 настроен и проверен через GitHub API: точный владелец `User 42288695`
-получил `pull_request` bypass, обязательный `pr-fast` и остальные правила
-сохранены. Разрешённая живая проба [PR #10](https://github.com/karateka-git/compadre-assistant/pull/10)
-подтвердила блокировку обычного merge при отменённом `pr-fast`; PR закрыт
-без merge, временная ветка удалена, `main` не изменён. Доступ к выбору
-обхода на PR не подтверждён: браузер GitHub не авторизован, GraphQL
-`viewerCanMergeAsAdmin=false` при REST `pull_requests_only`. Результаты и
-оставшаяся проверка описаны в [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md).
-Шаг 6.1 остаётся открытым; шаги 6.2–6.4 не начаты.
+Шаг 6.1 завершён: точный владелец `User 42288695` получил `pull_request`
+bypass; обязательный `pr-fast` и остальные правила сохранены. Проба
+[PR #10](https://github.com/karateka-git/compadre-assistant/pull/10) подтвердила
+блокировку обычного merge. Затем по явному разрешению
+[PR #11](https://github.com/karateka-git/compadre-assistant/pull/11) слит с
+`pr-fast=failure` только во временную `release/test-*`: merge SHA и
+rule suite `4557275818` с `result=bypass` подтверждают обход владельцем.
+Временные ветки/worktree удалены, `main` не изменён. Результаты и аудит —
+в [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md). Шаги 6.2–6.4 не начаты.
 
 Готово, когда аварийный обход требует явного действия владельца и оставляет проверяемую запись о выпуске.
 

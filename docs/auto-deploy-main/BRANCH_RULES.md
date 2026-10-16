@@ -14,7 +14,8 @@ Ruleset применяется к `refs/heads/main` и `refs/heads/release/*` и
 - `required_approving_review_count=0`, без обязательного code-owner review или одобрения последнего push;
 - с 16 октября 2026 года в `bypass_actors` только владелец
   `User 42288695` (`karateka-git`), режим `pull_request`
-  (`For pull requests only`); настройка и оставшаяся проба описаны в
+  (`For pull requests only`); настройка и успешная проба merge с обходом
+  во временную `release/test-*` описаны в
   [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md). При создании ruleset список был
   пустым; обычное слияние по-прежнему требует `pr-fast`.
 
