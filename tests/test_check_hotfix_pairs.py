@@ -162,6 +162,21 @@ class HotfixTests(unittest.TestCase):
         with self.assertRaisesRegex(hotfix.HotfixError, "release-full"):
             hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE)
 
+    def test_emergency_pair_check_keeps_history_without_release_full(self) -> None:
+        """Аварийный вызов пропускает только финальный release-full."""
+        self.admission.side_effect = lambda api, repo, workflow, sha, branch: (
+            object() if workflow == hotfix.MAIN_WORKFLOW else None
+        )
+        result = hotfix.check_release(
+            self.api, "release/1.0", RELEASE_SHA, BASE, require_full_ci=False,
+        )
+        self.assertEqual(result[0][:2], (10, 11))
+        self.api.main["merged_at"] = None
+        with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
+            hotfix.check_release(
+                self.api, "release/1.0", RELEASE_SHA, BASE, require_full_ci=False,
+            )
+
     def test_baseline_must_be_last_published_release(self) -> None:
         """Произвольный старый baseline не может скрыть последующий выпуск."""
         self.api.releases = [{"tag_name": "v1.0.1", "draft": False, "prerelease": False}]

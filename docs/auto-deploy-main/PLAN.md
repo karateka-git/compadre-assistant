@@ -481,7 +481,11 @@ bypass; обязательный `pr-fast` и остальные правила 
 `pr-fast=failure` только во временную `release/test-*`: merge SHA и
 rule suite `4557275818` с `result=bypass` подтверждают обход владельцем.
 Временные ветки/worktree удалены, `main` не изменён. Результаты и аудит —
-в [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md). Шаги 6.2–6.4 не начаты.
+в [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md). Шаг 6.2 реализован локально:
+отдельная аварийная публикация, причина, точный SHA, связанные PR и снимки
+`pr-fast`/полного CI/bypass описаны в [EMERGENCY_PUBLISH.md](EMERGENCY_PUBLISH.md).
+Только fake API проверял запись; настоящий тег и Release не создавались.
+Шаги 6.3–6.4 не начаты.
 
 Готово, когда аварийный обход требует явного действия владельца и оставляет проверяемую запись о выпуске.
 

@@ -167,7 +167,8 @@ def check_baseline(api: GitHub, branch: str, baseline: str) -> None:
         raise HotfixError("Начальный baseline не имеет успешного main-full")
 
 
-def check_release(api: GitHub, branch: str, candidate: str, baseline: str) -> list[tuple[int, int, str]]:
+def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
+                  *, require_full_ci: bool = True) -> list[tuple[int, int, str]]:
     """Проверяет каждый merge релизной линии после прошлого выпуска.
 
     Args:
@@ -175,6 +176,7 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str) -> li
         branch: Действующая релизная ветка release/X.Y.
         candidate: Её точный текущий SHA перед публикацией.
         baseline: SHA прошлого выпуска этой линии либо SHA создания ветки.
+        require_full_ci: Требовать успешный release-full для обычной публикации.
 
     Returns:
         Список пар PR и способа подтверждения патча.
@@ -226,7 +228,7 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str) -> li
         result.append((release["number"], main["number"], method))
     if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
         raise HotfixError("Релизная ветка сдвинулась во время проверки")
-    if select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
+    if require_full_ci and select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
         raise HotfixError("Нет успешного release-full для точного SHA")
     return result
 

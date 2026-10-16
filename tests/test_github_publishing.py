@@ -45,6 +45,17 @@ class GitHubPublishingTests(unittest.TestCase):
             with self.assertRaisesRegex(github_publishing.PublishingError, "422"):
                 client.post("/git/refs", {"ref": "refs/heads/release/1.0", "sha": "a" * 40})
 
+    def test_authenticated_user_requires_confirmed_response(self) -> None:
+        """Личность token читается через /user и ошибка API закрывает допуск."""
+        client = github_publishing.PublishingGitHub("owner/repo", "test-token")
+        identity = {"id": 42288695, "login": "karateka-git"}
+        with patch.object(github_publishing, "urlopen", return_value=FakeResponse(200, identity)) as open_url:
+            self.assertEqual(client.authenticated_user(), identity)
+        self.assertEqual(open_url.call_args.args[0].full_url, "https://api.github.com/user")
+        with patch.object(github_publishing, "urlopen", return_value=FakeResponse(401, identity)):
+            with self.assertRaises(github_publishing.PublishingError):
+                client.authenticated_user()
+
 
 if __name__ == "__main__":
     unittest.main()
