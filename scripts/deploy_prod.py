@@ -21,7 +21,7 @@ from typing import Any
 from scripts import deploy_prepare as prep
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
-from scripts.select_deploy_release import SelectedRelease, select_release
+from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
 
 CHECKOUT = Path("/opt/obs-chat-bot")
@@ -121,6 +121,27 @@ class Host:
             return select_release(GitHub(EXPECTED_REPOSITORY, "", allow_anonymous=True), version)
         finally:
             os.chdir(previous)
+
+    def select_emergency(self, version: str) -> SelectedRelease:
+        """Повторно сверяет аварийный Release и фактический полный CI."""
+        previous = Path.cwd()
+        try:
+            os.chdir(self.checkout)
+            return select_emergency_release(GitHub(EXPECTED_REPOSITORY, "", allow_anonymous=True), version)
+        finally:
+            os.chdir(previous)
+
+    def initiator(self) -> str:
+        """Возвращает подтверждённого sudo инициатора серверной команды."""
+        import pwd
+
+        uid = os.environ.get("SUDO_UID")
+        if uid is None or not uid.isdecimal():
+            raise DeployError("Аварийный режим требует запуска владельцем через sudo")
+        account = pwd.getpwuid(int(uid))
+        if account.pw_name != "user" or int(uid) == 0:
+            raise DeployError("Аварийный режим доступен только серверному владельцу user")
+        return f"{account.pw_name} (uid={uid})"
 
     def fetch(self, selected: SelectedRelease) -> None:
         """Получает только названный tag и SHA существующим read-only deploy key."""
@@ -450,16 +471,21 @@ def _current_image(host: Host) -> str:
 
 def _same_selection(host: Host, selected: SelectedRelease) -> None:
     """Требует полное совпадение повторного GitHub selector с первым снимком."""
-    if host.select(selected.version) != selected:
+    current = (host.select_emergency(selected.version) if selected.kind == "emergency"
+               else host.select(selected.version))
+    if current != selected:
         raise DeployError("Release, tag или CI изменились после выбора")
 
 
 def _prepare_candidate(
     host: Host, version: str, old_sha: str, old_id: str, old_tag: str,
+    *, emergency: bool = False,
 ) -> tuple[SelectedRelease, str, str, list[str], list[str]]:
     """Готовит candidate без остановки каналов и восстанавливает checkout при ошибке."""
     try:
-        selected = host.select(version)
+        selected = host.select_emergency(version) if emergency else host.select(version)
+        if selected.kind != ("emergency" if emergency else "ordinary"):
+            raise DeployError("Тип выбранного Release не соответствует команде")
         if selected.sha == old_sha:
             raise DeployError("Текущий код уже имеет SHA выбранной версии")
         host.fetch(selected)
@@ -570,17 +596,28 @@ def _degrade(host: Host, state: dict[str, Any], reason: str) -> None:
     _state(host, state, "degraded", error=reason)
 
 
-def deploy(host: Host, version: str) -> None:
+def deploy(host: Host, version: str, *, emergency: bool = False,
+           reason: str | None = None) -> None:
     """Развёртывает названный Release или возвращает оба канала на старый образ.
 
     Args:
         host: Адаптер системных операций production VPS.
         version: Каноническая опубликованная версия.
+        emergency: Явный выбор аварийного маршрута.
+        reason: Причина решения о развёртывании аварийного выпуска.
 
     Raises:
         DeployError: Допуск, переключение или проверка завершились отказом.
     """
     _version(version)
+    if emergency:
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 1000 or "\n" in reason or "\r" in reason:
+            raise DeployError("Для аварийного выпуска нужна однострочная причина")
+        initiator = host.initiator()
+    elif reason is not None:
+        raise DeployError("Причина допустима только с --emergency")
+    else:
+        initiator = None
     with prep.deploy_lock(host.state_dir, host.checkout):
         state = prep.read_state(host.state_dir, host.checkout) or {}
         previous_stage = state.get("stage")
@@ -591,6 +628,8 @@ def deploy(host: Host, version: str) -> None:
             raise DeployError("Degraded state требует ручного восстановления")
         last_good = state.get("last_good")
         if isinstance(last_good, dict) and last_good.get("version") == version:
+            if last_good.get("kind", "ordinary") != ("emergency" if emergency else "ordinary"):
+                raise DeployError("Тип установленного Release не соответствует команде")
             host.verify_installed(last_good)
             print("deploy-prod stage=already_installed", flush=True)
             return
@@ -611,10 +650,13 @@ def deploy(host: Host, version: str) -> None:
             raise DeployError("Исходное состояние production не прошло preflight") from error
         state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
                      failed_version=version)
+        state["deployment"] = ({"kind": "emergency", "initiator": initiator,
+                                "reason": reason.strip(), "version": version}
+                               if emergency else None)
         _state(host, state, "preparing")
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
-                host, version, old_sha, old_id, old_tag,
+                host, version, old_sha, old_id, old_tag, emergency=emergency,
             )
         except Exception as error:
             try:
@@ -628,12 +670,23 @@ def deploy(host: Host, version: str) -> None:
                    retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
         database = host.checkout / "data/app.db"
+        if emergency:
+            state["deployment"].update({
+                "sha": selected.sha, "release_id": selected.release_id,
+                "published_reason": selected.reason, "workflow": selected.workflow,
+                "ci_state": selected.ci_state, "ci_source": selected.ci_source,
+                "published_ci_state": selected.published_ci_state,
+                "published_ci_source": selected.published_ci_source,
+            })
+            print(f"deploy-prod АВАРИЙНЫЙ РЕЖИМ version={version} sha={selected.sha} "
+                  f"CI={selected.ci_state} reason={reason.strip()}", flush=True)
         try:
             state = {
                 "candidate": asdict(selected) | {"image_id": candidate_id, "tag": tag},
                 "old_sha": old_sha, "old_image_id": old_id, "old_tag": old_tag,
                 "schema_before": before, "last_good": last_good,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
+                "deployment": state.get("deployment"),
             }
             _state(host, state, "ready")
         except Exception as error:
@@ -671,6 +724,7 @@ def deploy(host: Host, version: str) -> None:
                 "version": version, "sha": selected.sha, "image_id": candidate_id,
                 "tag": tag, "backup_id": str(backup), "ci_run_id": selected.run_id,
                 "ci_run_attempt": selected.run_attempt,
+                "kind": selected.kind, "deployment": state.get("deployment"),
             }, error=None)
         except Exception as error:
             if critical:
@@ -760,6 +814,8 @@ def main() -> None:
     """Обрабатывает выпуск по версии или проверку текущего pin."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?")
+    parser.add_argument("--emergency", action="store_true", help="явный аварийный выпуск")
+    parser.add_argument("--reason", help="обязательная причина аварийного развёртывания")
     parser.add_argument("--verify-pinned", action="store_true",
                         help="контролируемый stop/start обоих каналов на текущем pin")
     args = parser.parse_args()
@@ -768,10 +824,12 @@ def main() -> None:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
+        if args.verify_pinned and (args.emergency or args.reason is not None):
+            raise DeployError("Проверка pin несовместима с аварийным режимом")
         if args.verify_pinned:
             verify_pinned(Host())
         else:
-            deploy(Host(), args.version)
+            deploy(Host(), args.version, emergency=args.emergency, reason=args.reason)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error

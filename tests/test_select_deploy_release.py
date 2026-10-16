@@ -216,6 +216,68 @@ class SelectDeployReleaseTests(unittest.TestCase):
         manifest = json.loads(output.getvalue())
         self.assertEqual((manifest["version"], manifest["sha"]), ("v1.0.0", SHA))
 
+    def _emergency_api(self, version: str = "v1.0.0") -> FakeApi:
+        """Создаёт immutable аварийный Release с точным служебным блоком."""
+        api = FakeApi(version)
+        api.release["body"] = (
+            f"Исправление\n\nТип выпуска: аварийный\nCommit: `{SHA}`\n"
+            f"Ветка: `{api.branch}`\nПричина: срочный сбой\n"
+            f"Полный CI: {api.workflow} failure — "
+            f"https://github.com/{REPO}/actions/runs/1/attempts/1\n\n"
+            "PR и состояние на момент merge:\n"
+            f"- PR #42 -> main; merge `{SHA}` (2026-10-15T00:00:00Z); "
+            "pr-fast=failure [GitHub Actions]; bypass=yes\n\n"
+            "Неподтверждённые или неуспешные проверки:\n- main-full: failure\n"
+        )
+        api.run["conclusion"] = "failure"
+        api.run["created_at"] = "2026-10-15T00:00:00Z"
+        return api
+
+    def test_emergency_selector_keeps_full_ci_failure_visible(self) -> None:
+        """Новая линия и PATCH допускают failure CI лишь по аварийному пути."""
+        for version, workflow in (("v1.0.0", selector.MAIN_WORKFLOW),
+                                  ("v1.0.1", selector.RELEASE_WORKFLOW)):
+            with self.subTest(version=version):
+                api = self._emergency_api(version)
+                selected = selector.select_emergency_release(api, api.version)
+                self.assertEqual((selected.kind, selected.sha, selected.ci_state,
+                                  selected.reason, selected.workflow),
+                                 ("emergency", SHA, "failure", "срочный сбой", workflow))
+                with self.assertRaises(selector.DeploySelectionError):
+                    selector.select_release(api, api.version)
+
+    def test_emergency_manifest_and_api_fail_closed(self) -> None:
+        """Подмена служебных полей и ошибка API не допускают аварийный SHA."""
+        for old, new in ((f"`{SHA}`", f"`{NEW_HEAD}`"),
+                         ("Тип выпуска: аварийный", "Тип выпуска: обычный"),
+                         ("Причина: срочный сбой", "Причина: "),
+                         ("release/1.0", "release/1.1")):
+            with self.subTest(old=old):
+                api = self._emergency_api()
+                api.release["body"] = api.release["body"].replace(old, new)
+                with self.assertRaises(selector.DeploySelectionError):
+                    selector.select_emergency_release(api, api.version)
+        api = self._emergency_api()
+        api.error = selector.ControllerError("API недоступен")
+        with self.assertRaises(selector.ControllerError):
+            selector.select_emergency_release(api, api.version)
+        api = self._emergency_api()
+        api.release["body"] += "Причина: вторая причина\n"
+        with self.assertRaises(selector.DeploySelectionError):
+            selector.select_emergency_release(api, api.version)
+        api = self._emergency_api()
+        api.tag["object"]["sha"] = NEW_HEAD
+        with self.assertRaises(selector.DeploySelectionError):
+            selector.select_emergency_release(api, api.version)
+        api = self._emergency_api()
+        api.release["body"] = api.release["body"].replace("bypass=yes", "bypass=unknown")
+        with self.assertRaises(selector.DeploySelectionError):
+            selector.select_emergency_release(api, api.version)
+        api = self._emergency_api()
+        api.release["body"] = api.release["body"].replace("failure — https://", "not_run — https://")
+        with self.assertRaises(selector.DeploySelectionError):
+            selector.select_emergency_release(api, api.version)
+
 
 if __name__ == "__main__":
     unittest.main()

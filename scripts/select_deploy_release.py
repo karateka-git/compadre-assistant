@@ -25,7 +25,7 @@ class DeploySelectionError(RuntimeError):
 
 @dataclass(frozen=True)
 class SelectedRelease:
-    """Фиксирует точную версию, commit и успешную попытку полного CI."""
+    """Фиксирует точную версию, commit, тип выпуска и наблюдаемый полный CI."""
 
     repository: str
     version: str
@@ -35,6 +35,12 @@ class SelectedRelease:
     workflow: str
     run_id: int
     run_attempt: int
+    kind: str = "ordinary"
+    reason: str | None = None
+    ci_state: str = "success"
+    ci_source: str | None = None
+    published_ci_state: str | None = None
+    published_ci_source: str | None = None
 
 
 def _sha(value: object, label: str) -> str:
@@ -52,7 +58,7 @@ def _positive(value: object, label: str) -> int:
 
 
 def _release(api: ReadOnlyGitHub, version: str) -> dict:
-    """Получает ровно названный опубликованный обычный GitHub Release."""
+    """Получает ровно названный опубликованный immutable GitHub Release."""
     value = api.get(f"/releases/tags/{quote(version, safe='')}")
     if not isinstance(value, dict):
         raise DeploySelectionError("Некорректный объект GitHub Release")
@@ -60,7 +66,7 @@ def _release(api: ReadOnlyGitHub, version: str) -> dict:
             value.get("draft") is not False or value.get("prerelease") is not False or
             value.get("immutable") is not True or
             not isinstance(value.get("published_at"), str) or not value["published_at"]):
-        raise DeploySelectionError("Указанная версия не является опубликованным обычным Release")
+        raise DeploySelectionError("Указанная версия не является опубликованным immutable Release")
     _positive(value.get("id"), "Release ID")
     _sha(value.get("target_commitish"), "Release target_commitish")
     if not isinstance(value.get("body"), str):
@@ -168,6 +174,123 @@ def select_release(api: ReadOnlyGitHub, version: str) -> SelectedRelease:
         raise DeploySelectionError("GitHub Release, tag или ветка изменились во время проверки")
     return SelectedRelease(api.repository, version, branch, tag_sha, release["id"],
                            workflow, admission.run_id, admission.run_attempt)
+
+
+def _emergency_manifest(body: str, version: str, repository: str,
+                        workflow: str) -> tuple[str, str, str, str, str]:
+    """Разбирает обязательные поля неизменяемого аварийного манифеста.
+
+    Args:
+        body: Опубликованный текст Release.
+        version: Каноническая версия.
+        repository: Ожидаемый GitHub-репозиторий.
+        workflow: Полный CI для типа версии.
+
+    Returns:
+        SHA, ветку, причину и опубликованные состояние и источник CI.
+
+    Raises:
+        DeploySelectionError: Служебные поля отсутствуют или неоднозначны.
+    """
+    labels = ("Тип выпуска", "Commit", "Ветка", "Причина", "Полный CI")
+    fields: dict[str, str] = {}
+    for line in body.splitlines():
+        for label in labels:
+            if line.startswith(f"{label}:"):
+                if label in fields:
+                    raise DeploySelectionError(f"Повторяется поле Release: {label}")
+                fields[label] = line.removeprefix(f"{label}:").strip()
+    if set(fields) != set(labels) or fields["Тип выпуска"] != "аварийный":
+        raise DeploySelectionError("Release не содержит аварийный манифест")
+    sha_field = fields["Commit"]
+    if not re.fullmatch(r"`[0-9a-f]{40}`", sha_field):
+        raise DeploySelectionError("Манифест содержит неверный commit SHA")
+    major, minor, _ = _version(version)
+    branch = f"release/{major}.{minor}"
+    if fields["Ветка"] != f"`{branch}`":
+        raise DeploySelectionError("Ветка в аварийном Release не соответствует версии")
+    reason = fields["Причина"]
+    if not reason or len(reason) > 1000 or any(c in reason for c in "\r\n\x00"):
+        raise DeploySelectionError("Причина аварийного выпуска отсутствует или некорректна")
+    ci = re.fullmatch(r"(main-full\.yml|release-full\.yml) "
+                      r"(success|failure|pending|not_run|unverified) — (.+)",
+                      fields["Полный CI"])
+    if not ci or ci[1] != workflow:
+        raise DeploySelectionError("Манифест содержит неверный полный CI")
+    source = ci[3]
+    expected_url = rf"https://github\.com/{re.escape(repository)}/actions/runs/[1-9][0-9]*/attempts/[1-9][0-9]*"
+    static_states = {
+        "GitHub Actions: полный run не идентифицирован": "unverified",
+        "GitHub Actions: подходящий full run не найден": "not_run",
+        "GitHub Actions: метаданные full run неполны": "unverified",
+    }
+    if (not re.fullmatch(expected_url, source) and
+            static_states.get(source) != ci[2]):
+        raise DeploySelectionError("Источник состояния полного CI некорректен")
+    if re.fullmatch(expected_url, source) and ci[2] == "not_run":
+        raise DeploySelectionError("Отсутствующий CI не может ссылаться на конкретный run")
+    pr_rows = re.findall(r"(?m)^- PR #([1-9][0-9]*) -> (main|release/[1-9][0-9]*\.[0-9]+); "
+                         r"merge `([0-9a-f]{40})` \(([^()]+)\); "
+                         r"pr-fast=(success|failure|pending|not_run|unverified) "
+                         r"\[([^\]\r\n]+)\]; bypass=(yes|no|unverified)"
+                         r"(?:; rule suite [1-9][0-9]*)?$", body)
+    if ("PR и состояние на момент merge:" not in body or not pr_rows or
+            len({row[0] for row in pr_rows}) != len(pr_rows) or
+            any(row[1] not in ("main", branch) for row in pr_rows)):
+        raise DeploySelectionError("Аварийный манифест не содержит проверяемый список PR")
+    if ci[2] != "success" and "Неподтверждённые или неуспешные проверки:" not in body:
+        raise DeploySelectionError("Манифест не перечисляет непрошедший полный CI")
+    if ("Неподтверждённые или неуспешные проверки:" not in body and
+            "Все наблюдаемые проверки успешны; аварийный допуск всё равно явный." not in body):
+        raise DeploySelectionError("Аварийный манифест не содержит итог проверки")
+    return sha_field[1:-1], branch, reason, ci[2], source
+
+
+def select_emergency_release(api: ReadOnlyGitHub, version: str) -> SelectedRelease:
+    """Выбирает только опубликованный аварийный Release точного SHA.
+
+    Полный CI читается заново и показывается как факт, но его успех не требуется.
+
+    Args:
+        api: Читающий клиент GitHub выбранного репозитория.
+        version: Явная каноническая версия выпуска.
+
+    Returns:
+        Проверенный снимок для аварийного развёртывания.
+
+    Raises:
+        DeploySelectionError: Происхождение или манифест не подтверждены.
+    """
+    if api.repository != EXPECTED_REPOSITORY or repository_from_origin() != EXPECTED_REPOSITORY:
+        raise DeploySelectionError("Репозиторий API или origin не совпадает с проектом")
+    major, minor, patch = _version(version)
+    branch = f"release/{major}.{minor}"
+    workflow = MAIN_WORKFLOW if patch == 0 else RELEASE_WORKFLOW
+    ci_branch = "main" if patch == 0 else branch
+    release = _release(api, version)
+    tag_sha = _tag_commit(api, version)
+    manifest_sha, manifest_branch, reason, published_state, published_source = _emergency_manifest(
+        release["body"], version, api.repository, workflow,
+    )
+    if (manifest_sha != tag_sha or manifest_branch != branch or
+            release["target_commitish"] != tag_sha):
+        raise DeploySelectionError("SHA тега, Release и аварийного манифеста не совпадают")
+    head = _branch_head(api, branch)
+    _check_ancestor(api, tag_sha, head)
+    _tag_protection(api, version, require_visible_bypass=False)
+    # Чтение состояния CI обязательно: ошибка API не считается отсутствием run.
+    from scripts.publish_emergency_release import _full_snapshot
+    current = _full_snapshot(api, workflow, tag_sha, ci_branch)
+    if _release(api, version) != release or _tag_commit(api, version) != tag_sha or _branch_head(api, branch) != head:
+        raise DeploySelectionError("GitHub Release, tag или ветка изменились во время проверки")
+    run = re.fullmatch(
+        rf"https://github\.com/{re.escape(api.repository)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
+        current.source,
+    )
+    return SelectedRelease(api.repository, version, branch, tag_sha, release["id"], workflow,
+                           int(run[1]) if run else 0, int(run[2]) if run else 0,
+                           "emergency", reason, current.state, current.source,
+                           published_state, published_source)
 
 
 def main() -> None:

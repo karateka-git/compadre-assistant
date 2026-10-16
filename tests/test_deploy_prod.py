@@ -74,6 +74,17 @@ class FakeHost(prod.Host):
         return SelectedRelease("karateka-git/compadre-assistant", version, "release/1.0",
                                NEW_SHA, 5, "main-full.yml", 8, 1)
 
+    def select_emergency(self, version: str) -> SelectedRelease:
+        """Возвращает аварийный Release с неуспешным полным CI."""
+        return SelectedRelease("karateka-git/compadre-assistant", version, "release/1.0",
+                               NEW_SHA, 5, "main-full.yml", 8, 1, "emergency",
+                               "сбой production", "failure", "https://github.com/example/run/8",
+                               "pending", "https://github.com/example/run/8")
+
+    def initiator(self) -> str:
+        """Фиксирует тестового sudo инициатора без обращения к системе."""
+        return "user (uid=1000)"
+
     def fetch(self, selected: SelectedRelease) -> None:
         """Переключает только фиктивный checkout."""
         self.head = selected.sha
@@ -204,6 +215,48 @@ class DeployProdTests(unittest.TestCase):
                 before = host.actions.copy()
                 prod.deploy(host, "v1.0.0")
                 self.assertEqual(host.actions, before)
+
+    def test_emergency_success_records_decision_and_rejects_normal_retry(self) -> None:
+        """Аварийный путь сохраняет аудит и применяет прежние pin/backup проверки."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                prod.deploy(host, "v1.0.0", emergency=True, reason="срочное восстановление")
+                state = prep.read_state(host.state_dir, host.checkout)
+                decision = state["deployment"]
+                self.assertEqual((decision["initiator"], decision["reason"], decision["sha"],
+                                  decision["ci_state"]),
+                                 ("user (uid=1000)", "срочное восстановление", NEW_SHA, "failure"))
+                self.assertEqual(state["last_good"]["kind"], "emergency")
+                self.assertTrue(Path(state["last_good"]["backup_id"]).is_file())
+                self.assertEqual(host.current_image, NEW_IMAGE)
+                before = host.actions.copy()
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+                self.assertEqual(host.actions, before)
+
+    def test_emergency_selector_failure_precedes_stop(self) -> None:
+        """Ошибка аварийного GitHub selector оставляет обоих ботов работающими."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                host, "select_emergency", side_effect=prod.DeployError("API недоступен"),
+            ):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
+            self.assertNotIn("stop_both", host.actions)
+            self.assertEqual(host.head, OLD_SHA)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
+
+    def test_emergency_requires_reason(self) -> None:
+        """Пустая причина отклоняется до серверных действий."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            with self.assertRaises(prod.DeployError):
+                prod.deploy(host, "v1.0.0", emergency=True, reason=" ")
+            self.assertEqual(host.actions, [])
 
     def test_one_channel_failure_rolls_both_back_without_database_restore(self) -> None:
         """Отказ candidate возвращает оба канала и сохраняет backup отдельно."""
