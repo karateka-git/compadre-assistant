@@ -12,7 +12,11 @@ Ruleset применяется к `refs/heads/main` и `refs/heads/release/*` и
 - `do_not_enforce_on_create=true`: создание новой релизной ветки не требует check ещё не существующей ветки;
 - запрет force push (`non_fast_forward`);
 - `required_approving_review_count=0`, без обязательного code-owner review или одобрения последнего push;
-- пустой `bypass_actors`: аварийный обход будет настроен только на этапе 6.
+- с 16 октября 2026 года в `bypass_actors` только владелец
+  `User 42288695` (`karateka-git`), режим `pull_request`
+  (`For pull requests only`); настройка и оставшаяся проба описаны в
+  [EMERGENCY_BYPASS.md](EMERGENCY_BYPASS.md). При создании ruleset список был
+  пустым; обычное слияние по-прежнему требует `pr-fast`.
 
 Правило PR не позволяет обычный прямой push в существующие целевые ветки. Прямой и force push не выполнялись в ходе проверки, чтобы не изменять `main` или реальный релиз. Запрет подтверждён конфигурацией активного ruleset через GitHub API; фактическая проверка ниже касается допуска PR.
 
