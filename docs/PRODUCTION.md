@@ -1,5 +1,31 @@
 # Production VPS
 
+## Подготовка первого versioned выпуска 2026-10-17
+
+`main`, `release/1.0` и опубликованный `v1.0.0` указывают на
+`33ae77a0e81cacf0a346376c0609681d30e0c317`; `main-full` run
+`39042879438`, attempt 1, включая `full-suite`, успешен. Первый live выпуск
+**не состоялся**. Во время разрешённой установки из этого SHA проверенный
+snapshot `scripts/` и `deploy/` помещён в
+`/usr/local/lib/compadre-assistant-deploy`, wrapper — в
+`/usr/local/sbin/deploy-prod`. Старый фактический image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`
+закреплён тегом по старому SHA; подготовлены внешние Compose override,
+`runtime.env` и три systemd drop-in.
+
+Проверка после `daemon-reload` обнаружила, что новый
+`90-deploy-pinned.conf` загружается перед существующим `channels.conf`.
+Последний снова задаёт `ExecStart` без `--no-build --pull never`, поэтому
+`deploy-prod --verify-pinned` не запускался. Reboot и `deploy-prod v1.0.0`
+также не выполнялись. Read-back подтвердил прежний чистый detached checkout
+`ac2ac981ba628a881b483238a4eaf191a644de6a`, оба старых канала
+running/healthy с нулём рестартов и `unless-stopped`, active/enabled service
+и backup timer, отсутствие deploy marker и state. Текущий частичный setup
+не подтверждает безопасный следующий reboot. Исправление готовится как
+PATCH `v1.0.1`; порядок замены snapshot и приёмки — в
+[STAGE5_STEP4.md](auto-deploy-main/STAGE5_STEP4.md). Права SQLite `0644`
+и каталога `data` `0755` не менялись в этом окне.
+
 Production переключён на Compadre Assistant 2026-10-13 по отдельному разрешению
 пользователя, с остановкой старых каналов и чистой SQLite после проверенного backup.
 Развёрнут SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` из
