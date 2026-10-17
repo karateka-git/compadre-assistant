@@ -62,6 +62,23 @@ class AppConfig:
         }
 
 
+def load_database_path() -> Path:
+    """Читает только путь SQLite из окружения и локального `.env`.
+
+    Returns:
+        Путь БД для отдельного запуска миграций без настроек каналов.
+
+    Raises:
+        ConfigError: DATABASE_PATH отсутствует или содержит только пробелы.
+    """
+    if load_dotenv is not None:
+        load_dotenv()
+    value = os.getenv("DATABASE_PATH", "").strip()
+    if not value:
+        raise ConfigError("Missing required environment variable: DATABASE_PATH")
+    return Path(value)
+
+
 def load_config(*, channels: tuple[str, ...] | None = None) -> AppConfig:
     """Читает настройки окружения и локальный `.env`, если доступен dotenv.
 

@@ -1,0 +1,7 @@
+#!/bin/sh
+# Installed at /usr/local/sbin/deploy-prod together with a reviewed controller snapshot.
+set -eu
+cd /
+exec /usr/bin/env -i HOME=/root PATH=/usr/bin:/bin \
+    PYTHONPATH=/usr/local/lib/compadre-assistant-deploy \
+    /usr/bin/python3 -m scripts.deploy_prod "$@"

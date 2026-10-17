@@ -1,0 +1,73 @@
+name: Full suite
+
+on:
+  workflow_call:
+    inputs:
+      previous-release-sha:
+        description: Full commit SHA of the previous published release (bootstrap production SHA before v1.0.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  full-suite:
+    name: full-suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact candidate
+        id: checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify candidate commit
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install runtime dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run full unittest suite
+        id: unit
+        run: python -m unittest discover -s tests
+
+      - name: Run three autonomous smoke checks
+        id: smokes
+        run: |
+          python -m compadre_assistant --sqlite-smoke
+          python -m compadre_assistant --pipeline-smoke
+          python -m compadre_assistant --analysis-smoke
+
+      - name: Check fresh and previous SQLite schemas
+        id: migrations
+        env:
+          PREVIOUS_SHA: ${{ inputs.previous-release-sha }}
+        run: python -m scripts.check_full_migrations --previous-sha "$PREVIOUS_SHA"
+
+      - name: Build and healthcheck candidate image
+        id: candidate
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: python -m scripts.check_candidate --expected-sha "$EXPECTED_SHA"
+
+      - name: Publish check manifest
+        if: always()
+        env:
+          PREVIOUS_SHA: ${{ inputs.previous-release-sha }}
+          CHECK_CHECKOUT: ${{ steps.checkout.outcome }}
+          CHECK_UNIT: ${{ steps.unit.outcome }}
+          CHECK_SMOKES: ${{ steps.smokes.outcome }}
+          CHECK_MIGRATIONS: ${{ steps.migrations.outcome }}
+          CHECK_CANDIDATE: ${{ steps.candidate.outcome }}
+        run: python -m scripts.write_full_manifest

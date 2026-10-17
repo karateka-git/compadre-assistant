@@ -1,7 +1,8 @@
 x-assistant-base: &assistant-base
   build:
     context: .
-  image: compadre-assistant:dev
+  image: ${ASSISTANT_IMAGE:-compadre-assistant:dev}
+  pull_policy: never
   env_file:
     - .env
   environment:

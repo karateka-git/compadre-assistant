@@ -32,6 +32,7 @@ from compadre_assistant.core.data.config import (
     AppConfig,
     ConfigError,
     load_config,
+    load_database_path,
     parse_channels,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
@@ -56,6 +57,11 @@ def parse_args() -> argparse.Namespace:
     """Читает аргументы командной строки приложения."""
     parser = argparse.ArgumentParser(prog="compadre-assistant")
     mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--migrate",
+        action="store_true",
+        help="Apply pending SQLite migrations without starting bots, then exit.",
+    )
     mode.add_argument(
         "--healthcheck",
         action="store_true",
@@ -95,10 +101,16 @@ def parse_args() -> argparse.Namespace:
         "--channels", type=parse_channels,
         help="Channels to validate: telegram, vk or telegram,vk (healthcheck/configuration).",
     )
+    parser.add_argument(
+        "--database-path", type=Path,
+        help="SQLite file for --migrate; overrides DATABASE_PATH without reading .env.",
+    )
     args = parser.parse_args()
+    if args.database_path is not None and not args.migrate:
+        parser.error("--database-path applies only to --migrate")
     if args.channels is not None and any((
         args.telegram_bot, args.vk_bot, args.process_url,
-        args.sqlite_smoke, args.pipeline_smoke, args.analysis_smoke,
+        args.sqlite_smoke, args.pipeline_smoke, args.analysis_smoke, args.migrate,
     )):
         parser.error("--channels applies only to --healthcheck or configuration checks")
     return args
@@ -111,6 +123,9 @@ def main() -> int:
     logger = logging.getLogger("compadre_assistant")
 
     logger.info("Starting Compadre Assistant %s", __version__)
+
+    if args.migrate:
+        return run_migrations_command(logger, database_path=args.database_path)
 
     if args.sqlite_smoke:
         return run_sqlite_smoke_command(logger)
@@ -192,6 +207,27 @@ def main() -> int:
     logger.info("Configuration is ready")
 
     return 0
+
+
+def run_migrations_command(
+    logger: logging.Logger, *, database_path: Path | None = None,
+) -> int:
+    """Применяет ожидающие миграции и завершает работу без сборки runtime.
+
+    Args:
+        logger: Logger результата без содержимого SQLite и настроек провайдеров.
+        database_path: Явный путь БД; `None` читает DATABASE_PATH из окружения.
+
+    Returns:
+        Ноль при успехе, 2 при отсутствии пути БД, 1 при ошибке миграции/SQLite.
+    """
+    try:
+        path = database_path if database_path is not None else load_database_path()
+    except ConfigError as error:
+        logger.error("Migration configuration error: %s", error)
+        return 2
+    logger.info("Migration database: %s", path.resolve())
+    return 0 if initialize_database(path, logger) else 1
 
 
 def configure_debug_logging(enabled: bool) -> None:
