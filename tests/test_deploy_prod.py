@@ -183,6 +183,177 @@ class FakeHost(prod.Host):
         self.actions.append("migrate")
 
 
+class SystemdBootTests(unittest.TestCase):
+    """Проверяет effective unit с фактическим порядком production drop-in."""
+
+    def _host(self, root: Path, *, legacy: bool = True) -> tuple[prod.Host, dict]:
+        """Создаёт ответы systemd D-Bus без доступа к серверному manager."""
+        host = prod.Host(root / "checkout", root / "state")
+        host.checkout.mkdir()
+        host.state_dir.mkdir()
+        runtime = host.state_dir / "runtime.env"
+        old = root / "90-deploy-pinned.conf"
+        channels = root / "channels.conf"
+        pinned = root / "zz-deploy-pinned.conf"
+        if legacy:
+            old.write_text("old", encoding="utf-8")
+        paths = [str(channels), str(pinned)]
+        if legacy:
+            paths.insert(0, str(old))
+        replies = {
+            "DropInPaths": " ".join(paths),
+            "ExecStart": {"type": "a(sasbttttuii)",
+                          "data": [["/usr/bin/docker", prod.PINNED_EXEC, False,
+                                    0, 0, 0, 0, 0, 0, 0]]},
+            "EnvironmentFiles": {"type": "a(sb)",
+                                 "data": [[str(runtime), False]]},
+            "Conditions": {"type": "a(sbbsi)",
+                           "data": [["ConditionPathExists", False, True,
+                                     str(host.state_dir / "deploy-in-progress"), 0]]},
+        }
+
+        def run(*args: str, env: dict[str, str] | None = None) -> str:
+            """Возвращает только проверяемые свойства synthetic unit."""
+            if args[:2] == ("systemctl", "show"):
+                return replies["DropInPaths"]
+            if args[:3] == ("busctl", "--json=short", "get-property"):
+                return json.dumps(replies[args[-1]])
+            raise AssertionError(args)
+
+        host.run = run  # type: ignore[method-assign]
+        return host, {"legacy": old, "channels": channels, "pinned": pinned,
+                      "runtime": runtime, "replies": replies}
+
+    def test_late_dropin_wins_after_existing_channels(self) -> None:
+        """Порядок 90, channels, zz допускает только закреплённый ExecStart."""
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary))
+            unit["replies"]["EnvironmentFiles"]["data"] *= 2
+            unit["replies"]["Conditions"]["data"] *= 2
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                host.require_systemd_boot(unit["runtime"])
+
+    def test_clean_install_needs_only_channels_and_late_dropin(self) -> None:
+        """Новый сервер не требует исторического файла 90."""
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary), legacy=False)
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                host.require_systemd_boot(unit["runtime"])
+
+    def test_original_order_is_rejected_before_stop(self) -> None:
+        """Реальный порядок 90, channels отвергается до переключения каналов."""
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary))
+            unit["replies"]["DropInPaths"] = f'{unit["legacy"]} {unit["channels"]}'
+            unit["replies"]["ExecStart"]["data"][0][1] = [
+                "/usr/bin/docker", "compose", "up", "-d", "vk_assistant", "tg_assistant",
+            ]
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                with self.assertRaises(prod.DeployError):
+                    host.require_systemd_boot(unit["runtime"])
+
+    def test_conflicting_later_dropin_is_rejected(self) -> None:
+        """Даже исправный ExecStart не оправдывает неизвестный поздний override."""
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary))
+            unit["replies"]["DropInPaths"] += f' {Path(temporary) / "zzz-conflict.conf"}'
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                with self.assertRaises(prod.DeployError):
+                    host.require_systemd_boot(unit["runtime"])
+
+    def test_invalid_dbus_json_is_rejected(self) -> None:
+        """Неожиданный ответ D-Bus не допускает критическую секцию."""
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary), legacy=False)
+            original_run = host.run
+
+            def invalid_reply(*args: str, env: dict[str, str] | None = None) -> str:
+                """Имитирует повреждённый ответ busctl для свойства ExecStart."""
+                if args[:3] == ("busctl", "--json=short", "get-property") and args[-1] == "ExecStart":
+                    return "invalid-json"
+                return original_run(*args, env=env)
+
+            host.run = invalid_reply  # type: ignore[method-assign]
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                with self.assertRaises(prod.DeployError):
+                    host.require_systemd_boot(unit["runtime"])
+
+    def test_effective_command_environment_and_condition_are_required(self) -> None:
+        """Каждое обязательное свойство systemd проверяется независимо."""
+        for property_name, changed in (
+            ("ExecStart", [["/usr/bin/docker", ["/usr/bin/docker", "compose", "up", "-d"],
+                            False, 0, 0, 0, 0, 0, 0, 0]]),
+            ("EnvironmentFiles", [["/tmp/unpinned.env", False]]),
+            ("Conditions", [["ConditionPathExists", False, False,
+                             "/var/lib/compadre-assistant-deploy/deploy-in-progress", 0]]),
+        ):
+            with self.subTest(property=property_name), TemporaryDirectory() as temporary:
+                host, unit = self._host(Path(temporary), legacy=False)
+                unit["replies"][property_name]["data"] = changed
+                with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                    prod, "CHANNELS_DROPIN", unit["channels"],
+                ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                    with self.assertRaises(prod.DeployError):
+                        host.require_systemd_boot(unit["runtime"])
+
+    def test_installed_accepts_only_checked_legacy_and_late_files(self) -> None:
+        """Новый snapshot допускает старый 90 только при точном совпадении."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            host, unit = self._host(root)
+            source = prod.SOURCE_ROOT / "deploy"
+            for target, name in (
+                (unit["legacy"], "obs-chat-bot-pinned.conf"),
+                (unit["pinned"], "obs-chat-bot-pinned.conf"),
+            ):
+                shutil.copyfile(source / name, target)
+            timer_guard = root / "timer-guard.conf"
+            backup_guard = root / "backup-guard.conf"
+            shutil.copyfile(source / "obs-chat-bot-backup-guard.conf", timer_guard)
+            shutil.copyfile(source / "obs-chat-bot-backup-service-guard.conf", backup_guard)
+            shutil.copyfile(source / "pinned-compose.yml", host.state_dir / "pinned-compose.yml")
+            shutil.copyfile(source / "critical-compose.yml", host.state_dir / "critical-compose.yml")
+            unit["runtime"].write_text(
+                f"ASSISTANT_IMAGE={prep.pinned_tag(OLD_SHA)}\n"
+                f"COMPOSE_FILE={host.checkout / 'docker-compose.yml'}:"
+                f"{host.state_dir / 'pinned-compose.yml'}\n", encoding="utf-8",
+            )
+            original_run = host.run
+
+            def installed_run(*args: str, env: dict[str, str] | None = None) -> str:
+                """Добавляет ответы systemd verify и active к fixture D-Bus."""
+                if args[:2] == ("systemd-analyze", "verify"):
+                    return ""
+                if args[:3] == ("systemctl", "show", "--property=NeedDaemonReload"):
+                    return "no"
+                if args == ("systemctl", "is-active", prod.SERVICE):
+                    return "active"
+                return original_run(*args, env=env)
+
+            host.run = installed_run  # type: ignore[method-assign]
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                prod, "CHANNELS_DROPIN", unit["channels"],
+            ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]), patch.object(
+                prod, "TIMER_GUARD", timer_guard,
+            ), patch.object(prod, "BACKUP_GUARD", backup_guard), patch.object(
+                host, "image", return_value={"Id": OLD_IMAGE},
+            ), patch.object(host, "require_compose_pin"):
+                host.installed(OLD_IMAGE, OLD_SHA)
+                unit["legacy"].write_text("changed", encoding="utf-8")
+                with self.assertRaises(prod.DeployError):
+                    host.installed(OLD_IMAGE, OLD_SHA)
+
+
 class DeployProdTests(unittest.TestCase):
     """Проверяет отказные границы и успешное состояние контроллера."""
 
