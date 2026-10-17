@@ -1,7 +1,7 @@
 # Этап 5, шаг 4: отказные проверки и runbook первого выпуска
 
-Этот документ — подготовка. Команды установки, остановки, reboot и выпуска **не
-выполнялись** на production. Перед шагом 5.5 заново прочитать
+Этот документ — подготовка и журнал прерванной первой установки. Остановка,
+reboot и выпуск **не выполнялись** на production. Перед продолжением шага 5.5 заново прочитать
 [`docs/PRODUCTION.md`](../PRODUCTION.md), снять текущее состояние и получить
 эксплуатационное разрешение. Текущий production SHA, image ID, состав unit и
 схема из прошлой инвентаризации не заменяют повторную проверку.
@@ -10,6 +10,34 @@
 плана, включая аварийный маршрут и эксплуатационную приёмку, проверенный
 порядок и recovery переносятся в `docs/OPERATIONS.md`; временный каталог
 удаляется отдельным завершающим изменением после проверки ссылок.
+
+## Состояние после первого окна 2026-10-17
+
+Опубликованный `v1.0.0` указывает на
+`33ae77a0e81cacf0a346376c0609681d30e0c317`; `main-full` run
+`39042879438`, attempt 1, включая `full-suite`, успешен. До переключения
+обнаружена ошибка порядка systemd drop-in: установленный
+`90-deploy-pinned.conf` загружается **перед** существующим `channels.conf`,
+который перекрывает `ExecStart`. Effective команда осталась без `--no-build
+--pull never`. Контролируемый `--verify-pinned` поэтому **не запускался**.
+
+На VPS остаются root-owned snapshot контроллера именно из SHA `v1.0.0`,
+`/usr/local/sbin/deploy-prod`, старый Docker tag, оба Compose override,
+`runtime.env` и три drop-in с именами `90-*`. `deploy-in-progress` и
+`state.json` отсутствуют. Checkout чистый detached на прежнем SHA
+`ac2ac981ba628a881b483238a4eaf191a644de6a`; оба контейнера продолжили
+работу на старом image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`
+с `healthy`, нулём рестартов и `unless-stopped`; service и backup timer
+остались active/enabled. Этот частичный setup сам по себе не доказывает
+безопасный запуск после reboot: до исправления не выполнять reboot,
+`--verify-pinned` или `deploy-prod v1.0.0`.
+
+Исправление готовится как новый PATCH `v1.0.1` после двух связанных PR,
+успешного `release-full` точного SHA и отдельного решения о публикации.
+Защищённый тег `v1.0.0` не изменять и не использовать для первого live
+переключения. До появления проверенного контроллера, безопасной замены
+snapshot и новой эксплуатационной приёмки шаг 5.5 открыт.
 
 ## Что проверено локально
 
@@ -32,9 +60,21 @@
 - `--verify-pinned` выполняет контролируемый stop/start обоих каналов на старом
   pin с тем же lock, marker, timer и rollback, без нового Release и миграции.
 
+Для исправления порядка отдельный Ubuntu 24.04 container с systemd 255
+загрузил synthetic base unit, точный проверенный `obs-chat-bot-pinned.conf`
+и копию production `channels.conf`. При именах `90-deploy-pinned.conf`,
+`channels.conf` effective `ExecStart` оказался без `--no-build --pull never`.
+После добавления идентичного `zz-deploy-pinned.conf` порядок стал
+`90`, `channels`, `zz`, а effective команда — с обоими флагами. D-Bus
+подтвердил два одинаковых `EnvironmentFiles` и два отрицательных
+`ConditionPathExists`; `systemd-analyze verify` прошёл в обоих состояниях.
+Это проверка реального merge systemd в изолированном контейнере, а не
+проверка boot VPS. Unit-тесты контроллера требуют поздний файл и эти
+effective свойства, включая случай оставшегося старого `90`.
+
 ## Порядок первого выпуска на VPS (только шаг 5.5)
 
-1. Получить отдельно утверждённый точный SHA контроллера и версию
+1. Получить отдельно утверждённый точный SHA нового контроллера и версию
    опубликованного Release. Проверить чистый detached checkout, origin,
    `systemctl cat` всех трёх unit, `NeedDaemonReload=no`, active/enabled
    backup timer, оба `healthy`, фактический одинаковый `.Image`, policy
@@ -57,12 +97,19 @@
    `/var/lib/compadre-assistant-deploy` (каталог 0700). Атомарно создать
    `runtime.env` (0600) ровно с `ASSISTANT_IMAGE=<СТАРЫЙ_TAG>` и
    `COMPOSE_FILE=/opt/obs-chat-bot/docker-compose.yml:/var/lib/compadre-assistant-deploy/pinned-compose.yml`.
-4. Установить три drop-in из `deploy/` по путям шага 5.3, не заменяя базовые
+4. Установить три drop-in из `deploy/` по путям ниже, не заменяя базовые
    unit, `channels.conf` и backup script. Выполнить `systemctl daemon-reload`,
    `systemd-analyze verify obs-chat-bot.service obs-chat-bot-backup.timer
    obs-chat-bot-backup.service`, `systemctl cat` и проверить
-   `NeedDaemonReload=no`. В root shell загрузить **только** эти две строки
-   `runtime.env`, вызвать `docker compose config --format json` и сверить
+   `NeedDaemonReload=no`. Для service последним загруженным drop-in должен быть
+   `zz-deploy-pinned.conf`; через `systemctl show` и D-Bus проверить effective
+   `ExecStart` с `--no-build --pull never`, только ожидаемый путь `EnvironmentFile`
+   к `runtime.env` и отрицательное `ConditionPathExists` для marker. Старый
+   `90-deploy-pinned.conf` допустим только при побайтовом совпадении с
+   проверенным шаблоном. Любой неизвестный drop-in или другое effective
+   свойство блокирует запуск контроллера. В root shell загрузить **только** эти две строки
+   `runtime.env`, выполнить `docker compose config --quiet` и через локальный
+   парсер сверить конфигурацию без печати полного JSON:
    project name с прежним, одинаковый image обоих сервисов,
    `pull_policy=never`, `restart=unless-stopped`, mounts и build context.
    С добавленным `critical-compose.yml` restart обоих должен быть `no`.
@@ -86,7 +133,41 @@
    `already_installed` без пересоздания. Владелец проверяет реальные ответы
    Telegram и VK до признания выпуска принятым.
 
-Команды установки для пунктов 2–4 выполняются в root shell **только после**
+### Замена частично установленного snapshot на текущем VPS
+
+Показанный ниже исходный блок установки относится **только к чистой
+установке**. На текущем VPS не распаковывать новый архив поверх каталога
+контроллера: `SOURCE_ROOT` запускаемого Python-кода указывает на этот каталог,
+а `v1.0.0` snapshot уже установлен. После опубликования и проверки
+`v1.0.1` нужна отдельная разрешённая операция:
+
+1. Повторить preflight шага 1, проверить отсутствие `deploy-in-progress` и
+   активного выпуска, прежние checkout/image ID, работоспособность обоих
+   каналов, backup timer и целостность SQLite. Сверить точный SHA `v1.0.1`
+   с `release/1.0` и успешным `release-full` run/attempt. Доступный Git
+   object получить read-only deploy key без смены checkout.
+2. Подготовить root-owned каталог новой версии рядом с действующим snapshot;
+   извлечь в него только `scripts/` и `deploy/` точного проверенного commit.
+   Побайтово сверить каждый файл архива с `git show`, владельца root и mode
+   каталога 0700. Прежний snapshot сохранить для восстановления, не
+   перезаписывать его содержимое на месте.
+3. Удерживая тот же `/var/lib/compadre-assistant-deploy/deploy.lock`, что
+   контроллер, и убедившись в отсутствии запущенного `deploy-prod`, на одном
+   filesystem переименовать прежний snapshot в сохранённый каталог, а новый
+   — в `/usr/local/lib/compadre-assistant-deploy`. Сверить установленный
+   wrapper с новым `deploy/deploy-prod`. При отказе до запуска контроллера
+   вернуть прежний каталог и зафиксировать фактическое состояние.
+4. Установить новый проверенный `obs-chat-bot-pinned.conf` как
+   `zz-deploy-pinned.conf`; существующий `90-deploy-pinned.conf` не изменять и
+   сверить его с тем же шаблоном. Сохранить исходные `channels.conf`, base
+   unit, backup script и текущий runtime pin. После `daemon-reload` проверить
+   `systemd-analyze verify`, `NeedDaemonReload=no`, порядок drop-in и
+   effective `ExecStart`, `EnvironmentFiles`, `Conditions` через D-Bus.
+   Контроллер нового snapshot должен принять старый image и unit до любого
+   stop/start. При отказе не запускать `--verify-pinned`, reboot и deploy;
+   проверить marker/state и оба работающих канала.
+
+Команды установки для пунктов 2–4 **на чистом хосте** выполняются в root shell **только после**
 предыдущей инвентаризации и подстановки проверенного `CTRL_SHA`. Архивировать
 нужно commit с той же утверждённой версией контроллера, которая прошла review;
 его scripts/deploy не должны меняться в server checkout при последующем
@@ -119,17 +200,19 @@ printf 'ASSISTANT_IMAGE=%s\nCOMPOSE_FILE=/opt/obs-chat-bot/docker-compose.yml:/v
 mv "$TMP_RUNTIME" /var/lib/compadre-assistant-deploy/runtime.env
 
 install -d /etc/systemd/system/obs-chat-bot.service.d /etc/systemd/system/obs-chat-bot-backup.timer.d /etc/systemd/system/obs-chat-bot-backup.service.d
-install -m 0644 /usr/local/lib/compadre-assistant-deploy/deploy/obs-chat-bot-pinned.conf /etc/systemd/system/obs-chat-bot.service.d/90-deploy-pinned.conf
+install -m 0644 /usr/local/lib/compadre-assistant-deploy/deploy/obs-chat-bot-pinned.conf /etc/systemd/system/obs-chat-bot.service.d/zz-deploy-pinned.conf
 install -m 0644 /usr/local/lib/compadre-assistant-deploy/deploy/obs-chat-bot-backup-guard.conf /etc/systemd/system/obs-chat-bot-backup.timer.d/90-deploy-guard.conf
 install -m 0644 /usr/local/lib/compadre-assistant-deploy/deploy/obs-chat-bot-backup-service-guard.conf /etc/systemd/system/obs-chat-bot-backup.service.d/90-deploy-guard.conf
 systemctl daemon-reload
 systemd-analyze verify obs-chat-bot.service obs-chat-bot-backup.timer obs-chat-bot-backup.service
 systemctl cat obs-chat-bot.service obs-chat-bot-backup.timer obs-chat-bot-backup.service
 systemctl show --property=NeedDaemonReload obs-chat-bot.service obs-chat-bot-backup.timer obs-chat-bot-backup.service
+systemctl show --property=DropInPaths,ExecStart,EnvironmentFiles obs-chat-bot.service
+busctl --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1/unit/obs_2dchat_2dbot_2eservice org.freedesktop.systemd1.Unit Conditions
 set -a
 . /var/lib/compadre-assistant-deploy/runtime.env
 set +a
-docker compose config --format json
+docker compose config --quiet
 ```
 
 После проверок и отдельного согласования окна:
