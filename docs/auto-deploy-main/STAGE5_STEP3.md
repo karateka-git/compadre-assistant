@@ -1,9 +1,15 @@
 # Этап 5, шаг 3: локальный контроллер переключения
 
 Реализованы `scripts/deploy_prod.py`, `deploy/deploy-prod`, pinned/critical Compose
-overrides и systemd guards. На VPS ничего не установлено и каналы не
-переключались. Команда `sudo deploy-prod vX.Y.Z` появится только после
-отдельной установки и проверки на старом образе в шагах 5.4–5.5.
+overrides и systemd guards. На момент завершения шага 5.3 на VPS ничего
+не было установлено, а каналы не переключались. Команда
+`sudo deploy-prod vX.Y.Z` планировалась после отдельной установки и проверки
+на старом образе в шагах 5.4–5.5.
+
+Этот абзац фиксирует состояние на момент разработки шага 5.3. На VPS
+2026-10-17 частично установлен snapshot `v1.0.0`; до остановки каналов
+обнаружен конфликт порядка drop-in. Действующий порядок продолжения и
+замены snapshot описан в [STAGE5_STEP4.md](STAGE5_STEP4.md).
 
 ## Граница автоматического выпуска
 
@@ -46,7 +52,7 @@ COMPOSE_FILE=/opt/obs-chat-bot/docker-compose.yml:/var/lib/compadre-assistant-de
 ```
 
 Установить `deploy/obs-chat-bot-pinned.conf` как
-`/etc/systemd/system/obs-chat-bot.service.d/90-deploy-pinned.conf`,
+`/etc/systemd/system/obs-chat-bot.service.d/zz-deploy-pinned.conf`,
 `deploy/obs-chat-bot-backup-guard.conf` как
 `/etc/systemd/system/obs-chat-bot-backup.timer.d/90-deploy-guard.conf`,
 `deploy/obs-chat-bot-backup-service-guard.conf` как
@@ -56,7 +62,10 @@ COMPOSE_FILE=/opt/obs-chat-bot/docker-compose.yml:/var/lib/compadre-assistant-de
 `NeedDaemonReload=no` для всех трёх unit и effective Compose config:
 обоим сервисам нужен один старый release tag, `pull_policy: never` и
 `restart: unless-stopped`; с добавленным critical override — `restart: no`.
-Проверить `systemctl cat` для всех трёх unit. Установка файлов сама по себе
+Проверить `systemctl cat` для всех трёх unit и effective `ExecStart`,
+`EnvironmentFiles`, `Conditions`: поздний `zz-deploy-pinned.conf` должен
+переопределять существующий `channels.conf`. Контроллер отказывает при
+неизвестном drop-in или несовпадении загруженных свойств. Установка файлов сама по себе
 не останавливает каналы.
 
 Перед первым реальным выпуском выполнить отдельный **контролируемый** тест
