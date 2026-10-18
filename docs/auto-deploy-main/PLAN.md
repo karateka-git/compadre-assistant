@@ -12,8 +12,16 @@
 polling подтверждён, restart count 0, policy `unless-stopped`; service и
 backup timer `active/enabled`. SQLite сохранила inode `501886`, integrity `ok`
 и схему `0001_initial_schema.sql`; копия `app-20261018T072510Z.db` проверена,
-всего шесть копий. Контролируемый reboot и live выпуск `v1.0.2` ещё не
-выполнялись; первый live выпуск (шаг 5.5) и эксплуатационная приёмка открыты.
+всего шесть копий. Затем один контролируемый `sudo systemctl reboot`
+2026-10-18 завершился с кодом 0; boot ID изменился с
+`c35ef418-6f8c-436a-a1fa-28f3b614353a` на
+`9e779e1c-c56b-4db6-9c14-2aa66f7ce576`. После краткого health
+`starting` оба канала вернулись в `running/healthy` на прежних SHA/image ID,
+с polling, текущим restart count 0 и policy `unless-stopped`, без второго
+polling. `stage=pinned_verified`, marker отсутствует; service/timer
+`active/enabled`, SQLite inode/integrity/schema и проверенная копия прежние.
+Следующий backup назначен на 2026-10-19 03:15 UTC. Live выпуск `v1.0.2`
+ещё не выполнялся; шаг 5.5 и эксплуатационная приёмка открыты.
 Проверка шага 7.1 записана в [STEP7_1_PREMERGE.md](STEP7_1_PREMERGE.md).
 Правило шага 7.2
 проверено на тестовых данных в [STEP7_2_RETENTION.md](STEP7_2_RETENTION.md);
@@ -658,7 +666,8 @@ SHA, image ID и состояние SQLite, проверить доступно�
 нужен успешный `release-full` точного SHA после двух связанных PR; успех
 `release-full` версии `v1.0.1` не переносится на новый патч. Проверенный
 root-owned snapshot контроллера и поздний drop-in установлены, прежний pin
-восстановлен до `rolled_back`; оба канала, service, timer и SQLite проверены.
+восстановлен и проверен до `pinned_verified`; контролируемый reboot подтвердил
+запуск прежнего образа, оба канала, service, timer и SQLite проверены.
 Получить отдельный эксплуатационный допуск на продолжение первого переключения.
 
 После команды `deploy-prod v1.0.2` проверить и записать: SHA версии и checkout,

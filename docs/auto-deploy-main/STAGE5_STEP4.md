@@ -1,9 +1,9 @@
 # Этап 5, шаг 4: отказные проверки и runbook первого выпуска
 
-Этот документ — подготовка и журнал первого выпуска. Первый live выпуск и
-reboot **не выполнялись** на production. После прежнего отказа `degraded`
-старый pin восстановили и 2026-10-18 успешно проверили повторно. Перед
-продолжением шага 5.5 заново прочитать
+Этот документ — подготовка и журнал первого выпуска. Первый live выпуск
+**не выполнялся** на production. После прежнего отказа `degraded`
+старый pin восстановили, 2026-10-18 успешно проверили повторно и выполнили
+контролируемый reboot. Перед продолжением шага 5.5 заново прочитать
 [`docs/PRODUCTION.md`](../PRODUCTION.md), снять текущее состояние и получить
 эксплуатационное разрешение. Текущий production SHA, image ID, состав unit и
 схема из прошлой инвентаризации не заменяют повторную проверку.
@@ -26,8 +26,28 @@ policy `unless-stopped`; второго polling-процесса нет. Service
 `active/enabled`, effective systemd и Compose guards проверены. SQLite
 сохранила inode `501886`, integrity `ok` и схему `0001_initial_schema.sql`.
 Копия `app-20261018T072510Z.db` присутствует и прошла integrity check; всего
-шесть копий. Контролируемый reboot и live выпуск `v1.0.2` ещё не выполнялись;
-перед ними требуется новый preflight и отдельный эксплуатационный допуск.
+шесть копий. Live выпуск `v1.0.2` ещё не выполнялся; перед ним требуется
+новый preflight и отдельный эксплуатационный допуск.
+
+## Контролируемый reboot старого pin 2026-10-18
+
+После свежего read-only preflight один `sudo systemctl reboot` завершился с
+кодом 0. SSH вернулся с новым boot ID:
+`c35ef418-6f8c-436a-a1fa-28f3b614353a` →
+`9e779e1c-c56b-4db6-9c14-2aa66f7ce576`. Сразу после загрузки у обоих
+контейнеров health был `starting`; спустя короткое время оба стали
+`running/healthy` на прежнем SHA
+`ac2ac981ba628a881b483238a4eaf191a644de6a` и image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
+Текущий restart count 0 и policy `unless-stopped` у обоих; свежие признаки
+Telegram/VK polling есть, conflict и traceback нет. Других контейнеров с
+теми же credentials и процессов приложения вне двух ожидаемых Docker cgroup
+не обнаружено. `stage=pinned_verified`, marker отсутствует, checkout чистый
+detached, effective systemd и Compose guards сохранились; service и backup
+timer `active/enabled`. SQLite сохранила inode `501886`, integrity `ok`, схему
+`0001_initial_schema.sql`; проверенная копия `app-20261018T072510Z.db` на
+месте, всего шесть копий. Следующий backup назначен на 2026-10-19 03:15 UTC.
+Live выпуск `v1.0.2` остаётся отдельным шагом.
 
 ## История отказа и PATCH v1.0.2
 
