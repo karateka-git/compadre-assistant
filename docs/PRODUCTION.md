@@ -1,5 +1,30 @@
 # Production VPS
 
+## Текущее состояние после отказа проверки pin 2026-10-17
+
+`v1.0.1` опубликован из `release/1.0` на точном SHA
+`19bba49f81f13f3ebb39730efa09f087758a22e5` после полного
+`release-full` run `39045505808`, attempt 1, но на VPS не развёрнут.
+Повторная проверка старого pin завершилась `degraded`. Read-only диагностика
+установила причину: `obs-chat-bot.service` выполнял Compose как `User=user`,
+а внешний каталог pin имеет root:root 0700 и `pinned-compose.yml` — 0600.
+Журнал systemd трижды показал `permission denied` для этого файла: при
+остановке и двух попытках запуска. Root-контроллер запускал оба старых
+контейнера с подтверждёнными healthcheck и polling, но unit не стартовал;
+автоматический возврат повторил тот же отказ.
+
+Последний read-back: marker `deploy-in-progress` сохранён, state — `degraded`,
+оба старых контейнера остановлены с policy `no`, service — inactive/enabled,
+backup timer — inactive/disabled. Чистый detached checkout, runtime tag и
+оба image ID указывают на прежний SHA
+`ac2ac981ba628a881b483238a4eaf191a644de6a` и image
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
+SQLite inode `501886`, integrity `ok`, схема `0001_initial_schema.sql`
+совпадает с rollback manifest. Это состояние не разрешает простой restart:
+нужен ручной recovery по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
+Планируется новый PATCH `v1.0.2`; восстановление VPS требует отдельного
+эксплуатационного решения. Обсуждение схемы шага 7.4.1 отложено пользователем.
+
 ## Подготовка первого versioned выпуска 2026-10-17
 
 `main`, `release/1.0` и опубликованный `v1.0.0` указывают на
