@@ -323,12 +323,15 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
         pair_rows = lines[pair_start:pair_end]
         if not pair_rows:
             raise DeploySelectionError("Список парных PR пуст")
-        if sum(line.startswith("- release #") for line in lines) != len(pair_rows):
+        if sum(line.startswith("- release https://") for line in lines) != len(pair_rows):
             raise DeploySelectionError("Строки пар PR находятся вне журнала")
         paired: set[int] = set()
         for row in pair_rows:
-            match = re.fullmatch(r"- release #([1-9][0-9]*), main #([1-9][0-9]*): "
-                                 r"(точный Git diff SHA-256 [0-9a-f]{64}|ручное подтверждение владельца)", row)
+            match = re.fullmatch(
+                rf"- release https://github\.com/{re.escape(api.repository)}/pull/([1-9][0-9]*), "
+                rf"main https://github\.com/{re.escape(api.repository)}/pull/([1-9][0-9]*); "
+                r"main merge `([0-9a-f]{40})` подтверждён в main", row,
+            )
             if match is None:
                 raise DeploySelectionError("Некорректная пара PR")
             release_number, main_number = int(match[1]), int(match[2])
@@ -339,6 +342,8 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
             release_pr, main_pr = linked_pulls(api, release_number)
             if (release_pr["number"], main_pr["number"]) != (release_number, main_number):
                 raise DeploySelectionError("Связь парных PR изменилась")
+            if main_pr.get("merge_commit_sha") != match[3]:
+                raise DeploySelectionError("Merge SHA main PR в манифесте не совпал")
             paired.update((release_number, main_number))
         if paired != set(numbers):
             raise DeploySelectionError("Список парных PR не покрывает все PR")

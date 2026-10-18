@@ -69,9 +69,12 @@ class PatchApi(api_tests.FakeApi):
         self.tags = [{"ref": "refs/tags/v1.0.0"}]
 
     def _pr(self, number: int) -> dict:
-        """Возвращает точный PR с взаимной ссылкой на вторую ветку."""
+        """Возвращает точный PR с взаимным URL на вторую ветку."""
         release = number == 10
-        return {"number": number, "body": f"Hotfix-Pair: #{11 if release else 10}",
+        linked = 11 if release else 10
+        body = ("Hotfix-Links:\n"
+                f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/{linked}\n")
+        return {"number": number, "body": body,
                 "merged_at": api_tests.MERGED_AT,
                 "base": {"ref": "release/1.0" if release else "main"},
                 "head": {"sha": self.release_head if release else self.main_head},
@@ -248,7 +251,7 @@ class EmergencyEndToEndTests(unittest.TestCase):
                 os.chdir(prior)
 
     def test_patch_requires_both_linked_prs_and_keeps_ci_pending(self) -> None:
-        """PATCH сверяет реальный Git diff двух merge PR перед fake публикацией."""
+        """PATCH сверяет два merge PR перед fake публикацией."""
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             repository = root / "repo"
@@ -317,16 +320,16 @@ class EmergencyEndToEndTests(unittest.TestCase):
                         self.assertIn("stop_both", host.actions)
                     original = api.posts[-1][1]["body"]
                     api.posts[-1][1]["body"] = original.replace(
-                        "- release #10, main #11:", "- release #10, main #12:")
+                        "/pull/11; main merge", "/pull/12; main merge")
                     with self.assertRaises(select.DeploySelectionError):
                         select.select_emergency_release(api, "v1.0.1")
                     api.posts[-1][1]["body"] = original
                     def broken_pair(number: int) -> dict:
                         pr = PatchApi._pr(api, number)
-                        return dict(pr, body="Hotfix-Pair: #999") if number == 11 else pr
+                        return dict(pr, body="Hotfix-Links:\nhttps://github.com/other/repo/pull/10") if number == 11 else pr
 
                     with patch.object(api, "_pr", side_effect=broken_pair), \
-                         self.assertRaisesRegex(Exception, "Hotfix-Pair"):
+                         self.assertRaisesRegex(Exception, "URL"):
                         select.select_emergency_release(api, "v1.0.1")
             finally:
                 os.chdir(prior)

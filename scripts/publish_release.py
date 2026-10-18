@@ -216,7 +216,12 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     _candidate(api, branch, sha)
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
-    pair_lines = "\n".join(f"- release #{r}, main #{m}: {method}" for r, m, method in pairs)
+    pair_lines = "\n".join(
+        f"- release https://github.com/{api.repository}/pull/{release_number}, "
+        f"main https://github.com/{api.repository}/pull/{main_number}; "
+        f"main merge `{main_sha}` подтверждён в main"
+        for release_number, main_number, main_sha in pairs
+    )
     body = (f"{notes.strip()}\n\nТип выпуска: обычный\nCommit: `{sha}`\nВетка: `{branch}`\n"
             f"Полный CI: {run_url}\n")
     if pair_lines:
