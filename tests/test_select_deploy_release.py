@@ -61,6 +61,9 @@ class FakeApi:
         self.error = None
         self.move_on_recheck = False
         self.release_reads = 0
+        self.compare_calls = 0
+        self.compare_response = None
+        self.compare_error = None
 
     def get(self, path, **parameters):
         """Читает один объект или имитирует отказ API."""
@@ -76,6 +79,11 @@ class FakeApi:
         if path == f"/git/ref/heads/{self.branch}":
             return {"ref": f"refs/heads/{self.branch}", "object": {"type": "commit", "sha": self.head}}
         if path == f"/compare/{SHA}...{self.head}":
+            self.compare_calls += 1
+            if self.compare_error:
+                raise self.compare_error
+            if self.compare_response is not None:
+                return deepcopy(self.compare_response)
             return {"status": "identical" if self.head == SHA else "ahead",
                     "base_commit": {"sha": SHA}, "head_commit": {"sha": self.head}}
         if path == "/rulesets/7":
@@ -124,6 +132,46 @@ class SelectDeployReleaseTests(unittest.TestCase):
         """Продвижение ветки после публикации не отменяет предыдущий выпуск."""
         self.api.head = NEW_HEAD
         self.assertEqual(self.select().sha, SHA)
+        self.assertEqual(self.api.compare_calls, 1)
+
+    def test_equal_tag_and_branch_skip_compare(self) -> None:
+        """Два независимо проверенных одинаковых SHA не требуют ответа compare."""
+        self.api.compare_response = {"status": "identical", "base_commit": {"sha": SHA}}
+        self.api.compare_error = selector.ControllerError("compare недоступен")
+        self.assertEqual(self.select().sha, SHA)
+        self.assertEqual(self.api.compare_calls, 0)
+
+    def test_different_sha_requires_exact_ahead_compare(self) -> None:
+        """Для старого тега нужны ahead и оба точных commit SHA."""
+        bad_responses = (
+            {"status": "behind", "base_commit": {"sha": SHA},
+             "head_commit": {"sha": NEW_HEAD}},
+            {"status": "diverged", "base_commit": {"sha": SHA},
+             "head_commit": {"sha": NEW_HEAD}},
+            {"status": "identical", "base_commit": {"sha": SHA}},
+            {"status": "ahead", "base_commit": {"sha": SHA}},
+            {"status": "ahead", "base_commit": {"sha": NEW_HEAD},
+             "head_commit": {"sha": NEW_HEAD}},
+            {"status": "ahead", "base_commit": {"sha": SHA},
+             "head_commit": {"sha": SHA}},
+            ["ahead"],
+        )
+        for response in bad_responses:
+            with self.subTest(response=response):
+                api = FakeApi()
+                api.head = NEW_HEAD
+                api.compare_response = response
+                with self.assertRaises(selector.DeploySelectionError):
+                    selector.select_release(api, api.version)
+                self.assertEqual(api.compare_calls, 1)
+
+    def test_different_sha_compare_api_failure_propagates(self) -> None:
+        """Ошибка compare прерывает выбор выпуска без повторного вызова."""
+        self.api.head = NEW_HEAD
+        self.api.compare_error = selector.ControllerError("compare недоступен")
+        with self.assertRaises(selector.ControllerError):
+            self.select()
+        self.assertEqual(self.api.compare_calls, 1)
 
     def test_wrong_repository_or_version_is_denied(self) -> None:
         """Чужой API, origin и неканоническая версия не допускаются."""

@@ -50,6 +50,9 @@ docker compose logs --tail=100 vk_catcher
 docker compose logs --tail=100 tg_catcher
 ```
 
+Связь релизной ветки, точного тега и фактической версии VPS описана в
+[RELEASES.md](RELEASES.md).
+
 После опубликованного обновления проекта выполнить:
 
 Сначала проверьте `git status`, diff обновления и наличие пригодной резервной
