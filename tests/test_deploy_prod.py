@@ -8,8 +8,10 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import stat
 import subprocess
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -186,6 +188,52 @@ class FakeHost(prod.Host):
 class SystemdBootTests(unittest.TestCase):
     """Проверяет effective unit с фактическим порядком production drop-in."""
 
+    @unittest.skipUnless(os.name == "posix" and shutil.which("systemd-analyze") and
+                         Path("/usr/bin/docker").exists(),
+                         "Нужен Linux с systemd-analyze и Docker CLI")
+    def test_real_systemd_verifies_legacy_channels_and_late_pin(self) -> None:
+        """Реальный parser systemd принимает три drop-in в production порядке."""
+        import grp
+        import pwd
+
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            unit = root / "obs-chat-bot.service"
+            unit.write_text(
+                "[Unit]\nDescription=Test pinned Compose\n"
+                "[Service]\nType=oneshot\nRemainAfterExit=yes\n"
+                f"User={pwd.getpwuid(os.getuid()).pw_name}\n"
+                f"Group={grp.getgrgid(os.getgid()).gr_name}\n"
+                f"WorkingDirectory={root}\n"
+                "ExecStart=/usr/bin/docker compose up -d vk_assistant tg_assistant\n"
+                "ExecStop=/usr/bin/docker compose stop vk_assistant tg_assistant\n",
+                encoding="utf-8",
+            )
+            dropins = root / "obs-chat-bot.service.d"
+            dropins.mkdir()
+            source = prod.SOURCE_ROOT / "deploy"
+            shutil.copyfile(source / "obs-chat-bot-pinned-v101.conf",
+                            dropins / "90-deploy-pinned.conf")
+            (dropins / "channels.conf").write_text(
+                "[Service]\nExecStart=\n"
+                "ExecStart=/usr/bin/docker compose up -d vk_assistant tg_assistant\n"
+                "ExecStop=\n"
+                "ExecStop=/usr/bin/docker compose stop vk_assistant tg_assistant\n",
+                encoding="utf-8",
+            )
+            shutil.copyfile(source / "obs-chat-bot-pinned.conf",
+                            dropins / "zz-deploy-pinned.conf")
+            env = os.environ.copy()
+            env["SYSTEMD_UNIT_PATH"] = str(root)
+            result = subprocess.run(
+                ("systemd-analyze", "--man=no", "--recursive-errors=no", "verify", str(unit)),
+                env=env, text=True, capture_output=True, check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            text = (source / "obs-chat-bot-pinned.conf").read_text(encoding="utf-8")
+            self.assertIn("ExecStart=!/usr/bin/docker compose up", text)
+            self.assertIn("ExecStop=!/usr/bin/docker compose stop", text)
+
     def _host(self, root: Path, *, legacy: bool = True) -> tuple[prod.Host, dict]:
         """Создаёт ответы systemd D-Bus без доступа к серверному manager."""
         host = prod.Host(root / "checkout", root / "state")
@@ -202,9 +250,15 @@ class SystemdBootTests(unittest.TestCase):
             paths.insert(0, str(old))
         replies = {
             "DropInPaths": " ".join(paths),
-            "ExecStart": {"type": "a(sasbttttuii)",
-                          "data": [["/usr/bin/docker", prod.PINNED_EXEC, False,
-                                    0, 0, 0, 0, 0, 0, 0]]},
+            "ExecStartEx": {"type": "a(sasasttttuii)",
+                            "data": [["/usr/bin/docker", prod.PINNED_EXEC,
+                                      ["no-setuid"], 0, 0, 0, 0, 0, 0, 0]]},
+            "ExecStopEx": {"type": "a(sasasttttuii)",
+                           "data": [["/usr/bin/docker", prod.PINNED_STOP,
+                                     ["no-setuid"], 0, 0, 0, 0, 0, 0, 0]]},
+            "User": {"type": "s", "data": "user"},
+            "Group": {"type": "s", "data": "user"},
+            "WorkingDirectory": {"type": "s", "data": str(host.checkout)},
             "EnvironmentFiles": {"type": "a(sb)",
                                  "data": [[str(runtime), False]]},
             "Conditions": {"type": "a(sbbsi)",
@@ -225,7 +279,7 @@ class SystemdBootTests(unittest.TestCase):
                       "runtime": runtime, "replies": replies}
 
     def test_late_dropin_wins_after_existing_channels(self) -> None:
-        """Порядок 90, channels, zz допускает только закреплённый ExecStart."""
+        """Порядок 90, channels, zz закрепляет root-доступ для start и stop."""
         with TemporaryDirectory() as temporary:
             host, unit = self._host(Path(temporary))
             unit["replies"]["EnvironmentFiles"]["data"] *= 2
@@ -249,7 +303,7 @@ class SystemdBootTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             host, unit = self._host(Path(temporary))
             unit["replies"]["DropInPaths"] = f'{unit["legacy"]} {unit["channels"]}'
-            unit["replies"]["ExecStart"]["data"][0][1] = [
+            unit["replies"]["ExecStartEx"]["data"][0][1] = [
                 "/usr/bin/docker", "compose", "up", "-d", "vk_assistant", "tg_assistant",
             ]
             with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
@@ -276,8 +330,8 @@ class SystemdBootTests(unittest.TestCase):
             original_run = host.run
 
             def invalid_reply(*args: str, env: dict[str, str] | None = None) -> str:
-                """Имитирует повреждённый ответ busctl для свойства ExecStart."""
-                if args[:3] == ("busctl", "--json=short", "get-property") and args[-1] == "ExecStart":
+                """Имитирует повреждённый ответ busctl для свойства ExecStartEx."""
+                if args[:3] == ("busctl", "--json=short", "get-property") and args[-1] == "ExecStartEx":
                     return "invalid-json"
                 return original_run(*args, env=env)
 
@@ -291,8 +345,19 @@ class SystemdBootTests(unittest.TestCase):
     def test_effective_command_environment_and_condition_are_required(self) -> None:
         """Каждое обязательное свойство systemd проверяется независимо."""
         for property_name, changed in (
-            ("ExecStart", [["/usr/bin/docker", ["/usr/bin/docker", "compose", "up", "-d"],
-                            False, 0, 0, 0, 0, 0, 0, 0]]),
+            ("ExecStartEx", [["/usr/bin/docker", ["/usr/bin/docker", "compose", "up", "-d"],
+                              ["no-setuid"], 0, 0, 0, 0, 0, 0, 0]]),
+            ("ExecStartEx", [["/usr/bin/docker", prod.PINNED_EXEC,
+                              [], 0, 0, 0, 0, 0, 0, 0]]),
+            ("ExecStartEx", [["/usr/bin/docker", prod.PINNED_EXEC,
+                              ["privileged"], 0, 0, 0, 0, 0, 0, 0]]),
+            ("ExecStopEx", [["/usr/bin/docker", prod.PINNED_STOP,
+                             [], 0, 0, 0, 0, 0, 0, 0]]),
+            ("ExecStopEx", [["/usr/bin/docker", ["/usr/bin/docker", "compose", "down"],
+                             ["no-setuid"], 0, 0, 0, 0, 0, 0, 0]]),
+            ("User", "root"),
+            ("Group", "root"),
+            ("WorkingDirectory", "/tmp/other-project"),
             ("EnvironmentFiles", [["/tmp/unpinned.env", False]]),
             ("Conditions", [["ConditionPathExists", False, False,
                              "/var/lib/compadre-assistant-deploy/deploy-in-progress", 0]]),
@@ -306,6 +371,37 @@ class SystemdBootTests(unittest.TestCase):
                     with self.assertRaises(prod.DeployError):
                         host.require_systemd_boot(unit["runtime"])
 
+    def test_private_pin_rejects_readable_or_replaced_files(self) -> None:
+        """Preflight закрывает group/world доступ и symlink к root pin."""
+        with TemporaryDirectory() as temporary:
+            host = prod.Host(Path(temporary) / "checkout", Path(temporary) / "state")
+            expected = {
+                host.state_dir: stat.S_IFDIR | 0o700,
+                host.state_dir / "runtime.env": stat.S_IFREG | 0o600,
+                host.state_dir / "pinned-compose.yml": stat.S_IFREG | 0o600,
+                host.state_dir / "critical-compose.yml": stat.S_IFREG | 0o600,
+            }
+
+            def fake_stat(path: Path) -> SimpleNamespace:
+                """Возвращает только mode и owner для проверяемого пути."""
+                return SimpleNamespace(st_mode=expected[path], st_uid=0, st_gid=0)
+
+            with patch.object(Path, "lstat", autospec=True, side_effect=fake_stat):
+                host.require_private_pin()
+                for changed in (stat.S_IFREG | 0o644, stat.S_IFLNK | 0o600):
+                    expected[host.state_dir / "pinned-compose.yml"] = changed
+                    with self.assertRaises(prod.DeployError):
+                        host.require_private_pin()
+                expected[host.state_dir / "pinned-compose.yml"] = stat.S_IFREG | 0o600
+
+            def nonroot_stat(path: Path) -> SimpleNamespace:
+                """Имитирует приватный файл, принадлежащий непривилегированному UID."""
+                return SimpleNamespace(st_mode=expected[path], st_uid=1000, st_gid=1000)
+
+            with patch.object(Path, "lstat", autospec=True, side_effect=nonroot_stat):
+                with self.assertRaises(prod.DeployError):
+                    host.require_private_pin()
+
     def test_installed_accepts_only_checked_legacy_and_late_files(self) -> None:
         """Новый snapshot допускает старый 90 только при точном совпадении."""
         with TemporaryDirectory() as temporary:
@@ -313,7 +409,7 @@ class SystemdBootTests(unittest.TestCase):
             host, unit = self._host(root)
             source = prod.SOURCE_ROOT / "deploy"
             for target, name in (
-                (unit["legacy"], "obs-chat-bot-pinned.conf"),
+                (unit["legacy"], "obs-chat-bot-pinned-v101.conf"),
                 (unit["pinned"], "obs-chat-bot-pinned.conf"),
             ):
                 shutil.copyfile(source / name, target)
@@ -347,9 +443,9 @@ class SystemdBootTests(unittest.TestCase):
                 prod, "TIMER_GUARD", timer_guard,
             ), patch.object(prod, "BACKUP_GUARD", backup_guard), patch.object(
                 host, "image", return_value={"Id": OLD_IMAGE},
-            ), patch.object(host, "require_compose_pin"):
+            ), patch.object(host, "require_compose_pin"), patch.object(host, "require_private_pin"):
                 host.installed(OLD_IMAGE, OLD_SHA)
-                unit["legacy"].write_text("changed", encoding="utf-8")
+                shutil.copyfile(source / "obs-chat-bot-pinned.conf", unit["legacy"])
                 with self.assertRaises(prod.DeployError):
                     host.installed(OLD_IMAGE, OLD_SHA)
 

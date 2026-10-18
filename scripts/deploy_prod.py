@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -33,12 +34,17 @@ BACKUP_SERVICE = "obs-chat-bot-backup.service"
 SERVICE_DBUS_PATH = "/org/freedesktop/systemd1/unit/obs_2dchat_2dbot_2eservice"
 CHANNELS_DROPIN = Path("/etc/systemd/system/obs-chat-bot.service.d/channels.conf")
 LEGACY_PINNED_DROPIN = Path("/etc/systemd/system/obs-chat-bot.service.d/90-deploy-pinned.conf")
+# На VPS файл 90 остался от v1.0.1 и не заменяется при установке нового zz.
+LEGACY_PINNED_TEMPLATE = Path("deploy/obs-chat-bot-pinned-v101.conf")
 # systemd читает drop-in по имени: этот файл обязан идти после channels.conf.
 PINNED_DROPIN = Path("/etc/systemd/system/obs-chat-bot.service.d/zz-deploy-pinned.conf")
 TIMER_GUARD = Path("/etc/systemd/system/obs-chat-bot-backup.timer.d/90-deploy-guard.conf")
 BACKUP_GUARD = Path("/etc/systemd/system/obs-chat-bot-backup.service.d/90-deploy-guard.conf")
 PINNED_EXEC = ["/usr/bin/docker", "compose", "up", "-d", "--no-build", "--pull", "never",
                "vk_assistant", "tg_assistant"]
+PINNED_STOP = ["/usr/bin/docker", "compose", "stop", "vk_assistant", "tg_assistant"]
+# Префикс ! у systemd сохраняет sandbox, но выполняет только эти команды без User=/Group=.
+PINNED_EXEC_FLAGS = ["no-setuid"]
 DEPLOY_SSH = ("ssh -i /home/user/.ssh/obs-chat-bot_deploy -o IdentitiesOnly=yes "
               "-o StrictHostKeyChecking=yes -o UserKnownHostsFile=/home/user/.ssh/known_hosts "
               "-o BatchMode=yes")
@@ -256,6 +262,30 @@ class Host:
             raise DeployError("Не удалось проверить effective systemd unit")
         return value["data"]
 
+    def systemd_text_property(self, interface: str, name: str) -> str:
+        """Читает строковое effective свойство unit из D-Bus без fallback.
+
+        Args:
+            interface: D-Bus интерфейс service.
+            name: Имя строкового свойства.
+
+        Returns:
+            Значение загруженного свойства.
+
+        Raises:
+            DeployError: Свойство отсутствует или имеет неожиданную форму.
+        """
+        try:
+            value = json.loads(self.run("busctl", "--json=short", "get-property",
+                                        "org.freedesktop.systemd1", SERVICE_DBUS_PATH,
+                                        interface, name))
+        except ValueError as exc:
+            raise DeployError("Не удалось разобрать effective systemd unit") from exc
+        if (not isinstance(value, dict) or value.get("type") != "s" or
+                not isinstance(value.get("data"), str)):
+            raise DeployError("Не удалось проверить effective systemd unit")
+        return value["data"]
+
     def require_systemd_boot(self, runtime: Path) -> None:
         """Проверяет порядок drop-in и фактические команду, env и marker guard.
 
@@ -271,11 +301,17 @@ class Host:
             expected.insert(0, str(LEGACY_PINNED_DROPIN))
         if dropins != expected:
             raise DeployError("Порядок systemd drop-in не закрепляет безопасный запуск")
-        command = self.systemd_property("org.freedesktop.systemd1.Service", "ExecStart",
-                                        "a(sasbttttuii)")
-        if (len(command) != 1 or not isinstance(command[0], list) or len(command[0]) != 10 or
-                command[0][:3] != [PINNED_EXEC[0], PINNED_EXEC, False]):
-            raise DeployError("Effective ExecStart не закрепляет безопасный запуск")
+        service_interface = "org.freedesktop.systemd1.Service"
+        for property_name, expected in (("ExecStartEx", PINNED_EXEC), ("ExecStopEx", PINNED_STOP)):
+            command = self.systemd_property(service_interface, property_name,
+                                            "a(sasasttttuii)")
+            if (len(command) != 1 or not isinstance(command[0], list) or len(command[0]) != 10 or
+                    command[0][:3] != [expected[0], expected, PINNED_EXEC_FLAGS]):
+                raise DeployError(f"Effective {property_name} не закрепляет root-private Compose")
+        for property_name, expected in (("User", "user"), ("Group", "user"),
+                                        ("WorkingDirectory", str(self.checkout))):
+            if self.systemd_text_property(service_interface, property_name) != expected:
+                raise DeployError(f"Effective {property_name} отличается от проверенного unit")
         environment = self.systemd_property("org.freedesktop.systemd1.Service", "EnvironmentFiles",
                                             "a(sb)")
         if (not 1 <= len(environment) <= 2 or
@@ -290,6 +326,22 @@ class Host:
                     for entry in conditions)):
             raise DeployError("Effective Condition не блокирует запуск при marker")
 
+    def require_private_pin(self) -> None:
+        """Требует root-owned каталог 0700 и файлы pin 0600 без symlink файлов.
+
+        Raises:
+            DeployError: Внешний pin доступен постороннему пользователю либо подменён.
+        """
+        expected = ((self.state_dir, stat.S_ISDIR, 0o700),
+                    (self.state_dir / "runtime.env", stat.S_ISREG, 0o600),
+                    (self.state_dir / "pinned-compose.yml", stat.S_ISREG, 0o600),
+                    (self.state_dir / "critical-compose.yml", stat.S_ISREG, 0o600))
+        for path, file_type, mode in expected:
+            info = path.lstat()
+            if (not file_type(info.st_mode) or info.st_uid != 0 or info.st_gid != 0 or
+                    stat.S_IMODE(info.st_mode) != mode):
+                raise DeployError("Внешний pin должен принадлежать root и оставаться приватным")
+
     def installed(self, old_id: str, old_sha: str) -> None:
         """Требует заранее установленный внешний pin и безопасный boot path."""
         marker = self.state_dir / "deploy-in-progress"
@@ -302,6 +354,7 @@ class Host:
         if marker.exists() or not all(path.is_file() for path in
                                            (runtime, override, critical, dropin, timer_guard, backup_guard)):
             raise DeployError("Внешний pin/systemd drop-in не установлен или остался marker")
+        self.require_private_pin()
         if override.read_bytes() != (SOURCE_ROOT / "deploy/pinned-compose.yml").read_bytes():
             raise DeployError("Внешний Compose override отличается от проверенного шаблона")
         if critical.read_bytes() != (SOURCE_ROOT / "deploy/critical-compose.yml").read_bytes():
@@ -310,7 +363,7 @@ class Host:
             raise DeployError("Systemd drop-in отличается от проверенного шаблона")
         if (LEGACY_PINNED_DROPIN.exists() and
                 LEGACY_PINNED_DROPIN.read_bytes() !=
-                (SOURCE_ROOT / "deploy/obs-chat-bot-pinned.conf").read_bytes()):
+                (SOURCE_ROOT / LEGACY_PINNED_TEMPLATE).read_bytes()):
             raise DeployError("Прежний systemd drop-in отличается от проверенного шаблона")
         if timer_guard.read_bytes() != (SOURCE_ROOT / "deploy/obs-chat-bot-backup-guard.conf").read_bytes():
             raise DeployError("Backup timer guard отличается от проверенного шаблона")
