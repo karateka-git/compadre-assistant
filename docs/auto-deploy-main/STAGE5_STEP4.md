@@ -60,10 +60,27 @@ state остаётся root:root 0700, runtime и оба override — root:root 
    заменить snapshot, сохранив предыдущее имя для возврата; установить новый
    `zz-deploy-pinned.conf`. Старый `90` оставить и сверить с v1.0.1 шаблоном.
    Не трогать `channels.conf`, base unit, `runtime.env`, marker, state и БД.
-3. Выполнить `daemon-reload`, `systemd-analyze verify`, `NeedDaemonReload=no`;
-   read-only guard нового snapshot должен подтвердить bytes, mode/owner,
-   порядок drop-in и все effective D-Bus свойства start/stop с `no-setuid`.
-   Проверить normal/critical Compose merge и project name, не выводя env.
+3. Выполнить `daemon-reload`, `systemd-analyze verify` и проверить
+   `NeedDaemonReload=no`. Пока marker на месте и service inactive, выполнить
+   **отдельные ручные read-only проверки**, не вызывая `Host.installed()`:
+   этот метод требует отсутствия marker и active service и в текущем
+   `degraded` обязан отказать. До снятия marker сверить:
+   - `cmp`/SHA256 установленного snapshot с файлами проверенного release SHA;
+     байты нового `zz` с `deploy/obs-chat-bot-pinned.conf`, прежнего `90` с
+     `deploy/obs-chat-bot-pinned-v101.conf`, Compose overrides и guard-файлов
+     с их проверенными шаблонами;
+   - `stat`/`lstat` типов, owner и mode: snapshot и state root-owned, каталог
+     state 0700, `runtime.env` и оба Compose override — обычные файлы
+     root:root 0600 без symlink; содержимое runtime только структурно
+     сверить с прежним tag и двумя ожидаемыми ключами, не печатая значения;
+   - загруженные D-Bus `DropInPaths` строго в порядке `90`, `channels`, `zz`
+     без других drop-in; `ExecStartEx` и `ExecStopEx` с точными argv и
+     единственным флагом `no-setuid`; `User=user`, `Group=user`, прежний
+     `WorkingDirectory`, только ожидаемые `EnvironmentFiles` и отрицательное
+     `ConditionPathExists` для marker;
+   - от root `docker compose config --quiet` для normal и critical merge;
+     отдельно проверить project name `obs-chat-bot`, старый image ID обоих
+     каналов, data bind и restart policy без вывода полного config или env.
    При отказе **до запуска** вернуть сохранённый snapshot и drop-in,
    повторно загрузить systemd; оставить marker/degraded и writers stopped.
 4. При прежней схеме и integrity под lock оставить marker и таймер выключенными,
