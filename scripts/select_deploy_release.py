@@ -122,9 +122,22 @@ def _branch_head(api: ReadOnlyGitHub, branch: str) -> str:
 
 
 def _check_ancestor(api: ReadOnlyGitHub, sha: str, head: str) -> None:
-    """Доказывает достижимость выпуска из текущей релизной ветки."""
+    """Доказывает, что commit выпуска входит в текущую релизную ветку.
+
+    Args:
+        api: Читающий клиент GitHub.
+        sha: Уже проверенный SHA тега выпуска.
+        head: Уже проверенный SHA head релизной ветки.
+
+    Raises:
+        DeploySelectionError: Сравнение не доказывает происхождение выпуска.
+    """
+    # Равенство независимо проверенных ref доказывает принадлежность без compare:
+    # GitHub может не вернуть head_commit для сравнения commit с самим собой.
+    if sha == head:
+        return
     value = api.get(f"/compare/{sha}...{head}")
-    if (not isinstance(value, dict) or value.get("status") not in ("ahead", "identical") or
+    if (not isinstance(value, dict) or value.get("status") != "ahead" or
             not isinstance(value.get("base_commit"), dict) or
             value["base_commit"].get("sha") != sha or
             not isinstance(value.get("head_commit"), dict) or

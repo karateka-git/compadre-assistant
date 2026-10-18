@@ -1,6 +1,78 @@
 # Production VPS
 
-## Текущее состояние после отказа проверки pin 2026-10-17
+## Текущее состояние после отказа live выпуска 2026-10-18
+
+На VPS установлен проверенный snapshot контроллера из `v1.0.2`, но сам
+`v1.0.2` **ещё не развёрнут**: checkout и оба контейнера работают на прежнем
+SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` и image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
+Один разрешённый запуск `sudo deploy-prod v1.0.2` завершился с кодом 1:
+`preparing` → `failed_preflight`, ошибка `DeploySelectionError`. Проверка
+происхождения выпуска сравнила SHA тега с тем же SHA в head `release/1.0`;
+GitHub API вернул `status=identical` без поля `head_commit`, а selector
+обязательно требует это поле. Отказ произошёл до создания marker, остановки
+writers, backup и миграции. В `state.json` записаны `stage=failed_preflight`,
+`failed_version=v1.0.2` и исторический `retry_after=2026-10-18T15:19:51Z`.
+Повтор команды не выполнялся; это время само по себе не разрешает повтор.
+
+Независимая проверка после отказа подтвердила прежний чистый detached SHA и
+image ID обоих каналов. Telegram и VK `running/healthy`, polling подтверждён,
+restart count 0, policy `unless-stopped`, дубликатов нет. Marker отсутствует,
+`obs-chat-bot.service` и backup timer `active/enabled`, effective systemd и
+Compose guards действуют. SQLite сохранила inode `501886`, integrity `ok` и
+схему `0001_initial_schema.sql`; шесть копий остались на месте, включая
+проверенную `app-20261018T072510Z.db`. Следующий backup назначен на
+2026-10-19 03:15 UTC. Live выпуск `v1.0.2` не установлен.
+
+Ранее ручной возврат старого pin завершился `state=rolled_back`. Затем
+один запуск
+`sudo deploy-prod --verify-pinned` завершился с кодом 0 и записал
+`stage=pinned_verified`; marker отсутствует. Независимая проверка после команды
+подтвердила прежние SHA и image ID у обоих каналов, действующие systemd и
+Compose guards и отсутствие второго polling-процесса.
+Telegram и VK `running/healthy`, polling подтверждён, restart count 0,
+policy `unless-stopped`. `obs-chat-bot.service` и backup timer активны и
+включены. SQLite сохранила inode `501886`, прошла integrity check; схема —
+`0001_initial_schema.sql`. Новая копия
+`app-20261018T072510Z.db` проверена; всего шесть копий. После отдельного
+preflight выполнен один `sudo systemctl reboot` (код 0): SSH восстановился,
+boot ID сменился с `c35ef418-6f8c-436a-a1fa-28f3b614353a` на
+`9e779e1c-c56b-4db6-9c14-2aa66f7ce576`. Сразу после загрузки оба
+контейнера временно имели health `starting`, затем стали `healthy` без смены
+прежнего image ID. Повторная проверка подтвердила polling без conflict и
+traceback, текущий restart count 0 у обоих, прежний pin и
+`stage=pinned_verified` без marker, отсутствие дублирующего polling вне двух
+ожидаемых Docker cgroup. Service и timer снова `active/enabled`, SQLite
+сохранила inode `501886`, integrity `ok` и прежнюю схему; проверенная копия
+осталась на месте. Следующий backup назначен на 2026-10-19 03:15 UTC.
+Для продолжения исправить selector, провести два связанных PR в `release/1.0`
+и `main`, проверить новый точный SHA полным `release-full`, опубликовать новый
+PATCH Release и отдельно согласовать работы на VPS. Номер и тег `v1.0.2`
+не переиспользовать. Причина прежнего отказа и обязательная проверка доступа
+к Compose описаны в
+[операционном порядке](OPERATIONS.md).
+Разбор схемы выпуска с пользователем по шагу 7.4.1 отложен.
+
+## Публикация v1.0.2 и подготовка восстановления 2026-10-18
+
+Связанные PR #15 в `main` и #14 в `release/1.0` были слиты до тайм-аутов
+GitHub API. `release-full` run `39105709125`, attempt 1, успешно проверил
+точный релизный SHA `d3fa4efa0b3af4784f8538cae28c8b1ab6e1050a`.
+Повторные тайм-ауты происходили при отдельной проверке перед публикацией
+тега и GitHub Release; последующий read-back подтвердил, что записи не было.
+Позже [неизменяемый Release v1.0.2](https://github.com/karateka-git/compadre-assistant/releases/tag/v1.0.2)
+и тег были опубликованы на этот SHA. Слияние PR и публикация Release сами по
+себе не запускают обновление VPS: `deploy-prod` выполняется отдельной командой.
+
+При подготовке ручного восстановления первый архив snapshot содержал Windows
+CRLF вместо байтов Git-коммита. Проверка `stage-controller-sha` остановила
+операцию в отдельном staging-каталоге **до** замены действующего snapshot;
+старые контроллер и drop-in остались на месте. Staging удалили после read-back.
+Новый архив сформировали из точного SHA с `core.autocrlf=false` и побайтово
+сверили все 34 файла с `git show`. Постоянный порядок этой проверки записан в
+[OPERATIONS.md](OPERATIONS.md#архив-контроллера-с-windows-точные-байты-git).
+
+## История отказа проверки pin 2026-10-17
 
 `v1.0.1` опубликован из `release/1.0` на точном SHA
 `19bba49f81f13f3ebb39730efa09f087758a22e5` после полного
@@ -13,7 +85,7 @@
 контейнера с подтверждёнными healthcheck и polling, но unit не стартовал;
 автоматический возврат повторил тот же отказ.
 
-Последний read-back: marker `deploy-in-progress` сохранён, state — `degraded`,
+На момент отказа marker `deploy-in-progress` был сохранён, state — `degraded`,
 оба старых контейнера остановлены с policy `no`, service — inactive/enabled,
 backup timer — inactive/disabled. Чистый detached checkout, runtime tag и
 оба image ID указывают на прежний SHA
@@ -22,8 +94,8 @@ backup timer — inactive/disabled. Чистый detached checkout, runtime tag 
 SQLite inode `501886`, integrity `ok`, схема `0001_initial_schema.sql`
 совпадает с rollback manifest. Это состояние не разрешает простой restart:
 нужен ручной recovery по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
-Планируется новый PATCH `v1.0.2`; восстановление VPS требует отдельного
-эксплуатационного решения. Обсуждение схемы шага 7.4.1 отложено пользователем.
+Для исправления позднее опубликован PATCH `v1.0.2`; результат ручного
+восстановления приведён выше.
 
 ## Подготовка первого versioned выпуска 2026-10-17
 
@@ -45,9 +117,9 @@ snapshot `scripts/` и `deploy/` помещён в
 также не выполнялись. Read-back подтвердил прежний чистый detached checkout
 `ac2ac981ba628a881b483238a4eaf191a644de6a`, оба старых канала
 running/healthy с нулём рестартов и `unless-stopped`, active/enabled service
-и backup timer, отсутствие deploy marker и state. Текущий частичный setup
-не подтверждает безопасный следующий reboot. Исправление готовится как
-PATCH `v1.0.1`; порядок замены snapshot и приёмки — в
+и backup timer, отсутствие deploy marker и state. Тот частичный setup
+не подтверждал безопасный следующий reboot. На тот момент исправление
+готовилось как PATCH `v1.0.1`; порядок замены snapshot и приёмки — в
 [STAGE5_STEP4.md](auto-deploy-main/STAGE5_STEP4.md). Права SQLite `0644`
 и каталога `data` `0755` не менялись в этом окне.
 
