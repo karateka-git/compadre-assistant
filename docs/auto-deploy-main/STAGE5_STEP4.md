@@ -1,9 +1,10 @@
 # Этап 5, шаг 4: отказные проверки и runbook первого выпуска
 
 Этот документ — подготовка и журнал первого выпуска. Первый live выпуск
-**не выполнялся** на production. После прежнего отказа `degraded`
-старый pin восстановили, 2026-10-18 успешно проверили повторно и выполнили
-контролируемый reboot. Перед продолжением шага 5.5 заново прочитать
+**не установлен** на production: попытка `v1.0.2` завершилась
+`failed_preflight`. После прежнего отказа `degraded` старый pin восстановили,
+2026-10-18 успешно проверили повторно и выполнили контролируемый reboot.
+Перед продолжением шага 5.5 заново прочитать
 [`docs/PRODUCTION.md`](../PRODUCTION.md), снять текущее состояние и получить
 эксплуатационное разрешение. Текущий production SHA, image ID, состав unit и
 схема из прошлой инвентаризации не заменяют повторную проверку.
@@ -12,6 +13,35 @@
 плана, включая аварийный маршрут и эксплуатационную приёмку, проверенный
 порядок и recovery переносятся в `docs/OPERATIONS.md`; временный каталог
 удаляется отдельным завершающим изменением после проверки ссылок.
+
+## Отказ первой попытки live выпуска v1.0.2 2026-10-18
+
+После свежего preflight опубликованный immutable Release, защищённый tag и
+полный `release-full` run `39105709125`, attempt 1, соответствовали SHA
+`d3fa4efa0b3af4784f8538cae28c8b1ab6e1050a`. Один запуск
+`sudo deploy-prod v1.0.2` вернул код 1: `preparing` → `failed_preflight`,
+`DeploySelectionError`. При равенстве tag SHA и head `release/1.0` GitHub
+compare вернул `status=identical`, `base_commit` и `merge_base_commit`, но не
+`head_commit`; `_check_ancestor()` требует `head_commit.sha` и ошибочно
+отверг выпуск. Отказ произошёл до marker, остановки writers, backup и
+миграции. Повтор deploy не выполнялся. `state.json` сохранил
+`stage=failed_preflight`, `failed_version=v1.0.2` и исторический cooldown
+`retry_after=2026-10-18T15:19:51Z`; истечение cooldown не устраняет дефект.
+
+Независимый readback подтвердил отсутствие marker, прежний чистый detached
+checkout `ac2ac981ba628a881b483238a4eaf191a644de6a` и общий image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
+Telegram/VK `running/healthy`, polling без conflict/traceback, restart count
+0, policy `unless-stopped`, дублей нет. Service и backup timer
+`active/enabled`, effective systemd и Compose guards проверены. SQLite inode
+`501886`, integrity `ok`, схема `0001_initial_schema.sql`; шесть backup на
+месте, копия `app-20261018T072510Z.db` прошла integrity check, следующий
+backup назначен на 2026-10-19 03:15 UTC.
+
+Для продолжения нужен фикс selector, два связанных PR в `release/1.0` и
+`main`, новый полный CI точного SHA, новый PATCH Release и отдельный допуск
+на замену контроллера и live выпуск на VPS. `v1.0.2` immutable; его tag не
+менять и номер не переиспользовать. Шаг 5.5 остаётся открытым.
 
 ## Успешная проверка старого pin 2026-10-18
 
@@ -26,8 +56,8 @@ policy `unless-stopped`; второго polling-процесса нет. Service
 `active/enabled`, effective systemd и Compose guards проверены. SQLite
 сохранила inode `501886`, integrity `ok` и схему `0001_initial_schema.sql`.
 Копия `app-20261018T072510Z.db` присутствует и прошла integrity check; всего
-шесть копий. Live выпуск `v1.0.2` ещё не выполнялся; перед ним требуется
-новый preflight и отдельный эксплуатационный допуск.
+шесть копий. На момент этой проверки live выпуск ещё не запускали; более
+поздний отказ описан выше.
 
 ## Контролируемый reboot старого pin 2026-10-18
 
@@ -47,7 +77,7 @@ detached, effective systemd и Compose guards сохранились; service и
 timer `active/enabled`. SQLite сохранила inode `501886`, integrity `ok`, схему
 `0001_initial_schema.sql`; проверенная копия `app-20261018T072510Z.db` на
 месте, всего шесть копий. Следующий backup назначен на 2026-10-19 03:15 UTC.
-Live выпуск `v1.0.2` остаётся отдельным шагом.
+После reboot live выпуск оставался отдельным шагом; его отказ описан выше.
 
 ## История отказа и PATCH v1.0.2
 
@@ -134,9 +164,12 @@ state остаётся root:root 0700, runtime и оба override — root:root 
    `rolled_back` в state атомарно. Сохранить данные о первоначальном отказе
    в журнале операции. Удаление marker и запись `rolled_back` возможны лишь
    после проверки фактического старого runtime.
-7. Новое окно для `--verify-pinned`, reboot и `deploy-prod v1.0.2` открывать
-   отдельно: сначала снова проверить Release exact SHA/CI и состояние VPS.
-   После live нужны два реальных канала и ночной backup по общему checklist.
+7. Отдельно открыть окна для `--verify-pinned`, reboot и первого live выпуска:
+   перед каждым действием проверять состояние VPS, перед live сверить Release
+   exact SHA/CI.
+   Первые два окна завершились успешно; попытка `deploy-prod v1.0.2` позже
+   отказала до переключения, как описано выше. После успешного live выпуска
+   ещё нужны реальные ответы двух каналов и ночной backup по общему checklist.
 
 Если recovery прерван после снятия marker, до возобновления проверить
 фактические контейнеры и state; нельзя считать `degraded` успешным только

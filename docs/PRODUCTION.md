@@ -1,12 +1,31 @@
 # Production VPS
 
-## Текущее состояние после контролируемого reboot 2026-10-18
+## Текущее состояние после отказа live выпуска 2026-10-18
 
 На VPS установлен проверенный snapshot контроллера из `v1.0.2`, но сам
 `v1.0.2` **ещё не развёрнут**: checkout и оба контейнера работают на прежнем
 SHA `ac2ac981ba628a881b483238a4eaf191a644de6a` и image ID
 `sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
-Ручной возврат старого pin завершился `state=rolled_back`. Затем один запуск
+Один разрешённый запуск `sudo deploy-prod v1.0.2` завершился с кодом 1:
+`preparing` → `failed_preflight`, ошибка `DeploySelectionError`. Проверка
+происхождения выпуска сравнила SHA тега с тем же SHA в head `release/1.0`;
+GitHub API вернул `status=identical` без поля `head_commit`, а selector
+обязательно требует это поле. Отказ произошёл до создания marker, остановки
+writers, backup и миграции. В `state.json` записаны `stage=failed_preflight`,
+`failed_version=v1.0.2` и исторический `retry_after=2026-10-18T15:19:51Z`.
+Повтор команды не выполнялся; это время само по себе не разрешает повтор.
+
+Независимая проверка после отказа подтвердила прежний чистый detached SHA и
+image ID обоих каналов. Telegram и VK `running/healthy`, polling подтверждён,
+restart count 0, policy `unless-stopped`, дубликатов нет. Marker отсутствует,
+`obs-chat-bot.service` и backup timer `active/enabled`, effective systemd и
+Compose guards действуют. SQLite сохранила inode `501886`, integrity `ok` и
+схему `0001_initial_schema.sql`; шесть копий остались на месте, включая
+проверенную `app-20261018T072510Z.db`. Следующий backup назначен на
+2026-10-19 03:15 UTC. Live выпуск `v1.0.2` не установлен.
+
+Ранее ручной возврат старого pin завершился `state=rolled_back`. Затем
+один запуск
 `sudo deploy-prod --verify-pinned` завершился с кодом 0 и записал
 `stage=pinned_verified`; marker отсутствует. Независимая проверка после команды
 подтвердила прежние SHA и image ID у обоих каналов, действующие systemd и
@@ -26,9 +45,11 @@ traceback, текущий restart count 0 у обоих, прежний pin и
 ожидаемых Docker cgroup. Service и timer снова `active/enabled`, SQLite
 сохранила inode `501886`, integrity `ok` и прежнюю схему; проверенная копия
 осталась на месте. Следующий backup назначен на 2026-10-19 03:15 UTC.
-Live выпуск `v1.0.2` ещё не выполнялся. Перед ним снять новое фактическое
-состояние и получить отдельный эксплуатационный допуск. Причина прежнего
-отказа и обязательная проверка доступа к Compose описаны в
+Для продолжения исправить selector, провести два связанных PR в `release/1.0`
+и `main`, проверить новый точный SHA полным `release-full`, опубликовать новый
+PATCH Release и отдельно согласовать работы на VPS. Номер и тег `v1.0.2`
+не переиспользовать. Причина прежнего отказа и обязательная проверка доступа
+к Compose описаны в
 [операционном порядке](OPERATIONS.md).
 Разбор схемы выпуска с пользователем по шагу 7.4.1 отложен.
 
