@@ -1,7 +1,8 @@
 # Этап 5, шаг 4: отказные проверки и runbook первого выпуска
 
-Этот документ — подготовка и журнал прерванной первой установки. Остановка,
-reboot и выпуск **не выполнялись** на production. Перед продолжением шага 5.5 заново прочитать
+Этот документ — подготовка и журнал первого выпуска. Первый live выпуск и
+reboot **не выполнялись** на production; проверка старого pin была запущена и
+завершилась `degraded`. Перед продолжением шага 5.5 заново прочитать
 [`docs/PRODUCTION.md`](../PRODUCTION.md), снять текущее состояние и получить
 эксплуатационное разрешение. Текущий production SHA, image ID, состав unit и
 схема из прошлой инвентаризации не заменяют повторную проверку.
@@ -11,7 +12,84 @@ reboot и выпуск **не выполнялись** на production. Пере
 порядок и recovery переносятся в `docs/OPERATIONS.md`; временный каталог
 удаляется отдельным завершающим изменением после проверки ссылок.
 
-## Состояние после первого окна 2026-10-17
+## Текущее состояние и PATCH v1.0.2
+
+`v1.0.1` опубликован на SHA `19bba49f81f13f3ebb39730efa09f087758a22e5`
+после полного `release-full` run `39045505808`, attempt 1, но live не
+развёрнут. Во время `deploy-prod --verify-pinned` старые контейнеры были
+пересозданы и подтвердили healthcheck и polling. Затем `systemctl start`
+отказал: unit выполняет Compose как `User=user`, а
+`/var/lib/compadre-assistant-deploy` принадлежит root:root и имеет 0700,
+`pinned-compose.yml` — 0600. Санитизированный journal показал одинаковый
+`permission denied` для pinned Compose при остановке и двух запусках unit.
+Автоматический rollback также отказал на запуске unit и оставил
+`stage=degraded`, marker, оба старых контейнера остановленными и timer
+inactive/disabled. Чистый detached checkout и pin остались на старом SHA
+`ac2ac981ba628a881b483238a4eaf191a644de6a`, image ID
+`sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
+SQLite integrity `ok`, схема `0001_initial_schema.sql` совпала с manifest.
+Эти факты обязательно повторить в новом эксплуатационном окне.
+
+PATCH `v1.0.2` должен выполняться из двух связанных PR в `release/1.0` и
+`main`, с обычным merge, полным `release-full` exact release SHA и новым
+immutable Release. До отдельного разрешения не отправлять ветки, не создавать
+PR и не публиковать версию. `v1.0.1` и его tag не менять. Новый поздний
+drop-in переопределяет **обе** команды Compose: `ExecStart=!` и `ExecStop=!`.
+По [systemd.service](https://www.freedesktop.org/software/systemd/man/257/systemd.service.html)
+`!` отменяет только `User=`/`Group=` для названной команды, в отличие от
+более широкого `+`; root-private каталог и файлы не открываются пользователю.
+В systemd 259 сервера D-Bus `ExecStartEx`/`ExecStopEx` передают флаги команд;
+проверять exact argv и единственный флаг `no-setuid`, а также `User=user`,
+`Group=user`, прежний `WorkingDirectory`, EnvironmentFiles, marker condition
+и порядок `90`, `channels`, `zz`. Имя `90` сверять с побайтовым шаблоном
+`deploy/obs-chat-bot-pinned-v101.conf`, `zz` — с новым шаблоном. Каталог
+state остаётся root:root 0700, runtime и оба override — root:root 0600.
+Официальная [спецификация Compose](https://docs.docker.com/compose/how-tos/project-name/)
+выводит project name из первого Compose-файла; root CLI должен подтвердить
+прежнее имя проекта `obs-chat-bot`, те же data bind и image до запуска.
+
+### Ручной возврат из текущего degraded
+
+1. Под отдельным эксплуатационным допуском выполнить fresh read-only
+   preflight: marker/state, old tag/image ID, чистый detached SHA, отсутствие
+   других polling, остановка обоих writers, service/timer, backup,
+   `schema_before` и `PRAGMA integrity_check`. Сохранить marker и lock; не
+   восстанавливать SQLite из backup без отдельного плана.
+2. Из проверенного SHA `v1.0.2` подготовить и побайтово сверить root-owned
+   snapshot отдельно от действующего. Под **тем же** `deploy.lock` атомарно
+   заменить snapshot, сохранив предыдущее имя для возврата; установить новый
+   `zz-deploy-pinned.conf`. Старый `90` оставить и сверить с v1.0.1 шаблоном.
+   Не трогать `channels.conf`, base unit, `runtime.env`, marker, state и БД.
+3. Выполнить `daemon-reload`, `systemd-analyze verify`, `NeedDaemonReload=no`;
+   read-only guard нового snapshot должен подтвердить bytes, mode/owner,
+   порядок drop-in и все effective D-Bus свойства start/stop с `no-setuid`.
+   Проверить normal/critical Compose merge и project name, не выводя env.
+   При отказе **до запуска** вернуть сохранённый snapshot и drop-in,
+   повторно загрузить systemd; оставить marker/degraded и writers stopped.
+4. При прежней схеме и integrity под lock оставить marker и таймер выключенными,
+   root Compose с pinned+critical override запустить **оба** старых канала на
+   старом image ID. Проверить image ID, running/healthy, restart count 0,
+   признаки Telegram/VK polling и отсутствие дублей. Не снимать marker, если
+   любой признак не подтвердился; в этом случае остановить writers и
+   сохранить `degraded`.
+5. После проверки вернуть `unless-stopped`, снять marker, запустить unit с
+   новым drop-in. Повторно проверить оба канала, image ID, health, restarts и
+   polling после штатного Compose. Если unit не подтвердился, вернуть marker,
+   отключить timer и остановить оба writers; зафиксировать `degraded`.
+6. Только после успешного unit вернуть backup timer к сохранённым в state
+   `enabled=true`, `active=true`, сверить схему и integrity; записать
+   `rolled_back` в state атомарно. Сохранить данные о первоначальном отказе
+   в журнале операции. Удаление marker и запись `rolled_back` возможны лишь
+   после проверки фактического старого runtime.
+7. Новое окно для `--verify-pinned`, reboot и `deploy-prod v1.0.2` открывать
+   отдельно: сначала снова проверить Release exact SHA/CI и состояние VPS.
+   После live нужны два реальных канала и ночной backup по общему checklist.
+
+Если recovery прерван после снятия marker, до возобновления проверить
+фактические контейнеры и state; нельзя считать `degraded` успешным только
+по active unit. До проверенного `rolled_back` команда `deploy-prod` закрыта.
+
+## История: состояние после первого окна 2026-10-17
 
 Опубликованный `v1.0.0` указывает на
 `33ae77a0e81cacf0a346376c0609681d30e0c317`; `main-full` run
@@ -102,11 +180,14 @@ effective свойства, включая случай оставшегося �
    `systemd-analyze verify obs-chat-bot.service obs-chat-bot-backup.timer
    obs-chat-bot-backup.service`, `systemctl cat` и проверить
    `NeedDaemonReload=no`. Для service последним загруженным drop-in должен быть
-   `zz-deploy-pinned.conf`; через `systemctl show` и D-Bus проверить effective
-   `ExecStart` с `--no-build --pull never`, только ожидаемый путь `EnvironmentFile`
-   к `runtime.env` и отрицательное `ConditionPathExists` для marker. Старый
-   `90-deploy-pinned.conf` допустим только при побайтовом совпадении с
-   проверенным шаблоном. Любой неизвестный drop-in или другое effective
+   `zz-deploy-pinned.conf`; через D-Bus проверить effective `ExecStartEx` с
+   `--no-build --pull never` и `ExecStopEx=... compose stop`, оба с единственным
+   флагом `no-setuid`, а также прежние `User=user`, `Group=user` и
+   `WorkingDirectory=/opt/obs-chat-bot`. Проверить только ожидаемый путь
+   `EnvironmentFile` к `runtime.env` и отрицательное `ConditionPathExists`
+   для marker. Старый `90-deploy-pinned.conf` допустим только при побайтовом
+   совпадении с `obs-chat-bot-pinned-v101.conf`; поздний `zz` — с новым
+   `obs-chat-bot-pinned.conf`. Любой неизвестный drop-in или другое effective
    свойство блокирует запуск контроллера. В root shell загрузить **только** эти две строки
    `runtime.env`, выполнить `docker compose config --quiet` и через локальный
    парсер сверить конфигурацию без печати полного JSON:
@@ -135,6 +216,8 @@ effective свойства, включая случай оставшегося �
 
 ### Замена частично установленного snapshot на текущем VPS
 
+Этот раздел описывает прежнее состояние **до degraded** и не является командой
+восстановления сейчас; выполнять актуальный порядок из раздела выше.
 Показанный ниже исходный блок установки относится **только к чистой
 установке**. На текущем VPS не распаковывать новый архив поверх каталога
 контроллера: `SOURCE_ROOT` запускаемого Python-кода указывает на этот каталог,
@@ -159,10 +242,11 @@ effective свойства, включая случай оставшегося �
    вернуть прежний каталог и зафиксировать фактическое состояние.
 4. Установить новый проверенный `obs-chat-bot-pinned.conf` как
    `zz-deploy-pinned.conf`; существующий `90-deploy-pinned.conf` не изменять и
-   сверить его с тем же шаблоном. Сохранить исходные `channels.conf`, base
+   сверить с `obs-chat-bot-pinned-v101.conf`. Сохранить исходные `channels.conf`, base
    unit, backup script и текущий runtime pin. После `daemon-reload` проверить
    `systemd-analyze verify`, `NeedDaemonReload=no`, порядок drop-in и
-   effective `ExecStart`, `EnvironmentFiles`, `Conditions` через D-Bus.
+   effective `ExecStartEx`, `ExecStopEx`, `User`, `Group`, `WorkingDirectory`,
+   `EnvironmentFiles`, `Conditions` через D-Bus.
    Контроллер нового snapshot должен принять старый image и unit до любого
    stop/start. При отказе не запускать `--verify-pinned`, reboot и deploy;
    проверить marker/state и оба работающих канала.
