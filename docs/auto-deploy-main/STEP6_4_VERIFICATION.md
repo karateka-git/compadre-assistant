@@ -8,6 +8,8 @@ VPS не менялись. Испытания выполнялись в одно
 
 ## Сценарий A: PATCH действующей линии
 
+Это исторический результат испытания прежнего протокола; будущие выпуски
+используют URL в описаниях по [HOTFIX_PAIRS.md](HOTFIX_PAIRS.md).
 В одноразовом Git создан baseline, два topic commits с одинаковым патчем и
 два merge commits: PR #10 в `release/1.0` и PR #11 в `main`. Fake API вернул
 взаимные `Hotfix-Pair`, состояния `pr-fast=failure`/`success` на момент merge,

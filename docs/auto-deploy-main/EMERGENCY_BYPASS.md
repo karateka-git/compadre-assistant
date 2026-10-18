@@ -176,7 +176,7 @@ protections и немедленно слить PR. При одновременн
 | Head SHA | `962f3064c35ab4a7516d3e14aa52ac7bd7de876c` |
 | `pr-fast` | [Run `38870536039`](https://github.com/karateka-git/compadre-assistant/actions/runs/38870536039), attempt 1, `failure` |
 | Обязательный job | [Job `116873307349`](https://github.com/karateka-git/compadre-assistant/actions/runs/38870536039/job/116873307349), `pr-fast`, `failure` |
-| Ожидаемая причина отказа | `Check linked hotfix PRs`: у синтетического PR отсутствует строка `Hotfix-Pair: #N` |
+| Ожидаемая причина отказа | `Check linked hotfix PRs`: у синтетического PR отсутствует блок `Hotfix-Links:` с полными URL |
 | Перед bypass | Не draft, `mergeable=MERGEABLE`, `mergeStateStatus=BLOCKED`, `viewerCanMergeAsAdmin=false` |
 | Merge SHA | `b56810079c3dfa0c6cb816d63a1d2d66cb452e05` |
 | Родители merge commit | Base `4f8a5a4ccf01c87c6074fbd9b883ce473ec8016e`, head `962f3064c35ab4a7516d3e14aa52ac7bd7de876c` |

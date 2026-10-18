@@ -356,7 +356,12 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
                      f"bypass={item.bypass}{suffix}")
     if pairs:
         lines.extend(("", "Парные PR исправлений:"))
-        lines.extend(f"- release #{release}, main #{main}: {method}" for release, main, method in pairs)
+        lines.extend(
+            f"- release https://github.com/{api.repository}/pull/{release}, "
+            f"main https://github.com/{api.repository}/pull/{main}; "
+            f"main merge `{main_sha}` подтверждён в main"
+            for release, main, main_sha in pairs
+        )
     missing = [f"pr-fast PR #{item.number}: {item.fast.state}" for item in pulls
                if item.fast.state != "success"]
     if full.state != "success":

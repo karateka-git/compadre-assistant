@@ -1,9 +1,8 @@
-"""Проверяет связь двух PR исправления и допуск изменений релизной линии."""
+"""Проверяет выбранные PR исправления и состояние их слияния."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import subprocess
@@ -17,11 +16,10 @@ from scripts.full_ci_admission import (
 from scripts.full_ci_controller import GitHub, VERSION_PATTERN, tag_commit
 
 
-PAIR_PATTERN = re.compile(r"^Hotfix-Pair: #([1-9]\d*)$", re.MULTILINE)
-ATTESTATION_PATTERN = re.compile(
-    r"^Hotfix-Adaptation-Approved: #(\d+) release=([0-9a-f]{40}) main=([0-9a-f]{40})$",
-    re.MULTILINE,
-)
+LINK_MARKER = "Hotfix-Links:"
+PULL_URL = f"https://github.com/{EXPECTED_REPOSITORY}/pull/"
+PULL_URL_PATTERN = re.compile(rf"{re.escape(PULL_URL)}([1-9]\d*)\Z")
+RELEASE_LINK_PATTERN = re.compile(r"release/([1-9]\d*)\.([0-9]|[1-9]\d*)\Z")
 
 
 class HotfixError(RuntimeError):
@@ -54,16 +52,84 @@ def pull(api: GitHub, number: int) -> dict:
     return value
 
 
-def pair_number(pr: dict) -> int:
-    """Извлекает единственную явную ссылку на парный PR."""
-    matches = PAIR_PATTERN.findall(pr["body"])
-    if len(matches) != 1 or int(matches[0]) == pr["number"]:
-        raise HotfixError(f"PR #{pr['number']}: требуется одна строка Hotfix-Pair: #N")
-    return int(matches[0])
+def body_links(pr: dict) -> tuple[int, ...]:
+    """Читает единственный блок точных GitHub PR URL из текущего описания.
+
+    Args:
+        pr: Прочитанный по API объект pull request.
+
+    Returns:
+        Номера PR в порядке URL в блоке.
+
+    Raises:
+        HotfixError: Блок отсутствует, содержит лишние строки или неверный URL.
+    """
+    lines = pr["body"].splitlines()
+    if lines.count(LINK_MARKER) != 1:
+        raise HotfixError(f"PR #{pr['number']}: требуется один блок Hotfix-Links")
+    index = lines.index(LINK_MARKER) + 1
+    urls = []
+    for line in lines[index:]:
+        if not line.strip():
+            break
+        urls.append(line.strip())
+    numbers = []
+    for url in urls:
+        match = PULL_URL_PATTERN.fullmatch(url)
+        if not match:
+            raise HotfixError(f"Неверный полный URL PR в описании #{pr['number']}")
+        numbers.append(int(match[1]))
+    if not numbers or len(numbers) != len(set(numbers)) or pr["number"] in numbers:
+        raise HotfixError(f"PR #{pr['number']}: неполный или повторённый Hotfix-Links")
+    return tuple(numbers)
+
+
+def linked_group(api: GitHub, number: int) -> tuple[dict, tuple[dict, ...]]:
+    """Читает main и выбранные release PR с взаимными URL в описаниях.
+
+    Args:
+        api: Клиент чтения GitHub.
+        number: Номер PR из группы.
+
+    Returns:
+        Main PR и release PR в порядке возрастания номера релизной линии.
+
+    Raises:
+        HotfixError: Ссылки или целевые ветки неполны.
+    """
+    current = pull(api, number)
+    if current["base"].get("ref") == "main":
+        main = current
+    else:
+        linked = [pull(api, item) for item in body_links(current)]
+        candidates = [pr for pr in linked if pr["base"].get("ref") == "main"]
+        if len(candidates) != 1:
+            raise HotfixError("В описании release PR нужна одна ссылка на main PR")
+        main = candidates[0]
+    if main["base"].get("ref") != "main":
+        raise HotfixError("Ссылка не указывает на PR в main")
+    selected = body_links(main)
+    releases = tuple(pull(api, item) for item in selected)
+    branches = []
+    for release in releases:
+        branch = release["base"].get("ref")
+        match = RELEASE_LINK_PATTERN.fullmatch(branch) if isinstance(branch, str) else None
+        if not match:
+            raise HotfixError(f"PR #{release['number']}: неверная релизная ветка")
+        branches.append((int(match[1]), int(match[2])))
+    if len(branches) != len(set(branches)) or number not in {main["number"], *selected}:
+        raise HotfixError("Выбранные PR не образуют однозначную группу")
+    members = {main["number"], *selected}
+    for pr in (main, *releases):
+        links = body_links(pr)
+        expected = members - {pr["number"]}
+        if len(links) != len(expected) or set(links) != expected:
+            raise HotfixError(f"PR #{pr['number']}: нет взаимных URL всех выбранных PR")
+    return main, tuple(pr for _, pr in sorted(zip(branches, releases)))
 
 
 def linked_pulls(api: GitHub, number: int) -> tuple[dict, dict]:
-    """Проверяет взаимные ссылки и разные целевые ветки PR.
+    """Возвращает release PR и выбранный main PR после полной проверки группы.
 
     Args:
         api: Читающий клиент GitHub API.
@@ -75,25 +141,37 @@ def linked_pulls(api: GitHub, number: int) -> tuple[dict, dict]:
     Raises:
         HotfixError: Связь отсутствует, неоднозначна или направлена не в те ветки.
     """
-    first = pull(api, number)
-    second = pull(api, pair_number(first))
-    if pair_number(second) != number:
-        raise HotfixError("PR не содержат взаимные ссылки Hotfix-Pair")
-    release, main = (first, second) if first["base"].get("ref") != "main" else (second, first)
-    if not RELEASE_BRANCH_PATTERN.fullmatch(release["base"].get("ref", "")):
-        raise HotfixError("Один PR должен быть направлен в release/X.Y")
-    if main["base"].get("ref") != "main":
-        raise HotfixError("Второй PR должен быть направлен в main")
-    return release, main
+    main, releases = linked_group(api, number)
+    matches = [pr for pr in releases if pr["number"] == number]
+    if len(matches) != 1:
+        raise HotfixError("Ожидался выбранный release PR")
+    return matches[0], main
 
 
-def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int, int]:
-    """Проверяет взаимные ссылки до слияния каждого PR."""
-    release, main = linked_pulls(api, number)
-    current = release if release["number"] == number else main
+def check_links(api: GitHub, number: int, expected_branch: str) -> tuple[int, tuple[int, ...]]:
+    """Проверяет ссылки и целевые ветки до слияния любого PR группы."""
+    main, releases = linked_group(api, number)
+    current = next((pr for pr in (main, *releases) if pr["number"] == number), None)
+    assert current is not None
     if current["base"]["ref"] != expected_branch:
         raise HotfixError("Целевая ветка события не совпадает с PR")
-    return release["number"], main["number"]
+    return main["number"], tuple(pr["number"] for pr in releases)
+
+
+def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int, tuple[int, ...]]:
+    """Проверяет живые ссылки и слияние зависимостей release PR."""
+    main, releases = linked_group(api, number)
+    current = next((pr for pr in (main, *releases) if pr["number"] == number), None)
+    assert current is not None
+    if current["base"]["ref"] != expected_branch:
+        raise HotfixError("Целевая ветка события не совпадает с PR")
+    if number != main["number"]:
+        _merged_reachable(api, main, "main")
+        for previous in releases:
+            if previous["number"] == number:
+                break
+            _merged_reachable(api, previous, previous["base"]["ref"])
+    return main["number"], tuple(pr["number"] for pr in releases)
 
 
 def merge_pull(api: GitHub, sha: str, branch: str) -> dict:
@@ -107,41 +185,34 @@ def merge_pull(api: GitHub, sha: str, branch: str) -> dict:
     return pull(api, matches[0]["number"])
 
 
-def patch_digest(merge_sha: str) -> str | None:
-    """Хеширует точные байты Git diff первого родителя merge commit."""
-    result = subprocess.run(
-        ["git", "diff", "--binary", "--full-index", "--no-ext-diff", "--no-renames",
-         f"{merge_sha}^1", merge_sha], capture_output=True,
-    )
-    if result.returncode:
-        raise HotfixError(f"git diff {merge_sha}: {result.stderr.decode(errors='replace').strip()}")
-    if not result.stdout:
-        return None
-    return hashlib.sha256(result.stdout).hexdigest()
-
-
-def owner_attested(api: GitHub, release: dict, main: dict) -> bool:
-    """Ищет явное подтверждение владельца для разных адаптаций."""
-    expected = (str(main["number"]), release["merge_commit_sha"], main["merge_commit_sha"])
-    owner = EXPECTED_REPOSITORY.split("/", 1)[0]
-    for comment in api.pages(f"/issues/{release['number']}/comments"):
-        if not isinstance(comment, dict) or not isinstance(comment.get("user"), dict):
-            raise HotfixError("Некорректный комментарий GitHub API")
-        if comment["user"].get("login") != owner:
-            continue
-        body = comment.get("body")
-        if isinstance(body, str) and expected in ATTESTATION_PATTERN.findall(body):
-            return True
-    return False
-
-
 def reachable(api: GitHub, sha: str, branch: str) -> bool:
     """Подтверждает принадлежность SHA текущей истории ветки через GitHub."""
     ref = api.get(f"/git/ref/heads/{branch}")
-    head = ref["object"]["sha"]
+    if (not isinstance(ref, dict) or ref.get("ref") != f"refs/heads/{branch}" or
+            not isinstance(ref.get("object"), dict)):
+        raise HotfixError(f"Некорректный ref {branch}")
+    head = ref["object"].get("sha")
+    if not isinstance(head, str) or not SHA_PATTERN.fullmatch(head):
+        raise HotfixError(f"Некорректный head {branch}")
+    if sha == head:
+        return True
     comparison = api.get(f"/compare/{sha}...{head}")
-    return (comparison.get("status") in ("ahead", "identical")
-            and comparison.get("base_commit", {}).get("sha") == sha)
+    return (isinstance(comparison, dict) and comparison.get("status") == "ahead"
+            and isinstance(comparison.get("base_commit"), dict)
+            and comparison["base_commit"].get("sha") == sha
+            and isinstance(comparison.get("head_commit"), dict)
+            and comparison["head_commit"].get("sha") == head)
+
+
+def _merged_reachable(api: GitHub, pr: dict, branch: str) -> str:
+    """Проверяет merge commit PR и его достижимость в текущей ветке."""
+    sha = pr.get("merge_commit_sha")
+    if (pr.get("merged_at") is None or not isinstance(sha, str) or
+            not SHA_PATTERN.fullmatch(sha) or pr["base"].get("ref") != branch):
+        raise HotfixError(f"PR #{pr['number']} ещё не слит в {branch}")
+    if merge_pull(api, sha, branch)["number"] != pr["number"] or not reachable(api, sha, branch):
+        raise HotfixError(f"Merge PR #{pr['number']} не подтверждён в {branch}")
+    return sha
 
 
 def check_baseline(api: GitHub, branch: str, baseline: str) -> None:
@@ -179,10 +250,10 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
         require_full_ci: Требовать успешный release-full для обычной публикации.
 
     Returns:
-        Список пар PR и способа подтверждения патча.
+        Список release PR, main PR и подтверждённого merge SHA main.
 
     Raises:
-        HotfixError: История, связь, слияние в main или адаптация не подтверждены.
+        HotfixError: История, ссылки или слияние выбранных PR не подтверждены.
     """
     if not RELEASE_BRANCH_PATTERN.fullmatch(branch) or not all(
         SHA_PATTERN.fullmatch(value) for value in (candidate, baseline)
@@ -209,23 +280,15 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
         release = merge_pull(api, sha, branch)
         if release.get("merge_commit_sha") != sha or not release.get("merged_at"):
             raise HotfixError(f"Данные слияния PR #{release['number']} изменились")
-        linked_release, main = linked_pulls(api, release["number"])
-        if linked_release["number"] != release["number"]:
+        main, selected = linked_group(api, release["number"])
+        if release["number"] not in [item["number"] for item in selected]:
             raise HotfixError("PR release не совпал с парой")
-        main_sha = main.get("merge_commit_sha")
-        if not main.get("merged_at") or not isinstance(main_sha, str) or not SHA_PATTERN.fullmatch(main_sha):
-            raise HotfixError(f"Парный PR #{main['number']} ещё не слит в main")
-        if merge_pull(api, main_sha, "main")["number"] != main["number"] or not reachable(api, main_sha, "main"):
-            raise HotfixError(f"Слияние PR #{main['number']} не подтверждено в main")
-        release_patch, main_patch = patch_digest(sha), patch_digest(main_sha)
-        if release_patch and release_patch == main_patch:
-            method = f"точный Git diff SHA-256 {release_patch}"
-        elif owner_attested(api, release, main):
-            method = "ручное подтверждение владельца"
-        else:
-            raise HotfixError(f"PR #{release['number']} и #{main['number']}: патчи различаются; "
-                              "нужно подтверждение владельца с точными merge SHA")
-        result.append((release["number"], main["number"], method))
+        main_sha = _merged_reachable(api, main, "main")
+        for previous in selected:
+            if previous["number"] == release["number"]:
+                break
+            _merged_reachable(api, previous, previous["base"]["ref"])
+        result.append((release["number"], main["number"], main_sha))
     if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
         raise HotfixError("Релизная ветка сдвинулась во время проверки")
     if require_full_ci and select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
@@ -234,12 +297,13 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
 
 
 def main() -> None:
-    """Запускает раннюю проверку PR или проверку пары перед публикацией."""
+    """Запускает проверку ссылок, зависимостей или выпуска."""
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="mode", required=True)
-    pr_parser = subparsers.add_parser("pr")
-    pr_parser.add_argument("number", type=int)
-    pr_parser.add_argument("base")
+    for mode in ("links", "deps"):
+        pr_parser = subparsers.add_parser(mode)
+        pr_parser.add_argument("number", type=int)
+        pr_parser.add_argument("base")
     release_parser = subparsers.add_parser("release")
     release_parser.add_argument("branch")
     release_parser.add_argument("candidate")
@@ -247,15 +311,16 @@ def main() -> None:
     args = parser.parse_args()
     try:
         api = GitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
-        if args.mode == "pr":
+        if args.mode in ("links", "deps"):
             require_repository(api)
-            release_number, main_number = check_pr(api, args.number, args.base)
-            print(f"Связанные PR: release #{release_number}, main #{main_number}")
+            check = check_links if args.mode == "links" else check_pr
+            main_number, releases = check(api, args.number, args.base)
+            print(f"Связанные PR: main #{main_number}, release {', '.join(map(str, releases))}")
         else:
-            for release_number, main_number, method in check_release(
+            for release_number, main_number, main_sha in check_release(
                 api, args.branch, args.candidate, args.baseline,
             ):
-                print(f"release #{release_number}, main #{main_number}: {method}")
+                print(f"release #{release_number}, main #{main_number}: main merge {main_sha}")
     except (HotfixError, KeyError, TypeError, ValueError) as error:
         print(f"Hotfix pairs: {error}", file=sys.stderr)
         raise SystemExit(1) from error

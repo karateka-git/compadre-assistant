@@ -124,7 +124,8 @@ class PublishTests(unittest.TestCase):
         check.assert_called_once_with(self.api, "release/1.0", SHA, OLD)
         self.assertEqual(result.admission.workflow, RELEASE_WORKFLOW)
         self.assertEqual(result.make_latest, "true")
-        self.assertIn("release #10, main #11", result.body)
+        self.assertIn("https://github.com/karateka-git/compadre-assistant/pull/10", result.body)
+        self.assertIn("https://github.com/karateka-git/compadre-assistant/pull/11", result.body)
 
     def test_version_sequence_and_occupied_names(self) -> None:
         """Пропуск PATCH и повторный тег/Release отвергаются."""
