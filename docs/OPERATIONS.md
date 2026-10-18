@@ -1,13 +1,6 @@
 # Эксплуатация Compadre Assistant
 
-
-Локальная версия после шага 4.2 использует пакет `compadre_assistant` и
-Compose-сервисы `tg_assistant`/`vk_assistant`. Приведённые ниже production-пути
-и имена сервисов описывают прежнее развёртывание. Перед выкладкой новой версии
-нужно отдельно обновить команды и systemd override, остановить прежние сервисы
-и исключить параллельный polling; обычный рецепт обновления прежней версии
-не является инструкцией перехода на переименованную сборку.
-Порядок запуска и диагностики локальных Telegram/VK и существующего VPS.
+Порядок запуска и диагностики локальных Telegram/VK и production VPS.
 Подготовка новой рабочей копии описана в [SETUP.md](SETUP.md).
 
 ## Production VPS
@@ -40,49 +33,82 @@ curl --socks5-hostname 10.77.77.1:1080 -I --max-time 10 https://api.telegram.org
 и доступность UDP `51831` между VPS. Закрытые ключи и содержимое `.env` в
 журналы и отчёты не копировать.
 
-Проверить сервис и контейнеры:
+Проверить службу и контейнеры:
 
 ```bash
-sudo systemctl status obs-chat-bot.service
-cd /opt/obs-chat-bot
-docker compose ps
-docker compose logs --tail=100 vk_catcher
-docker compose logs --tail=100 tg_catcher
+sudo systemctl is-active obs-chat-bot.service obs-chat-bot-backup.timer
+sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
+  --format '{{.Names}} {{.Image}} {{.Status}}'
 ```
 
-После опубликованного обновления проекта выполнить:
+Обычный выпуск выполняется только для опубликованного GitHub Release с полным
+`release-full` для точного коммита релизной ветки. После проверки текущего
+состояния и согласования эксплуатационного окна команда
+`sudo deploy-prod vX.Y.Z` сама сверяет Release, закрепляет образ, создаёт backup, останавливает
+оба канала, при необходимости применяет миграции и проверяет запуск обоих.
+Повтор того же выпуска должен завершиться `already_installed` без пересоздания.
+При `degraded` новый запуск блокируется до ручной проверки и восстановления
+по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
+Не удалять production-БД по development-инструкции: изменения её схемы требуют
+миграции с сохранением данных.
 
-Сначала проверьте `git status`, diff обновления и наличие пригодной резервной
-копии. Если меняется схема, заранее подготовьте миграцию с сохранением данных:
-редактирование уже применённого `0001_initial_schema.sql` не обновит production
-SQLite. Migration runner сравнивает версию и имя, но не checksum SQL-файла.
-Удаление production-БД по development-инструкции недопустимо.
+### Доступ systemd к закреплённому Compose
 
-Для обновления, совместимого с текущей схемой:
+Внешний каталог `/var/lib/compadre-assistant-deploy` принадлежит root и имеет
+права `0700`; `runtime.env` и оба Compose override внутри него — root:root
+`0600`. Основной `obs-chat-bot.service` задаёт `User=user` и `Group=user`.
+Поздний drop-in `zz-deploy-pinned.conf` должен перекрывать более ранние
+`90-deploy-pinned.conf` и `channels.conf` и задавать **обе** команды:
+`ExecStart=!/usr/bin/docker compose up -d --no-build --pull never
+vk_assistant tg_assistant` и `ExecStop=!/usr/bin/docker compose stop
+vk_assistant tg_assistant`. По [документации systemd](https://www.freedesktop.org/software/systemd/man/257/systemd.service.html)
+префикс `!` выполняет только эти команды без ограничений `User=`/`Group=`;
+остальные настройки службы сохраняются. Права приватного каталога и файлов
+не ослаблять ради запуска Compose.
 
-```bash
-cd /opt/obs-chat-bot
-git pull --ff-only
-docker compose up -d --build vk_catcher tg_catcher
-docker compose run --rm tg_catcher python -m obs_chat_bot --healthcheck
+Перед первым start/stop после изменения unit, drop-in или прав проверить
+`systemd-analyze verify`, `NeedDaemonReload=no`, порядок `DropInPaths` и
+итоговые D-Bus `ExecStartEx` **и** `ExecStopEx`: точные аргументы и единственный
+флаг `no-setuid`. Также сверить `User=user`, `Group=user`, рабочий каталог,
+путь `EnvironmentFiles` к `runtime.env` и условие, блокирующее службу при
+`deploy-in-progress`. Контроллер `deploy-prod` выполняет эти проверки перед
+обычным выпуском. Если хоть одна не проходит, остановиться до перезапуска;
+подмена прав `0700`/`0600` или одного только `ExecStart` не исправляет путь
+остановки службы.
+
+17 октября 2026 года `deploy-prod --verify-pinned` выявил именно этот дефект:
+root-контроллер смог поднять прежние контейнеры и подтвердить health/polling,
+но systemd запустил Compose как `user` и получил `permission denied` при
+чтении `pinned-compose.yml`. Возврат повторил тот же отказ; контроллер оставил
+`degraded`, marker, остановленные каналы и выключенный backup timer. В
+`v1.0.2` исправлены обе команды и добавлена проверка их фактических свойств.
+После ручного восстановления 18 октября старый образ снова работает;
+текущий статус и точный SHA указаны в [PRODUCTION.md](PRODUCTION.md).
+
+### Архив контроллера с Windows: точные байты Git
+
+При подготовке snapshot для VPS не упаковывать файлы из рабочей копии Windows:
+на ней переводы строк могут стать CRLF, хотя опубликованный Git-коммит хранит
+LF. 18 октября 2026 года такой архив остановился на проверке SHA256
+`scripts/deploy_prod.py` **до** замены действующего snapshot. Контрольную сумму
+в установочном скрипте под изменённые байты не подгонять.
+
+Архив `scripts/` и `deploy/` создавать из точного SHA проверенного Release:
+
+```powershell
+$releaseSha = "PASTE_VERIFIED_40_CHAR_SHA"
+$archivePath = "C:\Temp\release-snapshot.tar"
+git -c core.autocrlf=false archive --format=tar --output=$archivePath $releaseSha scripts deploy
 ```
 
-`obs-chat-bot.service` включён в systemd и после reboot запускает оба
-контейнера через override `channels.conf`. Для обоих сервисов задано
-`restart: unless-stopped`: Docker перезапускает завершившийся контейнер, если
-его не остановили вручную. Override systemd не запускает контейнер немедленно;
-проверяйте фактическое состояние через `docker compose ps`.
-
-После обновления убедитесь, что оба контейнера работают и не уходят в цикл
-перезапусков:
-
-```bash
-docker compose ps vk_catcher tg_catcher
-docker compose logs --tail=100 vk_catcher
-docker compose logs --tail=100 tg_catcher
-docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(docker compose ps -q vk_catcher)"
-docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$(docker compose ps -q tg_catcher)"
-```
+Перед передачей сверить SHA256 всего архива и **каждого обычного файла** в нём
+с `git show <SHA-релиза>:<путь-файла>`; отклонить неожиданные symlink/hardlink.
+Для передаваемых shell/Python-скриптов проверить отсутствие `CR` и синтаксис.
+На VPS повторно сверить SHA256 архива и распакованных файлов в отдельном
+root-owned staging-каталоге. Если хоть один файл не совпал, остановиться до
+атомарной замены snapshot и проверить источник архива. Незавершённый staging
+удалять только после проверки его точного пути и неизменности действующих
+snapshot, drop-in, marker и состояния ботов.
 
 Проверить ежедневные SQLite-копии и их журнал:
 
