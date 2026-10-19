@@ -70,8 +70,8 @@ class FakeApi:
             return {"ref": f"refs/heads/{branch}", "object": {"sha": self.heads[branch]}}
         if path.startswith("/compare/"):
             base, head = path.removeprefix("/compare/").split("...")
-            return {"status": self.compare_status, "base_commit": {"sha": base},
-                    "head_commit": {"sha": head}}
+            # Реальный GitHub compare не содержит head_commit при status=ahead.
+            return {"status": self.compare_status, "base_commit": {"sha": base}}
         raise AssertionError(path)
 
     def pages(self, path, key=None, **parameters):
@@ -211,19 +211,24 @@ class HotfixTests(unittest.TestCase):
             hotfix.check_pr(self.api, 11, "main")
 
     def test_dependency_compare_requires_exact_sha(self) -> None:
-        """Достижимость не выводится из одного статуса ahead."""
+        """Даже status=ahead не заменяет точный base commit ответа."""
         self.api.merge(11, MAIN_SHA)
         self.api.heads["main"] = OTHER_HEAD
         original_get = self.api.get
 
         def malformed_compare(path, **kwargs):
             if path.startswith("/compare/"):
-                return {"status": "ahead", "base_commit": {"sha": MAIN_SHA}}
+                return {"status": "ahead", "base_commit": {"sha": OTHER_HEAD}}
             return original_get(path, **kwargs)
 
         with patch.object(self.api, "get", side_effect=malformed_compare):
             with self.assertRaisesRegex(hotfix.HotfixError, "не подтверждён"):
                 hotfix.check_pr(self.api, 10, "release/1.0")
+
+    def test_compare_ahead_without_head_commit(self) -> None:
+        """Реальный ответ GitHub подтверждает предка без поля head_commit."""
+        self.api.heads["main"] = OTHER_HEAD
+        self.assertTrue(hotfix.reachable(self.api, MAIN_SHA, "main"))
 
     def test_stale_links_fail_even_after_prior_success(self) -> None:
         """Повторный вызов читает новое описание main PR."""
