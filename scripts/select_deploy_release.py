@@ -274,7 +274,7 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
     Raises:
         DeploySelectionError: Манифест неполон или противоречит данным API.
     """
-    from scripts.check_hotfix_pairs import linked_pulls
+    from scripts.check_hotfix_pairs import linked_pulls, reachable
     from scripts.publish_emergency_release import _bypass_at_merge, _fast_at_merge, _pull
 
     lines = body.splitlines()
@@ -327,24 +327,37 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
             raise DeploySelectionError("Строки пар PR находятся вне журнала")
         paired: set[int] = set()
         for row in pair_rows:
-            match = re.fullmatch(
+            pr_match = re.fullmatch(
                 rf"- release https://github\.com/{re.escape(api.repository)}/pull/([1-9][0-9]*), "
                 rf"main https://github\.com/{re.escape(api.repository)}/pull/([1-9][0-9]*); "
                 r"main merge `([0-9a-f]{40})` подтверждён в main", row,
             )
-            if match is None:
+            commit_match = re.fullmatch(
+                rf"- release https://github\.com/{re.escape(api.repository)}/pull/([1-9][0-9]*); "
+                rf"main commit https://github\.com/{re.escape(api.repository)}/commit/([0-9a-f]{{40}}) "
+                r"подтверждён в main", row,
+            )
+            if pr_match is None and commit_match is None:
                 raise DeploySelectionError("Некорректная пара PR")
-            release_number, main_number = int(match[1]), int(match[2])
+            release_number = int((pr_match or commit_match)[1])
+            main_number = int(pr_match[2]) if pr_match else None
             if (release_number in paired or main_number in paired or
                     observed.get(release_number, {}).get("branch") != branch or
-                    observed.get(main_number, {}).get("branch") != "main"):
+                    (main_number is not None and
+                     observed.get(main_number, {}).get("branch") != "main")):
                 raise DeploySelectionError("Пары PR не покрывают журнал однозначно")
-            release_pr, main_pr = linked_pulls(api, release_number)
-            if (release_pr["number"], main_pr["number"]) != (release_number, main_number):
+            release_pr, main_pr, main_commit = linked_pulls(api, release_number)
+            if release_pr["number"] != release_number or (
+                    main_pr["number"] if main_pr is not None else None) != main_number:
                 raise DeploySelectionError("Связь парных PR изменилась")
-            if main_pr.get("merge_commit_sha") != match[3]:
-                raise DeploySelectionError("Merge SHA main PR в манифесте не совпал")
-            paired.update((release_number, main_number))
+            if pr_match:
+                if main_pr.get("merge_commit_sha") != pr_match[3]:
+                    raise DeploySelectionError("Merge SHA main PR в манифесте не совпал")
+                paired.update((release_number, main_number))
+            else:
+                if main_commit != commit_match[2] or not reachable(api, main_commit, "main"):
+                    raise DeploySelectionError("Main commit в манифесте не подтверждён")
+                paired.add(release_number)
         if paired != set(numbers):
             raise DeploySelectionError("Список парных PR не покрывает все PR")
         _verify_patch_history(api, version, sha, branch, observed)

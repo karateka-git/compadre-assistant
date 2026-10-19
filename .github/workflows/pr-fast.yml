@@ -41,7 +41,7 @@ jobs:
         run: python scripts/check_pr_fast.py --base-sha "$BASE_SHA"
 
       - name: Check linked hotfix PRs
-        if: startsWith(github.event.pull_request.base.ref, 'release/') || contains(github.event.pull_request.body, 'Hotfix-Links:')
+        if: startsWith(github.event.pull_request.base.ref, 'release/') || contains(github.event.pull_request.body, 'Hotfix-Links:') || contains(github.event.pull_request.body, 'Hotfix-Main-Commit:')
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -64,7 +64,7 @@ jobs:
 
   hotfix-deps:
     name: hotfix-deps
-    if: startsWith(github.event.pull_request.base.ref, 'release/') && !github.event.pull_request.draft
+    if: startsWith(github.event.pull_request.base.ref, 'release/')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:

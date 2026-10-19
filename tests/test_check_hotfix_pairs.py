@@ -22,6 +22,11 @@ def links(*numbers: int) -> str:
     return "Hotfix-Links:\n" + "\n".join(f"{URL}{number}" for number in numbers) + "\n"
 
 
+def main_commit(sha: str = MAIN_SHA) -> str:
+    """Строит ссылку на уже существующий commit в main."""
+    return f"Hotfix-Main-Commit: https://github.com/{hotfix.EXPECTED_REPOSITORY}/commit/{sha}\n"
+
+
 class FakeApi:
     """Возвращает управляемые PR, refs и результаты GitHub compare."""
 
@@ -120,6 +125,40 @@ class HotfixTests(unittest.TestCase):
         self.assertEqual(hotfix.check_links(self.api, 10, "release/1.0"), (11, (10,)))
         self.assertEqual(hotfix.check_pr(self.api, 11, "main"), (11, (10,)))
         with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
+            hotfix.check_pr(self.api, 10, "release/1.0")
+
+    def test_existing_main_commit_one_release_needs_no_links(self) -> None:
+        """Один release PR может ссылаться только на достижимый main commit."""
+        self.api.pulls[10]["body"] = main_commit()
+        self.assertEqual(hotfix.check_links(self.api, 10, "release/1.0"), (None, (10,)))
+        self.assertEqual(hotfix.check_pr(self.api, 10, "release/1.0"), (None, (10,)))
+        self.api.merge(10, RELEASE_SHA)
+        self.assertEqual(hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE),
+                         [(10, None, MAIN_SHA)])
+
+    def test_existing_main_commit_multiple_lines_need_mutual_links(self) -> None:
+        """Несколько выбранных релизных PR делят SHA и ждут старшую линию."""
+        self.api.add_second_line()
+        self.api.pulls[10]["body"] = main_commit() + links(12)
+        self.api.pulls[12]["body"] = main_commit() + links(10)
+        self.assertEqual(hotfix.check_pr(self.api, 10, "release/1.0"), (None, (10, 12)))
+        with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
+            hotfix.check_pr(self.api, 12, "release/1.1")
+        self.api.merge(10, RELEASE_SHA)
+        self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (None, (10, 12)))
+        self.api.pulls[12]["body"] = main_commit(OTHER_HEAD) + links(10)
+        with self.assertRaisesRegex(hotfix.HotfixError, "основание main"):
+            hotfix.check_pr(self.api, 12, "release/1.1")
+
+    def test_existing_main_commit_bad_url_and_unreachable_fail(self) -> None:
+        """Чужой URL и commit вне текущего main закрывают допуск."""
+        self.api.pulls[10]["body"] = "Hotfix-Main-Commit: https://github.com/other/repo/commit/" + MAIN_SHA
+        with self.assertRaisesRegex(hotfix.HotfixError, "неверный URL"):
+            hotfix.check_links(self.api, 10, "release/1.0")
+        self.api.pulls[10]["body"] = main_commit()
+        self.api.heads["main"] = OTHER_HEAD
+        self.api.compare_status = "diverged"
+        with self.assertRaisesRegex(hotfix.HotfixError, "недостижим"):
             hotfix.check_pr(self.api, 10, "release/1.0")
 
     def test_release_requires_main_merge_and_reachability(self) -> None:

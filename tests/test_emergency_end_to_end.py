@@ -64,6 +64,7 @@ class PatchApi(api_tests.FakeApi):
         self.main_sha = main_sha
         self.release_head = release_head
         self.main_head = main_head
+        self.existing_main_commit = False
         self.releases = [{"tag_name": "v1.0.0", "published_at": api_tests.MERGED_AT,
                           "draft": False, "prerelease": False}]
         self.tags = [{"ref": "refs/tags/v1.0.0"}]
@@ -72,8 +73,11 @@ class PatchApi(api_tests.FakeApi):
         """Возвращает точный PR с взаимным URL на вторую ветку."""
         release = number == 10
         linked = 11 if release else 10
-        body = ("Hotfix-Links:\n"
-                f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/{linked}\n")
+        body = (("Hotfix-Main-Commit: "
+                 f"https://github.com/{select.EXPECTED_REPOSITORY}/commit/{self.main_sha}\n")
+                if release and self.existing_main_commit else
+                ("Hotfix-Links:\n"
+                 f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/{linked}\n"))
         return {"number": number, "body": body,
                 "merged_at": api_tests.MERGED_AT,
                 "base": {"ref": "release/1.0" if release else "main"},
@@ -331,6 +335,19 @@ class EmergencyEndToEndTests(unittest.TestCase):
                     with patch.object(api, "_pr", side_effect=broken_pair), \
                          self.assertRaisesRegex(Exception, "URL"):
                         select.select_emergency_release(api, "v1.0.1")
+                    existing = PatchApi(baseline, release_sha, main_sha,
+                                        release_head, main_head)
+                    existing.existing_main_commit = True
+                    prepared_existing = publish.prepare(
+                        existing, "v1.0.1", release_sha, "patch", "сбой production",
+                        "Исправление", (10,),
+                    )
+                    self.assertEqual(prepared_existing.pairs, ((10, None, main_sha),))
+                    self.assertIn(f"/commit/{main_sha} подтверждён в main",
+                                  prepared_existing.body)
+                    publish.publish(existing, prepared_existing)
+                    self.assertEqual(select.select_emergency_release(
+                        existing, "v1.0.1").sha, release_sha)
             finally:
                 os.chdir(prior)
 

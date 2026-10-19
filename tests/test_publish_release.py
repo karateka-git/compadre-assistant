@@ -127,6 +127,15 @@ class PublishTests(unittest.TestCase):
         self.assertIn("https://github.com/karateka-git/compadre-assistant/pull/10", result.body)
         self.assertIn("https://github.com/karateka-git/compadre-assistant/pull/11", result.body)
 
+    def test_patch_can_record_existing_main_commit(self) -> None:
+        """Manifest сохраняет URL существующего основания main без нового PR."""
+        self.api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-14T00:00:00Z"}]
+        with patch.object(publisher, "tag_commit", return_value=OLD), \
+             patch.object(publisher, "check_release", return_value=[(10, None, OLD)]):
+            result = publisher.prepare(self.api, "v1.0.1", SHA, "patch", "Исправление")
+        self.assertIn(f"/commit/{OLD} подтверждён в main", result.body)
+        self.assertNotIn("main https://github.com", result.body)
+
     def test_version_sequence_and_occupied_names(self) -> None:
         """Пропуск PATCH и повторный тег/Release отвергаются."""
         self.api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-14T00:00:00Z"}]
