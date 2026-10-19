@@ -137,11 +137,13 @@ def _check_ancestor(api: ReadOnlyGitHub, sha: str, head: str) -> None:
     if sha == head:
         return
     value = api.get(f"/compare/{sha}...{head}")
+    # GitHub не возвращает head_commit и для status=ahead. Точный head уже
+    # передан в URL compare; base и merge base доказывают отношение предка.
     if (not isinstance(value, dict) or value.get("status") != "ahead" or
             not isinstance(value.get("base_commit"), dict) or
             value["base_commit"].get("sha") != sha or
-            not isinstance(value.get("head_commit"), dict) or
-            value["head_commit"].get("sha") != head):
+            not isinstance(value.get("merge_base_commit"), dict) or
+            value["merge_base_commit"].get("sha") != sha):
         raise DeploySelectionError("Commit не доказан предком релизной ветки")
 
 
