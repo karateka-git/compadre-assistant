@@ -33,7 +33,7 @@ class PreparedRelease:
     branch: str
     sha: str
     admission: Admission
-    pairs: tuple[tuple[int, int, str], ...]
+    pairs: tuple[tuple[int, int | None, str], ...]
     body: str
     change: str
     notes: str
@@ -217,9 +217,13 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
     pair_lines = "\n".join(
-        f"- release https://github.com/{api.repository}/pull/{release_number}, "
-        f"main https://github.com/{api.repository}/pull/{main_number}; "
-        f"main merge `{main_sha}` подтверждён в main"
+        (f"- release https://github.com/{api.repository}/pull/{release_number}, "
+         f"main https://github.com/{api.repository}/pull/{main_number}; "
+         f"main merge `{main_sha}` подтверждён в main")
+        if main_number is not None else
+        (f"- release https://github.com/{api.repository}/pull/{release_number}; "
+         f"main commit https://github.com/{api.repository}/commit/{main_sha} "
+         "подтверждён в main")
         for release_number, main_number, main_sha in pairs
     )
     body = (f"{notes.strip()}\n\nТип выпуска: обычный\nCommit: `{sha}`\nВетка: `{branch}`\n"

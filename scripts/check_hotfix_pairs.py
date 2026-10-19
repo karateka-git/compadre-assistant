@@ -17,8 +17,11 @@ from scripts.full_ci_controller import GitHub, VERSION_PATTERN, tag_commit
 
 
 LINK_MARKER = "Hotfix-Links:"
+MAIN_COMMIT_MARKER = "Hotfix-Main-Commit: "
 PULL_URL = f"https://github.com/{EXPECTED_REPOSITORY}/pull/"
 PULL_URL_PATTERN = re.compile(rf"{re.escape(PULL_URL)}([1-9]\d*)\Z")
+COMMIT_URL = f"https://github.com/{EXPECTED_REPOSITORY}/commit/"
+COMMIT_URL_PATTERN = re.compile(rf"{re.escape(COMMIT_URL)}([0-9a-f]{{40}})\Z")
 RELEASE_LINK_PATTERN = re.compile(r"release/([1-9]\d*)\.([0-9]|[1-9]\d*)\Z")
 
 
@@ -52,7 +55,7 @@ def pull(api: GitHub, number: int) -> dict:
     return value
 
 
-def body_links(pr: dict) -> tuple[int, ...]:
+def body_links(pr: dict, *, optional: bool = False) -> tuple[int, ...]:
     """Читает единственный блок точных GitHub PR URL из текущего описания.
 
     Args:
@@ -65,6 +68,10 @@ def body_links(pr: dict) -> tuple[int, ...]:
         HotfixError: Блок отсутствует, содержит лишние строки или неверный URL.
     """
     lines = pr["body"].splitlines()
+    if any(line.startswith("Hotfix-Links:") and line != LINK_MARKER for line in lines):
+        raise HotfixError(f"PR #{pr['number']}: неверный блок Hotfix-Links")
+    if optional and LINK_MARKER not in lines:
+        return ()
     if lines.count(LINK_MARKER) != 1:
         raise HotfixError(f"PR #{pr['number']}: требуется один блок Hotfix-Links")
     index = lines.index(LINK_MARKER) + 1
@@ -84,7 +91,21 @@ def body_links(pr: dict) -> tuple[int, ...]:
     return tuple(numbers)
 
 
-def linked_group(api: GitHub, number: int) -> tuple[dict, tuple[dict, ...]]:
+def body_main_commit(pr: dict) -> str | None:
+    """Читает единственный точный URL уже существующего commit в main."""
+    markers = [line for line in pr["body"].splitlines()
+               if line.startswith("Hotfix-Main-Commit:")]
+    if not markers:
+        return None
+    if len(markers) != 1:
+        raise HotfixError(f"PR #{pr['number']}: повторён Hotfix-Main-Commit")
+    match = COMMIT_URL_PATTERN.fullmatch(markers[0].removeprefix(MAIN_COMMIT_MARKER))
+    if match is None:
+        raise HotfixError(f"PR #{pr['number']}: неверный URL main commit")
+    return match[1]
+
+
+def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tuple[dict, ...]]:
     """Читает main и выбранные release PR с взаимными URL в описаниях.
 
     Args:
@@ -92,24 +113,35 @@ def linked_group(api: GitHub, number: int) -> tuple[dict, tuple[dict, ...]]:
         number: Номер PR из группы.
 
     Returns:
-        Main PR и release PR в порядке возрастания номера релизной линии.
+        Main PR либо существующий main commit и release PR по порядку линий.
 
     Raises:
         HotfixError: Ссылки или целевые ветки неполны.
     """
     current = pull(api, number)
+    commit = body_main_commit(current)
     if current["base"].get("ref") == "main":
+        if commit is not None:
+            raise HotfixError("Main PR не может указывать Hotfix-Main-Commit")
         main = current
+    elif commit is not None:
+        main = None
     else:
         linked = [pull(api, item) for item in body_links(current)]
         candidates = [pr for pr in linked if pr["base"].get("ref") == "main"]
         if len(candidates) != 1:
             raise HotfixError("В описании release PR нужна одна ссылка на main PR")
         main = candidates[0]
-    if main["base"].get("ref") != "main":
-        raise HotfixError("Ссылка не указывает на PR в main")
-    selected = body_links(main)
-    releases = tuple(pull(api, item) for item in selected)
+    if main is not None:
+        if main["base"].get("ref") != "main" or body_main_commit(main) is not None:
+            raise HotfixError("Ссылка не указывает на PR в main")
+        selected = body_links(main)
+        releases = tuple(pull(api, item) for item in selected)
+        members = {main["number"], *selected}
+    else:
+        selected = body_links(current, optional=True)
+        releases = (current, *(pull(api, item) for item in selected))
+        members = {pr["number"] for pr in releases}
     branches = []
     for release in releases:
         branch = release["base"].get("ref")
@@ -117,61 +149,67 @@ def linked_group(api: GitHub, number: int) -> tuple[dict, tuple[dict, ...]]:
         if not match:
             raise HotfixError(f"PR #{release['number']}: неверная релизная ветка")
         branches.append((int(match[1]), int(match[2])))
-    if len(branches) != len(set(branches)) or number not in {main["number"], *selected}:
+    if len(branches) != len(set(branches)) or number not in members:
         raise HotfixError("Выбранные PR не образуют однозначную группу")
-    members = {main["number"], *selected}
-    for pr in (main, *releases):
-        links = body_links(pr)
+    for pr in ((main,) if main is not None else ()) + releases:
+        if pr is not main and body_main_commit(pr) != commit:
+            raise HotfixError(f"PR #{pr['number']}: основание main не совпадает")
+        links = body_links(pr, optional=main is None and len(releases) == 1)
         expected = members - {pr["number"]}
         if len(links) != len(expected) or set(links) != expected:
             raise HotfixError(f"PR #{pr['number']}: нет взаимных URL всех выбранных PR")
-    return main, tuple(pr for _, pr in sorted(zip(branches, releases)))
+    return main, commit, tuple(pr for _, pr in sorted(zip(branches, releases)))
 
 
-def linked_pulls(api: GitHub, number: int) -> tuple[dict, dict]:
-    """Возвращает release PR и выбранный main PR после полной проверки группы.
+def linked_pulls(api: GitHub, number: int) -> tuple[dict, dict | None, str | None]:
+    """Возвращает release PR и проверенное основание main.
 
     Args:
         api: Читающий клиент GitHub API.
         number: Номер любого PR из пары.
 
     Returns:
-        PR релизной ветки и PR в main.
+        PR релизной ветки, PR в main либо None и SHA существующего commit.
 
     Raises:
         HotfixError: Связь отсутствует, неоднозначна или направлена не в те ветки.
     """
-    main, releases = linked_group(api, number)
+    main, commit, releases = linked_group(api, number)
     matches = [pr for pr in releases if pr["number"] == number]
     if len(matches) != 1:
         raise HotfixError("Ожидался выбранный release PR")
-    return matches[0], main
+    return matches[0], main, commit
 
 
-def check_links(api: GitHub, number: int, expected_branch: str) -> tuple[int, tuple[int, ...]]:
+def check_links(api: GitHub, number: int, expected_branch: str) -> tuple[int | None, tuple[int, ...]]:
     """Проверяет ссылки и целевые ветки до слияния любого PR группы."""
-    main, releases = linked_group(api, number)
-    current = next((pr for pr in (main, *releases) if pr["number"] == number), None)
+    main, commit, releases = linked_group(api, number)
+    current = next((pr for pr in ((main,) if main is not None else ()) + releases
+                    if pr["number"] == number), None)
     assert current is not None
     if current["base"]["ref"] != expected_branch:
         raise HotfixError("Целевая ветка события не совпадает с PR")
-    return main["number"], tuple(pr["number"] for pr in releases)
+    return main["number"] if main is not None else None, tuple(pr["number"] for pr in releases)
 
 
-def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int, tuple[int, ...]]:
+def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int | None, tuple[int, ...]]:
     """Проверяет живые ссылки и слияние зависимостей release PR."""
-    main, releases = linked_group(api, number)
-    current = next((pr for pr in (main, *releases) if pr["number"] == number), None)
+    main, commit, releases = linked_group(api, number)
+    current = next((pr for pr in ((main,) if main is not None else ()) + releases
+                    if pr["number"] == number), None)
     assert current is not None
     if current["base"]["ref"] != expected_branch:
         raise HotfixError("Целевая ветка события не совпадает с PR")
-    if number != main["number"]:
-        _merged_reachable(api, main, "main")
+    if main is None or number != main["number"]:
+        if main is not None:
+            _merged_reachable(api, main, "main")
+        elif commit is None or not reachable(api, commit, "main"):
+            raise HotfixError("Указанный main commit недостижим")
         for previous in releases:
             if previous["number"] == number:
                 break
             _merged_reachable(api, previous, previous["base"]["ref"])
-    return main["number"], tuple(pr["number"] for pr in releases)
+    return main["number"] if main is not None else None, tuple(pr["number"] for pr in releases)
 
 
 def merge_pull(api: GitHub, sha: str, branch: str) -> dict:
@@ -239,7 +277,7 @@ def check_baseline(api: GitHub, branch: str, baseline: str) -> None:
 
 
 def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
-                  *, require_full_ci: bool = True) -> list[tuple[int, int, str]]:
+                  *, require_full_ci: bool = True) -> list[tuple[int, int | None, str]]:
     """Проверяет каждый merge релизной линии после прошлого выпуска.
 
     Args:
@@ -250,7 +288,7 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
         require_full_ci: Требовать успешный release-full для обычной публикации.
 
     Returns:
-        Список release PR, main PR и подтверждённого merge SHA main.
+        Список release PR, main PR (или None) и подтверждённого SHA main.
 
     Raises:
         HotfixError: История, ссылки или слияние выбранных PR не подтверждены.
@@ -280,15 +318,21 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
         release = merge_pull(api, sha, branch)
         if release.get("merge_commit_sha") != sha or not release.get("merged_at"):
             raise HotfixError(f"Данные слияния PR #{release['number']} изменились")
-        main, selected = linked_group(api, release["number"])
+        main, commit, selected = linked_group(api, release["number"])
         if release["number"] not in [item["number"] for item in selected]:
             raise HotfixError("PR release не совпал с парой")
-        main_sha = _merged_reachable(api, main, "main")
+        if main is not None:
+            main_sha = _merged_reachable(api, main, "main")
+        elif commit is not None and reachable(api, commit, "main"):
+            main_sha = commit
+        else:
+            raise HotfixError("Указанный main commit недостижим")
         for previous in selected:
             if previous["number"] == release["number"]:
                 break
             _merged_reachable(api, previous, previous["base"]["ref"])
-        result.append((release["number"], main["number"], main_sha))
+        result.append((release["number"], main["number"] if main is not None else None,
+                       main_sha))
     if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
         raise HotfixError("Релизная ветка сдвинулась во время проверки")
     if require_full_ci and select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
@@ -315,12 +359,14 @@ def main() -> None:
             require_repository(api)
             check = check_links if args.mode == "links" else check_pr
             main_number, releases = check(api, args.number, args.base)
-            print(f"Связанные PR: main #{main_number}, release {', '.join(map(str, releases))}")
+            basis = f"main #{main_number}" if main_number is not None else "main commit"
+            print(f"Связанные PR: {basis}, release {', '.join(map(str, releases))}")
         else:
             for release_number, main_number, main_sha in check_release(
                 api, args.branch, args.candidate, args.baseline,
             ):
-                print(f"release #{release_number}, main #{main_number}: main merge {main_sha}")
+                basis = f"main #{main_number}" if main_number is not None else "main commit"
+                print(f"release #{release_number}, {basis}: {main_sha}")
     except (HotfixError, KeyError, TypeError, ValueError) as error:
         print(f"Hotfix pairs: {error}", file=sys.stderr)
         raise SystemExit(1) from error

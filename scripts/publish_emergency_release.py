@@ -61,7 +61,7 @@ class PreparedEmergencyRelease:
     pr_numbers: tuple[int, ...]
     pulls: tuple[PullSnapshot, ...]
     full: CheckSnapshot
-    pairs: tuple[tuple[int, int, str], ...]
+    pairs: tuple[tuple[int, int | None, str], ...]
     body: str
     make_latest: str
 
@@ -319,7 +319,8 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
     if line:
         baseline = tag_commit(api, max(line)[1]["tag_name"])
         pairs = tuple(check_release(api, branch, sha, baseline, require_full_ci=False))
-        expected = {number for release, main, _ in pairs for number in (release, main)}
+        expected = {number for release, main, _ in pairs
+                    for number in (release, main) if number is not None}
         if set(pr_numbers) != expected:
             raise EmergencyPublishError("Список PR должен точно совпадать с проверенными парами")
         workflow, ci_branch = RELEASE_WORKFLOW, branch
@@ -357,9 +358,13 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
     if pairs:
         lines.extend(("", "Парные PR исправлений:"))
         lines.extend(
-            f"- release https://github.com/{api.repository}/pull/{release}, "
-            f"main https://github.com/{api.repository}/pull/{main}; "
-            f"main merge `{main_sha}` подтверждён в main"
+            (f"- release https://github.com/{api.repository}/pull/{release}, "
+             f"main https://github.com/{api.repository}/pull/{main}; "
+             f"main merge `{main_sha}` подтверждён в main")
+            if main is not None else
+            (f"- release https://github.com/{api.repository}/pull/{release}; "
+             f"main commit https://github.com/{api.repository}/commit/{main_sha} "
+             "подтверждён в main")
             for release, main, main_sha in pairs
         )
     missing = [f"pr-fast PR #{item.number}: {item.fast.state}" for item in pulls

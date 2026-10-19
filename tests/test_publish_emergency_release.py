@@ -228,6 +228,21 @@ class EmergencyPublishTests(unittest.TestCase):
         self.assertIn("PR #10 -> release/1.0", result.body)
         self.assertIn("PR #11 -> main", result.body)
 
+    def test_patch_with_existing_main_commit_requires_only_release_pr(self) -> None:
+        """Аварийный PATCH сохраняет основание main без выдуманного PR."""
+        self.api.releases = [{"tag_name": "v1.0.0", "published_at": MERGED_AT}]
+        with patch.object(emergency, "check_release", return_value=[(10, None, SHA)]), \
+             patch.object(emergency, "_pull", return_value={
+                 "number": 10, "base": {"ref": "release/1.0"}, "head": {"sha": HEAD},
+                 "merged_at": MERGED_AT, "merge_commit_sha": MERGE}), \
+             patch.object(emergency, "_fast_at_merge", return_value=emergency.CheckSnapshot("failure", "run")), \
+             patch.object(emergency, "_bypass_at_merge", return_value=("yes", 31)), \
+             patch.object(emergency, "_full_snapshot", return_value=emergency.CheckSnapshot("pending", "full")):
+            result = emergency.prepare(self.api, "v1.0.1", SHA, "patch", "срочно",
+                                       "Исправление", (10,))
+        self.assertEqual(result.pairs, ((10, None, SHA),))
+        self.assertIn(f"/commit/{SHA} подтверждён в main", result.body)
+
     def test_publish_confirms_tag_and_immutable_release(self) -> None:
         """Запись делает два POST и повторно сверяет точные данные."""
         prepared = self.prepared()
