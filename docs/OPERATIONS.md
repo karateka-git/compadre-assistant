@@ -49,6 +49,11 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 Связь движущейся релизной ветки, точного тега и фактической версии VPS описана
 в [RELEASES.md](RELEASES.md).
 Повтор того же выпуска должен завершиться `already_installed` без пересоздания.
+При проверке тега, который отстаёт от вершины релизной ветки, GitHub Compare
+может вернуть `status=ahead` без поля `head_commit`. Точный head берётся из
+отдельно прочитанного ref и передаётся в compare-запросе; допуск подтверждают
+`status=ahead`, `base_commit` и `merge_base_commit` с SHA тега. Требование
+`head_commit` блокировало первый выпуск до исправления в `v1.0.4`.
 При `degraded` новый запуск блокируется до ручной проверки и восстановления
 по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
 Не удалять production-БД по development-инструкции: изменения её схемы требуют

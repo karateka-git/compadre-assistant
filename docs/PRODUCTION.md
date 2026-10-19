@@ -1,6 +1,51 @@
 # Production VPS
 
-## Текущее состояние после отказа live выпуска 2026-10-18
+## Текущее состояние после выпуска v1.0.4 (2026-10-19)
+
+После связанных PR [#31](https://github.com/karateka-git/compadre-assistant/pull/31)
+в `main` и [#32](https://github.com/karateka-git/compadre-assistant/pull/32)
+в `release/1.0` полный
+[release-full run 39263707506](https://github.com/karateka-git/compadre-assistant/actions/runs/39263707506)
+(attempt 1) проверил SHA `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`.
+На нём опубликован защищённый тег и immutable
+[Release v1.0.4](https://github.com/karateka-git/compadre-assistant/releases/tag/v1.0.4).
+Исправление учитывает реальный ответ GitHub Compare `status=ahead` без
+`head_commit`: прежний контроллер отказывал до остановки ботов, когда тег
+отставал от вершины релизной ветки.
+
+На VPS из этого Git-объекта подготовлен и побайтово сверен root-owned snapshot
+контроллера: 35 файлов `scripts/` и `deploy/`. Прежний snapshot сохранён в
+`/usr/local/lib/compadre-assistant-deploy.previous-v102-20261019`.
+Под общим `deploy.lock` новый каталог установлен без изменения runtime;
+его read-only проверки подтвердили прежний pin, systemd/Compose и допуск
+`v1.0.4`. Затем один `sudo deploy-prod v1.0.4` завершился `stage=success`.
+Сейчас чистый detached checkout и оба контейнера работают на SHA
+`d6b7d9267e7754ee90957d9057e2a4eb41f789c1` и одном image ID
+`sha256:434ab2d8860bee4dfddfeb7311973813ca3f41e47ede81d509525e973f2aba3d`.
+Оба канала `healthy`, restart count 0, policy `unless-stopped`; polling и
+отсутствие другого Docker polling с теми же credentials подтверждены.
+Пользователь подтвердил реальные ответы Telegram и VK.
+
+Перед переключением контроллер создал проверенную копию
+`/var/lib/compadre-assistant-deploy/backups/v1.0.4-d6b7d9267e7754ee90957d9057e2a4eb41f789c1.db`.
+Рабочая SQLite сохранила inode `501886`, `integrity_check=ok` и схему `0001`;
+копия также прошла integrity check. После выпуска вручную запущен тот же
+`obs-chat-bot-backup.service`, который использует ночной timer: он завершился
+успешно, новая `app-20261019T140536Z.db` прошла integrity check, сохранены
+семь последних файлов. Timer `active/enabled`, следующий автоматический запуск
+назначен на 2026-10-20 03:15 UTC. Его результат ещё нужно проверить.
+
+Контролируемый reboot изменил boot ID с
+`9e779e1c-c56b-4db6-9c14-2aa66f7ce576` на
+`b743ff8e-b584-408d-9656-67ba28293251`. Сразу после восстановления SSH
+служба ещё запускалась, затем стала `active`, а оба контейнера — `healthy`
+на том же image ID с нулём рестартов. После reboot повторно подтверждены
+polling, отсутствие дублей, целостность SQLite, `stage=success`, отсутствие
+marker и активный backup timer. Повтор `deploy-prod v1.0.4` вернул
+`already_installed` без пересоздания контейнеров. Шаги 5.5 и 7.4 остаются
+открытыми до проверки следующего автоматического ночного backup.
+
+## История отказа live выпуска 2026-10-18
 
 На VPS установлен проверенный snapshot контроллера из `v1.0.2`, но сам
 `v1.0.2` **ещё не развёрнут**: checkout и оба контейнера работают на прежнем
