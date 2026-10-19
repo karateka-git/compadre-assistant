@@ -127,7 +127,7 @@ production `release/*` требовал только `pr-fast`.
 Валидатор проверяет оба основания main, включая одиночный release PR без
 блока ссылок. Если актуальный run отсутствует, адресный rerun останавливается
 без обхода. Автоматическая цепочка подтверждена во временной пробе;
-production ruleset включается отдельным действием после её проверки.
+рабочий ruleset `25404080` включён после проверки цепочки.
 
 Workflow `pull_request` исполняется из PR test merge, поэтому required check
 сам по себе не защищает от автора, который меняет workflow. Это предел
@@ -162,8 +162,13 @@ Auto-merge #24 отключён, PR закрыт, временный ruleset `25
 `8d6cbb402a35d2edb33ec4908edac1dfda170069` без ручного rerun.
 Временный ruleset `25397992`, четыре remote ветки и локальные trial worktree
 удалены. Production `release/*` на момент пробы всё ещё требовал только
-`pr-fast`; следующий шаг — отдельно включить `hotfix-deps` и проверить
-readback. Проба проверила реальный trigger, адресный rerun и auto-merge;
+`pr-fast`. Затем ruleset `25404080` добавил обязательный `hotfix-deps`
+для `release/*`; чтение правил GitHub для `release/1.0` показало оба
+обязательных check. [PR #21](https://github.com/karateka-git/compadre-assistant/pull/21)
+слит в `release/1.0` коммитом `869107ca8a1bc73368844476e53a374dd2443872`.
+[Release full run 39253612557](https://github.com/karateka-git/compadre-assistant/actions/runs/39253612557)
+успешно выполнил полный набор проверок именно для него. Проба проверила
+реальный trigger, адресный rerun и auto-merge;
 она не покрыла все отказные и конфликтные случаи.
 
 Перед публикацией `scripts/check_hotfix_pairs.py release` независимо читает
