@@ -99,8 +99,13 @@ compare/Actions с валидатором. [#25](https://github.com/karateka-git
 для #27. В attempt 2 job `118015083392` завершился успешно; заранее
 включённый GitHub auto-merge слил #27 в
 `8d6cbb402a35d2edb33ec4908edac1dfda170069`. Ручного rerun не было.
-Временный ruleset и пробные ветки удалены. Production required checks
-настраиваются отдельно после пробы и сверяются по GitHub API.
+Временный ruleset и пробные ветки удалены. Рабочий ruleset `25404080`
+требует `hotfix-deps` для `release/*` вместе с прежним `pr-fast`; действие
+проверено чтением правил GitHub для `release/1.0`.
+[PR #21](https://github.com/karateka-git/compadre-assistant/pull/21)
+слит в `release/1.0` коммитом `869107ca8a1bc73368844476e53a374dd2443872`.
+[Release full run 39253612557](https://github.com/karateka-git/compadre-assistant/actions/runs/39253612557)
+успешно выполнил и контроллер, и полный набор проверок для этого коммита.
 Если GitHub не находит run текущих head/base или failed job,
 автоматическая цепочка останавливается. Даже после обновления checks,
 запущенные через `pull_request`, не защищают от автора PR, который изменил
