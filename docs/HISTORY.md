@@ -8,6 +8,23 @@
 [архитектуре](ARCHITECTURE.md), сведения о сервере — в
 [production-инструкции](PRODUCTION.md).
 
+## Первый versioned выпуск на VPS: v1.0.4 (2026-10-19)
+
+Связанные PR [#31](https://github.com/karateka-git/compadre-assistant/pull/31)
+и [#32](https://github.com/karateka-git/compadre-assistant/pull/32) исправили
+допуск тега, отстающего от вершины релизной ветки, при ответе GitHub Compare
+без `head_commit`. Полный
+[release-full run 39263707506](https://github.com/karateka-git/compadre-assistant/actions/runs/39263707506)
+прошёл на SHA `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`;
+опубликован [v1.0.4](https://github.com/karateka-git/compadre-assistant/releases/tag/v1.0.4).
+На VPS установлен сверенный контроллер и выполнен `deploy-prod v1.0.4`.
+Оба бота работают на одном образе, пережили reboot и ответили пользователю
+в Telegram и VK. SQLite цела; копия перед переключением и вручную запущенный
+после выпуска backup service проверены. Повтор команды не пересоздал
+контейнеры. Подробные факты — в [PRODUCTION.md](PRODUCTION.md).
+Эксплуатационная приёмка 5.5/7.4 остаётся открытой до результата ближайшего
+автоматического ночного backup 2026-10-20 03:15 UTC.
+
 ## Assistant Rebirth: закрытие перехода и этапа 4 (2026-10-13)
 
 Пользователь принял завершение перехода после production-переключения и
