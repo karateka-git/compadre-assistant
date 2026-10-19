@@ -81,14 +81,43 @@ head обычное событие `synchronize` запускает новые �
 Событие `edited` одного PR не обновляет автоматически уже зелёный результат
 другого PR; этот случай включить в пробную проверку цепочки.
 
-**Состояние локальной реализации:** валидатор проверяет оба основания main,
-включая одиночный release PR без блока ссылок; `hotfix-deps` исполняется на
-каждом release PR и отказывает при несшитой зависимости. Доверенный workflow
-после merge выбирает следующий PR, сверяет текущий head и test-merge SHA с
-run и повторно запускает только failed job. Если актуальный run отсутствует,
-работа останавливается без обхода. В GitHub auto-merge для репозитория пока
-выключен, а ruleset требует только `pr-fast`. Нужны push, проверка настоящих
-событий, включение auto-merge, обновление ruleset и пробная цепочка PR.
+## Проба GitHub 19.10.2026 и порядок включения
+
+Код двух веток опубликован для проверки. В репозитории включена возможность
+auto-merge; для пробных `release/90.0` и `release/90.1` действует отдельный
+ruleset с обязательными `pr-fast` и `hotfix-deps`. Production `release/*`
+по-прежнему требует только `pr-fast`; новый допуск там ещё не включён.
+
+Пробные [PR #18](https://github.com/karateka-git/compadre-assistant/pull/18)
+в `release/90.0` и
+[PR #19](https://github.com/karateka-git/compadre-assistant/pull/19)
+в `release/90.1` слиты. После merge #18 workflow
+`hotfix-deps-rerun.yml` на `pull_request_target: closed` **не запустился**:
+этого workflow ещё нет в default `main`. GitHub Actions workflows API
+показывал четыре прежних workflow, а число запусков `pull_request_target`
+было нулевым. Для #19 вручную повторили только failed job `hotfix-deps`;
+он завершился успешно, после чего заранее включённый auto-merge
+автоматически слил #19. Это подтверждает связку required check и auto-merge
+при ручном rerun, но **не** автоматический запуск после merge другого PR.
+
+Обязательный порядок дальнейшего внедрения:
+
+1. Слить PR с `hotfix-deps-rerun.yml` и `scripts/rerun_hotfix_deps.py` в
+   default `main`; подтвердить, что GitHub обнаружил workflow. Доверенный
+   checkout использует точный `base.sha` события, который должен уже содержать
+   скрипт, и не исполняет PR head.
+2. Провести **новую** пробную цепочку после появления workflow в `main`:
+   merge предыдущего PR → запуск `pull_request_target: closed` → адресный
+   rerun актуального failed `hotfix-deps` следующего PR → успешный check →
+   auto-merge. Отдельно проверить поведение при старом run/head, ошибке API,
+   конфликте и изменении ссылок по описанной выше процедуре.
+3. Только после успешной сквозной пробы добавить `hotfix-deps` в required
+   checks production `release/*`. Включение auto-merge для каждого настоящего
+   release PR остаётся отдельным решением после просмотра изменений.
+
+Валидатор проверяет оба основания main, включая одиночный release PR без
+блока ссылок. Если актуальный run отсутствует, адресный rerun останавливается
+без обхода. Автоматическая цепочка и production ruleset ещё не приняты.
 
 Workflow `pull_request` исполняется из PR test merge, поэтому required check
 сам по себе не защищает от автора, который меняет workflow. Это предел
