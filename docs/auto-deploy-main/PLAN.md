@@ -356,10 +356,12 @@ release PR стал полностью готовым до включения au
 default `main` (API показывал четыре прежних workflow и ноль запусков этого
 триггера). Для [PR #19](https://github.com/karateka-git/compadre-assistant/pull/19)
 вручную повторили failed `hotfix-deps`; job стал green, и заранее включённый
-auto-merge автоматически слил #19. Возможность auto-merge в репозитории уже
-включена, но обязательность `hotfix-deps` действует только во временном
-ruleset для `release/90.0` и `release/90.1`. Production `release/*` пока
-требует только `pr-fast`. Проба подтверждает auto-merge после ручного rerun,
+auto-merge автоматически слил #19. Возможность auto-merge в репозитории
+остаётся включённой. Временный ruleset ID `25394666` требовал
+`hotfix-deps` для `release/90.0` и `release/90.1` только во время пробы;
+после неё ruleset, четыре удалённые тестовые ветки и локальные trial
+worktree/ветки удалены. Production `release/*` пока требует только
+`pr-fast`. Проба подтверждает auto-merge после ручного rerun,
 но не сквозной автоматический триггер после предыдущего merge.
 
 Для завершения шага 4.2 после изменения алгоритма:
