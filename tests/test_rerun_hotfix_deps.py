@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 import unittest
 from unittest.mock import patch
 
@@ -62,6 +63,15 @@ class RerunTests(unittest.TestCase):
     def setUp(self) -> None:
         """Изолирует данные GitHub для каждого сценария."""
         self.api = FakeApi()
+
+    def test_workflow_checks_out_trusted_exact_base(self) -> None:
+        """Write-token workflow не исполняет PR head или изменяемый main ref."""
+        workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                    "hotfix-deps-rerun.yml").read_text(encoding="utf-8")
+        self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", workflow)
+        self.assertIn("persist-credentials: false", workflow)
+        self.assertNotIn("ref: main", workflow)
+        self.assertNotIn("ref: ${{ github.event.pull_request.head.sha }}", workflow)
 
     def test_main_merge_selects_first_release_failed_job(self) -> None:
         """После main merge выбирается старшая линия и её один failed job."""
