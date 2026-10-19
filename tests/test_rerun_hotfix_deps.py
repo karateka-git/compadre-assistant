@@ -64,11 +64,12 @@ class RerunTests(unittest.TestCase):
         """Изолирует данные GitHub для каждого сценария."""
         self.api = FakeApi()
 
-    def test_workflow_checks_out_trusted_exact_base(self) -> None:
-        """Write-token workflow не исполняет PR head или изменяемый main ref."""
+    def test_workflow_checks_out_exact_merged_commit(self) -> None:
+        """Первый merge запускает код из merge SHA, а не прежнего base SHA."""
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
                     "hotfix-deps-rerun.yml").read_text(encoding="utf-8")
-        self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", workflow)
+        self.assertIn("ref: ${{ github.event.pull_request.merge_commit_sha }}", workflow)
+        self.assertNotIn("ref: ${{ github.event.pull_request.base.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
         self.assertNotIn("ref: main", workflow)
         self.assertNotIn("ref: ${{ github.event.pull_request.head.sha }}", workflow)
