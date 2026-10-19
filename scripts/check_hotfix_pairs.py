@@ -235,11 +235,11 @@ def reachable(api: GitHub, sha: str, branch: str) -> bool:
     if sha == head:
         return True
     comparison = api.get(f"/compare/{sha}...{head}")
+    # Compare API не возвращает head_commit даже при status=ahead. Точный head
+    # уже задан в URL; base_commit и status подтверждают отношение предка.
     return (isinstance(comparison, dict) and comparison.get("status") == "ahead"
             and isinstance(comparison.get("base_commit"), dict)
-            and comparison["base_commit"].get("sha") == sha
-            and isinstance(comparison.get("head_commit"), dict)
-            and comparison["head_commit"].get("sha") == head)
+            and comparison["base_commit"].get("sha") == sha)
 
 
 def _merged_reachable(api: GitHub, pr: dict, branch: str) -> str:

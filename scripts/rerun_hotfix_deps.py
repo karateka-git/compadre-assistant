@@ -73,7 +73,7 @@ def target_pr(api: GitHub, event: dict) -> dict | None:
 
 
 def current_failed_job(api: GitHub, pr: dict) -> int:
-    """Находит ровно один failed hotfix-deps на текущем head и test merge.
+    """Находит failed hotfix-deps для текущих head и base PR.
 
     Args:
         api: Читающий клиент GitHub.
@@ -87,10 +87,12 @@ def current_failed_job(api: GitHub, pr: dict) -> int:
     """
     head = pr.get("head")
     head_sha = head.get("sha") if isinstance(head, dict) else None
+    base = pr.get("base")
+    base_sha = base.get("sha") if isinstance(base, dict) else None
     merge_sha = pr.get("merge_commit_sha")
     if not all(isinstance(sha, str) and SHA_PATTERN.fullmatch(sha)
-               for sha in (head_sha, merge_sha)):
-        raise RerunError("Неизвестен текущий head или test-merge SHA PR")
+               for sha in (head_sha, base_sha, merge_sha)):
+        raise RerunError("Неизвестен текущий head, base или test-merge SHA PR")
     runs = api.pages("/actions/workflows/pr-fast.yml/runs", key="workflow_runs",
                      event="pull_request")
     matches = []
@@ -101,18 +103,21 @@ def current_failed_job(api: GitHub, pr: dict) -> int:
         if not isinstance(attached, list) or len(attached) != 1:
             continue
         item = attached[0]
+        # Actions run.head_sha у pull_request равен head PR, а не test merge.
+        # Пара head/base из привязанного PR исключает run прежнего основания.
         if (not isinstance(item, dict) or item.get("number") != pr["number"] or
                 not isinstance(item.get("head"), dict) or
                 item["head"].get("sha") != head_sha or
                 not isinstance(item.get("base"), dict) or
-                item["base"].get("ref") != pr["base"]["ref"] or
-                run.get("head_sha") != merge_sha):
+                item["base"].get("ref") != base["ref"] or
+                item["base"].get("sha") != base_sha or
+                run.get("head_sha") != head_sha):
             continue
         if not isinstance(run.get("id"), int) or run["id"] < 1:
             raise RerunError("Некорректный ID актуального run")
         matches.append(run)
     if not matches:
-        raise RerunError("Нет pr-fast run текущего head/test merge PR")
+        raise RerunError("Нет pr-fast run текущих head/base PR")
     run = max(matches, key=lambda item: item["id"])
     if run.get("status") != "completed":
         raise RerunError("Актуальный pr-fast run ещё не завершён")
@@ -162,6 +167,7 @@ def main() -> None:
         # Непосредственно перед POST проверяем, что никто не сменил head или test merge.
         fresh = pull(api, target["number"])
         if (fresh.get("head", {}).get("sha") != target["head"]["sha"] or
+                fresh.get("base", {}).get("sha") != target["base"]["sha"] or
                 fresh.get("merge_commit_sha") != target["merge_commit_sha"] or
                 fresh.get("body") != target["body"] or
                 fresh.get("state") != "open"):

@@ -112,7 +112,8 @@ head обычное событие `synchronize` запускает новые �
    содержит скрипт, и не исполняет head следующего открытого PR. Первый запуск
    после merge #20 выявил ошибку прежнего `base.sha`: он указывал на commit до
    появления скрипта; run 39237214318 завершился `No module named
-   scripts.rerun_hotfix_deps`. Это исправление требует отдельного PR и пробы.
+   scripts.rerun_hotfix_deps`. Исправление слито в main через PR #22,
+   merge SHA `5e37c20c77dbb367110ded25a451f46dda4eb9af`.
 2. Провести **новую** пробную цепочку после появления workflow в `main`:
    merge предыдущего PR → запуск `pull_request_target: closed` → адресный
    rerun актуального failed `hotfix-deps` следующего PR → успешный check →
@@ -129,6 +130,16 @@ head обычное событие `synchronize` запускает новые �
 Workflow `pull_request` исполняется из PR test merge, поэтому required check
 сам по себе не защищает от автора, который меняет workflow. Это предел
 модели GitHub checks, а не доказательство защищённого исполнения.
+
+В новой временной пробе PR #23 слит в `release/90.2` с merge SHA
+`f8d3aca817436b58fbc74ee2563c1e67d93bab52`; следующий PR #24 в
+`release/90.3` имел успешный `pr-fast`, failed `hotfix-deps` и заранее
+включённый auto-merge. `pull_request_target` run 39238073682 запустился,
+но остановился на ошибке «Указанный main commit недостижим». Реальный
+compare API при `status=ahead` возвращает точный `base_commit`, но не поле
+`head_commit`. Реальный Actions run для PR возвращает в `head_sha` SHA head PR,
+а не test merge SHA; привязку run нужно сверять по head/base PR. Эти два
+исправления проходят отдельный PR; ручного rerun #24 не было.
 
 Перед публикацией `scripts/check_hotfix_pairs.py release` независимо читает
 живые описания, проверяет все merge commits первой родительской линии после

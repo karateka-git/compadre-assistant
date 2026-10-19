@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from scripts import rerun_hotfix_deps as rerun
 from tests.test_check_hotfix_pairs import (
-    FakeApi as GroupApi, MAIN_SHA, NEXT_SHA, RELEASE_SHA, links, main_commit,
+    BASE, FakeApi as GroupApi, MAIN_SHA, NEXT_SHA, RELEASE_SHA, links, main_commit,
 )
 
 
@@ -28,16 +28,18 @@ class FakeApi(GroupApi):
         super().__init__()
         self.pulls[10].update({"state": "open", "head": {"sha": HEAD},
                                "merge_commit_sha": TEST_MERGE})
+        self.pulls[10]["base"]["sha"] = BASE
         self.pulls[11].update({"state": "open", "head": {"sha": "2" * 40}})
-        self.runs = [self.run(10, HEAD, TEST_MERGE)]
+        self.runs = [self.run(10, HEAD)]
         self.jobs = [{"id": 77, "name": "hotfix-deps", "status": "completed",
                       "conclusion": "failure"}]
 
-    def run(self, number: int, head: str, merge: str) -> dict:
+    def run(self, number: int, head: str) -> dict:
         """Строит run с точной связью с release PR."""
         return {"id": 55, "event": "pull_request", "status": "completed",
-                "head_sha": merge, "pull_requests": [{"number": number,
-                    "head": {"sha": head}, "base": {"ref": self.pulls[number]["base"]["ref"]}}]}
+                "head_sha": head, "pull_requests": [{"number": number,
+                    "head": {"sha": head}, "base": {"ref": self.pulls[number]["base"]["ref"],
+                                              "sha": self.pulls[number]["base"].get("sha", BASE)}}]}
 
     def pages(self, path, key=None, **parameters):
         """Возвращает Actions run/job либо историю PR родителя."""
@@ -102,15 +104,16 @@ class RerunTests(unittest.TestCase):
         self.assertEqual(rerun.target_pr(self.api, event(self.api, 10))["number"], 12)
 
     def test_stale_run_or_nonfailure_never_reruns(self) -> None:
-        """Чужой head, test merge и success job не выбираются для POST."""
+        """Чужой head, старый base и success job не выбираются для POST."""
         pr = self.api.pulls[10]
         self.api.runs[0]["pull_requests"][0]["head"]["sha"] = "3" * 40
-        with self.assertRaisesRegex(rerun.RerunError, "текущего head"):
+        with self.assertRaisesRegex(rerun.RerunError, "текущих head/base"):
             rerun.current_failed_job(self.api, pr)
-        self.api.runs = [self.api.run(10, HEAD, "4" * 40)]
-        with self.assertRaisesRegex(rerun.RerunError, "test merge"):
+        self.api.runs = [self.api.run(10, HEAD)]
+        self.api.runs[0]["pull_requests"][0]["base"]["sha"] = "4" * 40
+        with self.assertRaisesRegex(rerun.RerunError, "head/base"):
             rerun.current_failed_job(self.api, pr)
-        self.api.runs = [self.api.run(10, HEAD, TEST_MERGE)]
+        self.api.runs = [self.api.run(10, HEAD)]
         self.api.jobs[0]["conclusion"] = "success"
         with self.assertRaisesRegex(rerun.RerunError, "failed hotfix-deps"):
             rerun.current_failed_job(self.api, pr)
