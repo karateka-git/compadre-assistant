@@ -85,7 +85,7 @@ class FakeApi:
             if self.compare_response is not None:
                 return deepcopy(self.compare_response)
             return {"status": "identical" if self.head == SHA else "ahead",
-                    "base_commit": {"sha": SHA}, "head_commit": {"sha": self.head}}
+                    "base_commit": {"sha": SHA}, "merge_base_commit": {"sha": SHA}}
         if path == "/rulesets/7":
             return deepcopy(self.rule)
         if path == f"/actions/workflows/{self.workflow}":
@@ -142,18 +142,18 @@ class SelectDeployReleaseTests(unittest.TestCase):
         self.assertEqual(self.api.compare_calls, 0)
 
     def test_different_sha_requires_exact_ahead_compare(self) -> None:
-        """Для старого тега нужны ahead и оба точных commit SHA."""
+        """Для старого тега нужны ahead, base и merge base исходного SHA."""
         bad_responses = (
             {"status": "behind", "base_commit": {"sha": SHA},
-             "head_commit": {"sha": NEW_HEAD}},
+             "merge_base_commit": {"sha": SHA}},
             {"status": "diverged", "base_commit": {"sha": SHA},
-             "head_commit": {"sha": NEW_HEAD}},
+             "merge_base_commit": {"sha": SHA}},
             {"status": "identical", "base_commit": {"sha": SHA}},
             {"status": "ahead", "base_commit": {"sha": SHA}},
             {"status": "ahead", "base_commit": {"sha": NEW_HEAD},
-             "head_commit": {"sha": NEW_HEAD}},
+             "merge_base_commit": {"sha": SHA}},
             {"status": "ahead", "base_commit": {"sha": SHA},
-             "head_commit": {"sha": SHA}},
+             "merge_base_commit": {"sha": NEW_HEAD}},
             ["ahead"],
         )
         for response in bad_responses:
