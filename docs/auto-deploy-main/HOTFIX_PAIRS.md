@@ -89,8 +89,8 @@ head обычное событие `synchronize` запускает новые �
 возможность auto-merge. Во время пробы для `release/90.0` и `release/90.1`
 действовал отдельный ruleset ID `25394666` с обязательными `pr-fast` и
 `hotfix-deps`; после пробы его удалили вместе с четырьмя удалёнными тестовыми
-ветками и локальными trial worktree/ветками. Production `release/*`
-по-прежнему требует только `pr-fast`; новый допуск там ещё не включён.
+ветками и локальными trial worktree/ветками. На момент первой пробы
+production `release/*` требовал только `pr-fast`.
 
 Пробные [PR #18](https://github.com/karateka-git/compadre-assistant/pull/18)
 в `release/90.0` и
@@ -117,15 +117,17 @@ head обычное событие `synchronize` запускает новые �
 2. Провести **новую** пробную цепочку после появления workflow в `main`:
    merge предыдущего PR → запуск `pull_request_target: closed` → адресный
    rerun актуального failed `hotfix-deps` следующего PR → успешный check →
-   auto-merge. Отдельно проверить поведение при старом run/head, ошибке API,
-   конфликте и изменении ссылок по описанной выше процедуре.
+   auto-merge. Проба #26/#27 ниже подтвердила этот путь. Старый run/head,
+   ошибку API, конфликт и изменение ссылок отдельно проверять по описанной
+   выше процедуре; успешная цепочка не доказывает эти сценарии.
 3. Только после успешной сквозной пробы добавить `hotfix-deps` в required
    checks production `release/*`. Включение auto-merge для каждого настоящего
    release PR остаётся отдельным решением после просмотра изменений.
 
 Валидатор проверяет оба основания main, включая одиночный release PR без
 блока ссылок. Если актуальный run отсутствует, адресный rerun останавливается
-без обхода. Автоматическая цепочка и production ruleset ещё не приняты.
+без обхода. Автоматическая цепочка подтверждена во временной пробе;
+production ruleset включается отдельным действием после её проверки.
 
 Workflow `pull_request` исполняется из PR test merge, поэтому required check
 сам по себе не защищает от автора, который меняет workflow. Это предел
@@ -139,7 +141,30 @@ Workflow `pull_request` исполняется из PR test merge, поэтом�
 compare API при `status=ahead` возвращает точный `base_commit`, но не поле
 `head_commit`. Реальный Actions run для PR возвращает в `head_sha` SHA head PR,
 а не test merge SHA; привязку run нужно сверять по head/base PR. Эти два
-исправления проходят отдельный PR; ручного rerun #24 не было.
+исправления слиты в main через PR #25 с merge SHA
+`5046e10cae2072f9152296646cb16c7d8703a30a`; ручного rerun #24 не было.
+Auto-merge #24 отключён, PR закрыт, временный ruleset `25397656` и все его
+удалённые и локальные ветки удалены.
+
+Повторная проба от указанного SHA использовала временный ruleset `25397992`
+только для `release/90.4` и `release/90.5`, где требовались `pr-fast` и
+`hotfix-deps`. [PR #26](https://github.com/karateka-git/compadre-assistant/pull/26)
+получил оба успешных check и слит в `release/90.4` с merge SHA
+`7aa46a611a7a598b93b0c0bc8fd026497296a9cb`. Для
+[PR #27](https://github.com/karateka-git/compadre-assistant/pull/27)
+`pr-fast` был успешен, `hotfix-deps` отказал до merge #26, а auto-merge был
+заранее включён и ожидал оба required check. После merge #26 workflow
+`pull_request_target` run
+[39239001153](https://github.com/karateka-git/compadre-assistant/actions/runs/39239001153)
+успешно запросил повтор только failed job `118014617049` из run
+`39238873393` attempt 1. В attempt 2 `hotfix-deps` job `118015083392`
+стал successful; `pr-fast` сохранил успех. GitHub auto-merge слил #27 в
+`8d6cbb402a35d2edb33ec4908edac1dfda170069` без ручного rerun.
+Временный ruleset `25397992`, четыре remote ветки и локальные trial worktree
+удалены. Production `release/*` на момент пробы всё ещё требовал только
+`pr-fast`; следующий шаг — отдельно включить `hotfix-deps` и проверить
+readback. Проба проверила реальный trigger, адресный rerun и auto-merge;
+она не покрыла все отказные и конфликтные случаи.
 
 Перед публикацией `scripts/check_hotfix_pairs.py release` независимо читает
 живые описания, проверяет все merge commits первой родительской линии после

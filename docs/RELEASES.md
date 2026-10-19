@@ -87,8 +87,20 @@ workflow появился в default `main`. Первый запуск 392372143
 [#23](https://github.com/karateka-git/compadre-assistant/pull/23) →
 [#24](https://github.com/karateka-git/compadre-assistant/pull/24) подтвердила
 запуск workflow 39238073682, но обнаружила несовпадение формы ответов GitHub
-compare/Actions с валидатором; автоматический rerun ещё не подтверждён.
-Production ruleset `release/*` по-прежнему требует только `pr-fast`.
+compare/Actions с валидатором. [#25](https://github.com/karateka-git/compadre-assistant/pull/25)
+исправил разбор ответов; его merge SHA —
+`5046e10cae2072f9152296646cb16c7d8703a30a`.
+
+Повторная проба [#26](https://github.com/karateka-git/compadre-assistant/pull/26)
+→ [#27](https://github.com/karateka-git/compadre-assistant/pull/27)
+от веток на этом SHA прошла полностью. После merge #26 (`7aa46a611a7a598b93b0c0bc8fd026497296a9cb`)
+`pull_request_target` run [39239001153](https://github.com/karateka-git/compadre-assistant/actions/runs/39239001153)
+автоматически запросил rerun failed `hotfix-deps` job `118014617049`
+для #27. В attempt 2 job `118015083392` завершился успешно; заранее
+включённый GitHub auto-merge слил #27 в
+`8d6cbb402a35d2edb33ec4908edac1dfda170069`. Ручного rerun не было.
+Временный ruleset и пробные ветки удалены. Production required checks
+настраиваются отдельно после пробы и сверяются по GitHub API.
 Если GitHub не находит run текущих head/base или failed job,
 автоматическая цепочка останавливается. Даже после обновления checks,
 запущенные через `pull_request`, не защищают от автора PR, который изменил
