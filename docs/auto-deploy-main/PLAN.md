@@ -375,6 +375,12 @@ worktree/ветки удалены. Production `release/*` пока требуе
    автоматического триггера невозможен. Затем на новой пробе проверить
    `pull_request_target: closed` и адресный rerun актуального failed
    `hotfix-deps` следующего PR без повтора `pr-fast`.
+   PR #20 слит в main (`332e5b0305ebe43f7aeac3fb36956127859aba2e`);
+   workflow обнаружен. После первого отказа checkout PR #22 исправил его
+   (`5e37c20c77dbb367110ded25a451f46dda4eb9af`). Новая проба #23/#24
+   запустила workflow 39238073682, который остановился на несовместимом
+   разборе реальных compare/Actions payload. До исправления и повторной
+   сквозной пробы шаг остаётся открытым.
 3. Auto-merge в репозитории включён. После успешной сквозной пробы добавить
    `hotfix-deps` в required checks production `release/*`, оставив для `main`
    обязательным `pr-fast` и метод merge commit. Включение auto-merge для

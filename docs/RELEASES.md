@@ -80,12 +80,16 @@ auto-merge в репозитории остаётся включённой. Во
 `release/90.0` и `release/90.1` временный ruleset требовал оба check;
 после пробы ruleset ID `25394666` и тестовые ветки удалены. После ручного
 rerun `hotfix-deps` для PR #19 GitHub автоматически слил его.
-Автоматический rerun после merge PR #18
-не проверен: `pull_request_target` не запустился, пока его workflow отсутствует
-в default `main`. Прежде чем применять цепочку, нужно влить workflow и скрипт
-в `main`, провести новую сквозную пробу триггера, затем отдельно обновить
-production ruleset `release/*`, где сейчас требуется только `pr-fast`.
-Если GitHub не находит run текущего head/test merge или failed job,
+После merge [#20](https://github.com/karateka-git/compadre-assistant/pull/20)
+workflow появился в default `main`. Первый запуск 39237214318 выявил checkout
+старого `base.sha` без скрипта; [#22](https://github.com/karateka-git/compadre-assistant/pull/22)
+исправил checkout на SHA уже слитого коммита. Новая временная проба
+[#23](https://github.com/karateka-git/compadre-assistant/pull/23) →
+[#24](https://github.com/karateka-git/compadre-assistant/pull/24) подтвердила
+запуск workflow 39238073682, но обнаружила несовпадение формы ответов GitHub
+compare/Actions с валидатором; автоматический rerun ещё не подтверждён.
+Production ruleset `release/*` по-прежнему требует только `pr-fast`.
+Если GitHub не находит run текущих head/base или failed job,
 автоматическая цепочка останавливается. Даже после обновления checks,
 запущенные через `pull_request`, не защищают от автора PR, который изменил
 сам workflow; публикационный валидатор повторно читает живые данные.
