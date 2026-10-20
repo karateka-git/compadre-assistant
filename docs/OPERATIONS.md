@@ -64,8 +64,11 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 Внешний каталог `/var/lib/compadre-assistant-deploy` принадлежит root и имеет
 права `0700`; `runtime.env` и оба Compose override внутри него — root:root
 `0600`. Основной `obs-chat-bot.service` задаёт `User=user` и `Group=user`.
-Поздний drop-in `zz-deploy-pinned.conf` должен перекрывать более ранние
-`90-deploy-pinned.conf` и `channels.conf` и задавать **обе** команды:
+Поздний drop-in `zz-deploy-pinned.conf` должен перекрывать `channels.conf`
+и задавать **обе** команды. Исторический `90-deploy-pinned.conf` необязателен;
+его контролируемое удаление описано в
+[runbook шага 7.5](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
+Если он ещё установлен, поздний файл должен перекрывать и его:
 `ExecStart=!/usr/bin/docker compose up -d --no-build --pull never
 vk_assistant tg_assistant` и `ExecStop=!/usr/bin/docker compose stop
 vk_assistant tg_assistant`. По [документации systemd](https://www.freedesktop.org/software/systemd/man/257/systemd.service.html)
