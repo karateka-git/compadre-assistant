@@ -853,7 +853,12 @@ PR другого релиза не является условием допус
 [приёмке 7.5](STEP7_5_EMERGENCY_ACCEPTANCE.md), а read-only preflight VPS,
 согласованный порядок удаления и возврата — в
 [плане очистки systemd](STEP7_5_SYSTEMD_CLEANUP.md). Шаг остаётся открытым до
-проверки многолинейного fan-out и гонки с pending run в GitHub. Адресный
+merge PR #35 в release/1.0 и полного release-full его точного SHA. Многолинейная
+проба #36/#37/#38 принята: main merge c83f79c в 06:30:22 UTC запустил trusted
+workflow 39380753068; A получила attempt 2 в 06:30:47 при pending B, а B —
+после завершения исходного run в 06:31:42. Оба hotfix-deps стали success без
+повторного pr-fast; оба release PR одновременно OPEN/CLEAN без auto-merge.
+Временные PR и ветки очищаются отдельно после сохранения фактов. Адресный
 rerun одной линии подтверждён после merge #34: workflow 39379653797
 перезапустил failed hotfix-deps PR #35; run 39379234178 attempt 2 стал
 success, PR остался OPEN/CLEAN без auto-merge. Очистка 90 с reload и одним restart
