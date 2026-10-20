@@ -1,6 +1,51 @@
 # Production VPS
 
-## Текущее состояние после отказа проверки pin 2026-10-17
+## Текущее состояние v1.0.4 после очистки systemd (20.10.2026)
+
+По отдельному разрешению пользователя в окне 06:09:03–06:10:24 UTC под
+общим `deploy.lock` удалён только
+`/etc/systemd/system/obs-chat-bot.service.d/90-deploy-pinned.conf`, выполнены
+`daemon-reload` и один контролируемый restart `obs-chat-bot.service`.
+Сценарий завершился `WINDOW_OK` с кодом 0. Новый проверенный maintenance bundle
+сохранён в root:root 0700
+`/var/lib/compadre-assistant-deploy/maintenance-remove90-7e61b6fz`;
+приватные копии pin/state имеют 0600. Срок удаления копий не согласован.
+
+Независимая read-only проверка в 06:10:55 UTC подтвердила ровно
+`channels.conf`, `zz-deploy-pinned.conf` в загруженных `DropInPaths`, отсутствие
+90 и `NeedDaemonReload=no`. Effective команды, privilege flags,
+EnvironmentFiles и marker guard сохранены; повторные одинаковые
+EnvironmentFile/Condition из 90 и zz сравнивались по смыслу, а строгий
+`Host.installed` проверял допустимость каждой записи. Проверены root-private
+pin и Compose overrides, их байты и `state.json` не изменились.
+
+Service `active/enabled`, `Result=success`, ActiveEnterTimestamp —
+06:09:23 UTC. `Host.verify_both` подтвердил health, OCI revision и polling
+обоих каналов; дублирующих Docker polling нет. Оба контейнера используют
+прежний image ID `sha256:434ab2d8860bee4dfddfeb7311973813ca3f41e47ede81d509525e973f2aba3d`,
+имеют `healthy`, restart count 0 и `unless-stopped`. Чистый detached checkout
+остался на `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`, state — `success`,
+last_good — `v1.0.4`, marker отсутствует. Backup timer `active/enabled`,
+следующий запуск — 21.10.2026 03:15 UTC; окно не пересекалось с ночной копией.
+SQLite сохранила inode 501886, integrity `ok`, схему `0001_initial_schema.sql`.
+
+Предыдущая попытка 06:07:11–06:07:18 UTC безопасно вернула 90 до restart:
+сравнение ошибочно считало два одинаковых EnvironmentFiles/Conditions
+отличием от одной записи после удаления 90. Автоматический возврат завершился
+`ROLLBACK_OK`; независимый read-back в 06:07:45 UTC подтвердил исходную
+конфигурацию и прежний ActiveEnterTimestamp. Bundle первой попытки сохранён:
+`/var/lib/compadre-assistant-deploy/maintenance-remove90-j9jmxvj4`.
+После исправления сравнения, четырёх локальных проверок и повторного preflight
+вторая попытка отдельно принята на ревью. Историческая копия
+`zz-deploy-pinned.v101-saved-d3fa4efa` не оканчивается на `.conf`, systemd её
+не загружает; этот файл не изменялся и не удалялся.
+
+Это обслуживание действующего v1.0.4, новый Release не публиковался.
+Эксплуатационная очистка 7.5 выполнена; весь шаг остаётся открытым до
+GitHub-приёмки обновлённого fan-out. Подробный порядок возврата — в
+[runbook очистки](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
+
+## История отказа проверки pin 2026-10-17
 
 `v1.0.1` опубликован из `release/1.0` на точном SHA
 `19bba49f81f13f3ebb39730efa09f087758a22e5` после полного
@@ -13,7 +58,7 @@
 контейнера с подтверждёнными healthcheck и polling, но unit не стартовал;
 автоматический возврат повторил тот же отказ.
 
-Последний read-back: marker `deploy-in-progress` сохранён, state — `degraded`,
+Исторический read-back 17.10: marker `deploy-in-progress` сохранён, state — `degraded`,
 оба старых контейнера остановлены с policy `no`, service — inactive/enabled,
 backup timer — inactive/disabled. Чистый detached checkout, runtime tag и
 оба image ID указывают на прежний SHA

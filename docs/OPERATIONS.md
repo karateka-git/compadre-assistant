@@ -1,5 +1,8 @@
 # Эксплуатация Compadre Assistant
 
+Контролируемое удаление устаревшего `90-deploy-pinned.conf` описано в
+[runbook шага 7.5](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
+
 
 Локальная версия после шага 4.2 использует пакет `compadre_assistant` и
 Compose-сервисы `tg_assistant`/`vk_assistant`. Приведённые ниже production-пути
