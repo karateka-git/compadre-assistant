@@ -1,9 +1,9 @@
 # Шаг 7.5: приёмка аварийного маршрута и независимых релизов
 
-Статус на 20.10.2026: локальная реализация и изолированная приёмка выполнены.
-Шаг **не закрыт** до переноса в `release/1.0` через PR #35 и полного CI
-точного release merge SHA. Адресный rerun одной линии, многолинейный fan-out
-и гонка с pending run подтверждены в GitHub.
+Статус на 20.10.2026: локальная реализация, изолированная приёмка и GitHub
+gates выполнены. PR #35 слит в `release/1.0`, полный release-full точного
+merge SHA успешен. Адресный rerun одной линии, многолинейный fan-out
+и гонка с pending run подтверждены в GitHub; пробные ресурсы очищены.
 Устаревший systemd drop-in удалён в согласованном окне 20.10.2026.
 Настоящий аварийный Release для испытания не создавался.
 
@@ -69,7 +69,7 @@ Linux/systemd). Fake API/host не подтверждают работу GitHub 
 
 По отдельному разрешению пользователя [PR #34](https://github.com/karateka-git/compadre-assistant/pull/34)
 слит в main обычным merge commit в 06:18:49 UTC. Head PR —
-`3678fdbda289998bf8ac383f71e3b5140d1c1061`; merge commit и текущий main —
+`3678fdbda289998bf8ac383f71e3b5140d1c1061`; merge commit и main на тот момент —
 `3c28c14d5496b8fbace074d31b39a5a70a3ef9fb`. API подтвердил двух родителей:
 прежний main `56b18d4ad838202989c7790ea0d5934fbd7f5fa3` и head PR.
 
@@ -136,8 +136,16 @@ attempt 2 queued, вторую ещё attempt 1 in_progress. Значит гот
 checks и без auto-merge; ни один не требовал слияния другого. Head PR #37 —
 `7743c37055c7a68011923c73187db72e8c4ba6f9`, PR #38 —
 `56d89340778914a8e303d7245a1aab2e77e43269`. Проба принята после независимого
-ревью. PR #35 оставался OPEN/CLEAN с прежним head. Удаление временных ресурсов
-выполняется отдельным cleanup после сохранения этих фактов.
+ревью. PR #35 на этом этапе оставался OPEN/CLEAN с прежним head.
+
+После сохранения фактов PR #37/#38 закрыты без merge; три probe heads и
+`release/90.6`, `release/90.7` удалены одним atomic SSH push с exact-SHA
+leases. AGENTS перечитан. Main сохранил `c83f79c`, version tags не изменились;
+методика из PR #36 осталась в main (blob `2db986f035fa3af939baab71c7f268fef9925805`).
+Три чистых managed worktree `step75-probe-main`, `step75-probe-a`,
+`step75-probe-b` архивированы с сохранением коммитов; другие worktree
+не затрагивались. Таймлайн API сохранён локально как
+`step75-multiline-timeline.jsonl` в пользовательском Temp.
 
 Граница проверки: в GitHub воспроизведён in_progress → failed → targeted
 rerun. Отсутствующий run/job, pending → green, замена снимка, превышение
@@ -145,12 +153,27 @@ rerun. Отсутствующий run/job, pending → green, замена сн�
 тестами; это не отдельные внешние пробы. Rulesets и workflow не изменялись.
 Публикации Release, включения auto-merge и доступа к VPS не было.
 
-## Оставшийся GitHub gate
+## Перенос в release/1.0 и полный CI
 
-Перенести изменение в поддерживаемую `release/1.0` через PR #35 после
-явного разрешения и проверить полный `release-full` точного merge SHA.
-Затем записать результат и cleanup временных ресурсов. Настоящий аварийный
-Release для испытания не нужен.
+После отдельного явного разрешения пользователя PR #35 слит обычным merge
+в 06:36:05 UTC. Перед слиянием подтверждены exact head
+`f4ca22272aac449446125a358b2d612b776a677d`, base `release/1.0`, OPEN/CLEAN,
+оба актуальных успешных checks run `39379234178` attempt 2 и взаимные
+ссылки с main PR #34; CLI links/deps также завершились успешно.
+
+Merge SHA и release ref — `700b9c39966a3195ea9405b83fdf7476e9d29df4`,
+родители `d6b7d9267e7754ee90957d9057e2a4eb41f789c1` и head PR.
+[Release-full 39381329580](https://github.com/karateka-git/compadre-assistant/actions/runs/39381329580)
+attempt 1 завершился success: controller job `118490869622`
+06:36:10–06:36:17 UTC, настоящий full-suite job `118490915691`
+06:36:18–06:37:20 UTC. Checkout/verify exact SHA, полный unittest suite,
+три smoke checks, fresh/previous SQLite, build/healthcheck candidate и
+check manifest успешны. Штатный `select_successful_run` подтвердил Admission
+именно repository/workflow/branch/SHA/run/attempt этой проверки.
+
+После merge main сохранил `c83f79c`; version tags остались v1.0.0–v1.0.4
+на прежних SHA. Тег и GitHub Release не создавались; публикации образа и
+доступа к VPS не было. Полный CI кандидатного образа не является выкладкой.
 
 Ограничение: после истечения общего бюджета ожидания workflow завершается
 ошибкой с номерами незавершённых линий. Когда их актуальный run завершится,
@@ -169,5 +192,7 @@ inode/схемой. Первая попытка безопасно вернул�
 сравнения одинаковых systemd записей прошло повторное ревью.
 Полные факты и пути maintenance bundles сохранены в PRODUCTION/HISTORY и
 [runbook очистки](STEP7_5_SYSTEMD_CLEANUP.md). Новый Release не создавался.
-Весь шаг 7.5 остаётся открытым до merge PR #35 и полного release-full
-точного SHA; single-line и многолинейная GitHub-приёмка уже подтверждены.
+Технические gates шага 7.5 выполнены: single-line и многолинейная приёмка,
+pending race, отдельное systemd-окно, merge PR #35 и полный release-full.
+Вся фича и перенос временных документов в постоянные источники завершаются
+отдельно по оставшемуся плану; новая версия не публиковалась.

@@ -852,13 +852,19 @@ PR другого релиза не является условием допус
 Фактические локальные проверки и оставшиеся GitHub gates записывать в
 [приёмке 7.5](STEP7_5_EMERGENCY_ACCEPTANCE.md), а read-only preflight VPS,
 согласованный порядок удаления и возврата — в
-[плане очистки systemd](STEP7_5_SYSTEMD_CLEANUP.md). Шаг остаётся открытым до
-merge PR #35 в release/1.0 и полного release-full его точного SHA. Многолинейная
+[плане очистки systemd](STEP7_5_SYSTEMD_CLEANUP.md). Технические gates шага
+выполнены: PR #35 слит в release/1.0 в 06:36:05 UTC обычным merge commit
+700b9c39966a3195ea9405b83fdf7476e9d29df4; release-full 39381329580 attempt 1
+с настоящим full-suite job 118490915691 завершился success в 06:37:20 UTC.
+Штатный admission подтвердил точный SHA/run/attempt. Новая версия/тег/Release
+не публиковались, VPS при GitHub-проверке не затрагивался. Многолинейная
 проба #36/#37/#38 принята: main merge c83f79c в 06:30:22 UTC запустил trusted
 workflow 39380753068; A получила attempt 2 в 06:30:47 при pending B, а B —
 после завершения исходного run в 06:31:42. Оба hotfix-deps стали success без
 повторного pr-fast; оба release PR одновременно OPEN/CLEAN без auto-merge.
-Временные PR и ветки очищаются отдельно после сохранения фактов. Адресный
+Пробные PR #37/#38 закрыты без merge; пять временных удалённых веток удалены
+с exact-SHA leases, три чистых probe worktree архивированы, main/tags сохранены.
+Адресный
 rerun одной линии подтверждён после merge #34: workflow 39379653797
 перезапустил failed hotfix-deps PR #35; run 39379234178 attempt 2 стал
 success, PR остался OPEN/CLEAN без auto-merge. Очистка 90 с reload и одним restart
