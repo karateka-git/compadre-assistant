@@ -114,7 +114,11 @@ embeddings поиск использует FTS fallback.
 
 ## Production VPS
 
-Порядок эксплуатации production-сервиса, обновления, диагностика и резервные копии описаны в [OPERATIONS.md](docs/OPERATIONS.md).
+Разработка идёт через PR с быстрыми проверками в `main`, затем полный CI
+проверяет кандидата для `release/X.Y`. Защищённый тег и GitHub Release
+фиксируют конкретную версию; VPS обновляется только отдельной командой
+оператора. Схема веток, версий и допуска — в [RELEASES.md](docs/RELEASES.md),
+порядок обновления и возврата — в [OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Документация
 
@@ -122,6 +126,7 @@ embeddings поиск использует FTS fallback.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
 - [Эксплуатация](docs/OPERATIONS.md) — production VPS, обновления, логи и backup.
+- [Релизы](docs/RELEASES.md) — CI, релизные линии, версии и аварийный маршрут.
 - [Production VPS](docs/PRODUCTION.md) — контекст доступа и текущее состояние сервера без секретов.
 - [GitHub App](docs/GITHUB_APP.md) — настройка прав и подключение Obsidian vault.
 - [Бэклог](docs/BACKLOG.md) — задачи, которые ещё не начаты.

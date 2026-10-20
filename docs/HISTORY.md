@@ -8,6 +8,21 @@
 [архитектуре](ARCHITECTURE.md), сведения о сервере — в
 [production-инструкции](PRODUCTION.md).
 
+## Независимые релизные линии и приёмка связанных PR (2026-10-20)
+
+[PR #34](https://github.com/karateka-git/compadre-assistant/pull/34)
+обновил проверку связанных исправлений в `main`, а
+[PR #35](https://github.com/karateka-git/compadre-assistant/pull/35) —
+в `release/1.0`. После слияния #34 доверенный workflow автоматически
+повторил `hotfix-deps` для #35; проверка стала успешной без нового
+`pr-fast`. Отдельная проба двух релизных линий подтвердила независимую
+обработку и ожидание ещё выполняющегося check. #35 слит с SHA
+`700b9c39966a3195ea9405b83fdf7476e9d29df4`; полный
+`release-full` run `39381329580` завершился успешно. Пробные PR и
+ветки удалены. Слияние #35 **не** создало новый тег/Release и не изменило
+работающую на VPS версию `v1.0.4`. Действующие правила — в
+[RELEASES.md](RELEASES.md).
+
 ## Очистка устаревшего systemd drop-in (2026-10-20)
 
 По отдельному разрешению пользователя под общим deploy lock удалён
@@ -20,8 +35,8 @@ active/enabled service и backup timer, state success без marker, целую 
 Первая попытка в 06:07 UTC вернула 90 до restart из-за избыточно строгого
 сравнения одинаковых EnvironmentFiles/Conditions; после исправления и
 повторного ревью окно прошло успешно. Подробные факты и пути копий — в
-[PRODUCTION.md](PRODUCTION.md). Это не новый выпуск. Весь шаг 7.5 остаётся
-открытым до GitHub-проверки обновлённого fan-out.
+[PRODUCTION.md](PRODUCTION.md). Это не новый выпуск; GitHub-проверка
+обновлённого fan-out впоследствии завершена.
 
 ## Первый versioned выпуск на VPS: v1.0.4 (2026-10-19)
 
@@ -549,7 +564,7 @@ Telegram и VK не могут одновременно синхронизиро
 - пользователь вручную создаёт `.knowledge-catcher.yml` в корне выбранного
   vault и перечисляет обязательные instruction-файлы в нужном порядке;
 - готовый пример поставляется как runtime-ресурс
-  [`obs_chat_bot/resources/.knowledge-catcher.yml`](../obs_chat_bot/resources/.knowledge-catcher.yml);
+  [`compadre_assistant/resources/.knowledge-catcher.yml`](../compadre_assistant/resources/.knowledge-catcher.yml);
 - YAML имеет строгую версию `1`, непустой список `instructions`, не допускает
   неизвестных полей, повторов, абсолютных путей и выхода за корень vault;
 - конфигурация обязательна: её отсутствие, ошибка YAML или отсутствие любого
