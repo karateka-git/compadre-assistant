@@ -379,5 +379,16 @@ def _env(**overrides: str) -> dict[str, str]:
     return values
 
 
+class Step75PendingProbeTests(unittest.TestCase):
+    """Удерживает только временный PR run для наблюдения pending-run race."""
+
+    def test_step75_pending_probe(self) -> None:
+        """Даёт trusted workflow 60 секунд для наблюдения незавершённого run."""
+        import time
+
+        # Эта проба не сливается: задержка существует только в release/90.7 PR.
+        time.sleep(60)
+
+
 if __name__ == "__main__":
     unittest.main()
