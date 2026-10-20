@@ -448,6 +448,12 @@ class SystemdBootTests(unittest.TestCase):
                 shutil.copyfile(source / "obs-chat-bot-pinned.conf", unit["legacy"])
                 with self.assertRaises(prod.DeployError):
                     host.installed(OLD_IMAGE, OLD_SHA)
+                unit["legacy"].unlink()
+                # До daemon-reload старый DropInPaths всё ещё обязан закрывать допуск.
+                with self.assertRaisesRegex(prod.DeployError, "Порядок systemd"):
+                    host.installed(OLD_IMAGE, OLD_SHA)
+                unit["replies"]["DropInPaths"] = f'{unit["channels"]} {unit["pinned"]}'
+                host.installed(OLD_IMAGE, OLD_SHA)
 
 
 class DeployProdTests(unittest.TestCase):
@@ -524,6 +530,85 @@ class DeployProdTests(unittest.TestCase):
             with self.assertRaises(prod.DeployError):
                 prod.deploy(host, "v1.0.0", emergency=True, reason=" ")
             self.assertEqual(host.actions, [])
+
+    def test_emergency_backup_and_migration_faults_keep_audit(self) -> None:
+        """Аварийный допуск сохраняет backup gate, возврат двух каналов и решение."""
+        for fault in ("backup", "migrate"):
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                patches = self._patches()
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                    prep if fault == "backup" else host,
+                    "backup_sqlite" if fault == "backup" else "migrate",
+                    side_effect=prod.DeployError(fault),
+                ), patch.object(host, "start_both", wraps=host.start_both) as start:
+                    with self.assertRaises(prod.DeployError):
+                        prod.deploy(host, "v1.0.0", emergency=True, reason="срочное восстановление")
+                state = prep.read_state(host.state_dir, host.checkout)
+                self.assertEqual(state["stage"], "rolled_back")
+                decision = state["deployment"]
+                self.assertEqual((decision["initiator"], decision["reason"],
+                                  decision["published_reason"], decision["sha"],
+                                  decision["ci_state"], decision["published_ci_state"]),
+                                 ("user (uid=1000)", "срочное восстановление", "сбой production",
+                                  NEW_SHA, "failure", "pending"))
+                self.assertEqual((host.head, host.current_image, host.running),
+                                 (OLD_SHA, OLD_IMAGE, True))
+                self.assertEqual(host.timer_state, {"enabled": True, "active": True})
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+                self.assertTrue(all(item["Image"] == OLD_IMAGE
+                                    for item in host.containers().values()))
+                if fault == "backup":
+                    self.assertNotIn("migrate", host.actions)
+                else:
+                    self.assertTrue(Path(state["backup_id"]).is_file())
+                start.assert_called_once_with(prep.pinned_tag(OLD_SHA), OLD_IMAGE)
+
+    def test_emergency_failed_rollback_keeps_degraded_audit(self) -> None:
+        """Отказ возврата сохраняет решение, marker и остановку обоих каналов."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                host, "verify_both", side_effect=prod.DeployError("Каналы не подтверждены"),
+            ):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0", emergency=True, reason="восстановить каналы")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "degraded")
+            self.assertEqual(state["deployment"]["reason"], "восстановить каналы")
+            self.assertEqual(state["deployment"]["published_reason"], "сбой production")
+            self.assertEqual(state["deployment"]["sha"], NEW_SHA)
+            self.assertTrue(Path(state["backup_id"]).is_file())
+            self.assertTrue((host.state_dir / "deploy-in-progress").is_file())
+            self.assertFalse(any(item["State"]["Running"] for item in host.containers().values()))
+            self.assertEqual(host.timer_state, {"enabled": False, "active": False})
+            before = host.actions.copy()
+            with patches[0], self.assertRaisesRegex(prod.DeployError, "Degraded"):
+                prod.deploy(host, "v1.0.0", emergency=True, reason="повтор")
+            self.assertEqual(host.actions, before)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["deployment"],
+                             state["deployment"])
+
+    def test_emergency_new_schema_stops_before_writers(self) -> None:
+        """Аварийный режим не разрешает неизвестную миграцию и сохраняет причину."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
+                         / "0002_new.sql")
+            migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "failed_preflight")
+            self.assertEqual(state["deployment"]["reason"], "срочно")
+            self.assertEqual((host.head, host.current_image, host.running),
+                             (OLD_SHA, OLD_IMAGE, True))
+            self.assertNotIn("stop_both", host.actions)
+            self.assertNotIn("migrate", host.actions)
+            self.assertFalse((host.state_dir / "deploy-in-progress").exists())
 
     def test_one_channel_failure_rolls_both_back_without_database_restore(self) -> None:
         """Отказ candidate возвращает оба канала и сохраняет backup отдельно."""
