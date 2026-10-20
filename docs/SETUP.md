@@ -1,5 +1,22 @@
 # Подготовка проекта
 
+Здесь описана первая локальная настройка: получить код, выбрать каналы и
+возможности, заполнить `.env` и запустить нужный сервис. Проверки и команды
+после запуска находятся в [RUN.md](RUN.md); настройка GitHub App — в
+[GITHUB_APP.md](GITHUB_APP.md).
+
+```mermaid
+flowchart LR
+    A[Получить код] --> B[Скопировать .env.example]
+    B --> C[Выбрать каналы и возможности]
+    C --> D[Заполнить их настройки]
+    D --> E[Запустить нужный сервис]
+    E --> F[Проверить запуск по RUN.md]
+```
+
+Неактивная возможность не читает свой профиль. Для выбранного канала нужны его
+credentials; Compose сам не отключает сервис с пустым токеном.
+
 ## Получить код
 
 Нужны Git и Docker Engine с Docker Compose (на Windows — Docker Desktop,
@@ -22,6 +39,10 @@ Copy-Item .env.example .env
 токенами выбранных каналов приложение не готово к запуску. Общие переменные
 читает [`core/data/config.py`](../compadre_assistant/core/data/config.py), а настройки
 Obsidian — [`capabilities/obsidian/data/configuration/config.py`](../compadre_assistant/capabilities/obsidian/data/configuration/config.py).
+
+Сначала выберите `ENABLED_CHANNELS` и `ENABLED_CAPABILITIES`, затем заполните
+соответствующие группы переменных. Неполная группа включённой возможности
+останавливает запуск. Для Ask используйте [отдельный профиль](#настройка-ask).
 
 | Переменные | Назначение и обязательность |
 | --- | --- |
@@ -51,11 +72,15 @@ Obsidian не читаются GitHub, LLM, embeddings, chunking и тег за�
 но подключение/sync/write-back будут недоступны. Отсутствующие providers не
 превращаются в сообщение об отсутствии vault пользователя.
 
+### Подготовить GitHub App для Obsidian
+
 Создание GitHub App и получение PEM описаны в [GITHUB_APP.md](GITHUB_APP.md).
 Поместите PEM в `data/github-app.pem`, а в `.env` задайте
 `GITHUB_PRIVATE_KEY_PATH=data/github-app.pem`: каталог `data/` смонтирован в
 контейнер как `/app/data`. Путь Windows вне этого тома контейнеру недоступен.
 До подключения vault подготовьте обязательные правила по той же инструкции.
+
+### Учесть поведение служебного тега
 
 Служебный тег добавляется только новым заметкам из предложений `add` и только в
 YAML frontmatter; при отсутствии frontmatter приложение создаёт его. `update`
@@ -69,12 +94,13 @@ frontmatter tags уже существующей заметки. Изменен�
 
 После запуска Docker Engine:
 
-```powershell
-docker compose up --build tg_assistant
-```
+| Выбранные каналы | Команда из корня проекта |
+| --- | --- |
+| Только Telegram | `docker compose up --build tg_assistant` |
+| Только VK | `docker compose up --build vk_assistant` |
+| Telegram и VK | `docker compose up --build` |
 
-Для VK используйте `docker compose up --build vk_assistant`. Для обоих каналов —
-`docker compose up --build`; оба набора channel credentials должны быть заполнены.
+Для обоих каналов оба набора channel credentials должны быть заполнены.
 Compose не отключает сервис автоматически, если его токен отсутствует.
 Для привычных `open-*.cmd` задайте `ENABLED_CHANNELS=telegram` или `vk`;
 scripts запускают выбранные сервисы. Отдельные bot-флаги и контейнерный healthcheck

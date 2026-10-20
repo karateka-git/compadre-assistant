@@ -1,4 +1,11 @@
-# Настройка GitHub App для Obsidian vault
+# GitHub App и подключение Obsidian vault
+
+Этот документ помогает подготовить GitHub App и vault, затем подключить
+repository через Telegram или VK. Если App уже настроена, начните с
+[подготовки vault](#подготовить-vault) и
+[подключения пользователя](#4-зарегистрировать-пользователя-и-подключить-vault).
+Локальный запуск описан в [RUN.md](RUN.md), а снимок production —
+в [PRODUCTION.md](PRODUCTION.md).
 
 GitHub connector читает выбранный repository и после явного подтверждения
 пользователя записывает изменения Obsidian vault прямым commit в default branch.
@@ -7,27 +14,28 @@ GitHub connector читает выбранный repository и после явн
 user access token, App JWT и
 installation access token существуют только в памяти процесса.
 
-При ребрендинге в Compadre Assistant используется существующая GitHub App:
-её переименование выполнено в шаге 4.6 дорожной карты. Повторно создавать
-App, ключи и installations для этого не требуется. Раздел регистрации ниже
-предназначен для первичной настройки отдельной установки проекта.
+```mermaid
+flowchart LR
+    A[Подготовить App и PEM] --> B[Настроить четыре<br/>переменные окружения]
+    B --> C[Создать инструкции<br/>в vault]
+    C --> D[Зарегистрироваться<br/>в Telegram или VK]
+    D --> E[Прислать URL repository]
+    E --> F{GitHub уже авторизован?}
+    F -->|Нет| H[Пройти Device Flow]
+    H --> I{App установлена<br/>с Contents: write?}
+    F -->|Да| I
+    I -->|Да| G[Подключить vault<br/>и синхронизировать]
+    I -->|Нет| J[Настроить installation]
+    J --> E
+```
 
-На 2026-10-10 репозиторий уже переименован в
-[`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant),
-GitHub App также переименована в **Compadre Assistant**, прежний ID `4363317`
-сохранён, новый slug — `compadre-assistant`. Её действующая ссылка установки:
-https://github.com/apps/compadre-assistant/installations/new.
-Локальный `GITHUB_APP_SLUG` обновлён; остальные настройки и PEM сохранены.
+Если App уже существует, шаги регистрации и выпуска нового PEM не повторяют.
 
-Проверка 2026-10-10 через API подтвердила авторизацию прежним PEM, имя и ID
-App, существующую installation `148238219` с разрешением `Contents: write`
-для `karateka-git/my_obs_data`. Отдельный временный token, ограниченный этим
-репозиторием и `Contents: read`, успешно прочитал metadata и
-`.knowledge-catcher.yml`, после проверки token отозван. Записи в vault и БД
-не выполнялись. Повторный Device Flow и пользовательский сценарий записи
-остаются отдельными живыми проверками.
+Для действующего repository уже используется GitHub App **Compadre Assistant**
+со slug `compadre-assistant`. Раздел регистрации нужен только для новой
+установки; существующие App, PEM и installations повторно создавать не нужно.
 
-## 1. Зарегистрировать GitHub App
+## 1. Зарегистрировать GitHub App для новой установки
 
 Открыть настройки GitHub account:
 
@@ -73,6 +81,12 @@ GITHUB_PRIVATE_KEY_PATH=data/github-app.pem
 GitHub connector считается выключенным, если все четыре значения отсутствуют.
 Частично заполненная группа считается ошибкой конфигурации.
 
+| Конфигурация | Результат |
+| --- | --- |
+| Все четыре значения отсутствуют | GitHub connector выключен. |
+| Указана только часть значений | Ошибка конфигурации; заполните всю группу. |
+| Все значения указаны | Проверьте фактический slug, путь и права PEM до запуска. |
+
 Значения выше — примеры. `GITHUB_APP_SLUG` должен совпадать с фактическим slug
 App: ссылка установки строится из него как
 `https://github.com/apps/<app-slug>/installations/new`. Для текущей App используется
@@ -102,6 +116,10 @@ instructions:
 существовать. Бот не создаёт конфигурацию или правила автоматически.
 
 ## 4. Зарегистрировать пользователя и подключить vault
+
+Этот шаг выполняется после запуска Telegram или VK adapter. App должна иметь
+доступ к выбранному repository, а корень vault — содержать проверенные
+инструкции из [предыдущего шага](#подготовить-vault).
 
 После запуска Telegram или VK adapter пользователь отправляет:
 
