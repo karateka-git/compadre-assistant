@@ -1,6 +1,6 @@
 # Production VPS
 
-## Текущее состояние после выпуска v1.0.4 (2026-10-19)
+## Текущее состояние после выпуска v1.0.4 (проверено 2026-10-20)
 
 После связанных PR [#31](https://github.com/karateka-git/compadre-assistant/pull/31)
 в `main` и [#32](https://github.com/karateka-git/compadre-assistant/pull/32)
@@ -33,7 +33,8 @@
 `obs-chat-bot-backup.service`, который использует ночной timer: он завершился
 успешно, новая `app-20261019T140536Z.db` прошла integrity check, сохранены
 семь последних файлов. Timer `active/enabled`, следующий автоматический запуск
-назначен на 2026-10-20 03:15 UTC. Его результат ещё нужно проверить.
+назначен на 2026-10-20 03:15 UTC. Результат первого автоматического запуска
+подтверждён ниже.
 
 Контролируемый reboot изменил boot ID с
 `9e779e1c-c56b-4db6-9c14-2aa66f7ce576` на
@@ -42,8 +43,29 @@
 на том же image ID с нулём рестартов. После reboot повторно подтверждены
 polling, отсутствие дублей, целостность SQLite, `stage=success`, отсутствие
 marker и активный backup timer. Повтор `deploy-prod v1.0.4` вернул
-`already_installed` без пересоздания контейнеров. Шаги 5.5 и 7.4 остаются
-открытыми до проверки следующего автоматического ночного backup.
+`already_installed` без пересоздания контейнеров.
+
+### Первый автоматический ночной backup после выпуска
+
+20.10.2026 timer автоматически запустил `obs-chat-bot-backup.service` в
+03:15:02 UTC. Служба завершилась в 03:15:03 UTC с `Result=success` и
+`ExecMainStatus=0`; журнал записал новую копию
+`/var/backups/obs-chat-bot/app-20261020T031502Z.db` и `retained=7`.
+Файл размером 12 664 832 байта существует, его `PRAGMA integrity_check`
+вернул `ok`. В каталоге осталось семь файлов `app-*.db`. Timer остаётся
+`active/enabled`, следующий запуск назначен на 21.10.2026 03:15 UTC.
+
+После ночной копии `obs-chat-bot.service` имеет `Result=success` и
+`ActiveState=active`. Контейнеры Telegram и VK работают и имеют `healthy`,
+нулевой restart count, общий image ID
+`sha256:434ab2d8860bee4dfddfeb7311973813ca3f41e47ede81d509525e973f2aba3d`.
+Checkout чистый и указывает на SHA выпуска
+`d6b7d9267e7754ee90957d9057e2a4eb41f789c1`. В `state.json` записаны
+`stage=success` и `last_good.version=v1.0.4`; marker незавершённого deploy
+отсутствует. Рабочая SQLite сохранила inode `501886`. Проверка была только
+читающей; backup, deploy и перезапуски вручную не запускались. Живая проверка
+обоих каналов, reboot и повтор команды были подтверждены ранее. Шаги 5.5 и
+7.4.2 приняты 20.10.2026.
 
 ## История отказа live выпуска 2026-10-18
 
