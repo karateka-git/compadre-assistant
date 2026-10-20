@@ -55,7 +55,7 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 `status=ahead`, `base_commit` и `merge_base_commit` с SHA тега. Требование
 `head_commit` блокировало первый выпуск до исправления в `v1.0.4`.
 При `degraded` новый запуск блокируется до ручной проверки и восстановления
-по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
+по [порядку ниже](#отказ-выпуска-и-возврат).
 Не удалять production-БД по development-инструкции: изменения её схемы требуют
 миграции с сохранением данных.
 
@@ -64,11 +64,9 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 Внешний каталог `/var/lib/compadre-assistant-deploy` принадлежит root и имеет
 права `0700`; `runtime.env` и оба Compose override внутри него — root:root
 `0600`. Основной `obs-chat-bot.service` задаёт `User=user` и `Group=user`.
-Поздний drop-in `zz-deploy-pinned.conf` должен перекрывать `channels.conf`
-и задавать **обе** команды. Исторический `90-deploy-pinned.conf` необязателен;
-его контролируемое удаление описано в
-[runbook шага 7.5](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
-Если он ещё установлен, поздний файл должен перекрывать и его:
+После удаления устаревшего `90-deploy-pinned.conf` действующий порядок
+drop-in: `channels.conf`, затем `zz-deploy-pinned.conf`. Поздний файл
+должен задавать **обе** итоговые команды:
 `ExecStart=!/usr/bin/docker compose up -d --no-build --pull never
 vk_assistant tg_assistant` и `ExecStop=!/usr/bin/docker compose stop
 vk_assistant tg_assistant`. По [документации systemd](https://www.freedesktop.org/software/systemd/man/257/systemd.service.html)
@@ -86,14 +84,12 @@ vk_assistant tg_assistant`. По [документации systemd](https://www.
 подмена прав `0700`/`0600` или одного только `ExecStart` не исправляет путь
 остановки службы.
 
-17 октября 2026 года `deploy-prod --verify-pinned` выявил именно этот дефект:
-root-контроллер смог поднять прежние контейнеры и подтвердить health/polling,
-но systemd запустил Compose как `user` и получил `permission denied` при
-чтении `pinned-compose.yml`. Возврат повторил тот же отказ; контроллер оставил
-`degraded`, marker, остановленные каналы и выключенный backup timer. В
-`v1.0.2` исправлены обе команды и добавлена проверка их фактических свойств.
-После ручного восстановления 18 октября старый образ снова работает;
-текущий статус и точный SHA указаны в [PRODUCTION.md](PRODUCTION.md).
+Если Compose запускается как `user`, root-private pin недоступен:
+контейнеры могут запуститься вручную от root, но systemd не подтвердит
+службу, а возврат попадёт в `degraded`. Поэтому до restart проверяют
+обе итоговые команды и флаг `no-setuid`, а не только имя позднего файла.
+История этого отказа — в [HISTORY.md](HISTORY.md); текущее состояние —
+в [PRODUCTION.md](PRODUCTION.md).
 
 ### Архив контроллера с Windows: точные байты Git
 
@@ -131,6 +127,84 @@ sudo ls -l /var/backups/obs-chat-bot
 Timer запускает copy в 03:15 UTC, хранит семь последних файлов и выполняет
 backup через SQLite API. Копии лежат на том же диске VPS; защита от потери
 всей VM требует отдельного backup/snapshot у провайдера или внешнего хранилища.
+
+### Подготовка и запуск версии
+
+На локальной машине из чистого checkout точного кандидата выполнить
+read-only проверку, просмотреть будущие release notes и только затем
+опубликовать. Новый `release/X.Y` предварительно создаётся из проверенного
+`main` через `scripts.create_release_branch`: `--check-only`, затем
+локальное создание без флага и, после разрешения записи, `--publish-remote`.
+Каждый вызов принимает имя ветки и полный SHA. Для PATCH использовать
+действующую линию.
+
+```powershell
+$env:GITHUB_TOKEN = gh auth token
+python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --notes-file <путь-к-notes> --check
+python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --notes-file <путь-к-notes> --dry-run
+python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --notes-file <путь-к-notes> --publish
+```
+
+Пример номера не предписывает следующий фактический выпуск. Перед записью
+сверить изменения линии, указанный SHA и результаты полного CI; публикация
+не запускает VPS. На сервере после свежего read-only осмотра
+[PRODUCTION.md](PRODUCTION.md), отдельного эксплуатационного допуска и
+проверки окна backup вызвать `sudo deploy-prod vX.Y.Z`. Команда синхронна:
+по окончании проверить stage/state, отсутствие marker, точный SHA/image ID
+обоих каналов, health и polling, службу, backup timer и SQLite integrity.
+Для реальных ответов Telegram/VK требуется пользовательская проверка.
+Результат доступен в серверном журнале; внешних уведомлений сейчас нет.
+
+### Отказ выпуска и возврат
+
+Состояния `state.json` в `/var/lib/compadre-assistant-deploy` описывают
+ход одной команды; marker `deploy-in-progress` удерживает systemd от
+самостоятельного запуска во время критической секции. Не удалять marker,
+lock, state или backup для «повтора». Сначала сверить состояние, оба
+контейнера, pin, checkout, службу, timer и SQLite integrity/schema без
+вывода секретов и содержимого БД.
+
+| Stage | Действие |
+| --- | --- |
+| `failed_preflight` | Проверка остановилась до переключения. Убедиться, что старые каналы работают и marker отсутствует; устранить причину. `failed_version`/`retry_after` временно закрывают повтор той же версии. |
+| `preparing`, `ready` без marker | После прерывания один повтор той же команды восстанавливает прежний checkout и **завершается отказом**. Проверить прежние SHA, pin и оба канала перед новой попыткой. |
+| `ready`, `critical`, `writers_stopped`, `backup_verified`, `migration_started`, `schema_verified`, `candidate_pinned`, `candidate_started`, `rollback_started` с marker | Автоматический возврат допустим лишь при совпадении миграционного manifest и целой SQLite. Один повтор команды выполняет recovery прежнего pin и завершается отказом. Затем проверить `rolled_back`, оба канала, службу и timer. |
+| `rolled_back` | Старый runtime подтверждён контроллером; проверить его независимо. Новая выкладка — отдельное решение. |
+| `pinned_verified` | Проверка закреплённого прежнего образа завершена; это не установка новой версии. |
+| `success` | Сверить `last_good` с фактическим checkout и двумя контейнерами. Повтор уже установленной версии даёт `already_installed` без пересоздания. |
+| `degraded` либо несовместимая/неизвестная схема | Оставить marker, остановить оба writer и timer; новая команда заблокирована. Нужен отдельный план ручного восстановления. |
+
+Возврат **не** восстанавливает SQLite из копии автоматически. Если миграции
+изменили схему, старый код нельзя запускать до доказательства совместимости;
+решение о восстановлении backup должно учитывать записи после копии и
+возможные изменения GitHub vault. При `degraded` под отдельным разрешением
+сохранить lock/marker, проверить прежний SHA/image и схему, установить
+проверенный systemd/Compose snapshot, поднять оба старых канала с прежним
+pin, сверить health/polling и отсутствие дублей. Лишь после этого вернуть
+restart policy, снять marker, запустить unit, проверить оба канала снова,
+вернуть timer к сохранённому состоянию и атомарно записать `rolled_back`.
+Если любой признак не доказан, оставить `degraded` и оба канала остановленными.
+Не считать один лишь `active` unit доказательством успешного возврата.
+
+### Аварийная версия
+
+Аварийный путь требует решения владельца, причины, подтверждённого PR merge
+и внешней записи утверждённого текста Release. Из чистого checkout
+выполнить команду ниже сначала с `--check`, затем с `--dry-run`, затем
+с отдельно разрешённым `--publish`:
+
+```powershell
+python -m scripts.publish_emergency_release vX.Y.Z <полный-SHA> --change patch --reason "причина" --notes-file <путь-к-notes> --pr N --check
+```
+
+Для PATCH указывать
+PR выпускаемой линии и связанный main PR, если он создавался; PR других
+линий не включать. Проверить tag/Release после записи. На VPS после нового
+осмотра запустить `sudo deploy-prod --emergency vX.Y.Z --reason "причина"`.
+Обычный режим аварийный Release отвергает. Аварийная команда пропускает
+только допуск по успешному полному CI; backup, migration, pin, health,
+marker и rollback действуют как обычно. Настоящий аварийный выпуск на VPS
+пока не испытан.
 
 ## Перед запуском
 

@@ -108,9 +108,9 @@ SQLite сохранила inode 501886, integrity `ok`, схему `0001_initial
 не загружает; этот файл не изменялся и не удалялся.
 
 Это обслуживание действующего v1.0.4, новый Release не публиковался.
-Эксплуатационная очистка 7.5 выполнена; весь шаг остаётся открытым до
-GitHub-приёмки обновлённого fan-out. Подробный порядок возврата — в
-[runbook очистки](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
+Эксплуатационная очистка 7.5 выполнена. Проверка связанного GitHub-маршрута
+также завершена отдельно; это обслуживание не создало новый Release.
+Действующий порядок возврата — в [OPERATIONS.md](OPERATIONS.md#отказ-выпуска-и-возврат).
 
 ## История отказа live выпуска 2026-10-18
 
@@ -205,7 +205,7 @@ backup timer — inactive/disabled. Чистый detached checkout, runtime tag 
 `sha256:1b7521619423d8607ec449d3dcabdac009334d8833d6f71874c670f2d55f0743`.
 SQLite inode `501886`, integrity `ok`, схема `0001_initial_schema.sql`
 совпадает с rollback manifest. Это состояние не разрешает простой restart:
-нужен ручной recovery по [runbook](auto-deploy-main/STAGE5_STEP4.md#отказ-reboot-и-ручное-восстановление).
+нужен ручной recovery по [эксплуатационному порядку](OPERATIONS.md#отказ-выпуска-и-возврат).
 Для исправления позднее опубликован PATCH `v1.0.2`; результат ручного
 восстановления приведён выше.
 
@@ -231,8 +231,8 @@ snapshot `scripts/` и `deploy/` помещён в
 running/healthy с нулём рестартов и `unless-stopped`, active/enabled service
 и backup timer, отсутствие deploy marker и state. Тот частичный setup
 не подтверждал безопасный следующий reboot. На тот момент исправление
-готовилось как PATCH `v1.0.1`; порядок замены snapshot и приёмки — в
-[STAGE5_STEP4.md](auto-deploy-main/STAGE5_STEP4.md). Права SQLite `0644`
+готовилось как PATCH `v1.0.1`; действующие ограничения snapshot и
+systemd — в [OPERATIONS.md](OPERATIONS.md). Права SQLite `0644`
 и каталога `data` `0755` не менялись в этом окне.
 
 Production переключён на Compadre Assistant 2026-10-13 по отдельному разрешению
