@@ -1,8 +1,41 @@
 # Шаг 7.5: удалить устаревший systemd drop-in
 
-Статус: подготовлено локально; read-only preflight выполнен 19.10.2026
-в 15:20 UTC. Файл не удалялся, daemon-reload и restart не выполнялись.
-Операция требует отдельного согласования окна: оба бота кратко перезапустятся.
+Статус на 20.10.2026: очистка выполнена в отдельно разрешённом окне
+06:09:03–06:10:24 UTC; `WINDOW_OK`, exit 0. Файл 90 отсутствует, reload и
+один restart прошли успешно. Независимый read-back — 06:10:55 UTC.
+Весь шаг 7.5 остаётся открытым до проверки обновлённого fan-out в GitHub.
+
+## Фактическое окно и сохранённые копии
+
+Сценарий SHA256 `3ef7a16ad2fce045b7f759eb9b877a0ed68cbb031028dbeea3cd3e12fa31bcfe`
+перед unlink повторил preflight под существующим deploy.lock и сохранил
+проверенные drop-in, приватный pin/state и снимок effective systemd в
+`/var/lib/compadre-assistant-deploy/maintenance-remove90-7e61b6fz` (root:root
+0700, приватные файлы 0600). После удаления изменился только набор drop-in:
+загружены channels/zz, 90 отсутствует. Host.installed подтвердил команды,
+privilege flags, EnvironmentFiles/Conditions, root-private pin и Compose;
+после restart Host.verify_both подтвердил health/revision/polling.
+
+Независимая проверка: service active/enabled, Result success,
+NeedDaemonReload=no, ActiveEnterTimestamp 06:09:23 UTC; оба healthy,
+restarts 0, unless-stopped на прежнем image/SHA v1.0.4; duplicate Docker
+polling отсутствует. State/pin побайтово прежние, marker отсутствует.
+SQLite inode 501886, integrity ok, схема 0001; timer active/enabled,
+следующий запуск 21.10 03:15 UTC. Окно с ночной копией не пересекалось.
+
+Первая попытка 06:07:11–06:07:18 UTC завершилась до restart и вернула
+90 (`ROLLBACK_OK`): одинаковые записи EnvironmentFiles/Conditions от 90 и zz
+ошибочно сравнивались как разные списки. Read-back 06:07:45 UTC подтвердил
+полный возврат. Её bundle `maintenance-remove90-j9jmxvj4` также сохранён.
+После исправления только семантики этих двух полей, четырёх локальных
+проверок, успешного preflight и повторного ревью выполнена вторая попытка.
+ExecStartEx/ExecStopEx и остальные поля проверялись строго.
+
+Незагружаемый файл `zz-deploy-pinned.v101-saved-d3fa4efa` не изменялся:
+набор загружаемых drop-in проверялся только среди `*.conf`, отдельно от
+исторических копий. Срок удаления maintenance bundles не согласован.
+Ниже сохранены исторический preflight и проверенный порядок окна/возврата;
+повторять удаление и restart для уже выполненной очистки не требуется.
 
 ## Допуск контроллера
 
@@ -20,7 +53,7 @@
 effective команд, root privilege flags, EnvironmentFile, marker guard,
 приватного pin и неизвестных drop-in сохраняются.
 
-## Read-only факты VPS
+## Исторические read-only факты VPS (19.10.2026)
 
 - Checkout чистый, SHA `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`.
 - Service active/enabled, `NeedDaemonReload=no`; порядок: 90, channels, zz.
@@ -86,5 +119,5 @@ inspect и без изменений файлов/служб. Факты нео�
 остановиться, сохранить факты и применить отдельный recovery из OPERATIONS;
 не объявлять приёмку успешной и не пытаться восстанавливать БД автоматически.
 
-Удаление 90 и контролируемый restart остаются обязательными незавершёнными
-действиями шага 7.5. Read-only preflight не заменяет их выполнение.
+Удаление 90 и контролируемый restart выполнены 20.10.2026. GitHub-приёмка
+обновлённого fan-out остаётся отдельным незавершённым условием шага 7.5.

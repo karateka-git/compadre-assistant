@@ -8,6 +8,21 @@
 [архитектуре](ARCHITECTURE.md), сведения о сервере — в
 [production-инструкции](PRODUCTION.md).
 
+## Очистка устаревшего systemd drop-in (2026-10-20)
+
+По отдельному разрешению пользователя под общим deploy lock удалён
+`90-deploy-pinned.conf`, выполнены reload и один restart действующего
+v1.0.4. Окно 06:09:03–06:10:24 UTC завершилось `WINDOW_OK`; независимая
+проверка в 06:10:55 UTC подтвердила channels/zz в DropInPaths, неизменный
+pin/effective guards, оба healthy на прежних SHA/image с polling без дублей,
+active/enabled service и backup timer, state success без marker, целую SQLite
+с прежним inode и схемой. Maintenance bundle сохранён для возврата.
+Первая попытка в 06:07 UTC вернула 90 до restart из-за избыточно строгого
+сравнения одинаковых EnvironmentFiles/Conditions; после исправления и
+повторного ревью окно прошло успешно. Подробные факты и пути копий — в
+[PRODUCTION.md](PRODUCTION.md). Это не новый выпуск. Весь шаг 7.5 остаётся
+открытым до GitHub-проверки обновлённого fan-out.
+
 ## Assistant Rebirth: закрытие перехода и этапа 4 (2026-10-13)
 
 Пользователь принял завершение перехода после production-переключения и
