@@ -853,7 +853,10 @@ PR другого релиза не является условием допус
 [приёмке 7.5](STEP7_5_EMERGENCY_ACCEPTANCE.md), а read-only preflight VPS,
 согласованный порядок удаления и возврата — в
 [плане очистки systemd](STEP7_5_SYSTEMD_CLEANUP.md). Шаг остаётся открытым до
-проверки обновлённого fan-out в GitHub. Очистка 90 с reload и одним restart
+проверки многолинейного fan-out и гонки с pending run в GitHub. Адресный
+rerun одной линии подтверждён после merge #34: workflow 39379653797
+перезапустил failed hotfix-deps PR #35; run 39379234178 attempt 2 стал
+success, PR остался OPEN/CLEAN без auto-merge. Очистка 90 с reload и одним restart
 выполнена 20.10.2026 в 06:09:03–06:10:24 UTC, независимый read-back
 06:10:55 UTC подтвердил прежний v1.0.4, pin, health/polling обоих каналов,
 целую SQLite и активный backup timer. Факты, первая безопасно отменённая

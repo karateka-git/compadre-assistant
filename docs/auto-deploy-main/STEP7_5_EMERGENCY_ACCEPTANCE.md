@@ -1,7 +1,8 @@
 # Шаг 7.5: приёмка аварийного маршрута и независимых релизов
 
 Статус на 20.10.2026: локальная реализация и изолированная приёмка выполнены.
-Шаг **не закрыт**: обновлённый fan-out ещё нужно проверить в GitHub.
+Шаг **не закрыт**: адресный rerun одной линии подтверждён в GitHub;
+многолинейный fan-out и гонка с pending run ещё требуют отдельной пробы.
 Устаревший systemd drop-in удалён в согласованном окне 20.10.2026.
 Настоящий аварийный Release для испытания не создавался.
 
@@ -63,6 +64,36 @@ Linux/systemd). Fake API/host не подтверждают работу GitHub 
 серверный selector не получает ошибочную межрелизную блокировку.
 Исторические документы этапа 6 и прежние GitHub-пробы сохранены как история.
 
+## Фактический GitHub rerun 20.10.2026
+
+По отдельному разрешению пользователя [PR #34](https://github.com/karateka-git/compadre-assistant/pull/34)
+слит в main обычным merge commit в 06:18:49 UTC. Head PR —
+`3678fdbda289998bf8ac383f71e3b5140d1c1061`; merge commit и текущий main —
+`3c28c14d5496b8fbace074d31b39a5a70a3ef9fb`. API подтвердил двух родителей:
+прежний main `56b18d4ad838202989c7790ea0d5934fbd7f5fa3` и head PR.
+
+Доверенный [rerun workflow 39379653797](https://github.com/karateka-git/compadre-assistant/actions/runs/39379653797)
+(attempt 1, job `118485595156`) завершился success. Лог checkout подтверждает
+точный merge SHA `3c28c14`, а шаг скрипта в 06:19:09 UTC подтвердил адресный
+POST для failed `hotfix-deps` job `118484372819` связанного
+[PR #35](https://github.com/karateka-git/compadre-assistant/pull/35).
+Его head не менялся: `f4ca22272aac449446125a358b2d612b776a677d`.
+
+[Release PR run 39379234178](https://github.com/karateka-git/compadre-assistant/actions/runs/39379234178)
+перешёл из attempt 1 failure с причиной «PR #34 ещё не слит в main» в
+attempt 2 success. Новый hotfix-deps job `118485683244` выполнился
+06:19:12–06:19:21 UTC. Успешный pr-fast сохранил исходные времена
+06:14:46–06:15:04 UTC: он не запускался повторно; в attempt 2 GitHub
+показывает его как job `118485684395`.
+
+Read-back подтвердил PR #35 OPEN, CLEAN, MERGEABLE при двух успешных checks;
+autoMergeRequest отсутствует. PR #35 не сливался, auto-merge не включался.
+Эта проба доказала адресный rerun готовой одной линии после main merge;
+она не воспроизводила несколько выбранных линий или pending-run race.
+Промежуточный run `39379222845` был отменён concurrency после редактирования
+описания PR; актуальный `39379234178` завершился штатно. Слияние и rerun не
+публиковали Release и не обращались к VPS.
+
 ## Что требуется в GitHub после разрешения push
 
 1. Доставить изменения workflow и скриптов через PR в main; проверить новые
@@ -102,4 +133,5 @@ inode/схемой. Первая попытка безопасно вернул�
 сравнения одинаковых systemd записей прошло повторное ревью.
 Полные факты и пути maintenance bundles сохранены в PRODUCTION/HISTORY и
 [runbook очистки](STEP7_5_SYSTEMD_CLEANUP.md). Новый Release не создавался.
-Весь шаг 7.5 остаётся открытым до GitHub-приёмки обновлённого fan-out.
+Весь шаг 7.5 остаётся открытым до GitHub-приёмки многолинейного fan-out
+и гонки с pending run; адресный rerun одной готовой линии уже подтверждён.
