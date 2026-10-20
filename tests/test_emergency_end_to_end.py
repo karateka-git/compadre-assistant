@@ -56,7 +56,7 @@ class PatchApi(api_tests.FakeApi):
     """Представляет два взаимно связанных merge PR и новый PATCH."""
 
     def __init__(self, baseline: str, release_sha: str, main_sha: str,
-                 release_head: str, main_head: str) -> None:
+                 release_head: str, main_head: str, branch: str = "release/1.0") -> None:
         """Создаёт историю fake GitHub вокруг локальных Git merge commits."""
         super().__init__()
         self.baseline = baseline
@@ -65,9 +65,11 @@ class PatchApi(api_tests.FakeApi):
         self.release_head = release_head
         self.main_head = main_head
         self.existing_main_commit = False
-        self.releases = [{"tag_name": "v1.0.0", "published_at": api_tests.MERGED_AT,
+        self.branch = branch
+        self.line = branch.removeprefix("release/")
+        self.releases = [{"tag_name": f"v{self.line}.0", "published_at": api_tests.MERGED_AT,
                           "draft": False, "prerelease": False}]
-        self.tags = [{"ref": "refs/tags/v1.0.0"}]
+        self.tags = [{"ref": f"refs/tags/v{self.line}.0"}]
 
     def _pr(self, number: int) -> dict:
         """Возвращает точный PR с взаимным URL на вторую ветку."""
@@ -80,14 +82,14 @@ class PatchApi(api_tests.FakeApi):
                  f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/{linked}\n"))
         return {"number": number, "body": body,
                 "merged_at": api_tests.MERGED_AT,
-                "base": {"ref": "release/1.0" if release else "main"},
+                "base": {"ref": self.branch if release else "main"},
                 "head": {"sha": self.release_head if release else self.main_head},
                 "merge_commit_sha": self.release_sha if release else self.main_sha}
 
     def get(self, path, **parameters):
         """Читает refs, PR, CI и Release без обращения к GitHub."""
-        if path == "/git/ref/heads/release/1.0":
-            return {"ref": "refs/heads/release/1.0", "object": {"type": "commit", "sha": self.release_sha}}
+        if path == f"/git/ref/heads/{self.branch}":
+            return {"ref": f"refs/heads/{self.branch}", "object": {"type": "commit", "sha": self.release_sha}}
         if path == "/git/ref/heads/main":
             return {"ref": "refs/heads/main", "object": {"type": "commit", "sha": self.main_sha}}
         if path.startswith("/pulls/"):
@@ -103,12 +105,12 @@ class PatchApi(api_tests.FakeApi):
                 return {"status": "identical", "base_commit": {"sha": first},
                         "head_commit": {"sha": last}}
             raise AssertionError(path)
-        if path == "/git/ref/tags/v1.0.0":
-            return {"ref": "refs/tags/v1.0.0", "object": {"type": "commit", "sha": self.baseline}}
-        if path == "/git/ref/tags/v1.0.1":
-            return {"ref": "refs/tags/v1.0.1", "object": {"type": "commit", "sha": self.release_sha}}
-        if path == "/releases/tags/v1.0.1":
-            return {"id": 42, "tag_name": "v1.0.1", "name": "v1.0.1",
+        if path == f"/git/ref/tags/v{self.line}.0":
+            return {"ref": f"refs/tags/v{self.line}.0", "object": {"type": "commit", "sha": self.baseline}}
+        if path == f"/git/ref/tags/v{self.line}.1":
+            return {"ref": f"refs/tags/v{self.line}.1", "object": {"type": "commit", "sha": self.release_sha}}
+        if path == f"/releases/tags/v{self.line}.1":
+            return {"id": 42, "tag_name": f"v{self.line}.1", "name": f"v{self.line}.1",
                     "target_commitish": self.release_sha, "body": self.posts[-1][1]["body"],
                     "immutable": True, "draft": False, "prerelease": False,
                     "published_at": "2026-10-16T09:00:00Z"}
@@ -117,7 +119,7 @@ class PatchApi(api_tests.FakeApi):
         if path in ("/rulesets/rule-suites/31", "/rulesets/rule-suites/32"):
             release = path.endswith("31")
             return {"id": 31 if release else 32,
-                    "ref": "refs/heads/release/1.0" if release else "refs/heads/main",
+                    "ref": f"refs/heads/{self.branch}" if release else "refs/heads/main",
                     "after_sha": self.release_sha if release else self.main_sha,
                     "result": "bypass" if release else "pass", "actor_id": 42288695,
                     "rule_evaluations": [{"rule_source": {"id": 25067104}}]}
@@ -142,15 +144,15 @@ class PatchApi(api_tests.FakeApi):
                      "completed_at": "2026-10-16T07:59:00Z",
                      "conclusion": "failure" if "/110/" in path else "success"}]
         if path == "/rulesets/rule-suites":
-            release = parameters["ref"].endswith("release/1.0")
+            release = parameters["ref"] == f"refs/heads/{self.branch}"
             return [{"id": 31 if release else 32, "ref": parameters["ref"],
                      "after_sha": self.release_sha if release else self.main_sha,
                      "pushed_at": api_tests.MERGED_AT,
                      "result": "bypass" if release else "pass"}]
         if path == "/actions/workflows/release-full.yml/runs":
             return [{"id": 120, "head_sha": self.release_sha,
-                     "head_branch": "release/1.0", "workflow_id": 21, "event": "push",
-                     "path": ".github/workflows/release-full.yml@release/1.0",
+                     "head_branch": self.branch, "workflow_id": 21, "event": "push",
+                     "path": f".github/workflows/release-full.yml@{self.branch}",
                      "repository": {"full_name": self.repository},
                      "created_at": "2026-10-16T08:01:00Z", "run_attempt": 1,
                      "status": "in_progress", "conclusion": None}]
@@ -348,6 +350,57 @@ class EmergencyEndToEndTests(unittest.TestCase):
                     publish.publish(existing, prepared_existing)
                     self.assertEqual(select.select_emergency_release(
                         existing, "v1.0.1").sha, release_sha)
+                    with patch("scripts.check_hotfix_pairs.reachable", return_value=False):
+                        with self.assertRaisesRegex(select.DeploySelectionError, "Main commit"):
+                            select.select_emergency_release(existing, "v1.0.1")
+
+                    multiline = PatchApi(baseline, release_sha, main_sha,
+                                         release_head, main_head, branch="release/2.0")
+                    multiline.existing_main_commit = True
+                    prepared_multiline = publish.prepare(
+                        multiline, "v2.0.1", release_sha, "patch", "сбой production",
+                        "Исправление", (10,),
+                    )
+                    history_before_publication = list(multiline.releases)
+                    publish.publish(multiline, prepared_multiline)
+                    self.assertEqual(select.select_emergency_release(
+                        multiline, "v2.0.1").sha, release_sha)
+
+                    def unfinished_older_line(number: int) -> dict:
+                        """Добавляет взаимные ссылки на ещё не слитый PR другой линии."""
+                        pr = PatchApi._pr(multiline, 10)
+                        if number == 12:
+                            return dict(pr, number=12, base={"ref": "release/1.0"},
+                                        merged_at=None, merge_commit_sha=None,
+                                        body=pr["body"] + "Hotfix-Links:\n"
+                                        f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/10\n")
+                        if number == 10:
+                            return dict(pr, body=pr["body"] + "Hotfix-Links:\n"
+                                        f"https://github.com/{select.EXPECTED_REPOSITORY}/pull/12\n")
+                        return PatchApi._pr(multiline, number)
+
+                    with patch.object(multiline, "_pr", side_effect=unfinished_older_line):
+                        with patch.object(multiline, "releases", history_before_publication):
+                            self.assertEqual(publish.check_release(
+                                multiline, "release/2.0", release_sha, baseline,
+                                require_full_ci=False), [(10, None, main_sha)])
+                        self.assertEqual(select.select_emergency_release(
+                            multiline, "v2.0.1").sha, release_sha)
+                        with patch.object(host_tests, "NEW_SHA", release_sha), \
+                             patch.object(host_tests, "OLD_SHA", baseline):
+                            independent = IntegratedHost(root / "independent-host", multiline)
+                            with ExitStack() as stack:
+                                for item in host_tests.DeployProdTests()._patches():
+                                    stack.enter_context(item)
+                                prod.deploy(independent, "v2.0.1", emergency=True,
+                                            reason="независимый выпуск")
+                            state = prep.read_state(independent.state_dir, independent.checkout)
+                            self.assertEqual(state["stage"], "success")
+                            self.assertEqual(state["deployment"]["reason"], "независимый выпуск")
+                            self.assertEqual((independent.head, independent.current_image,
+                                              independent.running),
+                                             (release_sha, host_tests.NEW_IMAGE, True))
+                            self.assertFalse((independent.state_dir / "deploy-in-progress").exists())
             finally:
                 os.chdir(prior)
 

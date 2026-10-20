@@ -137,13 +137,12 @@ class HotfixTests(unittest.TestCase):
                          [(10, None, MAIN_SHA)])
 
     def test_existing_main_commit_multiple_lines_need_mutual_links(self) -> None:
-        """Несколько выбранных релизных PR делят SHA и ждут старшую линию."""
+        """Релизные PR с общим main commit независимы и сохраняют взаимные URL."""
         self.api.add_second_line()
         self.api.pulls[10]["body"] = main_commit() + links(12)
         self.api.pulls[12]["body"] = main_commit() + links(10)
         self.assertEqual(hotfix.check_pr(self.api, 10, "release/1.0"), (None, (10, 12)))
-        with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
-            hotfix.check_pr(self.api, 12, "release/1.1")
+        self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (None, (10, 12)))
         self.api.merge(10, RELEASE_SHA)
         self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (None, (10, 12)))
         self.api.pulls[12]["body"] = main_commit(OTHER_HEAD) + links(10)
@@ -160,6 +159,12 @@ class HotfixTests(unittest.TestCase):
         self.api.compare_status = "diverged"
         with self.assertRaisesRegex(hotfix.HotfixError, "недостижим"):
             hotfix.check_pr(self.api, 10, "release/1.0")
+        self.api.merge(10, RELEASE_SHA)
+        for full in (True, False):
+            with self.subTest(require_full_ci=full):
+                with self.assertRaisesRegex(hotfix.HotfixError, "недостижим"):
+                    hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE,
+                                         require_full_ci=full)
 
     def test_release_requires_main_merge_and_reachability(self) -> None:
         """Флаг merged без достижимости merge commit в main недостаточен."""
@@ -170,20 +175,38 @@ class HotfixTests(unittest.TestCase):
         with self.assertRaisesRegex(hotfix.HotfixError, "не подтверждён"):
             hotfix.check_pr(self.api, 10, "release/1.0")
 
-    def test_selected_lines_merge_old_to_new(self) -> None:
-        """Новая выбранная линия ждёт предыдущую; main не ждёт ни одну."""
+    def test_selected_lines_merge_independently_after_main(self) -> None:
+        """Обе релизные линии допускаются после main независимо от других PR."""
         self.api.add_second_line()
         self.api.merge(11, MAIN_SHA)
         self.assertEqual(hotfix.check_pr(self.api, 11, "main"), (11, (10, 12)))
         self.assertEqual(hotfix.check_pr(self.api, 10, "release/1.0"), (11, (10, 12)))
-        with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
-            hotfix.check_pr(self.api, 12, "release/1.1")
+        self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (11, (10, 12)))
         self.api.merge(10, RELEASE_SHA)
         self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (11, (10, 12)))
         self.api.heads["release/1.0"] = OTHER_HEAD
         self.api.compare_status = "behind"
-        with self.assertRaisesRegex(hotfix.HotfixError, "не подтверждён"):
-            hotfix.check_pr(self.api, 12, "release/1.1")
+        self.assertEqual(hotfix.check_pr(self.api, 12, "release/1.1"), (11, (10, 12)))
+
+    def test_other_open_release_does_not_block_ordinary_or_emergency_publication(self) -> None:
+        """Публикация своей линии ждёт main, но не PR другой выбранной линии."""
+        self.api.add_second_line()
+        self.api.merge(11, MAIN_SHA)
+        self.api.merge(10, RELEASE_SHA)
+        # Меняем номера линий, чтобы незавершённая линия была более старой.
+        self.api.pulls[10]["base"]["ref"] = "release/2.0"
+        self.api.pulls[12]["base"]["ref"] = "release/1.0"
+        self.api.heads["release/2.0"] = RELEASE_SHA
+        for full in (True, False):
+            with self.subTest(full=full):
+                self.assertEqual(hotfix.check_release(
+                    self.api, "release/2.0", RELEASE_SHA, BASE, require_full_ci=full,
+                ), [(10, 11, MAIN_SHA)])
+                self.api.pulls[11]["merged_at"] = None
+                with self.assertRaisesRegex(hotfix.HotfixError, "ещё не слит"):
+                    hotfix.check_release(self.api, "release/2.0", RELEASE_SHA, BASE,
+                                         require_full_ci=full)
+                self.api.merge(11, MAIN_SHA)
 
     def test_wrong_repo_missing_reciprocal_and_stale_body_fail(self) -> None:
         """Свежая проверка читает текущие описания и точные URL репозитория."""

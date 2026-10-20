@@ -1,6 +1,6 @@
 # Production VPS
 
-## Текущее состояние после выпуска v1.0.4 (2026-10-19)
+## Текущее состояние после выпуска v1.0.4 (проверено 2026-10-20)
 
 После связанных PR [#31](https://github.com/karateka-git/compadre-assistant/pull/31)
 в `main` и [#32](https://github.com/karateka-git/compadre-assistant/pull/32)
@@ -33,7 +33,8 @@
 `obs-chat-bot-backup.service`, который использует ночной timer: он завершился
 успешно, новая `app-20261019T140536Z.db` прошла integrity check, сохранены
 семь последних файлов. Timer `active/enabled`, следующий автоматический запуск
-назначен на 2026-10-20 03:15 UTC. Его результат ещё нужно проверить.
+назначен на 2026-10-20 03:15 UTC. Результат первого автоматического запуска
+подтверждён ниже.
 
 Контролируемый reboot изменил boot ID с
 `9e779e1c-c56b-4db6-9c14-2aa66f7ce576` на
@@ -42,8 +43,74 @@
 на том же image ID с нулём рестартов. После reboot повторно подтверждены
 polling, отсутствие дублей, целостность SQLite, `stage=success`, отсутствие
 marker и активный backup timer. Повтор `deploy-prod v1.0.4` вернул
-`already_installed` без пересоздания контейнеров. Шаги 5.5 и 7.4 остаются
-открытыми до проверки следующего автоматического ночного backup.
+`already_installed` без пересоздания контейнеров.
+
+### Первый автоматический ночной backup после выпуска
+
+20.10.2026 timer автоматически запустил `obs-chat-bot-backup.service` в
+03:15:02 UTC. Служба завершилась в 03:15:03 UTC с `Result=success` и
+`ExecMainStatus=0`; журнал записал новую копию
+`/var/backups/obs-chat-bot/app-20261020T031502Z.db` и `retained=7`.
+Файл размером 12 664 832 байта существует, его `PRAGMA integrity_check`
+вернул `ok`. В каталоге осталось семь файлов `app-*.db`. Timer остаётся
+`active/enabled`, следующий запуск назначен на 21.10.2026 03:15 UTC.
+
+После ночной копии `obs-chat-bot.service` имеет `Result=success` и
+`ActiveState=active`. Контейнеры Telegram и VK работают и имеют `healthy`,
+нулевой restart count, общий image ID
+`sha256:434ab2d8860bee4dfddfeb7311973813ca3f41e47ede81d509525e973f2aba3d`.
+Checkout чистый и указывает на SHA выпуска
+`d6b7d9267e7754ee90957d9057e2a4eb41f789c1`. В `state.json` записаны
+`stage=success` и `last_good.version=v1.0.4`; marker незавершённого deploy
+отсутствует. Рабочая SQLite сохранила inode `501886`. Проверка была только
+читающей; backup, deploy и перезапуски вручную не запускались. Живая проверка
+обоих каналов, reboot и повтор команды были подтверждены ранее. Шаги 5.5 и
+7.4.2 приняты 20.10.2026.
+
+### Удаление устаревшего systemd drop-in 20.10.2026
+
+По отдельному разрешению пользователя в окне 06:09:03–06:10:24 UTC под
+общим `deploy.lock` удалён только
+`/etc/systemd/system/obs-chat-bot.service.d/90-deploy-pinned.conf`, выполнены
+`daemon-reload` и один контролируемый restart `obs-chat-bot.service`.
+Сценарий завершился `WINDOW_OK` с кодом 0. Новый проверенный maintenance bundle
+сохранён в root:root 0700
+`/var/lib/compadre-assistant-deploy/maintenance-remove90-7e61b6fz`;
+приватные копии pin/state имеют 0600. Срок удаления копий не согласован.
+
+Независимая read-only проверка в 06:10:55 UTC подтвердила ровно
+`channels.conf`, `zz-deploy-pinned.conf` в загруженных `DropInPaths`, отсутствие
+90 и `NeedDaemonReload=no`. Effective команды, privilege flags,
+EnvironmentFiles и marker guard сохранены; повторные одинаковые
+EnvironmentFile/Condition из 90 и zz сравнивались по смыслу, а строгий
+`Host.installed` проверял допустимость каждой записи. Проверены root-private
+pin и Compose overrides, их байты и `state.json` не изменились.
+
+Service `active/enabled`, `Result=success`, ActiveEnterTimestamp —
+06:09:23 UTC. `Host.verify_both` подтвердил health, OCI revision и polling
+обоих каналов; дублирующих Docker polling нет. Оба контейнера используют
+прежний image ID `sha256:434ab2d8860bee4dfddfeb7311973813ca3f41e47ede81d509525e973f2aba3d`,
+имеют `healthy`, restart count 0 и `unless-stopped`. Чистый detached checkout
+остался на `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`, state — `success`,
+last_good — `v1.0.4`, marker отсутствует. Backup timer `active/enabled`,
+следующий запуск — 21.10.2026 03:15 UTC; окно не пересекалось с ночной копией.
+SQLite сохранила inode 501886, integrity `ok`, схему `0001_initial_schema.sql`.
+
+Предыдущая попытка 06:07:11–06:07:18 UTC безопасно вернула 90 до restart:
+сравнение ошибочно считало два одинаковых EnvironmentFiles/Conditions
+отличием от одной записи после удаления 90. Автоматический возврат завершился
+`ROLLBACK_OK`; независимый read-back в 06:07:45 UTC подтвердил исходную
+конфигурацию и прежний ActiveEnterTimestamp. Bundle первой попытки сохранён:
+`/var/lib/compadre-assistant-deploy/maintenance-remove90-j9jmxvj4`.
+После исправления сравнения, четырёх локальных проверок и повторного preflight
+вторая попытка отдельно принята на ревью. Историческая копия
+`zz-deploy-pinned.v101-saved-d3fa4efa` не оканчивается на `.conf`, systemd её
+не загружает; этот файл не изменялся и не удалялся.
+
+Это обслуживание действующего v1.0.4, новый Release не публиковался.
+Эксплуатационная очистка 7.5 выполнена; весь шаг остаётся открытым до
+GitHub-приёмки обновлённого fan-out. Подробный порядок возврата — в
+[runbook очистки](auto-deploy-main/STEP7_5_SYSTEMD_CLEANUP.md).
 
 ## История отказа live выпуска 2026-10-18
 

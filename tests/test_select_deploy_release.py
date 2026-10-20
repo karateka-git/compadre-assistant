@@ -312,6 +312,7 @@ class SelectDeployReleaseTests(unittest.TestCase):
         with patch.object(selector, "_verify_emergency_pulls"), \
              self.assertRaises(selector.ControllerError):
             selector.select_emergency_release(api, api.version)
+
         api = self._emergency_api()
         api.release["body"] += "Причина: вторая причина\n"
         with patch.object(selector, "_verify_emergency_pulls"), \
@@ -332,6 +333,23 @@ class SelectDeployReleaseTests(unittest.TestCase):
         with patch.object(selector, "_verify_emergency_pulls"), \
              self.assertRaises(selector.DeploySelectionError):
             selector.select_emergency_release(api, api.version)
+
+    def test_emergency_old_tag_requires_ancestor_proof(self) -> None:
+        """Поздняя вершина ветки требует ahead/base/merge base даже без полного CI."""
+        api = self._emergency_api("v1.0.1")
+        api.head = NEW_HEAD
+        with patch.object(selector, "_verify_emergency_pulls"):
+            self.assertEqual(selector.select_emergency_release(api, api.version).sha, SHA)
+        self.assertEqual(api.compare_calls, 1)
+        for response in ({"status": "diverged", "base_commit": {"sha": SHA},
+                          "merge_base_commit": {"sha": SHA}},
+                         {"status": "ahead", "base_commit": {"sha": SHA},
+                          "merge_base_commit": {"sha": NEW_HEAD}}):
+            with self.subTest(response=response):
+                api.compare_response = response
+                with patch.object(selector, "_verify_emergency_pulls"), \
+                     self.assertRaises(selector.DeploySelectionError):
+                    selector.select_emergency_release(api, api.version)
 
 
 if __name__ == "__main__":

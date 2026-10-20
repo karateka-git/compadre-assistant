@@ -193,7 +193,7 @@ def check_links(api: GitHub, number: int, expected_branch: str) -> tuple[int | N
 
 
 def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int | None, tuple[int, ...]]:
-    """Проверяет живые ссылки и слияние зависимостей release PR."""
+    """Проверяет взаимные ссылки и вхождение основания release PR в main."""
     main, commit, releases = linked_group(api, number)
     current = next((pr for pr in ((main,) if main is not None else ()) + releases
                     if pr["number"] == number), None)
@@ -205,10 +205,6 @@ def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int | None
             _merged_reachable(api, main, "main")
         elif commit is None or not reachable(api, commit, "main"):
             raise HotfixError("Указанный main commit недостижим")
-        for previous in releases:
-            if previous["number"] == number:
-                break
-            _merged_reachable(api, previous, previous["base"]["ref"])
     return main["number"] if main is not None else None, tuple(pr["number"] for pr in releases)
 
 
@@ -327,10 +323,6 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
             main_sha = commit
         else:
             raise HotfixError("Указанный main commit недостижим")
-        for previous in selected:
-            if previous["number"] == release["number"]:
-                break
-            _merged_reachable(api, previous, previous["base"]["ref"])
         result.append((release["number"], main["number"] if main is not None else None,
                        main_sha))
     if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
