@@ -2,35 +2,16 @@
 
 Compadre Assistant — личный ассистент в Telegram и VK с возможностями Obsidian и Ask. В режиме Obsidian он помогает превращать статьи в пополняемый vault. Он принимает ссылку, извлекает и анализирует материал, ищет связанные заметки, предлагает изменение в Markdown и записывает его в GitHub только после явного подтверждения пользователя.
 
-## Статус
+## Состояние проекта
 
-Статус на 2026-10-13: проект выпущен, переход к модульному ассистенту завершён.
-Production на VPS переключён на
-Compadre Assistant: Telegram-бот `@CompadreAssistant_bot` и сообщество VK
-`vk.com/compadre_assistant`. Оба контейнера `tg_assistant` и `vk_assistant`
-прошли проверку healthy после перезапуска; Telegram polling и VK Long Poll
-подтверждены. Telegram работает через отдельный WireGuard-туннель и SOCKS5-прокси.
-
-Реализованы режимы по чатам, адресные операции, независимые настройки
-каналов/возможностей и Ask. Пользовательский Obsidian flow в Telegram прошёл
-анализ статьи, review и подтверждённую запись в vault `karateka-git/my_obs_data`.
-Текущее развёртывание описано в [production-инструкции](docs/PRODUCTION.md),
-завершённые работы — в [истории](docs/HISTORY.md).
-
-Репозиторий переименован в
-[`karateka-git/compadre-assistant`](https://github.com/karateka-git/compadre-assistant).
-Существующая GitHub App переименована в **Compadre Assistant**, её действующий
-slug — `compadre-assistant`; прежний App ID и доступ к vault сохранены.
-
-Проверка 2026-10-10: 548 unittest, три автономных
-smoke и healthcheck локального профиля с временной БД прошли. Read-only API
-подтвердили внешние имена и чтение существующего vault через прежний PEM после
-переименования App. Локально на новом Telegram-боте с временной БД проверены
-`/start`, `/register` с сохранением имени и `/ask`. Контейнерная сборка,
-CLI smoke и healthcheck прошли без сети на временной БД и фиктивном профиле;
-контейнерный polling в рамках той проверки не запускался.
-
-Дальнейшая работа перечислена в [бэклоге](docs/BACKLOG.md): среди возможных задач — фоновое ревью статей и переход на внешнюю PostgreSQL для App Platform. Завершённые работы сохранены в [истории](docs/HISTORY.md).
+Реализованы общие профили Telegram и VK, режимы по чатам, независимые
+возможности Ask и Obsidian, индекс vault и подтверждаемая запись в GitHub.
+Последний документированный снимок VPS относится к 20.10.2026:
+[v1.0.4](docs/PRODUCTION.md#последний-проверенный-снимок--20102026).
+Перед эксплуатационным действием состояние сервера проверяют заново.
+Изменения опубликованных версий перечислены в
+[GitHub Releases](https://github.com/karateka-git/compadre-assistant/releases),
+открытые задачи — в [BACKLOG.md](docs/BACKLOG.md).
 
 ## Как это работает для пользователя
 
@@ -127,9 +108,10 @@ embeddings поиск использует FTS fallback.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
 - [Эксплуатация](docs/OPERATIONS.md) — production VPS, обновления, логи и backup.
 - [Релизы](docs/RELEASES.md) — CI, релизные линии, версии и аварийный маршрут.
+- [Правила документации](docs/DOCUMENTATION_GUIDELINES.md) — структура, схемы, точность и проверка текстов.
 - [Production VPS](docs/PRODUCTION.md) — контекст доступа и текущее состояние сервера без секретов.
 - [GitHub App](docs/GITHUB_APP.md) — настройка прав и подключение Obsidian vault.
 - [Бэклог](docs/BACKLOG.md) — задачи, которые ещё не начаты.
-- [История](docs/HISTORY.md) — завершённые задачи и прежние критерии разработки.
-- [Журнал решений](docs/DECISIONS.md) — архитектурные решения и их причины.
+- [GitHub Releases](https://github.com/karateka-git/compadre-assistant/releases) — изменения опубликованных версий.
+- [Действующие решения](docs/DECISIONS.md) — причины архитектурных и эксплуатационных решений.
 - [Document chunker](docs/DOCUMENT_CHUNKER.md) — выделенный модуль разбиения документов.
