@@ -624,8 +624,8 @@ def _prepare_candidate(
         before = _applied_names(database)
         expected = _schema_names(host.checkout)
         prep.validate_schema(database, before)
-        if before != expected:
-            raise DeployError("Новые миграции требуют доказательства совместимости со старым кодом и ручного плана")
+        if expected[:len(before)] != before:
+            raise DeployError("Применённые миграции не являются префиксом candidate")
         _same_selection(host, selected)
         prep.require_exact_tag(host.checkout, selected.version, selected.sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
@@ -675,6 +675,12 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
     if not all(isinstance(x, str) for x in (old, old_sha, old_tag)) or not isinstance(before, list):
         _degrade(host, state, "Нет проверенного rollback manifest")
         raise DeployError("Незавершённый выпуск требует ручного восстановления")
+    after = state.get("schema_after")
+    if isinstance(after, list) and after != before and state.get("migration_attempted") is True:
+        # Даже отсутствие новой записи в schema_migrations не доказывает,
+        # что SQL не изменил схему до прерывания процесса.
+        _degrade(host, state, "Новая миграция могла изменить схему")
+        raise DeployError("После попытки новой миграции автоматический возврат запрещён")
     try:
         current_schema = _applied_names(host.checkout / "data/app.db")
     except Exception as error:
@@ -811,7 +817,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             state = {
                 "candidate": asdict(selected) | {"image_id": candidate_id, "tag": tag},
                 "old_sha": old_sha, "old_image_id": old_id, "old_tag": old_tag,
-                "schema_before": before, "last_good": last_good,
+                "schema_before": before, "schema_after": expected,
+                "migration_attempted": False, "last_good": last_good,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
                 "deployment": state.get("deployment"),
             }
@@ -831,9 +838,11 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             _state(host, state, "writers_stopped")
             backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
             prep.backup_sqlite(database, backup)
+            prep.validate_schema(backup, before)
             _state(host, state, "backup_verified", backup_id=str(backup))
-            # Проверка выше доказала, что новых SQL нет; команда всё равно отдельная.
-            _state(host, state, "migration_started")
+            # Стадия фиксируется до мигратора: прерывание после неё запрещает
+            # автоматический запуск старого кода при новом миграционном наборе.
+            _state(host, state, "migration_started", migration_attempted=True)
             host.migrate(candidate_id)
             prep.validate_schema(database, expected)
             _state(host, state, "schema_verified")
