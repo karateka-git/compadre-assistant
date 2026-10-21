@@ -11,6 +11,11 @@ from compadre_assistant.core.presentation.incoming.ports import (
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry, CapabilityAccess
+from compadre_assistant.core.domain.capability_preferences import (
+    CapabilityDefault, GetUserCapabilitySelections, SetUserCapabilityPreference,
+    UserCapabilityPreferenceRepository,
+)
 from compadre_assistant.core.domain.users.identity import (
     CreatedLinkCode,
     IdentityAlreadyBoundError,
@@ -92,11 +97,55 @@ class IncomingMessageDispatcher:
         registry: CapabilityRegistry,
         user_identity_service: UserIdentityService,
         chat_mode_repository: ChatModeRepository,
+        capability_preference_repository: UserCapabilityPreferenceRepository,
     ) -> None:
         """Внедряет общий реестр и repositories независимого профиля."""
         self._registry = registry
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
+        self._capability_preference_repository = capability_preference_repository
+
+    def _personal_registry(self, user: AppUser) -> PersonalCapabilityRegistry:
+        """Читает выбор один раз после разрешения AppUser для допуска события."""
+        selections = GetUserCapabilitySelections(
+            self._capability_preference_repository, self._capability_defaults()
+        ).execute(user.id)
+        return self._registry.for_user(selections)
+
+    def _capability_defaults(self) -> tuple[CapabilityDefault, ...]:
+        """Передаёт domain только устойчивые ID и defaults общего каталога."""
+        return tuple(
+            CapabilityDefault(entry.capability_id, entry.enabled_by_default)
+            for entry in self._registry.descriptors()
+        )
+
+    @staticmethod
+    def _blocked_reply(access: CapabilityAccess) -> str:
+        """Объясняет причину отказа без открытия предметного обработчика."""
+        if not access.server_available:
+            return (
+                f"Возможность `{access.descriptor.capability_id}` недоступна на сервере. "
+                "Список: `/capabilities`."
+            )
+        return (
+            f"Возможность `{access.descriptor.capability_id}` лично выключена. "
+            f"Включить: `/enable {access.descriptor.capability_id}`. Список: `/capabilities`."
+        )
+
+    @staticmethod
+    def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
+        """Показывает известные ID, личный выбор и серверную доступность."""
+        lines = ["Личные возможности:"]
+        for access in personal.access:
+            lines.append(
+                f"`{access.descriptor.capability_id}` — {access.descriptor.description}. "
+                f"Личный выбор: {'включена' if access.user_enabled else 'выключена'}; "
+                f"сервер: {'доступна' if access.server_available else 'недоступна'}."
+            )
+        if not personal.access:
+            lines.append("Сейчас нет известных возможностей.")
+        lines.append("Управление: `/enable <id>`, `/disable <id>`. Выбор действует во всех привязанных каналах.")
+        return "\n".join(lines)
 
     def execute(
         self,
@@ -142,11 +191,21 @@ class IncomingMessageDispatcher:
             or self._registry.disabled_by_command(text) is not None
         )
         if command is ChatCommand.HELP:
+            user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.HELP,
-                capability_help=self._registry.help(),
+                capability_help=self._personal_registry(user).help() if user is not None else None,
             )
         identity = _incoming_identity_from_event(event)
+        if command is ChatCommand.CAPABILITIES:
+            if parsed is not None and parsed.arguments:
+                return IncomingResponse("Используй `/capabilities` без аргументов.")
+            user = self._user_identity_service.resolve(identity)
+            if user is None:
+                return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+            return IncomingResponse(self._capability_catalog(self._personal_registry(user)))
+        if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
+            return self._change_capability(command, parsed.arguments if parsed else "", identity)
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if parts and parts[0] == "core":
@@ -180,21 +239,23 @@ class IncomingMessageDispatcher:
             user = self._user_identity_service.resolve(identity)
             if user is None:
                 return ProcessIncomingMessageResult(IncomingMessageResultType.UNKNOWN_IDENTITY)
+            personal = self._personal_registry(user)
             mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
             target = parts[0] if parts else ""
             if mode is None or mode.capability_id != target:
-                capability = self._registry.by_id(target)
+                capability = personal.by_id(target)
                 return IncomingResponse(
                     f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
                     if capability
-                    else self._registry.entry_hint()
+                    else personal.entry_hint()
                 )
-            return self._dispatch(user, event, completion_handler)
+            return self._dispatch(user, event, completion_handler, personal)
 
         if command is ChatCommand.START:
             user = self._user_identity_service.resolve(identity)
             if user is None:
                 return ProcessIncomingMessageResult(type=IncomingMessageResultType.START_UNREGISTERED)
+            personal = self._personal_registry(user)
             if user.display_name is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
@@ -203,7 +264,7 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
 
         if command is ChatCommand.REGISTER:
@@ -222,7 +283,7 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=existing,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=self._personal_registry(existing).entry_hint(),
             )
 
         if command is ChatCommand.LINK:
@@ -271,11 +332,12 @@ class IncomingMessageDispatcher:
         if user is None:
             return ProcessIncomingMessageResult(type=IncomingMessageResultType.UNKNOWN_IDENTITY)
         if command is ChatCommand.EXIT:
+            personal = self._personal_registry(user)
             self._chat_mode_repository.clear(ChatModeKey(user.id, event.channel, event.chat_id))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_EXITED,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
         if command is ChatCommand.LINK_CODE:
             if user.display_name is None:
@@ -290,20 +352,28 @@ class IncomingMessageDispatcher:
                 link_code=link_code,
             )
         if command is ChatCommand.NAME:
+            personal = self._personal_registry(user)
             return self._save_name(
                 parsed.arguments if parsed is not None else "",
                 user,
                 registration=user.display_name is None,
+                personal=personal,
             )
         if command is ChatCommand.STATUS:
+            personal = self._personal_registry(user)
             mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+            access = personal.status(mode.capability_id) if mode else None
+            status_hint = (
+                f"\n{self._blocked_reply(access)}"
+                if access is not None and not access.effective else ""
+            )
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.PROFILE_STATUS,
                 app_user=user,
                 capability_reply=(
                     f"Профиль: {user.display_name or 'имя ещё не задано'}.\n"
                     f"Режим этого чата: {mode.capability_id if mode else 'не выбран'}.\n"
-                    f"{self._registry.entry_hint()}"
+                    f"{personal.entry_hint()}{status_hint}"
                 ),
             )
         if user.display_name is None:
@@ -312,14 +382,61 @@ class IncomingMessageDispatcher:
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                     app_user=user,
                 )
-            return self._save_name(text, user, registration=True)
-        return self._dispatch(user, event, completion_handler)
+            return self._save_name(
+                text, user, registration=True, personal=self._personal_registry(user)
+            )
+        return self._dispatch(user, event, completion_handler, self._personal_registry(user))
+
+    def _change_capability(
+        self, command: ChatCommand, arguments: str, identity: IncomingIdentity
+    ) -> IncomingResponse:
+        """Проверяет общую команду и сохраняет один личный выбор AppUser.
+
+        Args:
+            command: Команда включения либо отключения.
+            arguments: Строка аргументов после команды.
+            identity: Разрешаемая identity исходного канала.
+
+        Returns:
+            Подтверждение собственного commit или понятный отказ без записи.
+        """
+        parts = arguments.split()
+        if len(parts) != 1:
+            return IncomingResponse(f"Используй `{command.usage}`. Список: `/capabilities`.")
+        user = self._user_identity_service.resolve(identity)
+        if user is None:
+            return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+        access = self._personal_registry(user).status(parts[0])
+        if access is None:
+            return IncomingResponse(
+                f"Неизвестная возможность. Используй `{command.usage}`. "
+                "Список: `/capabilities`."
+            )
+        enabled = command is ChatCommand.ENABLE
+        if enabled and not access.server_available:
+            return IncomingResponse(
+                f"Возможность `{parts[0]}` недоступна на сервере. Личный выбор не изменён. "
+                "Список: `/capabilities`."
+            )
+        try:
+            changed = SetUserCapabilityPreference(
+                self._capability_preference_repository, self._capability_defaults()
+            ).execute(user.id, parts[0], enabled)
+        except Exception as error:
+            LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
+            return IncomingResponse("Не удалось сохранить выбор. Попробуй позже.", error)
+        state = "включена" if enabled else "выключена"
+        return IncomingResponse(
+            f"Возможность `{parts[0]}` {'уже ' if not changed else ''}{state}. "
+            "Выбор действует во всех привязанных каналах. Режим и данные сохранены."
+        )
 
     def _dispatch(
         self,
         user: AppUser,
         event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None,
+        personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult | IncomingResponse:
         """Выбирает вход по команде или ID без анализа предметного содержания."""
         context = HandlerContext(
@@ -327,14 +444,14 @@ class IncomingMessageDispatcher:
             CallbackReplyDelivery(completion_handler) if completion_handler else None,
         )
         key = ChatModeKey(user.id, event.channel, event.chat_id)
-        disabled = self._registry.disabled_by_command(event.text)
-        if disabled is not None:
+        blocked = personal.blocked_by_command(event.text)
+        if blocked is not None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.CAPABILITY_DISABLED,
                 app_user=user,
-                capability_reply=f"Возможность `{disabled.capability_id}` отключена.\n{self._registry.entry_hint()}",
+                capability_reply=self._blocked_reply(blocked),
             )
-        entry = self._registry.by_command(event.text)
+        entry = personal.by_command(event.text)
         if entry is not None:
             state = self._chat_mode_repository.get_state(key)
             try:
@@ -363,14 +480,18 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
-        capability = self._registry.by_id(state.capability_id)
+        capability = personal.by_id(state.capability_id)
         if capability is None:
+            access = personal.status(state.capability_id)
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_UNAVAILABLE,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=(
+                    f"{self._blocked_reply(access)}\n{personal.entry_hint()}"
+                    if access is not None else personal.entry_hint()
+                ),
             )
         try:
             result = capability.handle(context, event)
@@ -393,6 +514,7 @@ class IncomingMessageDispatcher:
         user: AppUser,
         *,
         registration: bool,
+        personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult:
         """Сохраняет имя и завершает регистрацию без выбора возможности."""
         try:
@@ -412,7 +534,7 @@ class IncomingMessageDispatcher:
                 else IncomingMessageResultType.NAME_UPDATED
             ),
             app_user=updated,
-            capability_reply=self._registry.entry_hint() if registration else None,
+            capability_reply=personal.entry_hint() if registration else None,
         )
 
 

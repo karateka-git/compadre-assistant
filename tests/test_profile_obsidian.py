@@ -12,6 +12,8 @@ from compadre_assistant.capabilities.obsidian.bootstrap import ObsidianProcessRu
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
@@ -55,6 +57,14 @@ class ProfileObsidianTest(unittest.TestCase):
         self.process("/register", channel=channel, **overrides)
         reply = self.process("Имя", channel=channel, **overrides)
         self.assertIn("Регистрация завершена", reply.text)
+        with connect_database(self.database_path) as connection:
+            owner = connection.execute(
+                "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
+                (channel, "external"),
+            ).fetchone()[0]
+            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                UserCapabilityPreference(owner, "obsidian", True)
+            )
 
     def test_registration_and_profile_commands_work_with_disabled_obsidian(self) -> None:
         """Отключённый модуль не мешает имени, справке и связи каналов."""
@@ -71,7 +81,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 self.assertIn("/register", help_text)
                 self.assertNotIn("/github_status", help_text)
                 self.assertNotIn("/obsidian", help_text)
-                self.assertIn("отключена", self.process("/obsidian https://example.com/article", **options).text)
+                self.assertIn("недоступна на сервере", self.process("/obsidian https://example.com/article", **options).text)
                 factory.assert_not_called()
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
@@ -146,6 +156,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 dispatcher = create_incoming_message_dispatcher(
                     capabilities=(handler,), user_identity_service=create_user_identity_service(connection),
                     chat_mode_repository=SQLiteChatModeRepository(connection),
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                 )
                 event = self.event("/obsidian Материал https://example.com/article", channel)
                 with patch.object(handler, "enter", wraps=handler.enter) as enter:

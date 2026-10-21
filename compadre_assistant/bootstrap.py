@@ -49,6 +49,8 @@ from compadre_assistant.capabilities.obsidian.smoke import (
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreferenceRepository
 from compadre_assistant.core.domain.chat_modes import ChatModeRepository
 from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteAppUserRepository,
@@ -77,6 +79,7 @@ def create_incoming_message_dispatcher(
     capabilities: tuple[IncomingCapabilityPort, ...],
     user_identity_service: UserIdentityService,
     chat_mode_repository: ChatModeRepository,
+    capability_preference_repository: UserCapabilityPreferenceRepository,
     disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
@@ -85,6 +88,7 @@ def create_incoming_message_dispatcher(
         capabilities: Только включённые обработчики, включая пользовательские реализации.
         user_identity_service: Общий сервис проверенных identities.
         chat_mode_repository: Хранилище режима конкретного чата.
+        capability_preference_repository: Хранилище личного выбора AppUser.
         disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
 
     Returns:
@@ -97,6 +101,7 @@ def create_incoming_message_dispatcher(
         registry=CapabilityRegistry(capabilities, disabled_capabilities),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
+        capability_preference_repository=capability_preference_repository,
     )
 
 
@@ -162,6 +167,7 @@ class ChannelMessageProcessor:
                 registry=self._registry,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
             return dispatcher.execute(incoming_message, completion_handler)
 

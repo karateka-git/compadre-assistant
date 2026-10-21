@@ -25,6 +25,7 @@ from compadre_assistant.capabilities.obsidian.presentation.processing import Obs
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from test_incoming_boundary import MemoryChatModes
+from capability_preference_helpers import MemoryCapabilityPreferences
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
@@ -614,10 +615,13 @@ def _make_use_case(**dependencies: object) -> PresentationScenario:
     dependencies.setdefault("vault_selection_manager", FakeVaultSelectionManager(selected=_test_vault(42)))
     obsidian = RecordingObsidianHandler(**dependencies)
     modes = MemoryChatModes()
+    preferences = MemoryCapabilityPreferences()
+    preferences.rows[(identity_service.app_user.id, "obsidian")] = True
     dispatcher = IncomingMessageDispatcher(
         registry=CapabilityRegistry((obsidian,)),
         user_identity_service=identity_service,
         chat_mode_repository=modes,
+        capability_preference_repository=preferences,
     )
     return PresentationScenario(dispatcher, obsidian, modes)
 

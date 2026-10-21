@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 import sqlite3
 import tempfile
@@ -25,6 +25,8 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import
 from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import GitHubAccountNotConnectedError
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
@@ -46,6 +48,9 @@ class CapabilityCompositionTest(unittest.TestCase):
             service = create_user_identity_service(connection)
             user = service.register(IncomingIdentity("telegram", "external", "chat"))
             self.user = service.update_display_name(app_user_id=user.id, display_name="Тест")
+            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                UserCapabilityPreference(self.user.id, "obsidian", True)
+            )
         self.key = ChatModeKey(self.user.id, "telegram", "chat")
         self.article = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()
@@ -107,6 +112,18 @@ class CapabilityCompositionTest(unittest.TestCase):
         for connection in connections:
             with self.assertRaises(sqlite3.ProgrammingError):
                 connection.execute("SELECT 1")
+
+    def test_obsidian_commands_toggle_access_without_erasing_saved_mode(self) -> None:
+        """Выключение Obsidian сохраняет маршрут и возвращает его после enable."""
+        self.assertIn("Режим Obsidian", self.process("/obsidian").text)
+        with connect_database(self.database_path) as connection:
+            before = SQLiteChatModeRepository(connection).get_state(self.key)
+        self.assertIn("выключена", self.process("/disable obsidian").text)
+        self.assertIn("/enable obsidian", self.process("обычный текст").text)
+        with connect_database(self.database_path) as connection:
+            self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
+        self.assertIn("включена", self.process("/enable obsidian").text)
+        self.assertNotIn("/enable obsidian", self.process("обычный текст").text)
 
     def test_processor_closes_only_owned_process_clients(self) -> None:
         """Остановка процессного входа закрывает HTTP/LLM клиентов по одному разу."""
@@ -277,6 +294,70 @@ class CapabilityCompositionTest(unittest.TestCase):
         self.assertTrue(all(reply.address == self.event("текст").reply_address for reply in delivered))
         with connect_database(self.database_path) as connection:
             self.assertIsNone(SQLiteChatModeRepository(connection).get(self.key))
+
+    def test_device_flow_finishes_after_disable_without_closing_runtime(self) -> None:
+        """Запущенный Device Flow доставляет итог после disable в исходный чат."""
+        class Client:
+            """Учитывает закрытие общего process-клиента."""
+
+            def __init__(self) -> None:
+                self.closes = 0
+
+            def close(self) -> None:
+                """Отмечает завершение жизненного цикла processor."""
+                self.closes += 1
+
+        started = Event()
+        release = Event()
+        client = Client()
+        starter = FakeGitHubConnectionStarter()
+        manager = FakeVaultSelectionManager(error=GitHubAccountNotConnectedError("not authorized"))
+        runtime = ObsidianProcessRuntime(starter, client)
+        delivered = []
+        with patch(
+            "compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager",
+            return_value=manager,
+        ), create_channel_message_processor(
+            database_path=self.database_path,
+            runtime=runtime,
+            obsidian_config=ObsidianConfig(
+                openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"
+            ),
+            use_case_factory=lambda _connection: self.article,
+            analysis_use_case_factory=lambda _connection: self.analysis,
+        ) as processor:
+            processor(self.event("/obsidian"))
+            result = processor(
+                self.event("https://github.com/octocat/notes Vault"),
+                completion_handler=delivered.append,
+            )
+            self.assertIn("ABCD-EFGH", result.text)
+
+            def complete() -> None:
+                """Фиксирует начало фонового завершения до выключения."""
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError("Тест не освободил Device Flow")
+                manager.error = None
+                starter.completion_handler(GitHubConnectionCompletion(
+                    GitHubConnectionCompletionStatus.CONNECTED,
+                    installation_count=1, account_login="octocat",
+                ))
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(complete)
+                try:
+                    self.assertTrue(started.wait(5))
+                    self.assertIn("выключена", processor(self.event("/disable obsidian")).text)
+                    self.assertEqual(client.closes, 0)
+                finally:
+                    release.set()
+                future.result(timeout=5)
+            self.assertIn("octocat/notes", delivered[-1].response.text)
+            self.assertEqual(delivered[-1].address, self.event("текст").reply_address)
+            self.assertIn("/enable obsidian", processor(self.event("текст")).text)
+            self.assertEqual(client.closes, 0)
+        self.assertEqual(client.closes, 1)
 
     def test_initial_name_completes_profile_without_mode(self) -> None:
         """Первое имя завершает профиль и не выбирает Obsidian."""

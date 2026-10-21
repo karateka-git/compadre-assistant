@@ -2,6 +2,7 @@
 
 from dataclasses import fields
 import unittest
+from capability_preference_helpers import MemoryCapabilityPreferences
 
 from compadre_assistant.bootstrap import create_incoming_message_dispatcher
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
@@ -64,7 +65,7 @@ class FakeCapability(IncomingCapabilityPort):
     """Регистрируется без изменений core и адаптеров каналов."""
 
     def __init__(self, identifier: str = "selected", command: str = "/selected") -> None:
-        self._descriptor = CapabilityDescriptor(identifier, command, "тестовая возможность")
+        self._descriptor = CapabilityDescriptor(identifier, command, "тестовая возможность", enabled_by_default=True)
         self.calls: list[tuple[AppUser, IncomingEvent]] = []
         self.entries: list[tuple[AppUser, IncomingEvent]] = []
         self.entry_mode = CapabilityMode.ACTIVE
@@ -140,10 +141,12 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.capability = FakeCapability()
         self.other = FakeCapability("other", "/other")
         self.repository = MemoryChatModes()
+        self.preferences = MemoryCapabilityPreferences()
         self.dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability, self.other),
             user_identity_service=self.identity,
             chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
         )
         self.key = ChatModeKey(23, "telegram", "chat-1")
 
@@ -164,6 +167,148 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.capability.entries)
 
+    def test_unregistered_help_has_only_common_commands(self) -> None:
+        """Неизвестная identity не получает персональные предметные разделы."""
+        self.identity.user = None
+        reply = self.dispatcher.execute(_event("/help"))
+        self.assertIn("/register", reply.text)
+        self.assertNotIn("/selected", reply.text)
+        self.assertEqual(self.preferences.reads, 0)
+
+    def test_capabilities_catalog_handles_default_override_and_incomplete_profile(self) -> None:
+        """Каталог доступен до имени и показывает личный и серверный статусы."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн", enabled_by_default=True)
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,),
+            disabled_capabilities=(disabled,),
+            user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        first = dispatcher.execute(_event("/capabilities")).text
+        self.assertIn("`selected`", first)
+        self.assertIn("Личный выбор: включена; сервер: доступна", first)
+        self.assertIn("`offline`", first)
+        self.assertIn("Личный выбор: включена; сервер: недоступна", first)
+        self.assertIsNone(self.identity.user.display_name)
+        self.preferences.rows[(23, "selected")] = False
+        self.assertIn("Личный выбор: выключена", dispatcher.execute(_event("/capabilities")).text)
+        self.assertEqual(self.preferences.reads, 2)
+
+    def test_capabilities_catalog_validates_arguments_and_registration(self) -> None:
+        """Лишний аргумент не читает настройки; незнакомый канал просит регистрацию."""
+        before = self.preferences.reads
+        self.assertIn("без аргументов", self.dispatcher.execute(_event("/capabilities extra")).text)
+        self.assertEqual(self.preferences.reads, before)
+        self.identity.user = None
+        self.assertIn("/register", self.dispatcher.execute(_event("/capabilities")).text)
+        self.assertEqual(self.preferences.reads, before)
+
+    def test_empty_capabilities_catalog_keeps_common_commands(self) -> None:
+        """Пустой серверный каталог возвращает понятный список без записи имени."""
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(),
+            user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        reply = dispatcher.execute(_event("/capabilities"))
+        self.assertIn("нет известных возможностей", reply.text)
+        self.assertIn("/enable <id>", reply.text)
+
+    def test_enable_validates_exact_id_and_server_availability(self) -> None:
+        """Некорректный ID и отключённый сервером вход не создают настроек."""
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), disabled_capabilities=(disabled,),
+            user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        for text in ("/enable", "/enable Selected", "/enable selected extra", "/enable unknown"):
+            reply = dispatcher.execute(_event(text))
+            self.assertIn("/capabilities", reply.text)
+            self.assertEqual(self.preferences.rows, {})
+        self.assertIn("недоступна на сервере", dispatcher.execute(_event("/enable offline")).text)
+        self.assertEqual(self.preferences.rows, {})
+        self.identity.user = None
+        self.assertIn("/register", dispatcher.execute(_event("/enable selected")).text)
+
+    def test_enable_is_idempotent_and_reports_write_failure(self) -> None:
+        """Повторный выбор сообщает «уже», а сбой записи не подтверждает включение."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        first = self.dispatcher.execute(_event("/enable selected"))
+        self.assertIn("уже включена", first.text)
+        self.assertTrue(self.preferences.rows[(23, "selected")])
+        self.preferences.rows[(23, "selected")] = False
+        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
+        self.assertIn("уже включена", self.dispatcher.execute(_event("/enable selected")).text)
+
+        class FailingPreferences(MemoryCapabilityPreferences):
+            """Имитирует отказ хранилища при записи."""
+
+            def upsert(self, preference):
+                """Сообщает о невозможности зафиксировать изменение."""
+                raise OSError("storage failed")
+
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=FailingPreferences(),
+        )
+        with self.assertLogs(level="ERROR"):
+            failed = dispatcher.execute(_event("/enable selected"))
+        self.assertIn("Не удалось сохранить", failed.text)
+        self.assertNotIn("Возможность `selected` включена", failed.text)
+
+    def test_disable_preserves_mode_data_and_background_delivery(self) -> None:
+        """Выключение блокирует новые события, сохраняя маршрут и фоновый ответ."""
+        self.dispatcher.execute(_event("/selected"))
+        delivered = []
+        event = _event("начать")
+        self.dispatcher.execute(event, delivered.append)
+        delivery = self.capability.delivery
+        before = self.repository.get_state(self.key)
+        handled = len(self.capability.calls)
+        reply = self.dispatcher.execute(_event("/disable selected"))
+        self.assertIn("выключена", reply.text)
+        self.assertEqual(self.repository.get_state(self.key), before)
+        self.assertIn("/enable selected", self.dispatcher.execute(_event("/status")).text)
+        self.assertNotIn("`/selected` —", self.dispatcher.execute(_event("/help")).text)
+        self.assertIn("/enable selected", self.dispatcher.execute(_event("текст")).text)
+        self.assertIn("/enable selected", self.dispatcher.execute(
+            _event("/confirm selected action 1 1 yes")
+        ).text)
+        self.assertEqual(len(self.capability.calls), handled)
+        delivery.send(event.reply_address, IncomingResponse("Готово"))
+        self.assertEqual(delivered[-1].response.text, "Готово")
+        self.assertIn("уже выключена", self.dispatcher.execute(_event("/disable selected")).text)
+        self.dispatcher.execute(_event("/disable other"))
+        self.assertIn("нет включённых", self.dispatcher.execute(_event("/start")).text)
+        self.assertIn("/capabilities", self.dispatcher.execute(_event("/exit")).text)
+        self.assertIsNone(self.repository.get(self.key))
+        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
+        self.assertEqual(self.dispatcher.execute(_event("/selected")).text, self.capability.pending)
+
+    def test_disable_validates_id_and_accepts_server_disabled_entry(self) -> None:
+        """Глобальное отключение не мешает личному выключению известного ID."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), disabled_capabilities=(disabled,),
+            user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        for text in ("/disable", "/disable Offline", "/disable offline extra", "/disable unknown"):
+            self.assertIn("/capabilities", dispatcher.execute(_event(text)).text)
+            self.assertEqual(self.preferences.rows, {})
+        self.preferences.rows[(23, "offline")] = True
+        self.assertIn("выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.assertFalse(self.preferences.rows[(23, "offline")])
+        self.assertIn("уже выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.identity.user = None
+        self.assertIn("/register", dispatcher.execute(_event("/disable selected")).text)
+
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):
@@ -171,6 +316,47 @@ class IncomingBoundaryTest(unittest.TestCase):
             self.assertIn("Выбери возможность", reply.text)
         self.assertFalse(self.capability.calls)
         self.assertIsNone(self.repository.get(self.key))
+
+    def test_personal_guard_reads_once_and_blocks_direct_entry(self) -> None:
+        """Выключенная fake-возможность не получает вход и не меняет режим."""
+        self.preferences.rows[(23, "selected")] = False
+        reply = self.dispatcher.execute(_event("/selected аргумент"))
+        self.assertIn("/enable selected", reply.text)
+        self.assertEqual(self.preferences.reads, 1)
+        self.assertEqual(self.capability.entries, [])
+        self.assertIsNone(self.repository.get(self.key))
+
+    def test_saved_mode_and_subject_confirmation_share_one_guard(self) -> None:
+        """Текст и адресный confirm не входят в лично выключенный режим."""
+        self.repository.save(ChatMode(self.key, "selected"))
+        revision = self.repository.get_state(self.key).revision
+        self.preferences.rows[(23, "selected")] = False
+        for text in ("обычный текст", "/confirm selected action 1 1 yes"):
+            before = self.preferences.reads
+            reply = self.dispatcher.execute(_event(text))
+            self.assertIn("/enable selected", reply.text)
+            self.assertEqual(self.preferences.reads, before + 1)
+        self.assertEqual(self.capability.calls, [])
+        self.assertEqual(self.repository.get_state(self.key).revision, revision)
+        self.preferences.rows[(23, "selected")] = True
+        self.dispatcher.execute(_event("обычный текст"))
+        self.assertEqual(len(self.capability.calls), 1)
+
+    def test_general_responses_use_one_personal_snapshot(self) -> None:
+        """Справка, старт, статус и выход не предлагают лично выключенные входы."""
+        self.preferences.rows[(23, "selected")] = False
+        self.repository.save(ChatMode(self.key, "selected"))
+        for text in ("/help", "/start", "/status", "/exit", "обычный текст"):
+            before = self.preferences.reads
+            reply = self.dispatcher.execute(_event(text))
+            self.assertEqual(self.preferences.reads, before + 1)
+            self.assertNotIn("`/selected` —", reply.text)
+            if text == "/status":
+                self.assertIn("Режим этого чата: selected", reply.text)
+                self.assertIn("/enable selected", reply.text)
+            if text == "/exit":
+                self.assertIsNone(self.repository.get(self.key))
+        self.assertIn("/other", reply.text)
 
     def test_entry_forwards_original_event_and_resolved_user(self) -> None:
         """Вход получает исходное событие с аргументом без анализа ядром."""
@@ -403,10 +589,11 @@ class IncomingBoundaryTest(unittest.TestCase):
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,), disabled_capabilities=(disabled,),
             user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
         )
         dispatcher.execute(_event("/selected"))
         reply = dispatcher.execute(_event("/unavailable https://example.com/article"))
-        self.assertIn("`unavailable` отключена", reply.text)
+        self.assertIn("`unavailable` недоступна на сервере", reply.text)
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
         self.assertFalse(self.capability.calls)
         self.assertNotIn("/unavailable", dispatcher.execute(_event("/help")).text)
@@ -441,7 +628,7 @@ class IncomingBoundaryTest(unittest.TestCase):
 
     def test_empty_registry_only_offers_general_help(self) -> None:
         """Отсутствие включённых возможностей не требует предметного обработчика."""
-        dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository)
+        dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
         self.assertIn("нет включённых", dispatcher.execute(_event("текст")).text)
         self.assertIn("/exit", dispatcher.execute(_event("/help")).text)
 

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
+import sqlite3
 import unittest
 from unittest.mock import patch
 
@@ -142,8 +143,64 @@ class MigrationRunnerTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(sorted(results), [0, 1])
-        self.assertEqual(migration_count, 1)
+        self.assertEqual(sorted(results), [0, 2])
+        self.assertEqual(migration_count, 2)
+
+    def test_capability_preferences_migrate_fresh_and_previous_database(self) -> None:
+        """Новая таблица появляется без backfill и сохраняет данные схемы 0001."""
+        for previous in (False, True):
+            with self.subTest(previous=previous), TemporaryDirectory(prefix="capability-migration-") as directory:
+                root = Path(directory)
+                database_path = root / "test.db"
+                migrations = root / "migrations"
+                migrations.mkdir()
+                initial = MIGRATIONS_DIR / "0001_initial_schema.sql"
+                (migrations / initial.name).write_bytes(initial.read_bytes())
+                with connect_database(database_path) as connection:
+                    if previous:
+                        self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [1])
+                        connection.execute("INSERT INTO app_users (id, display_name) VALUES (1, 'Fixture')")
+                        connection.execute(
+                            "INSERT INTO active_chat_modes (app_user_id, channel, chat_id, capability_id) "
+                            "VALUES (1, 'telegram', 'chat', 'obsidian')"
+                        )
+                        connection.commit()
+                    next_file = MIGRATIONS_DIR / "0002_user_capability_preferences.sql"
+                    (migrations / next_file.name).write_bytes(next_file.read_bytes())
+                    self.assertEqual(
+                        [item.version for item in apply_migrations(connection, migrations)],
+                        [2] if previous else [1, 2],
+                    )
+                    self.assertEqual(apply_migrations(connection, migrations), [])
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM user_capability_preferences").fetchone()[0], 0
+                    )
+                    if previous:
+                        self.assertEqual(
+                            tuple(connection.execute("SELECT id, display_name FROM app_users").fetchone()),
+                            (1, "Fixture"),
+                        )
+                        self.assertEqual(
+                            connection.execute("SELECT capability_id FROM active_chat_modes").fetchone()[0],
+                            "obsidian",
+                        )
+                    connection.execute("INSERT OR IGNORE INTO app_users (id) VALUES (1)")
+                    connection.execute(
+                        "INSERT INTO user_capability_preferences VALUES (1, 'ask', 0)"
+                    )
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute("INSERT INTO user_capability_preferences VALUES (1, 'ask', 1)")
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute("INSERT INTO user_capability_preferences VALUES (1, 'obsidian', 2)")
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        connection.execute("INSERT INTO user_capability_preferences VALUES (999, 'ask', 1)")
+                    connection.execute("DELETE FROM app_users WHERE id = 1")
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM user_capability_preferences").fetchone()[0], 0
+                    )
+                    connection.commit()
+                    self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+                    self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
 
 if __name__ == "__main__":

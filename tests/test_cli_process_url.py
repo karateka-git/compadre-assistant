@@ -10,6 +10,9 @@ from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleResult,
 )
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.capabilities.obsidian.domain.articles.processing import (
     ProcessArticleUrlCommand,
     ProcessArticleUrlError,
@@ -472,6 +475,11 @@ class ProcessUrlCliTest(unittest.TestCase):
                 use_case_factory=lambda _connection: fake_use_case,
                 analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
             )
+            with connect_database(database_path) as connection:
+                owner = connection.execute("SELECT id FROM app_users").fetchone()[0]
+                SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                    UserCapabilityPreference(owner, "obsidian", True)
+                )
             with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=FakeVaultSelectionManager(selected=_test_vault(1))):
                 result = process_channel_incoming_message(
                     runtime=ObsidianProcessRuntime(None, object()),
