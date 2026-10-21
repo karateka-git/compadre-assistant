@@ -238,6 +238,21 @@ Commit команды отключения отделяет новые собы�
 живая приёмка требуют самостоятельных последующих решений и доказательств.
 Этот план их выполнение не утверждает и этап 5 не закрывает.
 
+Локальный результат: план — commit `fc40e7a`; исправление контроллера и
+fake-host проверки — commit `45501de`. Из корня feature worktree проектной
+`.venv` выполнены команды:
+
+| Команда | Результат |
+| --- | --- |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m unittest discover -s tests -p test_deploy_prod.py` | 37 тестов, 1 пропуск Linux/systemd, остальные прошли. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m unittest discover -s tests` | 762 теста, 2 пропуска, остальные прошли за 60,373 с. |
+| `git diff --check` | Ошибок форматирования нет. |
+
+Тесты выполнялись с fake host и временной SQLite; исправленный controller
+snapshot ещё не проходил CI или проверку на production Linux. После этого
+docs-коммита HEAD изменится, поэтому для публикации и установки записать
+новый полный SHA и выполнить допуск по [RELEASES.md](../RELEASES.md).
+
 ### Проверка шага 5.2 — 21.10.2026
 
 Проверенный локально code SHA: `aab17baf90a807b36471eccd1c7be1075351cf95`
