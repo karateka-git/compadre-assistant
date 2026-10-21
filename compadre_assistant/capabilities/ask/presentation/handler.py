@@ -17,6 +17,7 @@ class AskCapability(IncomingCapabilityPort):
     descriptor = CapabilityDescriptor(
         "ask", "/ask", "один вопрос модели без истории: /ask <вопрос>",
         persistent_mode=False,
+        enabled_by_default=True,
     )
 
     def __init__(self, question: AskQuestion) -> None:

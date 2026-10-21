@@ -87,6 +87,7 @@ class CapabilityDescriptor:
     description: str
     help: CapabilityHelp = CapabilityHelp()
     persistent_mode: bool = True  # Длительный вход требует явного выхода из режима.
+    enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.
 
 
 class CapabilityMode(StrEnum):
