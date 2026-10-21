@@ -85,6 +85,12 @@ class ChatCommand(StrEnum):
         "",
         "показать личный выбор и серверную доступность возможностей",
     )
+    ENABLE = (
+        "/enable",
+        CommandSection.CAPABILITIES,
+        "<id>",
+        "включить доступную возможность для своего профиля",
+    )
     LINK_CODE = (
         "/link_code",
         CommandSection.CHANNEL_LINKING,

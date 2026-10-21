@@ -100,6 +100,29 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         self.assertIn("/enable selected", first(self.event("текст", "telegram", "tg-user", "tg-chat")).text)
         self.assertIn("/enable example", second(self.event("/example", "vk", "vk-user", "vk-chat")).text)
 
+    def test_enable_command_changes_both_channels_without_clearing_mode(self) -> None:
+        """Выбор из TG открывает VK и сохраняет прежний маршрут этого чата."""
+        first = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        tg = self.event("/enable example", "telegram", "tg-user", "tg-chat")
+        vk = self.event("/example", "vk", "vk-user", "vk-chat")
+        self.assertIn("включена", first(tg).text)
+        self.assertEqual(second(vk).text, "Актуальное состояние")
+        self.assertIn("уже включена", second(self.event(
+            "/enable example", "vk", "vk-user", "vk-chat"
+        )).text)
+        with connect_database(self.path) as connection:
+            mode = connection.execute(
+                "SELECT capability_id FROM active_chat_modes "
+                "WHERE app_user_id = 1 AND channel = 'vk' AND chat_id = 'vk-chat'"
+            ).fetchone()[0]
+            self.assertEqual(mode, "example")
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) FROM user_capability_preferences WHERE app_user_id = 2"
+                ).fetchone()[0], 0,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

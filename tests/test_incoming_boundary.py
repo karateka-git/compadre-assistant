@@ -217,6 +217,50 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("нет известных возможностей", reply.text)
         self.assertIn("/enable <id>", reply.text)
 
+    def test_enable_validates_exact_id_and_server_availability(self) -> None:
+        """Некорректный ID и отключённый сервером вход не создают настроек."""
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), disabled_capabilities=(disabled,),
+            user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        for text in ("/enable", "/enable Selected", "/enable selected extra", "/enable unknown"):
+            reply = dispatcher.execute(_event(text))
+            self.assertIn("/capabilities", reply.text)
+            self.assertEqual(self.preferences.rows, {})
+        self.assertIn("недоступна на сервере", dispatcher.execute(_event("/enable offline")).text)
+        self.assertEqual(self.preferences.rows, {})
+        self.identity.user = None
+        self.assertIn("/register", dispatcher.execute(_event("/enable selected")).text)
+
+    def test_enable_is_idempotent_and_reports_write_failure(self) -> None:
+        """Повторный выбор сообщает «уже», а сбой записи не подтверждает включение."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        first = self.dispatcher.execute(_event("/enable selected"))
+        self.assertIn("уже включена", first.text)
+        self.assertTrue(self.preferences.rows[(23, "selected")])
+        self.preferences.rows[(23, "selected")] = False
+        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
+        self.assertIn("уже включена", self.dispatcher.execute(_event("/enable selected")).text)
+
+        class FailingPreferences(MemoryCapabilityPreferences):
+            """Имитирует отказ хранилища при записи."""
+
+            def upsert(self, preference):
+                """Сообщает о невозможности зафиксировать изменение."""
+                raise OSError("storage failed")
+
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=FailingPreferences(),
+        )
+        with self.assertLogs(level="ERROR"):
+            failed = dispatcher.execute(_event("/enable selected"))
+        self.assertIn("Не удалось сохранить", failed.text)
+        self.assertNotIn("Возможность `selected` включена", failed.text)
+
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):

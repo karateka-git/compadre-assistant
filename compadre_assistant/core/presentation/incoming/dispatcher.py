@@ -13,7 +13,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry, CapabilityAccess
 from compadre_assistant.core.domain.capability_preferences import (
-    CapabilityDefault, GetUserCapabilitySelections, UserCapabilityPreferenceRepository,
+    CapabilityDefault, GetUserCapabilitySelections, SetUserCapabilityPreference,
+    UserCapabilityPreferenceRepository,
 )
 from compadre_assistant.core.domain.users.identity import (
     CreatedLinkCode,
@@ -106,14 +107,17 @@ class IncomingMessageDispatcher:
 
     def _personal_registry(self, user: AppUser) -> PersonalCapabilityRegistry:
         """Читает выбор один раз после разрешения AppUser для допуска события."""
-        defaults = tuple(
+        selections = GetUserCapabilitySelections(
+            self._capability_preference_repository, self._capability_defaults()
+        ).execute(user.id)
+        return self._registry.for_user(selections)
+
+    def _capability_defaults(self) -> tuple[CapabilityDefault, ...]:
+        """Передаёт domain только устойчивые ID и defaults общего каталога."""
+        return tuple(
             CapabilityDefault(entry.capability_id, entry.enabled_by_default)
             for entry in self._registry.descriptors()
         )
-        selections = GetUserCapabilitySelections(
-            self._capability_preference_repository, defaults
-        ).execute(user.id)
-        return self._registry.for_user(selections)
 
     @staticmethod
     def _blocked_reply(access: CapabilityAccess) -> str:
@@ -197,6 +201,33 @@ class IncomingMessageDispatcher:
             if user is None:
                 return IncomingResponse("Сначала зарегистрируйся: `/register`.")
             return IncomingResponse(self._capability_catalog(self._personal_registry(user)))
+        if command is ChatCommand.ENABLE:
+            parts = parsed.arguments.split() if parsed is not None else []
+            if len(parts) != 1:
+                return IncomingResponse("Используй `/enable <id>`. Список: `/capabilities`.")
+            user = self._user_identity_service.resolve(identity)
+            if user is None:
+                return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+            personal = self._personal_registry(user)
+            access = personal.status(parts[0])
+            if access is None:
+                return IncomingResponse("Неизвестная возможность. Используй `/enable <id>`. Список: `/capabilities`.")
+            if not access.server_available:
+                return IncomingResponse(
+                    f"Возможность `{parts[0]}` недоступна на сервере. Личный выбор не изменён. "
+                    "Список: `/capabilities`."
+                )
+            try:
+                changed = SetUserCapabilityPreference(
+                    self._capability_preference_repository, self._capability_defaults()
+                ).execute(user.id, parts[0], True)
+            except Exception as error:
+                LOGGER.exception("Could not enable user capability: capability_id=%s", parts[0])
+                return IncomingResponse("Не удалось сохранить выбор. Попробуй позже.", error)
+            return IncomingResponse(
+                f"Возможность `{parts[0]}` {'включена' if changed else 'уже включена'}. "
+                "Выбор действует во всех привязанных каналах. Режим чата сохранён."
+            )
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if parts and parts[0] == "core":
