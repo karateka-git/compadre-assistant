@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
-from threading import Barrier, Lock
+from threading import Barrier, Event, Lock
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 import sqlite3
 import tempfile
@@ -294,6 +294,70 @@ class CapabilityCompositionTest(unittest.TestCase):
         self.assertTrue(all(reply.address == self.event("текст").reply_address for reply in delivered))
         with connect_database(self.database_path) as connection:
             self.assertIsNone(SQLiteChatModeRepository(connection).get(self.key))
+
+    def test_device_flow_finishes_after_disable_without_closing_runtime(self) -> None:
+        """Запущенный Device Flow доставляет итог после disable в исходный чат."""
+        class Client:
+            """Учитывает закрытие общего process-клиента."""
+
+            def __init__(self) -> None:
+                self.closes = 0
+
+            def close(self) -> None:
+                """Отмечает завершение жизненного цикла processor."""
+                self.closes += 1
+
+        started = Event()
+        release = Event()
+        client = Client()
+        starter = FakeGitHubConnectionStarter()
+        manager = FakeVaultSelectionManager(error=GitHubAccountNotConnectedError("not authorized"))
+        runtime = ObsidianProcessRuntime(starter, client)
+        delivered = []
+        with patch(
+            "compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager",
+            return_value=manager,
+        ), create_channel_message_processor(
+            database_path=self.database_path,
+            runtime=runtime,
+            obsidian_config=ObsidianConfig(
+                openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"
+            ),
+            use_case_factory=lambda _connection: self.article,
+            analysis_use_case_factory=lambda _connection: self.analysis,
+        ) as processor:
+            processor(self.event("/obsidian"))
+            result = processor(
+                self.event("https://github.com/octocat/notes Vault"),
+                completion_handler=delivered.append,
+            )
+            self.assertIn("ABCD-EFGH", result.text)
+
+            def complete() -> None:
+                """Фиксирует начало фонового завершения до выключения."""
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError("Тест не освободил Device Flow")
+                manager.error = None
+                starter.completion_handler(GitHubConnectionCompletion(
+                    GitHubConnectionCompletionStatus.CONNECTED,
+                    installation_count=1, account_login="octocat",
+                ))
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(complete)
+                try:
+                    self.assertTrue(started.wait(5))
+                    self.assertIn("выключена", processor(self.event("/disable obsidian")).text)
+                    self.assertEqual(client.closes, 0)
+                finally:
+                    release.set()
+                future.result(timeout=5)
+            self.assertIn("octocat/notes", delivered[-1].response.text)
+            self.assertEqual(delivered[-1].address, self.event("текст").reply_address)
+            self.assertIn("/enable obsidian", processor(self.event("текст")).text)
+            self.assertEqual(client.closes, 0)
+        self.assertEqual(client.closes, 1)
 
     def test_initial_name_completes_profile_without_mode(self) -> None:
         """Первое имя завершает профиль и не выбирает Obsidian."""

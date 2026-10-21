@@ -1,6 +1,7 @@
 """Проверяет одноразовый Ask через настоящие входы Telegram и VK без сети."""
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import logging
 import threading
@@ -121,6 +122,45 @@ class AskChannelsTest(unittest.TestCase):
                 model_type.return_value.answer.assert_not_called()
                 self.assertIn("включена", self.send("telegram", processor, "/enable ask"))
                 self.assertEqual(self.send("telegram", processor, "/ask вопрос"), "Ответ")
+
+    def test_inflight_ask_delivers_after_disable_and_keeps_model_open(self) -> None:
+        """Принятый Ask отвечает в исходный канал после disable, runtime живёт."""
+        for channel in ("telegram", "vk"):
+            started = threading.Event()
+            release = threading.Event()
+
+            def answer(**kwargs):
+                """Ожидает отключения только на первом вопросе."""
+                if kwargs["question"] == "долгий":
+                    started.set()
+                    if not release.wait(5):
+                        raise TimeoutError("Тест не освободил модель")
+                return "Ответ: " + kwargs["question"]
+
+            with self.subTest(channel=channel), patch(
+                "compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel"
+            ) as model_type:
+                model = model_type.return_value
+                model.answer.side_effect = answer
+                with create_channel_message_processor(
+                    database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config
+                ) as processor:
+                    self.send(channel, processor, "/register")
+                    self.send(channel, processor, "/name Тест")
+                    with ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(self.send, channel, processor, "/ask долгий")
+                        try:
+                            self.assertTrue(started.wait(5))
+                            self.assertIn("выключена", self.send(channel, processor, "/disable ask"))
+                            model.close.assert_not_called()
+                        finally:
+                            release.set()
+                        self.assertEqual(future.result(timeout=5), "Ответ: долгий")
+                    self.assertIn("/enable ask", self.send(channel, processor, "/ask следующий"))
+                    self.assertEqual(model.answer.call_count, 1)
+                    self.assertIn("включена", self.send(channel, processor, "/enable ask"))
+                    self.assertEqual(self.send(channel, processor, "/ask другой"), "Ответ: другой")
+                model.close.assert_called_once_with()
 
     def test_pending_obsidian_and_each_chat_mode_survive_answers_and_errors(self) -> None:
         """Ask обходит настоящий Obsidian handler, не применяя pending и ссылки."""
