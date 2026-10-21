@@ -123,7 +123,10 @@ class IncomingMessageDispatcher:
     def _blocked_reply(access: CapabilityAccess) -> str:
         """Объясняет причину отказа без открытия предметного обработчика."""
         if not access.server_available:
-            return f"Возможность `{access.descriptor.capability_id}` недоступна на сервере. Справка: `/help`."
+            return (
+                f"Возможность `{access.descriptor.capability_id}` недоступна на сервере. "
+                "Список: `/capabilities`."
+            )
         return (
             f"Возможность `{access.descriptor.capability_id}` лично выключена. "
             f"Включить: `/enable {access.descriptor.capability_id}`. Список: `/capabilities`."
@@ -201,33 +204,8 @@ class IncomingMessageDispatcher:
             if user is None:
                 return IncomingResponse("Сначала зарегистрируйся: `/register`.")
             return IncomingResponse(self._capability_catalog(self._personal_registry(user)))
-        if command is ChatCommand.ENABLE:
-            parts = parsed.arguments.split() if parsed is not None else []
-            if len(parts) != 1:
-                return IncomingResponse("Используй `/enable <id>`. Список: `/capabilities`.")
-            user = self._user_identity_service.resolve(identity)
-            if user is None:
-                return IncomingResponse("Сначала зарегистрируйся: `/register`.")
-            personal = self._personal_registry(user)
-            access = personal.status(parts[0])
-            if access is None:
-                return IncomingResponse("Неизвестная возможность. Используй `/enable <id>`. Список: `/capabilities`.")
-            if not access.server_available:
-                return IncomingResponse(
-                    f"Возможность `{parts[0]}` недоступна на сервере. Личный выбор не изменён. "
-                    "Список: `/capabilities`."
-                )
-            try:
-                changed = SetUserCapabilityPreference(
-                    self._capability_preference_repository, self._capability_defaults()
-                ).execute(user.id, parts[0], True)
-            except Exception as error:
-                LOGGER.exception("Could not enable user capability: capability_id=%s", parts[0])
-                return IncomingResponse("Не удалось сохранить выбор. Попробуй позже.", error)
-            return IncomingResponse(
-                f"Возможность `{parts[0]}` {'включена' if changed else 'уже включена'}. "
-                "Выбор действует во всех привязанных каналах. Режим чата сохранён."
-            )
+        if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
+            return self._change_capability(command, parsed.arguments if parsed else "", identity)
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if parts and parts[0] == "core":
@@ -408,6 +386,50 @@ class IncomingMessageDispatcher:
                 text, user, registration=True, personal=self._personal_registry(user)
             )
         return self._dispatch(user, event, completion_handler, self._personal_registry(user))
+
+    def _change_capability(
+        self, command: ChatCommand, arguments: str, identity: IncomingIdentity
+    ) -> IncomingResponse:
+        """Проверяет общую команду и сохраняет один личный выбор AppUser.
+
+        Args:
+            command: Команда включения либо отключения.
+            arguments: Строка аргументов после команды.
+            identity: Разрешаемая identity исходного канала.
+
+        Returns:
+            Подтверждение собственного commit или понятный отказ без записи.
+        """
+        parts = arguments.split()
+        if len(parts) != 1:
+            return IncomingResponse(f"Используй `{command.usage}`. Список: `/capabilities`.")
+        user = self._user_identity_service.resolve(identity)
+        if user is None:
+            return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+        access = self._personal_registry(user).status(parts[0])
+        if access is None:
+            return IncomingResponse(
+                f"Неизвестная возможность. Используй `{command.usage}`. "
+                "Список: `/capabilities`."
+            )
+        enabled = command is ChatCommand.ENABLE
+        if enabled and not access.server_available:
+            return IncomingResponse(
+                f"Возможность `{parts[0]}` недоступна на сервере. Личный выбор не изменён. "
+                "Список: `/capabilities`."
+            )
+        try:
+            changed = SetUserCapabilityPreference(
+                self._capability_preference_repository, self._capability_defaults()
+            ).execute(user.id, parts[0], enabled)
+        except Exception as error:
+            LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
+            return IncomingResponse("Не удалось сохранить выбор. Попробуй позже.", error)
+        state = "включена" if enabled else "выключена"
+        return IncomingResponse(
+            f"Возможность `{parts[0]}` {'уже ' if not changed else ''}{state}. "
+            "Выбор действует во всех привязанных каналах. Режим и данные сохранены."
+        )
 
     def _dispatch(
         self,

@@ -137,8 +137,8 @@ class CapabilityRegistry:
         """Предлагает доступные команды входа без предметного анализа сообщения."""
         commands = ", ".join(f"`{command}`" for command in self._by_command)
         if not commands:
-            return "Сейчас нет включённых возможностей. Справка: `/help`."
-        return f"Выбери возможность: {commands}. Справка: `/help`."
+            return "Сейчас нет включённых возможностей. Выбор: `/capabilities`. Справка: `/help`."
+        return f"Выбери возможность: {commands}. Выбор: `/capabilities`. Справка: `/help`."
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,5 +217,5 @@ class PersonalCapabilityRegistry:
             f"`{entry.descriptor.entry_command}`" for entry in self.access if entry.effective
         )
         if not commands:
-            return "Сейчас нет включённых возможностей. Справка: `/help`."
-        return f"Выбери возможность: {commands}. Справка: `/help`."
+            return "Сейчас нет включённых возможностей. Выбор: `/capabilities`. Справка: `/help`."
+        return f"Выбери возможность: {commands}. Выбор: `/capabilities`. Справка: `/help`."

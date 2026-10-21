@@ -91,6 +91,12 @@ class ChatCommand(StrEnum):
         "<id>",
         "включить доступную возможность для своего профиля",
     )
+    DISABLE = (
+        "/disable",
+        CommandSection.CAPABILITIES,
+        "<id>",
+        "выключить возможность для своего профиля, сохранив режим и данные",
+    )
     LINK_CODE = (
         "/link_code",
         CommandSection.CHANNEL_LINKING,

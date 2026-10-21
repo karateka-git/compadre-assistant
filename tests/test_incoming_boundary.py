@@ -261,6 +261,54 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("Не удалось сохранить", failed.text)
         self.assertNotIn("Возможность `selected` включена", failed.text)
 
+    def test_disable_preserves_mode_data_and_background_delivery(self) -> None:
+        """Выключение блокирует новые события, сохраняя маршрут и фоновый ответ."""
+        self.dispatcher.execute(_event("/selected"))
+        delivered = []
+        event = _event("начать")
+        self.dispatcher.execute(event, delivered.append)
+        delivery = self.capability.delivery
+        before = self.repository.get_state(self.key)
+        handled = len(self.capability.calls)
+        reply = self.dispatcher.execute(_event("/disable selected"))
+        self.assertIn("выключена", reply.text)
+        self.assertEqual(self.repository.get_state(self.key), before)
+        self.assertIn("/enable selected", self.dispatcher.execute(_event("/status")).text)
+        self.assertNotIn("`/selected` —", self.dispatcher.execute(_event("/help")).text)
+        self.assertIn("/enable selected", self.dispatcher.execute(_event("текст")).text)
+        self.assertIn("/enable selected", self.dispatcher.execute(
+            _event("/confirm selected action 1 1 yes")
+        ).text)
+        self.assertEqual(len(self.capability.calls), handled)
+        delivery.send(event.reply_address, IncomingResponse("Готово"))
+        self.assertEqual(delivered[-1].response.text, "Готово")
+        self.assertIn("уже выключена", self.dispatcher.execute(_event("/disable selected")).text)
+        self.dispatcher.execute(_event("/disable other"))
+        self.assertIn("нет включённых", self.dispatcher.execute(_event("/start")).text)
+        self.assertIn("/capabilities", self.dispatcher.execute(_event("/exit")).text)
+        self.assertIsNone(self.repository.get(self.key))
+        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
+        self.assertEqual(self.dispatcher.execute(_event("/selected")).text, self.capability.pending)
+
+    def test_disable_validates_id_and_accepts_server_disabled_entry(self) -> None:
+        """Глобальное отключение не мешает личному выключению известного ID."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,), disabled_capabilities=(disabled,),
+            user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        for text in ("/disable", "/disable Offline", "/disable offline extra", "/disable unknown"):
+            self.assertIn("/capabilities", dispatcher.execute(_event(text)).text)
+            self.assertEqual(self.preferences.rows, {})
+        self.preferences.rows[(23, "offline")] = True
+        self.assertIn("выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.assertFalse(self.preferences.rows[(23, "offline")])
+        self.assertIn("уже выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.identity.user = None
+        self.assertIn("/register", dispatcher.execute(_event("/disable selected")).text)
+
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):

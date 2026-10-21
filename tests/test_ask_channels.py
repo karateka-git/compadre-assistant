@@ -107,6 +107,21 @@ class AskChannelsTest(unittest.TestCase):
                         self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
                 model.close.assert_called_once_with()
 
+    def test_ask_can_be_disabled_and_enabled_without_restart(self) -> None:
+        """Команды меняют личный допуск Ask при живом общем processor."""
+        with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+            model_type.return_value.answer.return_value = "Ответ"
+            with create_channel_message_processor(
+                database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config
+            ) as processor:
+                self.send("telegram", processor, "/register")
+                self.send("telegram", processor, "/name Тест")
+                self.assertIn("выключена", self.send("telegram", processor, "/disable ask"))
+                self.assertIn("/enable ask", self.send("telegram", processor, "/ask вопрос"))
+                model_type.return_value.answer.assert_not_called()
+                self.assertIn("включена", self.send("telegram", processor, "/enable ask"))
+                self.assertEqual(self.send("telegram", processor, "/ask вопрос"), "Ответ")
+
     def test_pending_obsidian_and_each_chat_mode_survive_answers_and_errors(self) -> None:
         """Ask обходит настоящий Obsidian handler, не применяя pending и ссылки."""
         for channel in ("telegram", "vk"):

@@ -123,6 +123,29 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
                 ).fetchone()[0], 0,
             )
 
+    def test_disable_command_is_shared_and_reenable_restores_saved_mode(self) -> None:
+        """TG выключает VK-вход; второй AppUser и маршрут VK остаются прежними."""
+        first = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        first(self.event("/enable example", "telegram", "tg-user", "tg-chat"))
+        self.save(2, True)
+        second(self.event("/example", "vk", "vk-user", "vk-chat"))
+        reply = first(self.event("/disable example", "telegram", "tg-user", "tg-chat"))
+        self.assertIn("выключена", reply.text)
+        self.assertIn("/enable example", second(self.event(
+            "текст", "vk", "vk-user", "vk-chat"
+        )).text)
+        self.assertEqual(first(self.event(
+            "/example", "telegram", "other-user", "other-chat"
+        )).text, "Актуальное состояние")
+        with connect_database(self.path) as connection:
+            self.assertEqual(connection.execute(
+                "SELECT capability_id FROM active_chat_modes "
+                "WHERE app_user_id = 1 AND channel = 'vk' AND chat_id = 'vk-chat'"
+            ).fetchone()[0], "example")
+        first(self.event("/enable example", "telegram", "tg-user", "tg-chat"))
+        self.assertEqual(second(self.event("текст", "vk", "vk-user", "vk-chat")).text, "Тестовый ответ")
+
 
 if __name__ == "__main__":
     unittest.main()

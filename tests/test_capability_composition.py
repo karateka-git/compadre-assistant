@@ -113,6 +113,18 @@ class CapabilityCompositionTest(unittest.TestCase):
             with self.assertRaises(sqlite3.ProgrammingError):
                 connection.execute("SELECT 1")
 
+    def test_obsidian_commands_toggle_access_without_erasing_saved_mode(self) -> None:
+        """Выключение Obsidian сохраняет маршрут и возвращает его после enable."""
+        self.assertIn("Режим Obsidian", self.process("/obsidian").text)
+        with connect_database(self.database_path) as connection:
+            before = SQLiteChatModeRepository(connection).get_state(self.key)
+        self.assertIn("выключена", self.process("/disable obsidian").text)
+        self.assertIn("/enable obsidian", self.process("обычный текст").text)
+        with connect_database(self.database_path) as connection:
+            self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
+        self.assertIn("включена", self.process("/enable obsidian").text)
+        self.assertNotIn("/enable obsidian", self.process("обычный текст").text)
+
     def test_processor_closes_only_owned_process_clients(self) -> None:
         """Остановка процессного входа закрывает HTTP/LLM клиентов по одному разу."""
         class Client:
