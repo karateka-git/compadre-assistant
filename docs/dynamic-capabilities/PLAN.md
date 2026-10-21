@@ -278,6 +278,22 @@ print('0001 copy -> 0002: saved rows, defaults, integrity OK')
 PR и живые Telegram/VK/production не проверены. Дефектов по локальным проверкам
 не обнаружено. Этап 5 и пункт бэклога открыты.
 
+### Дополнительная проверка candidate image — 21.10.2026
+
+После запуска Docker Desktop проверен SHA
+`1b4b64d599d79c3e19362994ea961bbc5d89e055`:
+
+```powershell
+& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m scripts.check_candidate --expected-sha 1b4b64d599d79c3e19362994ea961bbc5d89e055
+```
+
+Команда завершилась успешно: образ собран, в контейнере на временной SQLite
+применены `0001` и `0002`, healthcheck Telegram/VK прошёл с синтетической
+конфигурацией. Образ:
+`sha256:5cec08cdf7b18b3127386c798e6db818c7cd3078b850e6d5bc72118752b0c26a`.
+После записи результата документационный коммит изменит SHA; CI точного
+merge SHA и живые каналы по-прежнему не проверены.
+
 Новые проверки добавить по месту: repository/use cases личных настроек, `test_migration_runner.py`, `test_incoming_boundary.py`, `test_incoming_commands.py`, `test_chat_modes.py`, `test_capability_composition.py`, `test_ask_channels.py` и тесты адаптеров. Прежние тесты, которым нужен активный Obsidian, явно включают его в fixture; не сохранять старый доступ обходным контрактом ради тестов.
 
 Обязательные проверочные сценарии:

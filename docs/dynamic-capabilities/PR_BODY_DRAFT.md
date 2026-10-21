@@ -32,8 +32,9 @@ URL, SHA и CI добавляют после публикации ветки; т
   smoke, `compileall`, локальная проверка tracked-файлов/миграций и Compose
   `config --quiet` прошли на code SHA
   `aab17baf90a807b36471eccd1c7be1075351cf95`.
-- Локальный Docker daemon был недоступен; image build/healthcheck ждёт
-  `full-suite` в CI точного merge SHA.
+- После запуска Docker Desktop image build и healthcheck прошли на candidate
+  SHA `1b4b64d599d79c3e19362994ea961bbc5d89e055`. `full-suite` в CI
+  точного merge SHA остаётся обязательным.
 
 Эти результаты не являются PR CI. После любого нового коммита, включая
 документационные материалы, head SHA меняется; записать фактический SHA и
