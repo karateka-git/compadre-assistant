@@ -11,6 +11,10 @@ from compadre_assistant.core.presentation.incoming.ports import (
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry, CapabilityAccess
+from compadre_assistant.core.domain.capability_preferences import (
+    CapabilityDefault, GetUserCapabilitySelections, UserCapabilityPreferenceRepository,
+)
 from compadre_assistant.core.domain.users.identity import (
     CreatedLinkCode,
     IdentityAlreadyBoundError,
@@ -92,11 +96,34 @@ class IncomingMessageDispatcher:
         registry: CapabilityRegistry,
         user_identity_service: UserIdentityService,
         chat_mode_repository: ChatModeRepository,
+        capability_preference_repository: UserCapabilityPreferenceRepository,
     ) -> None:
         """Внедряет общий реестр и repositories независимого профиля."""
         self._registry = registry
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
+        self._capability_preference_repository = capability_preference_repository
+
+    def _personal_registry(self, user: AppUser) -> PersonalCapabilityRegistry:
+        """Читает выбор один раз после разрешения AppUser для допуска события."""
+        defaults = tuple(
+            CapabilityDefault(entry.capability_id, entry.enabled_by_default)
+            for entry in self._registry.descriptors()
+        )
+        selections = GetUserCapabilitySelections(
+            self._capability_preference_repository, defaults
+        ).execute(user.id)
+        return self._registry.for_user(selections)
+
+    @staticmethod
+    def _blocked_reply(access: CapabilityAccess) -> str:
+        """Объясняет причину отказа без открытия предметного обработчика."""
+        if not access.server_available:
+            return f"Возможность `{access.descriptor.capability_id}` недоступна на сервере. Справка: `/help`."
+        return (
+            f"Возможность `{access.descriptor.capability_id}` лично выключена. "
+            f"Включить: `/enable {access.descriptor.capability_id}`. Список: `/capabilities`."
+        )
 
     def execute(
         self,
@@ -180,16 +207,17 @@ class IncomingMessageDispatcher:
             user = self._user_identity_service.resolve(identity)
             if user is None:
                 return ProcessIncomingMessageResult(IncomingMessageResultType.UNKNOWN_IDENTITY)
+            personal = self._personal_registry(user)
             mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
             target = parts[0] if parts else ""
             if mode is None or mode.capability_id != target:
-                capability = self._registry.by_id(target)
+                capability = personal.by_id(target)
                 return IncomingResponse(
                     f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
                     if capability
-                    else self._registry.entry_hint()
+                    else personal.entry_hint()
                 )
-            return self._dispatch(user, event, completion_handler)
+            return self._dispatch(user, event, completion_handler, personal)
 
         if command is ChatCommand.START:
             user = self._user_identity_service.resolve(identity)
@@ -313,13 +341,14 @@ class IncomingMessageDispatcher:
                     app_user=user,
                 )
             return self._save_name(text, user, registration=True)
-        return self._dispatch(user, event, completion_handler)
+        return self._dispatch(user, event, completion_handler, self._personal_registry(user))
 
     def _dispatch(
         self,
         user: AppUser,
         event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None,
+        personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult | IncomingResponse:
         """Выбирает вход по команде или ID без анализа предметного содержания."""
         context = HandlerContext(
@@ -327,14 +356,14 @@ class IncomingMessageDispatcher:
             CallbackReplyDelivery(completion_handler) if completion_handler else None,
         )
         key = ChatModeKey(user.id, event.channel, event.chat_id)
-        disabled = self._registry.disabled_by_command(event.text)
-        if disabled is not None:
+        blocked = personal.blocked_by_command(event.text)
+        if blocked is not None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.CAPABILITY_DISABLED,
                 app_user=user,
-                capability_reply=f"Возможность `{disabled.capability_id}` отключена.\n{self._registry.entry_hint()}",
+                capability_reply=self._blocked_reply(blocked),
             )
-        entry = self._registry.by_command(event.text)
+        entry = personal.by_command(event.text)
         if entry is not None:
             state = self._chat_mode_repository.get_state(key)
             try:
@@ -363,14 +392,18 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
-        capability = self._registry.by_id(state.capability_id)
+        capability = personal.by_id(state.capability_id)
         if capability is None:
+            access = personal.status(state.capability_id)
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_UNAVAILABLE,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=(
+                    f"{self._blocked_reply(access)}\n{personal.entry_hint()}"
+                    if access is not None else personal.entry_hint()
+                ),
             )
         try:
             result = capability.handle(context, event)

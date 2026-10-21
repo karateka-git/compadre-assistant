@@ -9,6 +9,7 @@ import unittest
 from channel_helpers import process_channel_incoming_message
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.data.sqlite.user_identity_repository import SQLiteAppUserRepository, SQLiteExternalIdentityRepository
@@ -143,6 +144,7 @@ class ChatModesTest(unittest.TestCase):
                 dispatcher = IncomingMessageDispatcher(
                     registry=registry, user_identity_service=FakeIdentity(),
                     chat_mode_repository=SQLiteChatModeRepository(connection),
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                 )
                 dispatcher.execute(event)
 
@@ -154,6 +156,7 @@ class ChatModesTest(unittest.TestCase):
                     dispatcher = IncomingMessageDispatcher(
                         registry=registry, user_identity_service=FakeIdentity(),
                         chat_mode_repository=SQLiteChatModeRepository(connection),
+                        capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                     )
                     dispatcher.execute(IncomingEvent(
                         channel="telegram", chat_id="chat", message_id="2", text="/exit"
@@ -182,6 +185,7 @@ class ChatModesTest(unittest.TestCase):
                 dispatcher = IncomingMessageDispatcher(
                     registry=registry, user_identity_service=FakeIdentity(),
                     chat_mode_repository=SQLiteChatModeRepository(connection),
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                 )
                 dispatcher.execute(IncomingEvent(
                     channel="vk", chat_id="chat", message_id="1", text="завершить"
@@ -195,6 +199,7 @@ class ChatModesTest(unittest.TestCase):
                     dispatcher = IncomingMessageDispatcher(
                         registry=registry, user_identity_service=FakeIdentity(),
                         chat_mode_repository=SQLiteChatModeRepository(connection),
+                        capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                     )
                     dispatcher.execute(IncomingEvent(
                         channel="vk", chat_id="chat", message_id="2", text="/other"
@@ -216,7 +221,7 @@ class ChatModesTest(unittest.TestCase):
             capability = FakeCapability()
             with connect_database(self.database_path) as connection:
                 repository = SQLiteChatModeRepository(connection)
-                dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=identity, chat_mode_repository=repository)
+                dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=identity, chat_mode_repository=repository, capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection))
                 if repository.get(ChatModeKey(23, "telegram", "chat")) is None:
                     dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="0", text="/selected"))
                 dispatcher.execute(event)
@@ -230,7 +235,7 @@ class ChatModesTest(unittest.TestCase):
             mode = ChatMode(ChatModeKey(23, "telegram", "chat"), "unavailable")
             repository.save(mode)
             capability = FakeCapability()
-            dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=FakeIdentity(), chat_mode_repository=repository)
+            dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=FakeIdentity(), chat_mode_repository=repository, capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection))
             result = dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="1", text="да"))
             self.assertIn("отключена", result.text)
             self.assertEqual(capability.calls, [])

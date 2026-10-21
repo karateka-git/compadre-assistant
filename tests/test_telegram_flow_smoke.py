@@ -14,6 +14,8 @@ from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMes
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from test_incoming_boundary import FakeIdentity
 from test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
@@ -51,6 +53,9 @@ class TelegramFlowSmokeTest(unittest.TestCase):
             with connect_database(database_path) as connection:
                 apply_migrations(connection)
                 ensure_app_user(connection)
+                SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                    UserCapabilityPreference(1, "obsidian", True)
+                )
                 fetcher = FakeArticleHtmlFetcher()
                 analyzer = FakeArticleAnalyzer()
                 article_repository = SQLiteArticleRepository(connection)
@@ -81,6 +86,7 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                     ),)),
                     user_identity_service=identity,
                     chat_mode_repository=SQLiteChatModeRepository(connection),
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                 )
                 incoming_use_case.execute(IncomingEvent(channel="telegram", chat_id="100", message_id="9", text="/obsidian"))
                 first_reply = incoming_use_case.execute(_message("10")).text

@@ -19,6 +19,8 @@ from compadre_assistant.capabilities.obsidian.data.configuration.config import O
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.presentation.telegram.bot import _register_handlers
 from compadre_assistant.presentation.vk.bot import _handle_update
@@ -118,6 +120,14 @@ class AskChannelsTest(unittest.TestCase):
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("obsidian", "ask"), obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "/name Тест")
+                    with connect_database(self.path) as connection:
+                        owner = connection.execute(
+                            "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = '7'",
+                            (channel,),
+                        ).fetchone()[0]
+                        SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                            UserCapabilityPreference(owner, "obsidian", True)
+                        )
                     self.assertIn("да", self.send(channel, processor, "/obsidian"))
                     with connect_database(self.path) as connection:
                         before = tuple(connection.execute("SELECT * FROM active_chat_modes").fetchall())
@@ -148,7 +158,7 @@ class AskChannelsTest(unittest.TestCase):
                 for channel in ("telegram", "vk"):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "/name Тест")
-                    self.assertIn("отключ", self.send(channel, processor, "/ask вопрос"))
+                    self.assertIn("недоступна на сервере", self.send(channel, processor, "/ask вопрос"))
             loader.assert_not_called()
             model.assert_not_called()
 

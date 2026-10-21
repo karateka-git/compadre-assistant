@@ -25,6 +25,8 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import
 from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import GitHubAccountNotConnectedError
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
@@ -46,6 +48,9 @@ class CapabilityCompositionTest(unittest.TestCase):
             service = create_user_identity_service(connection)
             user = service.register(IncomingIdentity("telegram", "external", "chat"))
             self.user = service.update_display_name(app_user_id=user.id, display_name="Тест")
+            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                UserCapabilityPreference(self.user.id, "obsidian", True)
+            )
         self.key = ChatModeKey(self.user.id, "telegram", "chat")
         self.article = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()

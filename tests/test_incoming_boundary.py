@@ -2,6 +2,7 @@
 
 from dataclasses import fields
 import unittest
+from capability_preference_helpers import MemoryCapabilityPreferences
 
 from compadre_assistant.bootstrap import create_incoming_message_dispatcher
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
@@ -64,7 +65,7 @@ class FakeCapability(IncomingCapabilityPort):
     """Регистрируется без изменений core и адаптеров каналов."""
 
     def __init__(self, identifier: str = "selected", command: str = "/selected") -> None:
-        self._descriptor = CapabilityDescriptor(identifier, command, "тестовая возможность")
+        self._descriptor = CapabilityDescriptor(identifier, command, "тестовая возможность", enabled_by_default=True)
         self.calls: list[tuple[AppUser, IncomingEvent]] = []
         self.entries: list[tuple[AppUser, IncomingEvent]] = []
         self.entry_mode = CapabilityMode.ACTIVE
@@ -140,10 +141,12 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.capability = FakeCapability()
         self.other = FakeCapability("other", "/other")
         self.repository = MemoryChatModes()
+        self.preferences = MemoryCapabilityPreferences()
         self.dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability, self.other),
             user_identity_service=self.identity,
             chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
         )
         self.key = ChatModeKey(23, "telegram", "chat-1")
 
@@ -171,6 +174,31 @@ class IncomingBoundaryTest(unittest.TestCase):
             self.assertIn("Выбери возможность", reply.text)
         self.assertFalse(self.capability.calls)
         self.assertIsNone(self.repository.get(self.key))
+
+    def test_personal_guard_reads_once_and_blocks_direct_entry(self) -> None:
+        """Выключенная fake-возможность не получает вход и не меняет режим."""
+        self.preferences.rows[(23, "selected")] = False
+        reply = self.dispatcher.execute(_event("/selected аргумент"))
+        self.assertIn("/enable selected", reply.text)
+        self.assertEqual(self.preferences.reads, 1)
+        self.assertEqual(self.capability.entries, [])
+        self.assertIsNone(self.repository.get(self.key))
+
+    def test_saved_mode_and_subject_confirmation_share_one_guard(self) -> None:
+        """Текст и адресный confirm не входят в лично выключенный режим."""
+        self.repository.save(ChatMode(self.key, "selected"))
+        revision = self.repository.get_state(self.key).revision
+        self.preferences.rows[(23, "selected")] = False
+        for text in ("обычный текст", "/confirm selected action 1 1 yes"):
+            before = self.preferences.reads
+            reply = self.dispatcher.execute(_event(text))
+            self.assertIn("/enable selected", reply.text)
+            self.assertEqual(self.preferences.reads, before + 1)
+        self.assertEqual(self.capability.calls, [])
+        self.assertEqual(self.repository.get_state(self.key).revision, revision)
+        self.preferences.rows[(23, "selected")] = True
+        self.dispatcher.execute(_event("обычный текст"))
+        self.assertEqual(len(self.capability.calls), 1)
 
     def test_entry_forwards_original_event_and_resolved_user(self) -> None:
         """Вход получает исходное событие с аргументом без анализа ядром."""
@@ -403,10 +431,11 @@ class IncomingBoundaryTest(unittest.TestCase):
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,), disabled_capabilities=(disabled,),
             user_identity_service=self.identity, chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
         )
         dispatcher.execute(_event("/selected"))
         reply = dispatcher.execute(_event("/unavailable https://example.com/article"))
-        self.assertIn("`unavailable` отключена", reply.text)
+        self.assertIn("`unavailable` недоступна на сервере", reply.text)
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
         self.assertFalse(self.capability.calls)
         self.assertNotIn("/unavailable", dispatcher.execute(_event("/help")).text)
@@ -441,7 +470,7 @@ class IncomingBoundaryTest(unittest.TestCase):
 
     def test_empty_registry_only_offers_general_help(self) -> None:
         """Отсутствие включённых возможностей не требует предметного обработчика."""
-        dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository)
+        dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
         self.assertIn("нет включённых", dispatcher.execute(_event("текст")).text)
         self.assertIn("/exit", dispatcher.execute(_event("/help")).text)
 

@@ -80,6 +80,8 @@ from compadre_assistant.capabilities.obsidian.data.sqlite.github_installation_re
 )
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
@@ -117,6 +119,9 @@ class OperationScopesTest(unittest.TestCase):
                 INSERT INTO obsidian_vault_instructions (app_user_id, vault_id, position, path, blob_sha, content)
                 VALUES (1, 1, 0, 'rules.md', 'rules-sha', 'Создавай отдельные заметки.');
             """)
+            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                UserCapabilityPreference(1, "obsidian", True)
+            )
 
     def service(self, connection):
         """Собирает применение proposals через общий SQLite lease."""
@@ -161,6 +166,7 @@ class OperationScopesTest(unittest.TestCase):
             registry=CapabilityRegistry((handler,)),
             user_identity_service=create_user_identity_service(connection),
             chat_mode_repository=SQLiteChatModeRepository(connection),
+            capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
         )
 
     def process(self, text, origin=TG):
