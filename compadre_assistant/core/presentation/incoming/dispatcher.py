@@ -125,6 +125,21 @@ class IncomingMessageDispatcher:
             f"Включить: `/enable {access.descriptor.capability_id}`. Список: `/capabilities`."
         )
 
+    @staticmethod
+    def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
+        """Показывает известные ID, личный выбор и серверную доступность."""
+        lines = ["Личные возможности:"]
+        for access in personal.access:
+            lines.append(
+                f"`{access.descriptor.capability_id}` — {access.descriptor.description}. "
+                f"Личный выбор: {'включена' if access.user_enabled else 'выключена'}; "
+                f"сервер: {'доступна' if access.server_available else 'недоступна'}."
+            )
+        if not personal.access:
+            lines.append("Сейчас нет известных возможностей.")
+        lines.append("Управление: `/enable <id>`, `/disable <id>`. Выбор действует во всех привязанных каналах.")
+        return "\n".join(lines)
+
     def execute(
         self,
         event: IncomingEvent,
@@ -175,6 +190,13 @@ class IncomingMessageDispatcher:
                 capability_help=self._personal_registry(user).help() if user is not None else None,
             )
         identity = _incoming_identity_from_event(event)
+        if command is ChatCommand.CAPABILITIES:
+            if parsed is not None and parsed.arguments:
+                return IncomingResponse("Используй `/capabilities` без аргументов.")
+            user = self._user_identity_service.resolve(identity)
+            if user is None:
+                return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+            return IncomingResponse(self._capability_catalog(self._personal_registry(user)))
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if parts and parts[0] == "core":

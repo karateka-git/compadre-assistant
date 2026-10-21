@@ -9,6 +9,7 @@ class CommandSection(StrEnum):
 
     BASIC = "Основные"
     CHANNEL_LINKING = "Связь Telegram и VK"
+    CAPABILITIES = "Личные возможности"  # Команды управляют выбором одного AppUser во всех каналах.
 
 
 class ChatCommand(StrEnum):
@@ -77,6 +78,12 @@ class ChatCommand(StrEnum):
         CommandSection.BASIC,
         "",
         "показать состояние подключения",
+    )
+    CAPABILITIES = (
+        "/capabilities",
+        CommandSection.CAPABILITIES,
+        "",
+        "показать личный выбор и серверную доступность возможностей",
     )
     LINK_CODE = (
         "/link_code",

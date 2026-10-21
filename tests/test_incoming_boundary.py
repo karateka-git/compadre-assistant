@@ -175,6 +175,48 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertNotIn("/selected", reply.text)
         self.assertEqual(self.preferences.reads, 0)
 
+    def test_capabilities_catalog_handles_default_override_and_incomplete_profile(self) -> None:
+        """Каталог доступен до имени и показывает личный и серверный статусы."""
+        self.identity.user = AppUser(id=23, display_name=None)
+        disabled = CapabilityDescriptor("offline", "/offline", "офлайн", enabled_by_default=True)
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(self.capability,),
+            disabled_capabilities=(disabled,),
+            user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        first = dispatcher.execute(_event("/capabilities")).text
+        self.assertIn("`selected`", first)
+        self.assertIn("Личный выбор: включена; сервер: доступна", first)
+        self.assertIn("`offline`", first)
+        self.assertIn("Личный выбор: включена; сервер: недоступна", first)
+        self.assertIsNone(self.identity.user.display_name)
+        self.preferences.rows[(23, "selected")] = False
+        self.assertIn("Личный выбор: выключена", dispatcher.execute(_event("/capabilities")).text)
+        self.assertEqual(self.preferences.reads, 2)
+
+    def test_capabilities_catalog_validates_arguments_and_registration(self) -> None:
+        """Лишний аргумент не читает настройки; незнакомый канал просит регистрацию."""
+        before = self.preferences.reads
+        self.assertIn("без аргументов", self.dispatcher.execute(_event("/capabilities extra")).text)
+        self.assertEqual(self.preferences.reads, before)
+        self.identity.user = None
+        self.assertIn("/register", self.dispatcher.execute(_event("/capabilities")).text)
+        self.assertEqual(self.preferences.reads, before)
+
+    def test_empty_capabilities_catalog_keeps_common_commands(self) -> None:
+        """Пустой серверный каталог возвращает понятный список без записи имени."""
+        dispatcher = create_incoming_message_dispatcher(
+            capabilities=(),
+            user_identity_service=self.identity,
+            chat_mode_repository=self.repository,
+            capability_preference_repository=self.preferences,
+        )
+        reply = dispatcher.execute(_event("/capabilities"))
+        self.assertIn("нет известных возможностей", reply.text)
+        self.assertIn("/enable <id>", reply.text)
+
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):
