@@ -167,6 +167,14 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.capability.entries)
 
+    def test_unregistered_help_has_only_common_commands(self) -> None:
+        """Неизвестная identity не получает персональные предметные разделы."""
+        self.identity.user = None
+        reply = self.dispatcher.execute(_event("/help"))
+        self.assertIn("/register", reply.text)
+        self.assertNotIn("/selected", reply.text)
+        self.assertEqual(self.preferences.reads, 0)
+
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):
@@ -199,6 +207,22 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.preferences.rows[(23, "selected")] = True
         self.dispatcher.execute(_event("обычный текст"))
         self.assertEqual(len(self.capability.calls), 1)
+
+    def test_general_responses_use_one_personal_snapshot(self) -> None:
+        """Справка, старт, статус и выход не предлагают лично выключенные входы."""
+        self.preferences.rows[(23, "selected")] = False
+        self.repository.save(ChatMode(self.key, "selected"))
+        for text in ("/help", "/start", "/status", "/exit", "обычный текст"):
+            before = self.preferences.reads
+            reply = self.dispatcher.execute(_event(text))
+            self.assertEqual(self.preferences.reads, before + 1)
+            self.assertNotIn("`/selected` —", reply.text)
+            if text == "/status":
+                self.assertIn("Режим этого чата: selected", reply.text)
+                self.assertIn("/enable selected", reply.text)
+            if text == "/exit":
+                self.assertIsNone(self.repository.get(self.key))
+        self.assertIn("/other", reply.text)
 
     def test_entry_forwards_original_event_and_resolved_user(self) -> None:
         """Вход получает исходное событие с аргументом без анализа ядром."""

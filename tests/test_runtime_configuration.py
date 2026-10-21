@@ -19,6 +19,8 @@ from compadre_assistant.capabilities.obsidian.data.configuration.config import (
 )
 from compadre_assistant.core.data.config import load_config
 from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.presentation.cli.main import main, run_healthcheck
@@ -114,9 +116,19 @@ class RuntimeConfigurationTest(unittest.TestCase):
                                 "compadre_assistant.capabilities.obsidian.bootstrap.OpenAIObsidianProposalGenerator"
                             ) as proposal, patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAICompatibleEmbeddingProvider") as embedding:
                                 for text in ("/register", "/name Имя", "/help", "/status", "/exit", "/obsidian"):
+                                    if text == "/obsidian" and enabled:
+                                        with connect_database(self.root / "app.db") as connection:
+                                            owner = connection.execute(
+                                                "SELECT app_user_id FROM external_identities "
+                                                "WHERE channel = ? AND external_user_id = ?",
+                                                (channel, channel),
+                                            ).fetchone()[0]
+                                            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                                                UserCapabilityPreference(owner, "obsidian", True)
+                                            )
                                     reply = processor(IncomingEvent(channel, channel, text, text, channel), None)
                                     if text == "/obsidian":
-                                        expected = "Провайдер GitHub не настроен" if enabled else "отключена"
+                                        expected = "Провайдер GitHub не настроен" if enabled else "недоступна на сервере"
                                         self.assertIn(expected, reply.text)
                                 analyzer.assert_not_called()
                                 proposal.assert_not_called()
@@ -264,6 +276,11 @@ class RuntimeConfigurationTest(unittest.TestCase):
         processor = runner.call_args.kwargs["incoming_message_processor"]
         for text in ("/register", "/name Имя"):
             processor(IncomingEvent("telegram", "chat", text, text, "user"), None)
+        with connect_database(self.root / "app.db") as connection:
+            owner = connection.execute("SELECT id FROM app_users").fetchone()[0]
+            SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                UserCapabilityPreference(owner, "obsidian", True)
+            )
         # Gateway есть, но пользователь ещё не выбрал vault; LLM отсутствует.
         runtime = ObsidianProcessRuntime(None, object())
         from channel_helpers import process_channel_incoming_message

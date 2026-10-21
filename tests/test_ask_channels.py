@@ -216,6 +216,16 @@ class AskChannelsTest(unittest.TestCase):
                     for channel in ("telegram", "vk"):
                         self.send(channel, processor, "/register")
                         self.send(channel, processor, "/name Тест")
+                        if "obsidian" in enabled:
+                            with connect_database(self.path) as connection:
+                                owner = connection.execute(
+                                    "SELECT app_user_id FROM external_identities "
+                                    "WHERE channel = ? AND external_user_id = '7'",
+                                    (channel,),
+                                ).fetchone()[0]
+                                SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                                    UserCapabilityPreference(owner, "obsidian", True)
+                                )
                         help_text = self.send(channel, processor, "/help")
                         self.assertEqual("/ask" in help_text, "ask" in enabled)
                         self.assertEqual("/obsidian" in help_text, "obsidian" in enabled)

@@ -129,7 +129,9 @@ class MigrateCommandTest(unittest.TestCase):
         migrations.mkdir()
         initial = MIGRATIONS_DIR / "0001_initial_schema.sql"
         (migrations / initial.name).write_bytes(initial.read_bytes())
-        (migrations / "0002_failing.sql").write_text(
+        second = MIGRATIONS_DIR / "0002_user_capability_preferences.sql"
+        (migrations / second.name).write_bytes(second.read_bytes())
+        (migrations / "0003_failing.sql").write_text(
             "CREATE TABLE partial_change (id INTEGER);\n"
             "INSERT INTO app_users (display_name) VALUES ('Rolled back');\n"
             "INSERT INTO missing_table VALUES (1);\n", encoding="utf-8",
@@ -140,7 +142,7 @@ class MigrateCommandTest(unittest.TestCase):
         ):
             self.assertEqual(self.run_cli(["--migrate"], {"DATABASE_PATH": str(self.database)}), 1)
         with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 2)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
             self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'partial_change'").fetchone())
 
@@ -168,7 +170,7 @@ class MigrateCommandTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
         with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 2)
 
 
 if __name__ == "__main__":

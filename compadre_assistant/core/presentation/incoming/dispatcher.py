@@ -169,9 +169,10 @@ class IncomingMessageDispatcher:
             or self._registry.disabled_by_command(text) is not None
         )
         if command is ChatCommand.HELP:
+            user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.HELP,
-                capability_help=self._registry.help(),
+                capability_help=self._personal_registry(user).help() if user is not None else None,
             )
         identity = _incoming_identity_from_event(event)
         if command is ChatCommand.CONFIRM:
@@ -223,6 +224,7 @@ class IncomingMessageDispatcher:
             user = self._user_identity_service.resolve(identity)
             if user is None:
                 return ProcessIncomingMessageResult(type=IncomingMessageResultType.START_UNREGISTERED)
+            personal = self._personal_registry(user)
             if user.display_name is None:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
@@ -231,7 +233,7 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
 
         if command is ChatCommand.REGISTER:
@@ -250,7 +252,7 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=existing,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=self._personal_registry(existing).entry_hint(),
             )
 
         if command is ChatCommand.LINK:
@@ -299,11 +301,12 @@ class IncomingMessageDispatcher:
         if user is None:
             return ProcessIncomingMessageResult(type=IncomingMessageResultType.UNKNOWN_IDENTITY)
         if command is ChatCommand.EXIT:
+            personal = self._personal_registry(user)
             self._chat_mode_repository.clear(ChatModeKey(user.id, event.channel, event.chat_id))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_EXITED,
                 app_user=user,
-                capability_reply=self._registry.entry_hint(),
+                capability_reply=personal.entry_hint(),
             )
         if command is ChatCommand.LINK_CODE:
             if user.display_name is None:
@@ -318,20 +321,28 @@ class IncomingMessageDispatcher:
                 link_code=link_code,
             )
         if command is ChatCommand.NAME:
+            personal = self._personal_registry(user)
             return self._save_name(
                 parsed.arguments if parsed is not None else "",
                 user,
                 registration=user.display_name is None,
+                personal=personal,
             )
         if command is ChatCommand.STATUS:
+            personal = self._personal_registry(user)
             mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+            access = personal.status(mode.capability_id) if mode else None
+            status_hint = (
+                f"\n{self._blocked_reply(access)}"
+                if access is not None and not access.effective else ""
+            )
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.PROFILE_STATUS,
                 app_user=user,
                 capability_reply=(
                     f"Профиль: {user.display_name or 'имя ещё не задано'}.\n"
                     f"Режим этого чата: {mode.capability_id if mode else 'не выбран'}.\n"
-                    f"{self._registry.entry_hint()}"
+                    f"{personal.entry_hint()}{status_hint}"
                 ),
             )
         if user.display_name is None:
@@ -340,7 +351,9 @@ class IncomingMessageDispatcher:
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                     app_user=user,
                 )
-            return self._save_name(text, user, registration=True)
+            return self._save_name(
+                text, user, registration=True, personal=self._personal_registry(user)
+            )
         return self._dispatch(user, event, completion_handler, self._personal_registry(user))
 
     def _dispatch(
@@ -426,6 +439,7 @@ class IncomingMessageDispatcher:
         user: AppUser,
         *,
         registration: bool,
+        personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult:
         """Сохраняет имя и завершает регистрацию без выбора возможности."""
         try:
@@ -445,7 +459,7 @@ class IncomingMessageDispatcher:
                 else IncomingMessageResultType.NAME_UPDATED
             ),
             app_user=updated,
-            capability_reply=self._registry.entry_hint() if registration else None,
+            capability_reply=personal.entry_hint() if registration else None,
         )
 
 
