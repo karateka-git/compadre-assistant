@@ -180,9 +180,18 @@ class FakeHost(prod.Host):
         assert good["image_id"] == self.current_image and self.running
 
     def migrate(self, image_id: str) -> None:
-        """Фиксирует отдельный no-op migrate вызов."""
+        """Применяет новые fake SQL после остановки writers."""
         assert image_id == NEW_IMAGE
         self.actions.append("migrate")
+        migrations = self.checkout / "compadre_assistant/core/data/sqlite/migrations"
+        with closing(sqlite3.connect(self.checkout / "data/app.db")) as connection:
+            applied = connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+            for version, path in enumerate(sorted(migrations.glob("*.sql")), start=1):
+                if version > applied:
+                    connection.executescript(path.read_text(encoding="utf-8"))
+                    connection.execute("INSERT INTO schema_migrations VALUES (?, ?)",
+                                       (version, path.name))
+            connection.commit()
 
 
 class SystemdBootTests(unittest.TestCase):
@@ -590,8 +599,8 @@ class DeployProdTests(unittest.TestCase):
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["deployment"],
                              state["deployment"])
 
-    def test_emergency_new_schema_stops_before_writers(self) -> None:
-        """Аварийный режим не разрешает неизвестную миграцию и сохраняет причину."""
+    def test_emergency_new_schema_keeps_backup_and_audit(self) -> None:
+        """Аварийный допуск сохраняет backup gate при новой миграции."""
         with TemporaryDirectory() as temporary:
             host = FakeHost(Path(temporary))
             migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
@@ -599,15 +608,14 @@ class DeployProdTests(unittest.TestCase):
             migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
+                prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
             state = prep.read_state(host.state_dir, host.checkout)
-            self.assertEqual(state["stage"], "failed_preflight")
+            self.assertEqual(state["stage"], "success")
             self.assertEqual(state["deployment"]["reason"], "срочно")
             self.assertEqual((host.head, host.current_image, host.running),
-                             (OLD_SHA, OLD_IMAGE, True))
-            self.assertNotIn("stop_both", host.actions)
-            self.assertNotIn("migrate", host.actions)
+                             (NEW_SHA, NEW_IMAGE, True))
+            self.assertLess(host.actions.index("stop_both"), host.actions.index("migrate"))
+            self.assertTrue(Path(state["backup_id"]).is_file())
             self.assertFalse((host.state_dir / "deploy-in-progress").exists())
 
     def test_one_channel_failure_rolls_both_back_without_database_restore(self) -> None:
@@ -642,8 +650,8 @@ class DeployProdTests(unittest.TestCase):
             self.assertEqual(host.current_image, OLD_IMAGE)
             self.assertEqual(host.actions.count("verify_both"), 4)
 
-    def test_pending_migration_fails_before_stop(self) -> None:
-        """Неизвестный SQL не допускается к автоматической миграции."""
+    def test_pending_migration_runs_after_verified_backup(self) -> None:
+        """Новая миграция проходит после backup и до запуска candidate."""
         with TemporaryDirectory() as temporary:
             host = FakeHost(Path(temporary))
             migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
@@ -651,11 +659,110 @@ class DeployProdTests(unittest.TestCase):
             migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "success")
+            self.assertEqual(state["schema_before"], ["0001_initial_schema.sql"])
+            self.assertEqual(state["schema_after"], ["0001_initial_schema.sql", "0002_new.sql"])
+            prep.validate_schema(Path(state["backup_id"]), state["schema_before"])
+            prep.validate_schema(host.checkout / "data/app.db", state["schema_after"])
+            self.assertLess(host.actions.index("stop_both"), host.actions.index("migrate"))
+            self.assertLess(host.actions.index("migrate"), host.actions.index("start_both"))
+
+    def test_changed_migration_prefix_fails_before_stop(self) -> None:
+        """Candidate не вправе переименовать уже применённую миграцию."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            migrations = host.checkout / "compadre_assistant/core/data/sqlite/migrations"
+            (migrations / "0001_initial_schema.sql").rename(migrations / "0001_other.sql")
+            (migrations / "0002_new.sql").write_text("CREATE TABLE new_table (id INTEGER);",
+                                                      encoding="utf-8")
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(prod.DeployError):
                     prod.deploy(host, "v1.0.0")
             self.assertNotIn("stop_both", host.actions)
-            self.assertEqual(host.head, OLD_SHA)
+            self.assertNotIn("migrate", host.actions)
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
+
+    def test_candidate_failure_after_new_migration_stays_degraded(self) -> None:
+        """После изменения схемы старый runtime не возобновляется автоматически."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            host.fail_candidate = True
+            migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
+                         / "0002_new.sql")
+            migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaisesRegex(prod.DeployError, "degraded"):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "degraded")
+            self.assertTrue(Path(state["backup_id"]).is_file())
+            self.assertTrue((host.state_dir / "deploy-in-progress").exists())
+            self.assertFalse(host.running)
+            self.assertEqual(host.actions.count("start_both"), 1)
+
+    def test_backup_failure_before_new_migration_restores_old_runtime(self) -> None:
+        """До запуска нового SQL отказ backup допускает возврат старого кода."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
+                         / "0002_new.sql")
+            migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                prep, "backup_sqlite", side_effect=prod.DeployError("backup"),
+            ):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "rolled_back")
+            self.assertFalse(state["migration_attempted"])
+            self.assertTrue(host.running)
+            self.assertNotIn("migrate", host.actions)
+
+    def test_new_migration_failure_without_history_row_stays_degraded(self) -> None:
+        """Неуспешный мигратор не доказывает отсутствие частичного изменения."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            migration = (host.checkout / "compadre_assistant/core/data/sqlite/migrations"
+                         / "0002_new.sql")
+            migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
+            patches = self._patches()
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                host, "migrate", side_effect=prod.DeployError("partial SQL"),
+            ):
+                with self.assertRaisesRegex(prod.DeployError, "degraded"):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "degraded")
+            self.assertTrue(state["migration_attempted"])
+            self.assertFalse(host.running)
+            self.assertTrue((host.state_dir / "deploy-in-progress").exists())
+
+    def test_interrupted_new_migration_stays_degraded_without_history_row(self) -> None:
+        """После прерывания SQL отсутствие строки migration не разрешает rollback."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            host.marker(True)
+            host.stop_both()
+            prep.write_state(host.state_dir, host.checkout, {
+                "stage": "migration_started", "old_sha": OLD_SHA,
+                "old_image_id": OLD_IMAGE, "old_tag": prep.pinned_tag(OLD_SHA),
+                "schema_before": ["0001_initial_schema.sql"],
+                "schema_after": ["0001_initial_schema.sql", "0002_new.sql"],
+                "migration_attempted": True,
+                "timer_before": {"enabled": True, "active": True},
+            })
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()):
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.0.0")
+            state = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(state["stage"], "degraded")
+            self.assertFalse(host.running)
+            self.assertTrue((host.state_dir / "deploy-in-progress").exists())
 
     def test_incomplete_switch_rolls_back_before_new_attempt(self) -> None:
         """После reboot незавершённый переход не объявляется успешным."""
