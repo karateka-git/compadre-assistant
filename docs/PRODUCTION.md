@@ -27,7 +27,7 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 | Область | Результат проверки |
 | --- | --- |
 | Версия | `v2.0.0`, SHA `0d21ef0172ecf8024bd6c1583a8046fda798aec3`, чистый detached HEAD; [GitHub Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v2.0.0). |
-| Каналы | `tg_assistant` и `vk_assistant` на image ID `sha256:db9ef5fd808474349ee4f182de7febe1df9d647635d948574be0d3fcf86e938e`, оба `healthy`, restart count 0, policy `unless-stopped`. Реальные ответы после выпуска ещё не подтверждены пользователем. |
+| Каналы | `tg_assistant` и `vk_assistant` на image ID `sha256:db9ef5fd808474349ee4f182de7febe1df9d647635d948574be0d3fcf86e938e`, оба `healthy`, restart count 0, policy `unless-stopped`. В 13:36 UTC container ID, PID и `StartedAt` обоих совпали со снимком до личных переключений. Пользователь подтвердил живые сценарии Telegram/VK, второго профиля и долгого Ask; тексты и timestamps ответов независимо не наблюдались. |
 | Контроллер | Отдельный snapshot из проверенного SHA `38bc8411e17d717e954e554f890d599eddd96b96` (`release/2.0`); архив `scripts/` и `deploy/` побайтно сверен с Git, SHA-256 `dcec561a81f6de071946a8d095788a4e87d741fe80bc040a8db939a9f6c0ffc8`. Прежний snapshot сохранён в `/usr/local/lib/compadre-assistant-deploy.previous-v1.0.4-38bc841`. После `sudo deploy-prod v2.0.0`: `stage=success`, `last_good.version=v2.0.0`, marker отсутствует. |
 | Данные | Рабочая SQLite: `integrity_check=ok`, `foreign_key_check` пуст, миграции `0001_initial_schema.sql` и `0002_user_capability_preferences.sql`. |
 | Backup | Проверенная копия перед `0002`: `/var/lib/compadre-assistant-deploy/backups/v2.0.0-0d21ef0172ecf8024bd6c1583a8046fda798aec3.db`, права `0600`, `integrity_check=ok`, только `0001`; ночной timer `active/enabled`. Копии лежат на том же диске VPS. |
@@ -36,7 +36,16 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 Проверка выполнена по Git, controller state, Docker Compose, systemd и
 SQLite на VPS после установки 21.10.2026. До установки старый контроллер
 остановил попытку `v2.0.0` на `failed_preflight` из-за новой `0002`, не меняя
-БД и каналы. Исправление прошло [полный CI релизной линии](https://github.com/karateka-git/compadre-assistant/actions/runs/39601345018), после чего контроллер обновлён отдельно и повторная установка завершилась успешно. Порядок установки и возврата — в [OPERATIONS.md](OPERATIONS.md). Живая приёмка личных настроек в Telegram/VK остаётся открытой в [плане функции](dynamic-capabilities/PLAN.md).
+БД и каналы. Исправление прошло [полный CI релизной линии](https://github.com/karateka-git/compadre-assistant/actions/runs/39601345018), после чего контроллер обновлён отдельно и повторная установка завершилась успешно. Порядок установки и возврата — в [OPERATIONS.md](OPERATIONS.md).
+
+Read-only повторная проверка 21.10.2026 в 13:36 UTC сохранила `stage=success`,
+чистый SHA checkout, обе миграции, `integrity_check=ok`, отсутствие ошибок
+foreign keys и marker, активные unit и backup timer. Пользователь сообщил
+«Проверил всё перечисленное» о живой проверке личного выбора, связанных
+каналов, второго профиля и долгого Ask. Это пользовательское свидетельство;
+наблюдаемые на VPS факты о процессах приведены выше. Тексты сообщений и
+временные метки порядка Ask/disable не получены, поэтому они не входят в
+независимую техническую проверку.
 
 ## Базовые команды
 
