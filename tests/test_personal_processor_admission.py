@@ -3,6 +3,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import logging
+import multiprocessing
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
@@ -24,6 +25,76 @@ from test_chat_modes import DelayedCapability
 from test_incoming_boundary import FakeCapability
 from test_telegram_bot import FakeAiogram, TelegramMessage
 from test_vk_bot import FakeVkClient
+
+
+class ProcessCapability(FakeCapability):
+    """Удерживает допущенный вход до сигнала из другого процесса."""
+
+    def __init__(self, started, release) -> None:
+        """Принимает межпроцессные сигналы для управляемой гонки."""
+        super().__init__("example", "/example")
+        self._descriptor = CapabilityDescriptor("example", "/example", "пример")
+        self.started = started
+        self.release = release
+
+    def enter(self, context, event, arguments):
+        """Ожидает второго процесса после проверки личного допуска."""
+        if self.started is not None:
+            self.started.set()
+            if not self.release.wait(10):
+                raise TimeoutError("Допущенный вход не освобождён")
+        return super().enter(context, event, arguments)
+
+
+def _process_event(path: Path, text: str, started, release, results) -> None:
+    """Обрабатывает одно сообщение с собственным processor и SQLite-соединением."""
+    capability = ProcessCapability(started, release)
+    processor = ChannelMessageProcessor(database_path=path, capabilities=(capability,))
+    event = IncomingEvent("telegram", "tg-chat", "1", text, "tg-user")
+    reply = processor(event)
+    results.put((reply.text, len(capability.entries)))
+
+
+def _process_preference(path: Path, app_user_id: int, capability_id: str,
+                        enabled: bool, ready, release, results) -> None:
+    """Записывает один ключ после общего сигнала старта и возвращает commit."""
+    with connect_database(path) as connection:
+        ready.set()
+        if not release.wait(10):
+            raise TimeoutError("Запись не освобождена")
+        old = SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+            UserCapabilityPreference(app_user_id, capability_id, enabled)
+        )
+    results.put(old)
+
+
+def _process_adapter_event(path: Path, channel: str, text: str, results) -> None:
+    """Запускает отдельный TG или VK adapter с новым processor."""
+    capability = ProcessCapability(None, None)
+    processor = ChannelMessageProcessor(database_path=path, capabilities=(capability,))
+    logger = logging.getLogger("test.personal.process-adapters")
+    if channel == "telegram":
+        aiogram = FakeAiogram()
+        _register_handlers(
+            aiogram.dispatcher, aiogram,
+            incoming_message_processor=processor, logger=logger,
+        )
+        message = TelegramMessage()
+        message.chat = SimpleNamespace(id=42)
+        message.from_user = SimpleNamespace(id=7, username=None, full_name="Тест")
+        message.message_id = 1
+        message.text = text
+        asyncio.run(aiogram.dispatcher.included_router.handler(message))
+        results.put(("\n".join(message.answers), len(capability.entries)))
+        return
+    client = FakeVkClient()
+    _handle_update(
+        {"type": "message_new", "object": {"message": {
+            "id": 1, "peer_id": 44, "from_id": 9, "text": text,
+        }}},
+        incoming_message_processor=processor, client=client, logger=logger,
+    )
+    results.put(("\n".join(reply for _, reply in client.messages), len(capability.entries)))
 
 
 class PersonalProcessorAdmissionTest(unittest.TestCase):
@@ -227,6 +298,127 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             ).fetchone()[0], "example")
         first(self.event("/enable example", "telegram", "tg-user", "tg-chat"))
         self.assertEqual(second(self.event("текст", "vk", "vk-user", "vk-chat")).text, "Тестовый ответ")
+
+    def test_process_boundary_before_and_after_disable_commit(self) -> None:
+        """Допуск до commit завершается, а новый процесс после commit не входит."""
+        self.save(1, True)
+        context = multiprocessing.get_context("spawn")
+        started = context.Event()
+        release = context.Event()
+        results = context.Queue()
+        admitted = context.Process(
+            target=_process_event,
+            args=(self.path, "/example", started, release, results),
+        )
+        admitted.start()
+        try:
+            self.assertTrue(started.wait(10), "Первый процесс не достиг handler")
+            disabled_results = context.Queue()
+            disabled = context.Process(
+                target=_process_event,
+                args=(self.path, "/disable example", None, None, disabled_results),
+            )
+            disabled.start()
+            disabled.join(10)
+            self.assertEqual(disabled.exitcode, 0)
+            self.assertIn("выключена", disabled_results.get(timeout=2)[0])
+        finally:
+            release.set()
+            admitted.join(10)
+        self.assertEqual(admitted.exitcode, 0)
+        self.assertEqual(results.get(timeout=2), ("Актуальное состояние", 1))
+
+        after_results = context.Queue()
+        after = context.Process(
+            target=_process_event,
+            args=(self.path, "/example", None, None, after_results),
+        )
+        after.start()
+        after.join(10)
+        self.assertEqual(after.exitcode, 0)
+        text, entered = after_results.get(timeout=2)
+        self.assertIn("/enable example", text)
+        self.assertEqual(entered, 0)
+
+    def test_separate_adapter_processes_see_cross_channel_commits(self) -> None:
+        """TG и VK в разных процессах читают общий AppUser после commit."""
+        with connect_database(self.path) as connection:
+            connection.executemany(
+                "UPDATE external_identities SET external_user_id = ?, external_chat_id = ? "
+                "WHERE channel = ? AND external_user_id = ?",
+                (("7", "42", "telegram", "tg-user"),
+                 ("9", "44", "vk", "vk-user")),
+            )
+            connection.commit()
+        context = multiprocessing.get_context("spawn")
+
+        def send(channel: str, text: str) -> tuple[str, int]:
+            """Ожидает отдельный канал и возвращает ответ с числом входов."""
+            outcome = context.Queue()
+            process = context.Process(
+                target=_process_adapter_event,
+                args=(self.path, channel, text, outcome),
+            )
+            process.start()
+            process.join(10)
+            self.assertEqual(process.exitcode, 0)
+            return outcome.get(timeout=2)
+
+        self.assertIn("включена", send("telegram", "/enable example")[0])
+        self.assertEqual(send("vk", "/example"), ("Актуальное состояние", 1))
+        self.assertIn("выключена", send("vk", "/disable example")[0])
+        text, entered = send("telegram", "/example")
+        self.assertIn("/enable example", text)
+        self.assertEqual(entered, 0)
+
+    def test_process_writes_keep_distinct_keys_and_last_same_key(self) -> None:
+        """Независимые процессы сохраняют разные ID и порядок commit одного ID."""
+        context = multiprocessing.get_context("spawn")
+        release = context.Event()
+        ready = (context.Event(), context.Event())
+        results = (context.Queue(), context.Queue())
+        processes = (
+            context.Process(target=_process_preference, args=(
+                self.path, 1, "ask", False, ready[0], release, results[0],
+            )),
+            context.Process(target=_process_preference, args=(
+                self.path, 1, "example", True, ready[1], release, results[1],
+            )),
+        )
+        for process in processes:
+            process.start()
+        try:
+            self.assertTrue(all(event.wait(10) for event in ready))
+        finally:
+            release.set()
+            for process in processes:
+                process.join(10)
+        self.assertEqual([process.exitcode for process in processes], [0, 0])
+        self.assertEqual([result.get(timeout=2) for result in results], [None, None])
+        with connect_database(self.path) as connection:
+            rows = connection.execute(
+                "SELECT capability_id, enabled FROM user_capability_preferences "
+                "WHERE app_user_id = 1 ORDER BY capability_id"
+            ).fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows], [("ask", 0), ("example", 1)])
+
+        same_ready = (context.Event(), context.Event())
+        same_go = (context.Event(), context.Event())
+        same_results = (context.Queue(), context.Queue())
+        same_writers = tuple(context.Process(target=_process_preference, args=(
+            self.path, 1, "example", enabled, same_ready[index],
+            same_go[index], same_results[index],
+        )) for index, enabled in enumerate((False, True)))
+        for writer in same_writers:
+            writer.start()
+        self.assertTrue(all(event.wait(10) for event in same_ready))
+        for index, expected_old in enumerate((True, False)):
+            same_go[index].set()
+            same_writers[index].join(10)
+            self.assertEqual(same_writers[index].exitcode, 0)
+            self.assertEqual(same_results[index].get(timeout=2), expected_old)
+        with connect_database(self.path) as connection:
+            self.assertTrue(SQLiteUserCapabilityPreferenceRepository(connection).get_for_user(1)[1].enabled)
 
 
 if __name__ == "__main__":
