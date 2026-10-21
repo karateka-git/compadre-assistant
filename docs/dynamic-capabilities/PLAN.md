@@ -205,6 +205,75 @@ Commit команды отключения отделяет новые собы�
 выпуска и живой приёмки пользователем. Локальная подготовка шагов 5.1–5.3
 сама по себе не закрывает этап.
 
+### Проверка шага 5.2 — 21.10.2026
+
+Проверенный локально code SHA: `aab17baf90a807b36471eccd1c7be1075351cf95`
+на ветке `codex/dynamic-capabilities` до этой записи. Baseline предыдущего
+опубликованного выпуска: `d6b7d9267e7754ee90957d9057e2a4eb41f789c1`;
+объект commit доступен локально. Команды ниже выполнялись из корня feature
+worktree проектным Python `C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe`.
+
+| Команда | Локальный результат |
+| --- | --- |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m scripts.check_full_migrations --previous-sha d6b7d9267e7754ee90957d9057e2a4eb41f789c1` | Успех: свежая и обновлённая SQLite, прежний код на обновлённой БД, идемпотентность и синтетическая следующая миграция. `0001` совпала с опубликованным commit. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m unittest discover -s tests -p test_migration_runner.py` | 6 тестов прошли. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m unittest discover -s tests` | 757 запущено, 2 пропущены, остальные прошли; 59,310 с. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m compadre_assistant --sqlite-smoke` | Успех на временной SQLite. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m compadre_assistant --pipeline-smoke` | Успех без внешнего API. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m compadre_assistant --analysis-smoke` | Успех с fake LLM. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -m compileall -q compadre_assistant document_chunker tests scripts` | Успех. |
+| `& 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' scripts/check_pr_fast.py --base-sha d6b7d9267e7754ee90957d9057e2a4eb41f789c1` | Tracked-файлы и миграции прошли локальную проверку против доступного baseline; это не проверка будущего PR merge с его фактической базой. |
+| `Copy-Item -LiteralPath .env.example -Destination .env; try { docker compose --env-file .env.example config --quiet; $code = $LASTEXITCODE } finally { Remove-Item -LiteralPath .env }; exit $code` | Compose-конфигурация с синтетическим `.env` прошла; временный `.env` удалён. |
+| `docker version --format '{{.Server.Version}}'` | Docker daemon недоступен (`dockerDesktopLinuxEngine` pipe отсутствует), поэтому `scripts.check_candidate` с image build/healthcheck локально не выполнялся. |
+
+Отдельно на временной копии БД создана **именно опубликованная** `0001` через
+`git show` baseline SHA; до `0002` сохранены AppUser, Telegram identity, режим
+Obsidian, статья и анализ. После применения `0002` все строки остались,
+`user_capability_preferences` пуста, выбор без явных строк равен Ask=true и
+Obsidian=false. Повтор миграции не применяет SQL; `integrity_check=ok`,
+`foreign_key_check` пуст. Воспроизводимая команда этого дополнительного probe:
+
+```powershell
+@'
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import subprocess
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.domain.capability_preferences import CapabilityDefault, GetUserCapabilitySelections
+sha = 'd6b7d9267e7754ee90957d9057e2a4eb41f789c1'
+old_sql = subprocess.run(['git', 'show', f'{sha}:compadre_assistant/core/data/sqlite/migrations/0001_initial_schema.sql'], capture_output=True, check=True).stdout
+with TemporaryDirectory(prefix='upgrade-0001-') as folder:
+    root = Path(folder); old = root / 'migrations'; old.mkdir()
+    (old / '0001_initial_schema.sql').write_bytes(old_sql)
+    db = root / 'copy.db'
+    with connect_database(db) as c:
+        assert [m.version for m in apply_migrations(c, old)] == [1]
+        c.executescript("INSERT INTO app_users(id,display_name) VALUES(1,'Old user'); INSERT INTO external_identities(app_user_id,channel,external_user_id,external_chat_id) VALUES(1,'telegram','old','chat'); INSERT INTO active_chat_modes(app_user_id,channel,chat_id,capability_id) VALUES(1,'telegram','chat','obsidian'); INSERT INTO articles(id,app_user_id,source_url,normalized_url,status) VALUES(7,1,'https://example.com/a','https://example.com/a','analyzed'); INSERT INTO analysis_results(app_user_id,article_id,llm_model,prompt_version,result_text) VALUES(1,7,'fixture','v1','saved');")
+    with connect_database(db) as c:
+        assert [m.version for m in apply_migrations(c)] == [2]
+        assert apply_migrations(c) == []
+        assert tuple(c.execute('SELECT display_name FROM app_users WHERE id=1').fetchone()) == ('Old user',)
+        assert tuple(c.execute('SELECT external_user_id FROM external_identities').fetchone()) == ('old',)
+        assert tuple(c.execute('SELECT capability_id FROM active_chat_modes').fetchone()) == ('obsidian',)
+        assert tuple(c.execute('SELECT status FROM articles WHERE id=7').fetchone()) == ('analyzed',)
+        assert tuple(c.execute('SELECT result_text FROM analysis_results').fetchone()) == ('saved',)
+        assert c.execute('SELECT COUNT(*) FROM user_capability_preferences').fetchone()[0] == 0
+        defaults = (CapabilityDefault('ask', True), CapabilityDefault('obsidian', False))
+        choice = GetUserCapabilitySelections(SQLiteUserCapabilityPreferenceRepository(c), defaults).execute(1)
+        assert [(x.capability_id,x.enabled,x.explicit) for x in choice] == [('ask',True,False),('obsidian',False,False)]
+        assert c.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+        assert c.execute('PRAGMA foreign_key_check').fetchall() == []
+print('0001 copy -> 0002: saved rows, defaults, integrity OK')
+'@ | & 'C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe' -
+```
+
+Этот итог — локальная проверка содержимого code SHA; следующий docs-only
+коммит шага 5.2 изменит общий SHA Git. CI для итогового SHA ещё не выполнялся,
+PR и живые Telegram/VK/production не проверены. Дефектов по локальным проверкам
+не обнаружено. Этап 5 и пункт бэклога открыты.
+
 Новые проверки добавить по месту: repository/use cases личных настроек, `test_migration_runner.py`, `test_incoming_boundary.py`, `test_incoming_commands.py`, `test_chat_modes.py`, `test_capability_composition.py`, `test_ask_channels.py` и тесты адаптеров. Прежние тесты, которым нужен активный Obsidian, явно включают его в fixture; не сохранять старый доступ обходным контрактом ради тестов.
 
 Обязательные проверочные сценарии:
