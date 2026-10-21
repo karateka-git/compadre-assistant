@@ -1,8 +1,12 @@
 """Проверяет допуск в независимых processor на общей временной SQLite."""
 
+import asyncio
 from concurrent.futures import ThreadPoolExecutor
+import logging
 from pathlib import Path
+import re
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 
 from compadre_assistant.bootstrap import ChannelMessageProcessor
@@ -14,8 +18,12 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import CapabilityDescriptor
+from compadre_assistant.presentation.telegram.bot import _register_handlers
+from compadre_assistant.presentation.vk.bot import _handle_update
 from test_chat_modes import DelayedCapability
 from test_incoming_boundary import FakeCapability
+from test_telegram_bot import FakeAiogram, TelegramMessage
+from test_vk_bot import FakeVkClient
 
 
 class PersonalProcessorAdmissionTest(unittest.TestCase):
@@ -49,6 +57,32 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
                 UserCapabilityPreference(app_user_id, "example", enabled)
             )
 
+    def send_adapter(self, channel: str, processor: ChannelMessageProcessor,
+                     text: str, user_id: str, chat_id: str) -> str:
+        """Передаёт команду через настоящий адаптер с fake-клиентом канала."""
+        logger = logging.getLogger("test.personal.adapters")
+        if channel == "telegram":
+            aiogram = FakeAiogram()
+            _register_handlers(
+                aiogram.dispatcher, aiogram,
+                incoming_message_processor=processor, logger=logger,
+            )
+            message = TelegramMessage()
+            message.chat = SimpleNamespace(id=chat_id)
+            message.from_user = SimpleNamespace(id=user_id, username=None, full_name="Тест")
+            message.message_id = 1
+            message.text = text
+            asyncio.run(aiogram.dispatcher.included_router.handler(message))
+            return "\n".join(message.answers)
+        client = FakeVkClient()
+        _handle_update(
+            {"type": "message_new", "object": {"message": {
+                "id": 1, "peer_id": int(chat_id), "from_id": int(user_id), "text": text,
+            }}},
+            incoming_message_processor=processor, client=client, logger=logger,
+        )
+        return "\n".join(reply for _, reply in client.messages)
+
     @staticmethod
     def capability() -> FakeCapability:
         """Создаёт вход с default False, как у нового встроенного ID."""
@@ -74,6 +108,54 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         self.save(2, True)
         self.assertEqual(first(other).text, "Актуальное состояние")
         self.assertIn("/enable example", second(vk).text)
+
+    def test_adapters_share_selection_and_rebind_uses_destination_profile(self) -> None:
+        """TG/VK видят commit и после rebind применяют настройки нового AppUser."""
+        with connect_database(self.path) as connection:
+            connection.executemany(
+                "UPDATE external_identities SET external_user_id = ?, external_chat_id = ? "
+                "WHERE channel = ? AND external_user_id = ?",
+                (("7", "42", "telegram", "tg-user"),
+                 ("8", "43", "telegram", "other-user"),
+                 ("9", "44", "vk", "vk-user")),
+            )
+            connection.commit()
+        telegram = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        vk = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+
+        def tg(text: str, user: str = "7", chat: str = "42") -> str:
+            return self.send_adapter("telegram", telegram, text, user, chat)
+
+        def send_vk(text: str) -> str:
+            return self.send_adapter("vk", vk, text, "9", "44")
+
+        self.assertIn("/enable example", send_vk("/example"))
+        self.assertIn("включена", tg("/enable example"))
+        self.assertIn("Актуальное состояние", send_vk("/example"))
+        self.assertIn("выключена", send_vk("/disable example"))
+        self.assertIn("/enable example", tg("/example"))
+        self.assertIn("/enable example", tg("/example", "8", "43"))
+        self.assertIn("включена", tg("/enable example", "8", "43"))
+        code_reply = tg("/link_code", "8", "43")
+        code = re.search(r"Код привязки: `([^`]+)`", code_reply)
+        self.assertIsNotNone(code, code_reply)
+        rebind = send_vk(f"/link {code.group(1)}")
+        confirmation = re.search(r"/confirm core identity \d+ \d+ yes", rebind)
+        self.assertIsNotNone(confirmation, rebind)
+        self.assertIn("перепривязал", send_vk(confirmation.group()))
+        self.assertIn("Актуальное состояние", send_vk("/example"))
+        self.assertIn("/enable example", tg("/example"))
+        with connect_database(self.path) as connection:
+            owner = connection.execute(
+                "SELECT app_user_id FROM external_identities WHERE channel = 'vk' "
+                "AND external_user_id = '9'"
+            ).fetchone()[0]
+            self.assertEqual(owner, 2)
+            choices = connection.execute(
+                "SELECT app_user_id, enabled FROM user_capability_preferences "
+                "WHERE capability_id = 'example' ORDER BY app_user_id"
+            ).fetchall()
+            self.assertEqual([(row[0], row[1]) for row in choices], [(1, 0), (2, 1)])
 
     def test_admitted_entry_finishes_after_disable_commit(self) -> None:
         """Уже допущенный вызов завершается, следующий вход видит disable."""
