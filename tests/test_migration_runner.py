@@ -143,8 +143,101 @@ class MigrationRunnerTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(sorted(results), [0, 2])
-        self.assertEqual(migration_count, 2)
+        self.assertEqual(sorted(results), [0, 3])
+        self.assertEqual(migration_count, 3)
+
+    def test_existing_profiles_receive_default_name_without_losing_data(self) -> None:
+        """0003 обновляет NULL-имена после 0001 и 0002 без потери данных."""
+        for applied_prefix in (1, 2):
+            with self.subTest(applied_prefix=applied_prefix), TemporaryDirectory(
+                prefix="user-name-migration-"
+            ) as directory:
+                root = Path(directory)
+                database_path = root / "test.db"
+                migrations = root / "migrations"
+                migrations.mkdir()
+                for version in range(1, applied_prefix + 1):
+                    source = next(MIGRATIONS_DIR.glob(f"{version:04d}_*.sql"))
+                    (migrations / source.name).write_bytes(source.read_bytes())
+
+                with connect_database(database_path) as connection:
+                    self.assertEqual(
+                        [item.version for item in apply_migrations(connection, migrations)],
+                        list(range(1, applied_prefix + 1)),
+                    )
+                    connection.execute("INSERT INTO app_users (id, display_name) VALUES (1, NULL)")
+                    connection.execute("INSERT INTO app_users (id, display_name) VALUES (2, 'Existing')")
+                    connection.execute(
+                        "INSERT INTO external_identities "
+                        "(id, app_user_id, channel, external_user_id, external_chat_id) "
+                        "VALUES (10, 1, 'telegram', 'user-1', 'chat-1')"
+                    )
+                    connection.execute(
+                        "INSERT INTO active_chat_modes "
+                        "(app_user_id, channel, chat_id, capability_id) "
+                        "VALUES (1, 'telegram', 'chat-1', 'obsidian')"
+                    )
+                    connection.execute(
+                        "INSERT INTO articles "
+                        "(id, app_user_id, source_url, normalized_url, title, cleaned_text) "
+                        "VALUES (20, 1, 'https://example.com/a', 'https://example.com/a', 'Article', 'Body')"
+                    )
+                    if applied_prefix == 2:
+                        connection.execute(
+                            "INSERT INTO user_capability_preferences VALUES (1, 'ask', 0)"
+                        )
+                    connection.commit()
+
+                    before_identity = tuple(connection.execute("SELECT * FROM external_identities").fetchone())
+                    before_mode = tuple(connection.execute("SELECT * FROM active_chat_modes").fetchone())
+                    before_article = tuple(connection.execute("SELECT * FROM articles").fetchone())
+                    before_preferences = [
+                        tuple(row) for row in connection.execute(
+                            "SELECT * FROM user_capability_preferences ORDER BY app_user_id, capability_id"
+                        )
+                    ] if applied_prefix == 2 else None
+
+                    if applied_prefix == 1:
+                        source = next(MIGRATIONS_DIR.glob("0002_*.sql"))
+                        (migrations / source.name).write_bytes(source.read_bytes())
+                        self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [2])
+                        connection.execute(
+                            "INSERT INTO user_capability_preferences VALUES (1, 'ask', 0)"
+                        )
+                        connection.commit()
+                        before_preferences = [
+                            tuple(row) for row in connection.execute(
+                                "SELECT * FROM user_capability_preferences ORDER BY app_user_id, capability_id"
+                            )
+                        ]
+
+                    source = MIGRATIONS_DIR / "0003_backfill_existing_user_names.sql"
+                    (migrations / source.name).write_bytes(source.read_bytes())
+                    self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [3])
+                    self.assertEqual(
+                        [tuple(row) for row in connection.execute("SELECT id, display_name FROM app_users ORDER BY id")],
+                        [(1, "Анатолий"), (2, "Existing")],
+                    )
+                    self.assertEqual(tuple(connection.execute("SELECT * FROM external_identities").fetchone()), before_identity)
+                    self.assertEqual(tuple(connection.execute("SELECT * FROM active_chat_modes").fetchone()), before_mode)
+                    self.assertEqual(tuple(connection.execute("SELECT * FROM articles").fetchone()), before_article)
+                    self.assertEqual(
+                        [tuple(row) for row in connection.execute(
+                            "SELECT * FROM user_capability_preferences ORDER BY app_user_id, capability_id"
+                        )],
+                        before_preferences,
+                    )
+                    self.assertEqual(apply_migrations(connection, migrations), [])
+                    self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+                    self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_clean_install_applies_all_migrations_without_creating_profiles(self) -> None:
+        """Чистая установка применяет 0001–0003, оставляя каталог пользователей пустым."""
+        with TemporaryDirectory(prefix="user-name-clean-install-") as directory:
+            with connect_database(Path(directory) / "test.db") as connection:
+                self.assertEqual([item.version for item in apply_migrations(connection)], [1, 2, 3])
+                self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
+                self.assertEqual(apply_migrations(connection), [])
 
     def test_capability_preferences_migrate_fresh_and_previous_database(self) -> None:
         """Новая таблица появляется без backfill и сохраняет данные схемы 0001."""
