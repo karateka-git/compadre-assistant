@@ -14,10 +14,13 @@ from compadre_assistant.capabilities.obsidian.presentation.processing import (
 )
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from tests.response_assertions import content_text
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+from compadre_assistant.presentation.vk.rendering import render_vk_content
+from tests.test_message_rendering import _HtmlReader
 
 
 class ResponseContentContractTest(unittest.TestCase):
-    """Защищает буквальные данные, структуру и временную доставку действий."""
+    """Защищает буквальные данные, структуру и канальную доставку действий."""
 
     def test_nested_content_preserves_styles_and_block_boundaries(self) -> None:
         """Объединение оставляет списки, команды и данные в исходном порядке."""
@@ -36,7 +39,7 @@ class ResponseContentContractTest(unittest.TestCase):
             '<b>Данные</b> & `текст`\n\n• ' + command + '\n\nИтог\nСледующий шаг',
         )
 
-    def test_temporary_serialization_matches_plain_content_and_actions(self) -> None:
+    def test_channel_renderers_preserve_content_and_addressed_actions(self) -> None:
         """Runtime сохраняет полные команды yes/no после всех блоков."""
         actions = tuple(
             ConfirmationAction(choice, label, f'/confirm obsidian replace 17 3 {choice}')
@@ -47,12 +50,19 @@ class ResponseContentContractTest(unittest.TestCase):
             BulletList((ListItem((TextSpan('пункт'),)),)),
         ))
         response = IncomingResponse(content, actions=actions)
-        expected = content_text(content) + '\n' + '\n'.join(
+        expected = content_text(content) + '\n\n' + '\n\n'.join(
             f'{action.label}: {action.command}' for action in actions
         )
-        self.assertEqual(response.render_text(), expected)
-        for action in actions:
-            self.assertEqual(response.render_text().count(action.command), 1)
+        telegram = render_telegram_content(response.content, response.actions)
+        vk = render_vk_content(response.content, response.actions)
+        outputs = (
+            "".join("".join(_HtmlReader(part.text).parts) for part in telegram),
+            "".join(part.text for part in vk),
+        )
+        for output in outputs:
+            self.assertEqual(output, expected)
+            for action in actions:
+                self.assertEqual(output.count(action.command), 1)
 
     def test_override_and_error_survive_presentation(self) -> None:
         """Override передаётся буквально, включая пустое значение, и сохраняет error."""
@@ -74,6 +84,13 @@ class ResponseContentContractTest(unittest.TestCase):
         self.assertEqual(content_text(result), 'Ответ: ' + data + '\n/help')
         self.assertEqual(result.blocks[0].spans[1], TextSpan(data))
         self.assertEqual(result.blocks[0].spans[-1], TextSpan('/help', TextStyle.CODE))
+        telegram = render_telegram_content(result, ())
+        vk = render_vk_content(result, ())
+        self.assertEqual(
+            ''.join(''.join(_HtmlReader(part.text).parts) for part in telegram),
+            'Ответ: ' + data + '\n/help',
+        )
+        self.assertEqual(''.join(part.text for part in vk), 'Ответ: ' + data + '\n/help')
 
 
 if __name__ == '__main__':

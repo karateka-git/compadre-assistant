@@ -436,47 +436,6 @@ def _telegram_retry_delay(error: Exception, failed_attempt: int) -> float | None
     return None
 
 
-def split_telegram_message(text: str, *, limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT) -> list[str]:
-    """Делит текст на части, не превышающие безопасный лимит Telegram.
-
-    Args:
-        text: Исходный ответ.
-        limit: Максимальная длина одного фрагмента.
-
-    Returns:
-        Непустой список фрагментов для последовательной отправки.
-    """
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-
-        split_at = _find_split_position(remaining, limit)
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-
-    return chunks
-
-
-def _find_split_position(text: str, limit: int) -> int:
-    """Находит позицию разреза по абзацу, строке или пробелу."""
-    window = text[:limit]
-    for separator in ("\n\n", "\n", " "):
-        position = window.rfind(separator)
-        if position > 0:
-            return position + len(separator)
-    return limit
-
-
 def _load_aiogram() -> Any:
     """Загружает `aiogram` только при реальном запуске Telegram adapter."""
     try:

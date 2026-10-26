@@ -447,7 +447,7 @@ class IncomingBoundaryTest(unittest.TestCase):
 
         self.assertEqual(response.error, failure)
         self.assertIn("Проверь состояние действия", response_text(response))
-        self.assertNotIn("секретная причина", response.render_text())
+        self.assertNotIn("секретная причина", response_text(response))
         self.assertEqual(response.actions, ())
         self.assertEqual(self.repository.get_state(self.key), before)
         self.assertEqual(len(self.capability.calls), 1)

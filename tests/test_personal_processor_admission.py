@@ -26,6 +26,7 @@ from test_chat_modes import DelayedCapability
 from test_incoming_boundary import FakeCapability
 from test_telegram_bot import FakeAiogram, TelegramMessage
 from test_vk_bot import FakeVkClient
+from tests.test_message_rendering import _HtmlReader
 
 
 class ProcessCapability(FakeCapability):
@@ -145,7 +146,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             message.message_id = 1
             message.text = text
             asyncio.run(aiogram.dispatcher.included_router.handler(message))
-            return "\n".join(message.answers)
+            return "\n".join("".join(_HtmlReader(answer).parts) for answer in message.answers)
         client = FakeVkClient()
         _handle_update(
             {"type": "message_new", "object": {"message": {

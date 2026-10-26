@@ -5,7 +5,7 @@ from compadre_assistant.presentation.message_rendering import content_groups
 
 
 def content_text(content: MessageContent) -> str:
-    """Возвращает видимый текст блоков без зависимости от временного API ответа."""
+    """Возвращает видимый текст блоков независимо от адаптера канала."""
     return "".join(span.text for group in content_groups(content, ()) for span in group)
 
 

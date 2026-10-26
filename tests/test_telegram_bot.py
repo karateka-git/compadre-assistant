@@ -27,7 +27,6 @@ from compadre_assistant.presentation.telegram.bot import (
     _start_polling_with_retries,
     _telegram_polling_retry_delay,
     safe_send_telegram_reply,
-    split_telegram_message,
 )
 
 
@@ -234,20 +233,6 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertEqual(len(message.answers), 2)
         self.assertIn("Принял, обрабатываю", message.answers[0])
         self.assertEqual(message.answers[-1], "Готово")
-
-    def test_split_telegram_message_keeps_chunks_under_limit(self) -> None:
-        """Длинный ответ делится на безопасные фрагменты."""
-        chunks = split_telegram_message("alpha beta gamma delta", limit=10)
-
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
-        self.assertEqual(" ".join(chunks), "alpha beta gamma delta")
-
-    def test_split_telegram_message_falls_back_to_hard_split(self) -> None:
-        """Слово длиннее лимита режется без бесконечного цикла."""
-        chunks = split_telegram_message("abcdefghij", limit=4)
-
-        self.assertEqual(chunks, ["abcd", "efgh", "ij"])
 
     def test_safe_send_telegram_reply_does_not_raise_when_send_fails(self) -> None:
         """Ошибка отправки Telegram-сообщения логируется и не роняет handler."""

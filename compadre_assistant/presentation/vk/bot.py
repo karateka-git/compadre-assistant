@@ -346,27 +346,6 @@ class VkApiClient:
         return payload
 
 
-def split_vk_message(text: str, *, limit: int = VK_SAFE_MESSAGE_LIMIT) -> list[str]:
-    """Делит длинный VK-ответ на безопасные части."""
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        split_at = _find_split_position(remaining, limit)
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-    return chunks
-
-
 def _handle_update(
     update: dict[str, Any],
     *,
@@ -651,15 +630,6 @@ def _safe_network_error_details(error: VkTransientError) -> str:
     if isinstance(errno, int) and not isinstance(errno, bool):
         details.append(f"errno={errno}")
     return " ".join(details)
-
-
-def _find_split_position(text: str, limit: int) -> int:
-    window = text[:limit]
-    for separator in ("\n\n", "\n", " "):
-        position = window.rfind(separator)
-        if position > 0:
-            return position + len(separator)
-    return limit
 
 
 def _require_int(value: object, field_name: str) -> int:

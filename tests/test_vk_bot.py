@@ -20,7 +20,6 @@ from compadre_assistant.presentation.vk.bot import (
     _long_poll_retry_delay,
     _safe_send_vk_message,
     run_vk_bot,
-    split_vk_message,
 )
 
 
@@ -142,14 +141,6 @@ class LongPollMessageClient(LongPollSequenceClient, FakeVkClient):
 
 class VkBotTest(unittest.TestCase):
     """Проверяет helpers VK adapter."""
-
-    def test_split_vk_message_keeps_chunks_under_limit(self) -> None:
-        """Длинный VK-ответ делится на безопасные фрагменты."""
-        chunks = split_vk_message("alpha beta gamma delta", limit=10)
-
-        self.assertGreater(len(chunks), 1)
-        self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
-        self.assertEqual(" ".join(chunks), "alpha beta gamma delta")
 
     def test_handle_update_converts_vk_message_to_incoming_message(self) -> None:
         """VK update превращается в channel-agnostic IncomingEvent."""
