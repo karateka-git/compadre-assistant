@@ -7,6 +7,7 @@ from typing import Protocol
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.message_content import MessageContent, Paragraph
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,17 +39,26 @@ class ConfirmationAction:
 class IncomingResponse:
     """Передаёт готовое содержимое и действия без предметных моделей."""
 
-    text: str
+    content: MessageContent
     error: Exception | None = None
     actions: tuple[ConfirmationAction, ...] = ()
 
     def render_text(self) -> str:
-        """Добавляет доступные команды действий для текстовых каналов."""
-        if not self.actions:
-            return self.text
+        """Временно сериализует новую модель до подключения адаптеров шага 5.4."""
+        blocks = []
+        for block in self.content.blocks:
+            if isinstance(block, Paragraph):
+                blocks.append("".join(span.text for span in block.spans))
+            else:
+                blocks.append("\n".join(
+                    "• " + "".join(span.text for span in item.spans)
+                    for item in block.items
+                ))
+        text = "\n\n".join(block for block in blocks if block)
+        # До подключения рендереров сохраняем прежние одиночные переносы действий.
         return "\n".join(
-            (self.text, *(f"{action.label}: {action.command}" for action in self.actions))
-        )
+            (text, *(f"{action.label}: {action.command}" for action in self.actions))
+        ) if self.actions else text
 
 
 @dataclass(frozen=True, slots=True)

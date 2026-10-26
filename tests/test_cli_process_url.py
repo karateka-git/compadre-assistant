@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Тесты CLI-команды обработки URL статьи."""
 
 from pathlib import Path
@@ -490,7 +491,7 @@ class ProcessUrlCliTest(unittest.TestCase):
                     analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
                 )
 
-        self.assertIn("Готово: статья сохранена", result.text)
+        self.assertIn("Готово: статья сохранена", response_text(result))
         self.assertEqual(fake_use_case.commands[0].source_url, "https://example.com/article")
         self.assertEqual(fake_analysis_use_case.commands, [])
 

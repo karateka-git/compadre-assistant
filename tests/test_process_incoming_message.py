@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Тесты общего application-flow входящих сообщений."""
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
@@ -1068,8 +1069,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertEqual(started.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(len(completions), 3)  # Квитанция, авторизация, выбранный vault.
-        self.assertIn("первую синхронизацию", completions[1].response.text)
-        self.assertIn("octocat/notes", completions[2].response.text)
+        self.assertIn("первую синхронизацию", response_text(completions[1].response))
+        self.assertIn("octocat/notes", response_text(completions[2].response))
         self.assertTrue(all(reply.address == _telegram_message("текст").reply_address for reply in completions))
         self.assertEqual(
             manager.calls[-1],
@@ -1100,7 +1101,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             )
         )
 
-        self.assertIn(starter.installation_url, completions[-1].response.text)
+        self.assertIn(starter.installation_url, response_text(completions[-1].response))
 
     def test_article_is_blocked_until_obsidian_has_vault(self) -> None:
         """Статьи внутри Obsidian требуют подключённый vault готового профиля."""
@@ -1257,7 +1258,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/link ABC123"))
 
-        self.assertIn("адресной командой", result.text)
+        self.assertIn("адресной командой", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
         self.assertTrue(identity_service.rebind_requested)
 

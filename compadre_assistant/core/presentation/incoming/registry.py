@@ -117,8 +117,8 @@ class CapabilityRegistry:
     def help(self) -> CapabilityHelp:
         """Формирует справку всех включённых входов и способ выхода."""
         entries = tuple(
-            f"`{entry.descriptor.entry_command}` — {entry.descriptor.description}"
-            + ("; выход: `/exit`" if entry.descriptor.persistent_mode else "")
+            f"{entry.descriptor.entry_command} — {entry.descriptor.description}"
+            + ("; выход: /exit" if entry.descriptor.persistent_mode else "")
             for entry in self._by_id.values()
         )
         sections = (HelpSection("Возможности", entries),) if entries else ()
@@ -135,10 +135,10 @@ class CapabilityRegistry:
 
     def entry_hint(self) -> str:
         """Предлагает доступные команды входа без предметного анализа сообщения."""
-        commands = ", ".join(f"`{command}`" for command in self._by_command)
+        commands = ", ".join(f"{command}" for command in self._by_command)
         if not commands:
-            return "Сейчас нет включённых возможностей. Выбор: `/capabilities`. Справка: `/help`."
-        return f"Выбери возможность: {commands}. Выбор: `/capabilities`. Справка: `/help`."
+            return "Сейчас нет включённых возможностей. Выбор: /capabilities. Справка: /help."
+        return f"Выбери возможность: {commands}. Выбор: /capabilities. Справка: /help."
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,8 +200,8 @@ class PersonalCapabilityRegistry:
         """Формирует справку только эффективно доступных возможностей."""
         entries = tuple(entry for entry in self.access if entry.effective)
         commands = tuple(
-            f"`{entry.descriptor.entry_command}` — {entry.descriptor.description}"
-            + ("; выход: `/exit`" if entry.descriptor.persistent_mode else "")
+            f"{entry.descriptor.entry_command} — {entry.descriptor.description}"
+            + ("; выход: /exit" if entry.descriptor.persistent_mode else "")
             for entry in entries
         )
         sections = (HelpSection("Возможности", commands),) if commands else ()
@@ -214,8 +214,8 @@ class PersonalCapabilityRegistry:
     def entry_hint(self) -> str:
         """Предлагает только эффективно доступные команды входа."""
         commands = ", ".join(
-            f"`{entry.descriptor.entry_command}`" for entry in self.access if entry.effective
+            f"{entry.descriptor.entry_command}" for entry in self.access if entry.effective
         )
         if not commands:
-            return "Сейчас нет включённых возможностей. Выбор: `/capabilities`. Справка: `/help`."
-        return f"Выбери возможность: {commands}. Выбор: `/capabilities`. Справка: `/help`."
+            return "Сейчас нет включённых возможностей. Выбор: /capabilities. Справка: /help."
+        return f"Выбери возможность: {commands}. Выбор: /capabilities. Справка: /help."

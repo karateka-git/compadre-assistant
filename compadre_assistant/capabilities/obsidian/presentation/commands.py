@@ -46,10 +46,10 @@ def help_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
         (
             "Obsidian vault",
             (
-                "`/github_status` — показать состояние локальной копии vault",
-                "`/github_sync` — проверить GitHub и синхронизировать vault",
-                "`/github_disconnect` — отключить vault после подтверждения",
+                "/github_status — показать состояние локальной копии vault",
+                "/github_sync — проверить GitHub и синхронизировать vault",
+                "/github_disconnect — отключить vault после подтверждения",
             ),
         ),
-        ("Статьи", ("`/reanalyze <ID статьи>` — выполнить анализ статьи повторно",)),
+        ("Статьи", ("/reanalyze <ID статьи> — выполнить анализ статьи повторно",)),
     )

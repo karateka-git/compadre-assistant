@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверки конфигурации шага 2.5 через реальные CLI и bootstrap без live API."""
 
 from dataclasses import replace
@@ -128,8 +129,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
                                             )
                                     reply = processor(IncomingEvent(channel, channel, text, text, channel), None)
                                     if text == "/obsidian":
-                                        expected = "Провайдер GitHub не настроен" if enabled else "недоступна на сервере"
-                                        self.assertIn(expected, reply.text)
+                                        expected = "провайдер GitHub не настроен" if enabled else "недоступна на сервере"
+                                        self.assertIn(expected, response_text(reply))
                                 analyzer.assert_not_called()
                                 proposal.assert_not_called()
                                 embedding.assert_not_called()
@@ -290,8 +291,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
                     "telegram", "chat", "article", "/obsidian https://article.example/page", "user"
                 ), obsidian_config=ObsidianConfig(openai_base_url="", openai_api_key="", openai_model=""), runtime=runtime,
             )
-        self.assertIn("Провайдер LLM не настроен", reply.text)
-        self.assertNotIn("vault не подключён", reply.text)
+        self.assertIn("провайдер LLM не настроен", response_text(reply))
+        self.assertNotIn("vault не подключён", response_text(reply))
 
     def test_ask_healthcheck_and_startup_matrix(self) -> None:
         """Все сочетания проверяют ASK_* только при включении и не вызывают API."""

@@ -1,3 +1,4 @@
+from compadre_assistant.core.presentation.message_content import text_content
 """Тесты VK presentation adapter."""
 
 import logging
@@ -154,7 +155,7 @@ class VkBotTest(unittest.TestCase):
             _completion_handler,
         ) -> IncomingResponse:
             processed.append(message)
-            return IncomingResponse("Пришли ссылку на статью.")
+            return IncomingResponse(text_content("Пришли ссылку на статью."))
 
         _handle_update(
             {
@@ -187,9 +188,9 @@ class VkBotTest(unittest.TestCase):
 
         def processor(_message: IncomingEvent, _handler) -> IncomingResponse:
             """Запоминает уже отправленные ответы к началу обработки."""
-            _handler(BackgroundReply(_message.reply_address, IncomingResponse("Принял, обрабатываю")))
+            _handler(BackgroundReply(_message.reply_address, IncomingResponse(text_content("Принял, обрабатываю"))))
             seen_before_processing.extend(text for _, text in client.messages)
-            return IncomingResponse("Готово")
+            return IncomingResponse(text_content("Готово"))
 
         _handle_update(
             {
@@ -217,7 +218,7 @@ class VkBotTest(unittest.TestCase):
             _message: IncomingEvent,
             _completion_handler,
         ) -> IncomingResponse:
-            return IncomingResponse("Пришли ссылку на статью.")
+            return IncomingResponse(text_content("Пришли ссылку на статью."))
 
         with self.assertLogs(logger, level="ERROR") as logs:
             _handle_update(
@@ -268,7 +269,7 @@ class VkBotTest(unittest.TestCase):
 
         def processor(_message, completion_handler):
             completion_handlers.append(completion_handler)
-            return IncomingResponse("Авторизация GitHub запускается.")
+            return IncomingResponse(text_content("Авторизация GitHub запускается."))
 
         _handle_update(
             {
@@ -288,8 +289,8 @@ class VkBotTest(unittest.TestCase):
         )
         completion_handlers[0](
             BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse(
-                "https://github.com/apps/compadre-assistant/installations/new "
-                "Contents: read and write"
+                text_content("https://github.com/apps/compadre-assistant/installations/new "
+                "Contents: read and write")
             ))
         )
 
@@ -304,7 +305,7 @@ class VkBotTest(unittest.TestCase):
 
         def processor(_message, completion_handler):
             completion_handlers.append(completion_handler)
-            return IncomingResponse("Подключение запущено.")
+            return IncomingResponse(text_content("Подключение запущено."))
 
         for message_id, peer_id in ((11, 22), (12, 44)):
             _handle_update(
@@ -324,8 +325,8 @@ class VkBotTest(unittest.TestCase):
                 logger=logging.getLogger("test.vk.github_completion_routing"),
             )
 
-        completion_handlers[1](BackgroundReply(ReplyAddress("vk", "44"), IncomingResponse("Второй чат готов.")))
-        completion_handlers[0](BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse("Первый чат готов.")))
+        completion_handlers[1](BackgroundReply(ReplyAddress("vk", "44"), IncomingResponse(text_content("Второй чат готов."))))
+        completion_handlers[0](BackgroundReply(ReplyAddress("vk", "22"), IncomingResponse(text_content("Первый чат готов."))))
         self.assertEqual(
             client.messages[-2:],
             [(44, "Второй чат готов."), (22, "Первый чат готов.")],
@@ -482,7 +483,7 @@ class VkBotTest(unittest.TestCase):
                 self.assertTrue(release_a1.wait(3))
             if event.text == "B1":
                 b1_finished.set()
-            return IncomingResponse(event.text)
+            return IncomingResponse(text_content(event.text))
 
         def run() -> None:
             try:
@@ -562,7 +563,7 @@ class VkBotTest(unittest.TestCase):
         def processor(event: IncomingEvent, _handler) -> IncomingResponse:
             if event.text == "bad":
                 raise RuntimeError("test processor failure")
-            return IncomingResponse(event.text)
+            return IncomingResponse(text_content(event.text))
 
         logger = logging.getLogger("test.vk.workers.shutdown")
         with self.assertLogs(logger, level="ERROR") as logs:
@@ -588,7 +589,7 @@ def _unused_processor(
     _completion_handler,
 ) -> IncomingResponse:
     """Возвращает результат для сценариев Long Poll без входящих updates."""
-    return IncomingResponse("Пришли ссылку на статью.")
+    return IncomingResponse(text_content("Пришли ссылку на статью."))
 
 
 def _network_transient_error() -> VkTransientError:

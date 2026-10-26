@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверки независимого профиля и явного входа в Obsidian без внешних API."""
 
 from dataclasses import replace
@@ -56,7 +57,7 @@ class ProfileObsidianTest(unittest.TestCase):
         """Создаёт профиль и сохраняет имя, не входя в возможность."""
         self.process("/register", channel=channel, **overrides)
         reply = self.process("Имя", channel=channel, **overrides)
-        self.assertIn("Регистрация завершена", reply.text)
+        self.assertIn("Регистрация завершена", response_text(reply))
         with connect_database(self.database_path) as connection:
             owner = connection.execute(
                 "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
@@ -72,16 +73,16 @@ class ProfileObsidianTest(unittest.TestCase):
             with self.subTest(channel=channel), patch("compadre_assistant.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
                 options = dict(channel=channel, enabled_capabilities=(), obsidian_config=None)
                 self.register(**options)
-                self.assertIn("Рад тебя видеть, Имя", self.process("/start", **options).text)
-                self.assertIn("уже зарегистрирован", self.process("/register", **options).text)
-                self.assertIn("Профиль: Имя", self.process("/status", **options).text)
-                self.assertIn("Теперь буду обращаться", self.process("/name Новое имя", **options).text)
-                self.assertIn("Код привязки", self.process("/link_code", **options).text)
-                help_text = self.process("/help", **options).text
+                self.assertIn("Рад тебя видеть, Имя", response_text(self.process("/start", **options)))
+                self.assertIn("уже зарегистрирован", response_text(self.process("/register", **options)))
+                self.assertIn("Профиль: Имя", response_text(self.process("/status", **options)))
+                self.assertIn("Теперь буду обращаться", response_text(self.process("/name Новое имя", **options)))
+                self.assertIn("Код привязки", response_text(self.process("/link_code", **options)))
+                help_text = response_text(self.process("/help", **options))
                 self.assertIn("/register", help_text)
                 self.assertNotIn("/github_status", help_text)
                 self.assertNotIn("/obsidian", help_text)
-                self.assertIn("недоступна на сервере", self.process("/obsidian https://example.com/article", **options).text)
+                self.assertIn("недоступна на сервере", response_text(self.process("/obsidian https://example.com/article", **options)))
                 factory.assert_not_called()
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
@@ -105,8 +106,8 @@ class ProfileObsidianTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             code = create_user_identity_service(connection).create_link_code(1)
         reply = self.process(f"/link {code.code}", channel="vk", enabled_capabilities=())
-        self.assertIn("привязал этот канал", reply.text)
-        self.assertIn("Профиль: Имя", self.process("/status", channel="vk", enabled_capabilities=()).text)
+        self.assertIn("привязал этот канал", response_text(reply))
+        self.assertIn("Профиль: Имя", response_text(self.process("/status", channel="vk", enabled_capabilities=())))
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 1)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
@@ -116,8 +117,8 @@ class ProfileObsidianTest(unittest.TestCase):
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_analyze_article_use_case") as analyzer, patch("compadre_assistant.capabilities.obsidian.bootstrap.create_prepare_obsidian_review_use_case") as review:
             options = dict(obsidian_config=ObsidianConfig(), analysis_use_case_factory=None)
             self.register(**options)
-            self.assertIn("/obsidian", self.process("/start", **options).text)
-            self.assertIn("Провайдер LLM не настроен", self.process("/obsidian", **options).text)
+            self.assertIn("/obsidian", response_text(self.process("/start", **options)))
+            self.assertIn("провайдер LLM не настроен", response_text(self.process("/obsidian", **options)))
             analyzer.assert_not_called()
             review.assert_not_called()
 
@@ -125,20 +126,20 @@ class ProfileObsidianTest(unittest.TestCase):
         """Ненастроенный GitHub отличается от отсутствующего пользовательского vault."""
         self.register()
         no_provider = self.process("/obsidian https://example.com/article")
-        self.assertIn("Провайдер GitHub не настроен", no_provider.text)
+        self.assertIn("провайдер GitHub не настроен", response_text(no_provider))
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             no_vault = self.process("/obsidian https://example.com/article", runtime=runtime)
-            self.assertIn("vault не подключён", no_vault.text)
-            self.assertNotIn("Провайдер", no_vault.text)
-            self.assertIn("GitHub-репозиторий", self.process("/obsidian", runtime=runtime).text)
+            self.assertIn("хранилище заметок (vault) не подключено", response_text(no_vault))
+            self.assertNotIn("Провайдер", response_text(no_vault))
+            self.assertIn("GitHub repository", response_text(self.process("/obsidian", runtime=runtime)))
             manager.selected = _test_vault(1)
             missing_llm = self.process(
                 "/obsidian https://example.com/article", runtime=runtime,
                 obsidian_config=ObsidianConfig(), analysis_use_case_factory=None,
             )
-            self.assertIn("Провайдер LLM не настроен", missing_llm.text)
+            self.assertIn("провайдер LLM не настроен", response_text(missing_llm))
         self.assertFalse(self.article.commands)
         self.assertFalse(self.analysis.commands)
 
@@ -161,7 +162,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 event = self.event("/obsidian Материал https://example.com/article", channel)
                 with patch.object(handler, "enter", wraps=handler.enter) as enter:
                     reply = dispatcher.execute(event)
-                self.assertIn("статья сохранена", reply.text)
+                self.assertIn("статья сохранена", response_text(reply))
                 self.assertIs(enter.call_args.args[1], event)
                 self.assertEqual(enter.call_args.args[2], "Материал https://example.com/article")
                 saved = journal.messages[0]
@@ -169,9 +170,9 @@ class ProfileObsidianTest(unittest.TestCase):
                     self.assertEqual(getattr(saved, field), getattr(event, field))
                 user = enter.call_args.args[0].app_user
                 self.assertEqual(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, channel, "chat")).capability_id, "obsidian")
-                self.assertIn("/obsidian", dispatcher.execute(replace(event, chat_id="other", text="https://example.com/article")).text)
+                self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, chat_id="other", text="https://example.com/article"))))
                 dispatcher.execute(replace(event, text="/exit"))
-                self.assertIn("/obsidian", dispatcher.execute(replace(event, text="https://github.com/octocat/notes")).text)
+                self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, text="https://github.com/octocat/notes"))))
         self.assertEqual(len(self.article.commands), 3)
 
     def test_github_entry_argument_connects_inside_obsidian(self) -> None:
@@ -180,10 +181,10 @@ class ProfileObsidianTest(unittest.TestCase):
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
-            self.assertIn("/obsidian", self.process("https://github.com/octocat/notes Vault", runtime=runtime).text)
+            self.assertIn("/obsidian", response_text(self.process("https://github.com/octocat/notes Vault", runtime=runtime)))
             self.assertFalse(manager.calls)
             reply = self.process("/obsidian https://github.com/octocat/notes Vault", runtime=runtime)
-            self.assertIn("vault подключён", reply.text)
+            self.assertIn("Хранилище подключено", response_text(reply))
             self.assertEqual(manager.calls, [(1, "https://github.com/octocat/notes", "Vault")])
         self.assertFalse(self.article.commands)
 

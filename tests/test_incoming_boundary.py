@@ -1,3 +1,5 @@
+from compadre_assistant.core.presentation.message_content import text_content
+from tests.response_assertions import content_text, response_text
 """Проверки общих контрактов и реестра без предметных зависимостей."""
 
 from dataclasses import fields
@@ -90,7 +92,7 @@ class FakeCapability(IncomingCapabilityPort):
         self.entry_arguments = arguments
         if self.entry_exception:
             raise self.entry_exception
-        return CapabilityResult(IncomingResponse(self.pending, self.entry_error), self.entry_mode)
+        return CapabilityResult(IncomingResponse(text_content(self.pending), self.entry_error), self.entry_mode)
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Фиксирует исходное событие и независимую доставку."""
@@ -101,7 +103,7 @@ class FakeCapability(IncomingCapabilityPort):
         if self.handle_exception is not None:
             raise self.handle_exception
         return CapabilityResult(
-            IncomingResponse("Тестовый ответ", self.handle_error, actions=self.actions),
+            IncomingResponse(text_content("Тестовый ответ"), self.handle_error, actions=self.actions),
             self.handle_mode,
         )
 
@@ -163,7 +165,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.identity.pending = True
         reply = self.dispatcher.execute(_event("/help"))
         for command in ("/selected", "/other", "/exit", "/status", "/name"):
-            self.assertIn(command, reply.text)
+            self.assertIn(command, response_text(reply))
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.capability.entries)
 
@@ -171,8 +173,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Неизвестная identity не получает персональные предметные разделы."""
         self.identity.user = None
         reply = self.dispatcher.execute(_event("/help"))
-        self.assertIn("/register", reply.text)
-        self.assertNotIn("/selected", reply.text)
+        self.assertIn("/register", response_text(reply))
+        self.assertNotIn("/selected", response_text(reply))
         self.assertEqual(self.preferences.reads, 0)
 
     def test_capabilities_catalog_handles_default_override_and_incomplete_profile(self) -> None:
@@ -186,23 +188,23 @@ class IncomingBoundaryTest(unittest.TestCase):
             chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
-        first = dispatcher.execute(_event("/capabilities")).text
-        self.assertIn("`selected`", first)
+        first = response_text(dispatcher.execute(_event("/capabilities")))
+        self.assertIn("selected", first)
         self.assertIn("Личный выбор: включена; сервер: доступна", first)
-        self.assertIn("`offline`", first)
+        self.assertIn("offline", first)
         self.assertIn("Личный выбор: включена; сервер: недоступна", first)
         self.assertIsNone(self.identity.user.display_name)
         self.preferences.rows[(23, "selected")] = False
-        self.assertIn("Личный выбор: выключена", dispatcher.execute(_event("/capabilities")).text)
+        self.assertIn("Личный выбор: выключена", response_text(dispatcher.execute(_event("/capabilities"))))
         self.assertEqual(self.preferences.reads, 2)
 
     def test_capabilities_catalog_validates_arguments_and_registration(self) -> None:
         """Лишний аргумент не читает настройки; незнакомый канал просит регистрацию."""
         before = self.preferences.reads
-        self.assertIn("без аргументов", self.dispatcher.execute(_event("/capabilities extra")).text)
+        self.assertIn("без аргументов", response_text(self.dispatcher.execute(_event("/capabilities extra"))))
         self.assertEqual(self.preferences.reads, before)
         self.identity.user = None
-        self.assertIn("/register", self.dispatcher.execute(_event("/capabilities")).text)
+        self.assertIn("/register", response_text(self.dispatcher.execute(_event("/capabilities"))))
         self.assertEqual(self.preferences.reads, before)
 
     def test_empty_capabilities_catalog_keeps_common_commands(self) -> None:
@@ -214,8 +216,8 @@ class IncomingBoundaryTest(unittest.TestCase):
             capability_preference_repository=self.preferences,
         )
         reply = dispatcher.execute(_event("/capabilities"))
-        self.assertIn("нет известных возможностей", reply.text)
-        self.assertIn("/enable <id>", reply.text)
+        self.assertIn("нет известных возможностей", response_text(reply))
+        self.assertIn("/enable <id>", response_text(reply))
 
     def test_enable_validates_exact_id_and_server_availability(self) -> None:
         """Некорректный ID и отключённый сервером вход не создают настроек."""
@@ -227,22 +229,22 @@ class IncomingBoundaryTest(unittest.TestCase):
         )
         for text in ("/enable", "/enable Selected", "/enable selected extra", "/enable unknown"):
             reply = dispatcher.execute(_event(text))
-            self.assertIn("/capabilities", reply.text)
+            self.assertIn("/capabilities", response_text(reply))
             self.assertEqual(self.preferences.rows, {})
-        self.assertIn("недоступна на сервере", dispatcher.execute(_event("/enable offline")).text)
+        self.assertIn("недоступна на сервере", response_text(dispatcher.execute(_event("/enable offline"))))
         self.assertEqual(self.preferences.rows, {})
         self.identity.user = None
-        self.assertIn("/register", dispatcher.execute(_event("/enable selected")).text)
+        self.assertIn("/register", response_text(dispatcher.execute(_event("/enable selected"))))
 
     def test_enable_is_idempotent_and_reports_write_failure(self) -> None:
         """Повторный выбор сообщает «уже», а сбой записи не подтверждает включение."""
         self.identity.user = AppUser(id=23, display_name=None)
         first = self.dispatcher.execute(_event("/enable selected"))
-        self.assertIn("уже включена", first.text)
+        self.assertIn("уже включена", response_text(first))
         self.assertTrue(self.preferences.rows[(23, "selected")])
         self.preferences.rows[(23, "selected")] = False
-        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
-        self.assertIn("уже включена", self.dispatcher.execute(_event("/enable selected")).text)
+        self.assertIn("включена", response_text(self.dispatcher.execute(_event("/enable selected"))))
+        self.assertIn("уже включена", response_text(self.dispatcher.execute(_event("/enable selected"))))
 
         class FailingPreferences(MemoryCapabilityPreferences):
             """Имитирует отказ хранилища при записи."""
@@ -258,8 +260,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         )
         with self.assertLogs(level="ERROR"):
             failed = dispatcher.execute(_event("/enable selected"))
-        self.assertIn("Не удалось сохранить", failed.text)
-        self.assertNotIn("Возможность `selected` включена", failed.text)
+        self.assertIn("Не удалось сохранить", response_text(failed))
+        self.assertNotIn("Возможность selected включена", response_text(failed))
 
     def test_disable_preserves_mode_data_and_background_delivery(self) -> None:
         """Выключение блокирует новые события, сохраняя маршрут и фоновый ответ."""
@@ -271,24 +273,24 @@ class IncomingBoundaryTest(unittest.TestCase):
         before = self.repository.get_state(self.key)
         handled = len(self.capability.calls)
         reply = self.dispatcher.execute(_event("/disable selected"))
-        self.assertIn("выключена", reply.text)
+        self.assertIn("выключена", response_text(reply))
         self.assertEqual(self.repository.get_state(self.key), before)
-        self.assertIn("/enable selected", self.dispatcher.execute(_event("/status")).text)
-        self.assertNotIn("`/selected` —", self.dispatcher.execute(_event("/help")).text)
-        self.assertIn("/enable selected", self.dispatcher.execute(_event("текст")).text)
-        self.assertIn("/enable selected", self.dispatcher.execute(
+        self.assertIn("/enable selected", response_text(self.dispatcher.execute(_event("/status"))))
+        self.assertNotIn("`/selected` —", response_text(self.dispatcher.execute(_event("/help"))))
+        self.assertIn("/enable selected", response_text(self.dispatcher.execute(_event("текст"))))
+        self.assertIn("/enable selected", response_text(self.dispatcher.execute(
             _event("/confirm selected action 1 1 yes")
-        ).text)
+        )))
         self.assertEqual(len(self.capability.calls), handled)
-        delivery.send(event.reply_address, IncomingResponse("Готово"))
-        self.assertEqual(delivered[-1].response.text, "Готово")
-        self.assertIn("уже выключена", self.dispatcher.execute(_event("/disable selected")).text)
+        delivery.send(event.reply_address, IncomingResponse(text_content("Готово")))
+        self.assertEqual(response_text(delivered[-1].response), "Готово")
+        self.assertIn("уже выключена", response_text(self.dispatcher.execute(_event("/disable selected"))))
         self.dispatcher.execute(_event("/disable other"))
-        self.assertIn("нет включённых", self.dispatcher.execute(_event("/start")).text)
-        self.assertIn("/capabilities", self.dispatcher.execute(_event("/exit")).text)
+        self.assertIn("нет включённых", response_text(self.dispatcher.execute(_event("/start"))))
+        self.assertIn("/capabilities", response_text(self.dispatcher.execute(_event("/exit"))))
         self.assertIsNone(self.repository.get(self.key))
-        self.assertIn("включена", self.dispatcher.execute(_event("/enable selected")).text)
-        self.assertEqual(self.dispatcher.execute(_event("/selected")).text, self.capability.pending)
+        self.assertIn("включена", response_text(self.dispatcher.execute(_event("/enable selected"))))
+        self.assertEqual(response_text(self.dispatcher.execute(_event("/selected"))), self.capability.pending)
 
     def test_disable_validates_id_and_accepts_server_disabled_entry(self) -> None:
         """Глобальное отключение не мешает личному выключению известного ID."""
@@ -300,20 +302,20 @@ class IncomingBoundaryTest(unittest.TestCase):
             capability_preference_repository=self.preferences,
         )
         for text in ("/disable", "/disable Offline", "/disable offline extra", "/disable unknown"):
-            self.assertIn("/capabilities", dispatcher.execute(_event(text)).text)
+            self.assertIn("/capabilities", response_text(dispatcher.execute(_event(text))))
             self.assertEqual(self.preferences.rows, {})
         self.preferences.rows[(23, "offline")] = True
-        self.assertIn("выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.assertIn("выключена", response_text(dispatcher.execute(_event("/disable offline"))))
         self.assertFalse(self.preferences.rows[(23, "offline")])
-        self.assertIn("уже выключена", dispatcher.execute(_event("/disable offline")).text)
+        self.assertIn("уже выключена", response_text(dispatcher.execute(_event("/disable offline"))))
         self.identity.user = None
-        self.assertIn("/register", dispatcher.execute(_event("/disable selected")).text)
+        self.assertIn("/register", response_text(dispatcher.execute(_event("/disable selected"))))
 
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):
             reply = self.dispatcher.execute(_event(text))
-            self.assertIn("Выбери возможность", reply.text)
+            self.assertIn("Выбери возможность", response_text(reply))
         self.assertFalse(self.capability.calls)
         self.assertIsNone(self.repository.get(self.key))
 
@@ -321,7 +323,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Выключенная fake-возможность не получает вход и не меняет режим."""
         self.preferences.rows[(23, "selected")] = False
         reply = self.dispatcher.execute(_event("/selected аргумент"))
-        self.assertIn("/enable selected", reply.text)
+        self.assertIn("/enable selected", response_text(reply))
         self.assertEqual(self.preferences.reads, 1)
         self.assertEqual(self.capability.entries, [])
         self.assertIsNone(self.repository.get(self.key))
@@ -334,7 +336,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         for text in ("обычный текст", "/confirm selected action 1 1 yes"):
             before = self.preferences.reads
             reply = self.dispatcher.execute(_event(text))
-            self.assertIn("/enable selected", reply.text)
+            self.assertIn("/enable selected", response_text(reply))
             self.assertEqual(self.preferences.reads, before + 1)
         self.assertEqual(self.capability.calls, [])
         self.assertEqual(self.repository.get_state(self.key).revision, revision)
@@ -350,19 +352,19 @@ class IncomingBoundaryTest(unittest.TestCase):
             before = self.preferences.reads
             reply = self.dispatcher.execute(_event(text))
             self.assertEqual(self.preferences.reads, before + 1)
-            self.assertNotIn("`/selected` —", reply.text)
+            self.assertNotIn("`/selected` —", response_text(reply))
             if text == "/status":
-                self.assertIn("Режим этого чата: selected", reply.text)
-                self.assertIn("/enable selected", reply.text)
+                self.assertIn("Режим этого чата: selected", response_text(reply))
+                self.assertIn("/enable selected", response_text(reply))
             if text == "/exit":
                 self.assertIsNone(self.repository.get(self.key))
-        self.assertIn("/other", reply.text)
+        self.assertIn("/other", response_text(reply))
 
     def test_entry_forwards_original_event_and_resolved_user(self) -> None:
         """Вход получает исходное событие с аргументом без анализа ядром."""
         event = _event("/selected произвольный аргумент")
         reply = self.dispatcher.execute(event)
-        self.assertEqual(reply.text, self.capability.pending)
+        self.assertEqual(response_text(reply), self.capability.pending)
         self.assertEqual(self.capability.entries, [(self.identity.user, event)])
         self.assertEqual(self.capability.entry_arguments, "произвольный аргумент")
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
@@ -378,7 +380,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.dispatcher.execute(_event("https://example.com/article"))
         self.assertFalse(self.capability.calls)
         self.capability.pending = "Ожидающее действие сохранено"
-        self.assertEqual(self.dispatcher.execute(_event("/selected")).text, self.capability.pending)
+        self.assertEqual(response_text(self.dispatcher.execute(_event("/selected"))), self.capability.pending)
 
     def test_switch_and_exit_are_isolated_by_chat_channel_and_user(self) -> None:
         """Переключение не затрагивает соседний чат, канал или пользователя."""
@@ -437,20 +439,20 @@ class IncomingBoundaryTest(unittest.TestCase):
         failure = RuntimeError("секретная причина")
         self.capability.handle_mode = CapabilityMode.COMPLETE
         self.capability.handle_exception = failure
-        self.capability.background_reply = IncomingResponse("Действие принято")
+        self.capability.background_reply = IncomingResponse(text_content("Действие принято"))
         delivered = []
 
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR") as logs:
             response = self.dispatcher.execute(_event("подтвердить"), delivered.append)
 
         self.assertEqual(response.error, failure)
-        self.assertIn("Проверь состояние действия", response.text)
+        self.assertIn("Проверь состояние действия", response_text(response))
         self.assertNotIn("секретная причина", response.render_text())
         self.assertEqual(response.actions, ())
         self.assertEqual(self.repository.get_state(self.key), before)
         self.assertEqual(len(self.capability.calls), 1)
         self.assertEqual(len(delivered), 1)
-        self.assertEqual(delivered[0].response.text, "Действие принято")
+        self.assertEqual(response_text(delivered[0].response), "Действие принято")
         self.assertIn("capability_id=selected", "\n".join(logs.output))
 
     def test_handle_exception_has_same_safe_reply_in_both_adapters(self) -> None:
@@ -504,7 +506,7 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_general_commands_and_entry_precede_pending_rebind(self) -> None:
         """Общие команды доступны во время прежнего текстового rebind."""
         self.identity.pending = True
-        self.assertIn("Профиль", self.dispatcher.execute(_event("/status")).text)
+        self.assertIn("Профиль", response_text(self.dispatcher.execute(_event("/status"))))
         self.dispatcher.execute(_event("/selected"))
         self.assertTrue(self.capability.entries)
         self.dispatcher.execute(_event("/exit"))
@@ -521,9 +523,9 @@ class IncomingBoundaryTest(unittest.TestCase):
         mode = ChatMode(self.key, "disabled")
         self.repository.save(mode)
         reply = self.dispatcher.execute(_event("https://example.com/article"))
-        self.assertIn("отключена", reply.text)
-        self.assertIn("/exit", reply.text)
-        self.assertIn("/other", reply.text)
+        self.assertIn("отключена", response_text(reply))
+        self.assertIn("/exit", response_text(reply))
+        self.assertIn("/other", response_text(reply))
         self.assertEqual(self.repository.get(self.key), mode)
         self.assertFalse(self.capability.calls)
         self.dispatcher.execute(_event("/other"))
@@ -537,9 +539,9 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.dispatcher.execute(event, delivered.append)
         delivery = self.capability.delivery
         self.dispatcher.execute(_event("/exit"))
-        delivery.send(event.reply_address, IncomingResponse("Готово"))
+        delivery.send(event.reply_address, IncomingResponse(text_content("Готово")))
         self.assertEqual(delivered[0].address, event.reply_address)
-        self.assertEqual(delivered[0].response.text, "Готово")
+        self.assertEqual(response_text(delivered[0].response), "Готово")
         self.assertIsNone(self.repository.get(self.key))
 
     def test_fake_entry_and_actions_work_in_both_channel_adapters(self) -> None:
@@ -593,10 +595,10 @@ class IncomingBoundaryTest(unittest.TestCase):
         )
         dispatcher.execute(_event("/selected"))
         reply = dispatcher.execute(_event("/unavailable https://example.com/article"))
-        self.assertIn("`unavailable` недоступна на сервере", reply.text)
+        self.assertIn("unavailable недоступна на сервере", response_text(reply))
         self.assertEqual(self.repository.get(self.key).capability_id, "selected")
         self.assertFalse(self.capability.calls)
-        self.assertNotIn("/unavailable", dispatcher.execute(_event("/help")).text)
+        self.assertNotIn("/unavailable", response_text(dispatcher.execute(_event("/help"))))
 
     def test_registry_checks_disabled_metadata_conflicts(self) -> None:
         """Отключённые входы подчиняются общим ограничениям реестра."""
@@ -629,8 +631,8 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_empty_registry_only_offers_general_help(self) -> None:
         """Отсутствие включённых возможностей не требует предметного обработчика."""
         dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
-        self.assertIn("нет включённых", dispatcher.execute(_event("текст")).text)
-        self.assertIn("/exit", dispatcher.execute(_event("/help")).text)
+        self.assertIn("нет включённых", response_text(dispatcher.execute(_event("текст"))))
+        self.assertIn("/exit", response_text(dispatcher.execute(_event("/help"))))
 
 
 if __name__ == "__main__":

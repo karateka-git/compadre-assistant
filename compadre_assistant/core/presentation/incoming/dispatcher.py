@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+
 from dataclasses import dataclass
 from enum import StrEnum
 import logging
 
+from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -124,12 +126,12 @@ class IncomingMessageDispatcher:
         """Объясняет причину отказа без открытия предметного обработчика."""
         if not access.server_available:
             return (
-                f"Возможность `{access.descriptor.capability_id}` недоступна на сервере. "
-                "Список: `/capabilities`."
+                f"Возможность {access.descriptor.capability_id} недоступна на сервере. "
+                "Список: /capabilities."
             )
         return (
-            f"Возможность `{access.descriptor.capability_id}` лично выключена. "
-            f"Включить: `/enable {access.descriptor.capability_id}`. Список: `/capabilities`."
+            f"Возможность {access.descriptor.capability_id} лично выключена. "
+            f"Включить: /enable {access.descriptor.capability_id}. Список: /capabilities."
         )
 
     @staticmethod
@@ -138,13 +140,13 @@ class IncomingMessageDispatcher:
         lines = ["Личные возможности:"]
         for access in personal.access:
             lines.append(
-                f"`{access.descriptor.capability_id}` — {access.descriptor.description}. "
+                f"{access.descriptor.capability_id} — {access.descriptor.description}. "
                 f"Личный выбор: {'включена' if access.user_enabled else 'выключена'}; "
                 f"сервер: {'доступна' if access.server_available else 'недоступна'}."
             )
         if not personal.access:
             lines.append("Сейчас нет известных возможностей.")
-        lines.append("Управление: `/enable <id>`, `/disable <id>`. Выбор действует во всех привязанных каналах.")
+        lines.append("Управление: /enable <id>, /disable <id>. Выбор действует во всех привязанных каналах.")
         return "\n".join(lines)
 
     def execute(
@@ -199,11 +201,11 @@ class IncomingMessageDispatcher:
         identity = _incoming_identity_from_event(event)
         if command is ChatCommand.CAPABILITIES:
             if parsed is not None and parsed.arguments:
-                return IncomingResponse("Используй `/capabilities` без аргументов.")
+                return IncomingResponse(compose_content('Используй ', code_span('/capabilities'), ' без аргументов.'))
             user = self._user_identity_service.resolve(identity)
             if user is None:
-                return IncomingResponse("Сначала зарегистрируйся: `/register`.")
-            return IncomingResponse(self._capability_catalog(self._personal_registry(user)))
+                return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
+            return IncomingResponse(text_content(self._capability_catalog(self._personal_registry(user))))
         if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
             return self._change_capability(command, parsed.arguments if parsed else "", identity)
         if command is ChatCommand.CONFIRM:
@@ -217,7 +219,7 @@ class IncomingMessageDispatcher:
                     or parts[4] not in {"yes", "no"}
                 ):
                     return IncomingResponse(
-                        "Используй адресную команду из актуального запроса привязки."
+                        compose_content('Используй адресную команду из актуального запроса привязки.')
                     )
                 try:
                     if parts[4] == "yes":
@@ -233,7 +235,7 @@ class IncomingMessageDispatcher:
                     return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
-                        "Действие недоступно, устарело или истекло. Повтори /link в исходном чате.",
+                        compose_content('Действие недоступно, устарело или истекло. Повтори /link в исходном чате.'),
                         error,
                     )
             user = self._user_identity_service.resolve(identity)
@@ -245,9 +247,9 @@ class IncomingMessageDispatcher:
             if mode is None or mode.capability_id != target:
                 capability = personal.by_id(target)
                 return IncomingResponse(
-                    f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
+                    text_content(f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
                     if capability
-                    else personal.entry_hint()
+                    else personal.entry_hint())
                 )
             return self._dispatch(user, event, completion_handler, personal)
 
@@ -309,7 +311,7 @@ class IncomingMessageDispatcher:
                         for decision, label in (("yes", "Перенести identity"), ("no", "Отменить"))
                     )
                     return IncomingResponse(
-                        "Канал уже привязан к другому профилю. Подтверди перенос адресной командой.",
+                        compose_content('Канал уже привязан к другому профилю. Подтверди перенос адресной командой.'),
                         actions=actions,
                     )
                 except IdentityAlreadyBoundError:
@@ -402,21 +404,37 @@ class IncomingMessageDispatcher:
         """
         parts = arguments.split()
         if len(parts) != 1:
-            return IncomingResponse(f"Используй `{command.usage}`. Список: `/capabilities`.")
+            return IncomingResponse(compose_content(
+                'Используй ',
+                code_span(str(command.usage)),
+                '. Список: ',
+                code_span('/capabilities'),
+                '.',
+            ))
         user = self._user_identity_service.resolve(identity)
         if user is None:
-            return IncomingResponse("Сначала зарегистрируйся: `/register`.")
+            return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
         access = self._personal_registry(user).status(parts[0])
         if access is None:
             return IncomingResponse(
-                f"Неизвестная возможность. Используй `{command.usage}`. "
-                "Список: `/capabilities`."
+                compose_content(
+                    'Неизвестная возможность. Используй ',
+                    code_span(str(command.usage)),
+                    '. Список: ',
+                    code_span('/capabilities'),
+                    '.',
+                )
             )
         enabled = command is ChatCommand.ENABLE
         if enabled and not access.server_available:
             return IncomingResponse(
-                f"Возможность `{parts[0]}` недоступна на сервере. Личный выбор не изменён. "
-                "Список: `/capabilities`."
+                compose_content(
+                    'Возможность ',
+                    code_span(str(parts[0])),
+                    ' недоступна на сервере. Личный выбор не изменён. Список: ',
+                    code_span('/capabilities'),
+                    '.',
+                )
             )
         try:
             changed = SetUserCapabilityPreference(
@@ -424,11 +442,14 @@ class IncomingMessageDispatcher:
             ).execute(user.id, parts[0], enabled)
         except Exception as error:
             LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
-            return IncomingResponse("Не удалось сохранить выбор. Попробуй позже.", error)
+            return IncomingResponse(compose_content('Не удалось сохранить выбор. Попробуй позже.'), error)
         state = "включена" if enabled else "выключена"
         return IncomingResponse(
-            f"Возможность `{parts[0]}` {'уже ' if not changed else ''}{state}. "
-            "Выбор действует во всех привязанных каналах. Режим и данные сохранены."
+            compose_content(
+                'Возможность ',
+                code_span(str(parts[0])),
+                ' ' + str('уже ' if not changed else '') + str(state) + '. Выбор действует во всех привязанных каналах. Режим и данные сохранены.',
+            )
         )
 
     def _dispatch(
@@ -463,7 +484,11 @@ class IncomingMessageDispatcher:
                     entry.descriptor.capability_id,
                 )
                 return IncomingResponse(
-                    "Не удалось войти в возможность. Попробуй позже или отправь `/help`.",
+                    compose_content(
+                        'Не удалось войти в возможность. Попробуй позже или отправь ',
+                        code_span('/help'),
+                        '.',
+                    ),
                     error,
                 )
             # Одноразовый вход и ошибка никогда не заменяют прежний режим.
@@ -501,7 +526,9 @@ class IncomingMessageDispatcher:
                 capability.descriptor.capability_id,
             )
             return IncomingResponse(
-                "Не удалось обработать сообщение. Проверь состояние действия перед повторной отправкой.",
+                compose_content(
+                    'Не удалось обработать сообщение. Проверь состояние действия перед повторной отправкой.',
+                ),
                 error,
             )
         if result.response.error is None and result.mode is CapabilityMode.COMPLETE:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -58,6 +59,58 @@ class MessageContent:
     """Передаёт упорядоченные абзацы и списки независимо от канала доставки."""
 
     blocks: tuple[Paragraph | BulletList, ...]
+
+
+def text_content(text: str) -> MessageContent:
+    """Передаёт буквальный текст без разбора Markdown, HTML или команд."""
+    return MessageContent((Paragraph((TextSpan(text),)),))
+
+
+def compose_content(*parts: str | TextSpan | MessageContent) -> MessageContent:
+    """Собирает фрагменты текста и готовые блоки без разбора разметки.
+
+    Args:
+        parts: Буквальные строки, явно оформленные фрагменты и вложенное
+            содержимое. Порядок, пробелы и переносы сохраняются.
+
+    Returns:
+        Содержимое с исходными стилями; соседние фрагменты образуют абзац.
+    """
+    spans: list[TextSpan] = []
+    blocks: list[Paragraph | BulletList] = []
+    for part in parts:
+        if isinstance(part, MessageContent):
+            for index, block in enumerate(part.blocks):
+                if index and spans:
+                    blocks.append(Paragraph(tuple(spans)))
+                    spans = []
+                if isinstance(block, Paragraph):
+                    spans.extend(block.spans)
+                else:
+                    if spans:
+                        blocks.append(Paragraph(tuple(spans)))
+                        spans = []
+                    blocks.append(block)
+        else:
+            spans.append(part if isinstance(part, TextSpan) else TextSpan(part))
+    if spans:
+        blocks.append(Paragraph(tuple(spans)))
+    return MessageContent(tuple(blocks))
+
+
+def code_span(text: str) -> TextSpan:
+    """Помечает точное значение для копирования без добавления ограничителей."""
+    return TextSpan(text, TextStyle.CODE)
+
+
+def join_content(separator: str, parts: Iterable[str | MessageContent]) -> MessageContent:
+    """Соединяет содержимое без потери стилей и без строкового вывода моделей."""
+    pieces: list[str | MessageContent] = []
+    for part in parts:
+        if pieces:
+            pieces.append(separator)
+        pieces.append(part)
+    return compose_content(*pieces)
 
 
 def confirmation_action_paragraph(action: ConfirmationAction) -> Paragraph:

@@ -1,3 +1,4 @@
+from compadre_assistant.core.presentation.message_content import text_content
 """Тесты низкоуровневых helpers Telegram adapter."""
 
 import asyncio
@@ -214,8 +215,8 @@ class TelegramBotHelpersTest(unittest.TestCase):
 
         def processor(_event, _completion_handler) -> IncomingResponse:
             """Сохраняет ответы, отправленные до вызова worker."""
-            _completion_handler(BackgroundReply(_event.reply_address, IncomingResponse("Принял, обрабатываю")))
-            return IncomingResponse("Готово")
+            _completion_handler(BackgroundReply(_event.reply_address, IncomingResponse(text_content("Принял, обрабатываю"))))
+            return IncomingResponse(text_content("Готово"))
 
         _register_handlers(
             aiogram.dispatcher,
@@ -494,8 +495,8 @@ class TelegramBotHelpersTest(unittest.TestCase):
             await asyncio.to_thread(
                 handler,
                 BackgroundReply(ReplyAddress("telegram", "100"), IncomingResponse(
-                    "https://github.com/apps/compadre-assistant/installations/new "
-                    "Contents: read and write"
+                    text_content("https://github.com/apps/compadre-assistant/installations/new "
+                    "Contents: read and write")
                 )),
             )
             for _attempt in range(10):

@@ -1,5 +1,7 @@
 """Представляет независимый вопрос и ожидаемые ошибки Ask любому каналу."""
 
+from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
+
 from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelError, AskModelTimeoutError, EmptyQuestionError, QuestionTooLongError,
 )
@@ -41,24 +43,37 @@ class AskCapability(IncomingCapabilityPort):
             """Подтверждает приём перед сетевым запросом через общий delivery port."""
             if context.delivery is not None:
                 context.delivery.send(
-                    event.reply_address, IncomingResponse("Вопрос принят. Готовлю ответ…")
+                    event.reply_address, IncomingResponse(compose_content('Вопрос принят. Готовлю ответ…'))
                 )
 
         try:
-            response = IncomingResponse(self._question.execute(arguments, on_request=notify))
+            response = IncomingResponse(text_content(self._question.execute(arguments, on_request=notify)))
         except EmptyQuestionError as error:
-            response = IncomingResponse("Напиши вопрос после команды: /ask <вопрос>.", error)
+            response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <вопрос>.'), error)
         except QuestionTooLongError as error:
-            response = IncomingResponse(str(error), error)
+            response = IncomingResponse(compose_content(
+                str(error),
+                " Повтори ",
+                code_span("/ask <вопрос>"),
+                " с допустимым вопросом.",
+            ), error)
         except AskModelTimeoutError as error:
-            response = IncomingResponse("Модель не успела ответить. Попробуй повторить /ask позже.", error)
+            response = IncomingResponse(compose_content(
+                'Модель не успела ответить. Попробуй повторить /ask позже.',
+            ), error)
         except AskModelError as error:
-            response = IncomingResponse("Не удалось получить ответ модели. Попробуй /ask позже.", error)
+            response = IncomingResponse(compose_content(
+                'Не удалось получить ответ модели. Попробуй /ask позже.',
+            ), error)
         return CapabilityResult(response, CapabilityMode.COMPLETE)
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Предлагает явную команду при устаревшем сохранённом режиме Ask."""
         return CapabilityResult(
-            IncomingResponse("Для вопроса используй /ask <вопрос>."),
+            IncomingResponse(compose_content(
+                "Ask не является режимом чата. Чтобы задать один вопрос, вызови ",
+                code_span("/ask <вопрос>"),
+                ". Текущий режим не изменится.",
+            )),
             CapabilityMode.COMPLETE,
         )

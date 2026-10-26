@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверяет допуск в независимых processor на общей временной SQLite."""
 
 import asyncio
@@ -52,7 +53,7 @@ def _process_event(path: Path, text: str, started, release, results) -> None:
     processor = ChannelMessageProcessor(database_path=path, capabilities=(capability,))
     event = IncomingEvent("telegram", "tg-chat", "1", text, "tg-user")
     reply = processor(event)
-    results.put((reply.text, len(capability.entries)))
+    results.put((response_text(reply), len(capability.entries)))
 
 
 def _process_preference(path: Path, app_user_id: int, capability_id: str,
@@ -168,17 +169,17 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         tg = self.event("/example", "telegram", "tg-user", "tg-chat")
         vk = self.event("/example", "vk", "vk-user", "vk-chat")
         other = self.event("/example", "telegram", "other-user", "other-chat")
-        self.assertIn("/enable example", first(tg).text)
+        self.assertIn("/enable example", response_text(first(tg)))
         self.save(1, True)
-        self.assertEqual(second(vk).text, "Актуальное состояние")
-        self.assertIn("/example", first(self.event("/help", "telegram", "tg-user", "tg-chat")).text)
-        self.assertIn("/enable example", first(other).text)
+        self.assertEqual(response_text(second(vk)), "Актуальное состояние")
+        self.assertIn("/example", response_text(first(self.event("/help", "telegram", "tg-user", "tg-chat"))))
+        self.assertIn("/enable example", response_text(first(other)))
         self.save(1, False)
-        self.assertIn("/enable example", second(vk).text)
-        self.assertIn("/enable example", first(tg).text)
+        self.assertIn("/enable example", response_text(second(vk)))
+        self.assertIn("/enable example", response_text(first(tg)))
         self.save(2, True)
-        self.assertEqual(first(other).text, "Актуальное состояние")
-        self.assertIn("/enable example", second(vk).text)
+        self.assertEqual(response_text(first(other)), "Актуальное состояние")
+        self.assertIn("/enable example", response_text(second(vk)))
 
     def test_adapters_share_selection_and_rebind_uses_destination_profile(self) -> None:
         """TG/VK видят commit и после rebind применяют настройки нового AppUser."""
@@ -208,7 +209,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         self.assertIn("/enable example", tg("/example", "8", "43"))
         self.assertIn("включена", tg("/enable example", "8", "43"))
         code_reply = tg("/link_code", "8", "43")
-        code = re.search(r"Код привязки: `([^`]+)`", code_reply)
+        code = re.search(r"Код привязки: ([^\n]+)", code_reply)
         self.assertIsNotNone(code, code_reply)
         rebind = send_vk(f"/link {code.group(1)}")
         confirmation = re.search(r"/confirm core identity \d+ \d+ yes", rebind)
@@ -249,9 +250,9 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
                     )
             finally:
                 capability.release.set()
-            self.assertEqual(future.result(timeout=5).text, "Актуальное состояние")
-        self.assertIn("/enable selected", first(self.event("текст", "telegram", "tg-user", "tg-chat")).text)
-        self.assertIn("/enable example", second(self.event("/example", "vk", "vk-user", "vk-chat")).text)
+            self.assertEqual(response_text(future.result(timeout=5)), "Актуальное состояние")
+        self.assertIn("/enable selected", response_text(first(self.event("текст", "telegram", "tg-user", "tg-chat"))))
+        self.assertIn("/enable example", response_text(second(self.event("/example", "vk", "vk-user", "vk-chat"))))
 
     def test_enable_command_changes_both_channels_without_clearing_mode(self) -> None:
         """Выбор из TG открывает VK и сохраняет прежний маршрут этого чата."""
@@ -259,11 +260,11 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
         tg = self.event("/enable example", "telegram", "tg-user", "tg-chat")
         vk = self.event("/example", "vk", "vk-user", "vk-chat")
-        self.assertIn("включена", first(tg).text)
-        self.assertEqual(second(vk).text, "Актуальное состояние")
-        self.assertIn("уже включена", second(self.event(
+        self.assertIn("включена", response_text(first(tg)))
+        self.assertEqual(response_text(second(vk)), "Актуальное состояние")
+        self.assertIn("уже включена", response_text(second(self.event(
             "/enable example", "vk", "vk-user", "vk-chat"
-        )).text)
+        ))))
         with connect_database(self.path) as connection:
             mode = connection.execute(
                 "SELECT capability_id FROM active_chat_modes "
@@ -284,20 +285,20 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         self.save(2, True)
         second(self.event("/example", "vk", "vk-user", "vk-chat"))
         reply = first(self.event("/disable example", "telegram", "tg-user", "tg-chat"))
-        self.assertIn("выключена", reply.text)
-        self.assertIn("/enable example", second(self.event(
+        self.assertIn("выключена", response_text(reply))
+        self.assertIn("/enable example", response_text(second(self.event(
             "текст", "vk", "vk-user", "vk-chat"
-        )).text)
-        self.assertEqual(first(self.event(
+        ))))
+        self.assertEqual(response_text(first(self.event(
             "/example", "telegram", "other-user", "other-chat"
-        )).text, "Актуальное состояние")
+        ))), "Актуальное состояние")
         with connect_database(self.path) as connection:
             self.assertEqual(connection.execute(
                 "SELECT capability_id FROM active_chat_modes "
                 "WHERE app_user_id = 1 AND channel = 'vk' AND chat_id = 'vk-chat'"
             ).fetchone()[0], "example")
         first(self.event("/enable example", "telegram", "tg-user", "tg-chat"))
-        self.assertEqual(second(self.event("текст", "vk", "vk-user", "vk-chat")).text, "Тестовый ответ")
+        self.assertEqual(response_text(second(self.event("текст", "vk", "vk-user", "vk-chat"))), "Тестовый ответ")
 
     def test_process_boundary_before_and_after_disable_commit(self) -> None:
         """Допуск до commit завершается, а новый процесс после commit не входит."""
