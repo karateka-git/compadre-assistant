@@ -166,6 +166,12 @@ class PendingInputResult:
 
     response: IncomingResponse
     outcome: PendingInputOutcome
+    action: Callable[[], IncomingResponse] | None = None  # Долгое действие после атомарного принятия ввода.
+
+    def __post_init__(self) -> None:
+        """Запрещает внешнее действие до окончательного принятия значения."""
+        if self.action is not None and self.outcome is not PendingInputOutcome.COMPLETE:
+            raise ValueError("Отложенное действие требует complete")
 
 
 @runtime_checkable
@@ -185,5 +191,7 @@ class PendingInputContinuationPort(Protocol):
         Returns:
             Ответ с решением о сохранении исходного ожидания. После принятия
             значения даже ошибка внешнего действия возвращается как complete.
+            Долгую операцию нужно вернуть в action: ядро выполнит её вне
+            блокировки чата после атомарной очистки ожидания.
         """
         ...

@@ -24,7 +24,7 @@ class IncomingEvent:
         channel: Имя канала, например ``telegram`` или ``vk``.
         chat_id: Идентификатор конкретного чата в канале.
         message_id: Идентификатор сообщения для возможной дедупликации.
-        text: Непустой текст пользователя.
+        text: Непустой исходный текст; пробельное значение проверяет владелец ввода.
         external_user_id: Идентификатор автора в канале, если он известен.
         username: Публичное имя автора, если оно доступно.
         display_name: Отображаемое имя автора, если оно доступно.
@@ -48,7 +48,7 @@ class IncomingEvent:
 
     def __post_init__(self) -> None:
         """Проверяет обязательные поля события при создании."""
-        if not all((self.channel.strip(), self.chat_id.strip(), self.message_id.strip(), self.text.strip())):
+        if not all((self.channel.strip(), self.chat_id.strip(), self.message_id.strip(), self.text)):
             raise ValueError("channel, chat_id, message_id and text must not be empty")
         if self.external_user_id is not None and not self.external_user_id.strip():
             raise ValueError("external_user_id must not be empty")

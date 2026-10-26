@@ -57,6 +57,28 @@ class AskQuestion:
             AskModelUnavailableError: Если провайдер модели недоступен.
             InvalidAskAnswerError: Если модель не вернула непустую строку.
         """
+        question = self.validate_question(question)
+
+        if on_request is not None:
+            on_request()
+        answer = self._model.answer(question=question, instruction=ASK_INSTRUCTION)
+        if not isinstance(answer, str) or not answer.strip():
+            raise InvalidAskAnswerError("Модель не вернула непустой текст ответа.")
+        return answer
+
+    def validate_question(self, question: str) -> str:
+        """Проверяет и нормализует вопрос до обращения к внешней модели.
+
+        Args:
+            question: Исходный текст вопроса.
+
+        Returns:
+            Вопрос без внешних пробелов.
+
+        Raises:
+            EmptyQuestionError: Если вопрос пуст.
+            QuestionTooLongError: Если превышен настроенный лимит.
+        """
         question = question.strip()
         if not question:
             raise EmptyQuestionError("Введите непустой вопрос.")
@@ -65,9 +87,4 @@ class AskQuestion:
                 f"Вопрос должен содержать не более {self._max_question_chars} символов."
             )
 
-        if on_request is not None:
-            on_request()
-        answer = self._model.answer(question=question, instruction=ASK_INSTRUCTION)
-        if not isinstance(answer, str) or not answer.strip():
-            raise InvalidAskAnswerError("Модель не вернула непустой текст ответа.")
-        return answer
+        return question

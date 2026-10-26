@@ -122,7 +122,7 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
         self.assertEqual(message.answers, ["Пришли &lt;текст&gt; &amp; /help"])
         self.assertEqual(message.parse_modes, ["HTML"])
         client = FakeVkClient()
-        _handle_update(_update(1, 42, " "), incoming_message_processor=processor, client=client, logger=self.logger, empty_message_reply=short)
+        _handle_update(_update(1, 42, ""), incoming_message_processor=processor, client=client, logger=self.logger, empty_message_reply=short)
         self.assertEqual(client.messages, [(42, short)])
         self.assertEqual(client.formats, [None])
         processor.assert_not_called()

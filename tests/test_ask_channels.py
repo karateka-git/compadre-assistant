@@ -103,12 +103,29 @@ class AskChannelsTest(unittest.TestCase):
                     for text in ("обычный вопрос", "/unknown вопрос", "/asker вопрос"):
                         self.send(channel, processor, text)
                     self.assertEqual(model.answer.call_count, 2)
-                    self.assertIn(escape("/ask <вопрос>") if channel == "telegram" else "/ask <вопрос>", self.send(channel, processor, "/ask"))
+                    self.assertIn("Введи один вопрос", self.send(channel, processor, "/ask"))
                     self.assertIn("100", self.send(channel, processor, "/ask " + "я" * 101))
                     self.assertEqual(model.answer.call_count, 2)
                     with connect_database(self.path) as connection:
                         self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
                 model.close.assert_called_once_with()
+
+    def test_pending_question_accepts_retry_from_both_channels(self) -> None:
+        """Пробельный текст достигает владельца ввода, а пустой вне ввода не запускает Ask."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
+                model = model_type.return_value
+                model.answer.return_value = "Ответ"
+                with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
+                    self.send(channel, processor, "/register")
+                    self.send(channel, processor, "Тест")
+                    self.assertIn("Пришли текстовое", self.send(channel, processor, "  "))
+                    self.send(channel, processor, "/ask")
+                    self.assertIn("Вопрос пуст", self.send(channel, processor, "  "))
+                    self.assertIn("Сократи вопрос", self.send(channel, processor, "x" * 101))
+                    model.answer.assert_not_called()
+                    self.assertEqual(self.send(channel, processor, "вопрос"), "Ответ")
+                    self.assertEqual(model.answer.call_count, 1)
 
     def test_ask_can_be_disabled_and_enabled_without_restart(self) -> None:
         """Команды меняют личный допуск Ask при живом общем processor."""

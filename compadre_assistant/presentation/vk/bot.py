@@ -367,7 +367,7 @@ def _handle_update(
     message_id = _require_int(message.get("id"), "id")
     from_id = _require_int(message.get("from_id"), "from_id")
 
-    if not text.strip():
+    if not text:
         _safe_send_vk_message(
             client,
             peer_id=peer_id,

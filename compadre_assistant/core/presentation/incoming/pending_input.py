@@ -20,7 +20,8 @@ class PendingInput:
     request_id: str
     created_at: datetime
     expires_at: datetime
-    app_user_id: int | None = None  # Профиль на момент начала общего ввода; смена отменяет действие.
+    app_user_id: int | None = None  # Профиль на момент начала ввода; смена отменяет действие.
+    required_mode: str | None = None  # Предметный ввод допустим только в указанном активном режиме.
 
 
 class PendingInputStore:
@@ -47,14 +48,15 @@ class PendingInputStore:
             raise ValueError("Часы ожидания должны возвращать timezone-aware datetime")
         return now.astimezone(timezone.utc)
 
-    def begin(self, chat_key: ReplyAddress, owner_id: str, input_kind: str, *, app_user_id: int | None = None) -> PendingInput:
+    def begin(self, chat_key: ReplyAddress, owner_id: str, input_kind: str, *, app_user_id: int | None = None, required_mode: str | None = None) -> PendingInput:
         """Заменяет ожидание новым ID и сроком ровно десять минут.
 
         Args:
             chat_key: Канал и чат, в том числе до создания AppUser.
             owner_id: Публичный ID владельца ввода.
             input_kind: Тип значения, интерпретируемый только владельцем.
-            app_user_id: Ожидаемый профиль для повторной проверки общего ввода.
+            app_user_id: Ожидаемый профиль для повторной проверки ввода.
+            required_mode: Обязательный активный режим; None не ограничивает режим.
 
         Returns:
             Новая неизменяемая запись.
@@ -62,7 +64,7 @@ class PendingInputStore:
         with self.lock(chat_key):
             now = self._now()
             pending = PendingInput(chat_key, owner_id, input_kind, uuid4().hex,
-                                   now, now + timedelta(minutes=10), app_user_id)
+                                   now, now + timedelta(minutes=10), app_user_id, required_mode)
             self._entries[chat_key] = pending
             return pending
 

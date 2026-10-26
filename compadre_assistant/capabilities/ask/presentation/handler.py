@@ -9,11 +9,12 @@ from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import As
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
-    IncomingCapabilityPort, IncomingResponse,
+    IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
+    PendingInputResult, PendingInputOutcome, PendingInput,
 )
 
 
-class AskCapability(IncomingCapabilityPort):
+class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
     """Выполняет один вопрос без установки длительного режима чата."""
 
     descriptor = CapabilityDescriptor(
@@ -40,6 +41,13 @@ class AskCapability(IncomingCapabilityPort):
         Returns:
             Ответ либо безопасное описание ожидаемой ошибки без перехода режима.
         """
+        if not arguments.strip() and context.pending_inputs is not None:
+            context.pending_inputs.begin(event.reply_address, "ask", "ask_question",
+                                         app_user_id=context.app_user.id)
+            return CapabilityResult(IncomingResponse(text_content(
+                "Введи один вопрос для модели следующим сообщением. "
+                "Ожидание действует 10 минут. Для отмены введи /cancel."
+            )), CapabilityMode.COMPLETE)
         def notify() -> None:
             """Подтверждает приём перед сетевым запросом через общий delivery port."""
             if context.delivery is not None:
@@ -67,6 +75,36 @@ class AskCapability(IncomingCapabilityPort):
                 'Не удалось получить ответ модели. Попробуй /ask позже.',
             ), error)
         return CapabilityResult(response, CapabilityMode.COMPLETE)
+
+    def continue_input(
+        self, context: HandlerContext, pending: PendingInput, event: IncomingEvent
+    ) -> PendingInputResult:
+        """Проверяет вопрос и откладывает запрос модели до освобождения чата.
+
+        Args:
+            context: Повторно допущенный профиль и сервисы ответа.
+            pending: Исходное ожидание с типом значения.
+            event: Неизменённое сообщение пользователя.
+
+        Returns:
+            Retry при неверном значении либо complete с действием вне блокировки.
+        """
+        if pending.input_kind != "ask_question":
+            return PendingInputResult(IncomingResponse(text_content(
+                "Ожидание вопроса недоступно. Повтори /ask."
+            )), PendingInputOutcome.COMPLETE)
+        try:
+            question = self._question.validate_question(event.text)
+        except EmptyQuestionError as error:
+            return PendingInputResult(IncomingResponse(text_content(
+                "Вопрос пуст. Отправь непустой вопрос ещё раз или введи /cancel."
+            ), error), PendingInputOutcome.RETRY)
+        except QuestionTooLongError as error:
+            return PendingInputResult(IncomingResponse(text_content(
+                str(error) + " Сократи вопрос и отправь его ещё раз или введи /cancel."
+            ), error), PendingInputOutcome.RETRY)
+        return PendingInputResult(IncomingResponse(text_content("")), PendingInputOutcome.COMPLETE,
+                                  lambda: self.enter(context, event, question).response)
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Предлагает явную команду при устаревшем сохранённом режиме Ask."""

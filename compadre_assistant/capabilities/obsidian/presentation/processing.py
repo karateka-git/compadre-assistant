@@ -16,7 +16,8 @@ from compadre_assistant.capabilities.obsidian.domain.articles.url_utils import n
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, CapabilityDescriptor, CapabilityResult, HandlerContext,
-    IncomingCapabilityPort, IncomingResponse,
+    IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
+    PendingInputResult, PendingInputOutcome, PendingInput,
 )
 from compadre_assistant.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
@@ -113,7 +114,7 @@ ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
 
-class ObsidianMessageHandler(IncomingCapabilityPort):
+class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
     def __init__(
@@ -256,7 +257,63 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         Returns:
             Готовое содержимое ответа с продолжением режима Obsidian.
         """
+        parsed = ParsedObsidianCommand.parse(event.text.strip())
+        if (parsed is not None and parsed.command is ObsidianCommand.REANALYZE
+                and not parsed.arguments and context.pending_inputs is not None):
+            context.pending_inputs.begin(event.reply_address, "obsidian", "reanalyze_article",
+                                         app_user_id=context.app_user.id, required_mode="obsidian")
+            return CapabilityResult(IncomingResponse(text_content(
+                "Укажи числовой ID статьи для повторного анализа. "
+                "Ожидание действует 10 минут. Для отмены введи /cancel."
+            )))
         return self._handle(context, event)
+
+    def continue_input(
+        self, context: HandlerContext, pending: PendingInput, event: IncomingEvent
+    ) -> PendingInputResult:
+        """Проверяет ID статьи, сохраняя исходное событие для повторного анализа.
+
+        Args:
+            context: Повторно допущенный профиль и сервисы ответа.
+            pending: Исходное ожидание с типом значения.
+            event: Неизменённое сообщение пользователя.
+
+        Returns:
+            Retry при неверном значении либо complete с действием вне блокировки.
+        """
+        if pending.input_kind != "reanalyze_article":
+            return PendingInputResult(IncomingResponse(text_content(
+                "Ожидание ID недоступно. Повтори /reanalyze."
+            )), PendingInputOutcome.COMPLETE)
+        value = event.text.strip()
+        if not _valid_article_id(value):
+            return PendingInputResult(IncomingResponse(text_content(
+                "Не удалось распознать ID статьи. Введи числовой ID или отмени ввод "
+                "командой /cancel. Ожидание ID продолжается."
+            )), PendingInputOutcome.RETRY)
+        article = self._article_url_use_case.get_saved_for_user(int(value), context.app_user.id)
+        if article is None:
+            return PendingInputResult(IncomingResponse(text_content(
+                "Статья недоступна в этом профиле. Введи другой ID или отмени ввод командой /cancel."
+            )), PendingInputOutcome.RETRY)
+        if self._obsidian_confirmation_service is not None:
+            active = self._obsidian_confirmation_service.get_active_for_article(
+                app_user_id=context.app_user.id, article_id=article.id or 0
+            )
+            if active is not None:
+                return PendingInputResult(IncomingResponse(text_content(
+                    "Для этой статьи уже ожидается действие. Заверши его в исходном чате "
+                    "перед повторным анализом. Ожидание ID продолжается."
+                )), PendingInputOutcome.RETRY)
+
+        def analyze() -> IncomingResponse:
+            """Отправляет квитанцию после принятия ID и повторяет предметные проверки."""
+            if context.delivery is not None:
+                from compadre_assistant.core.presentation.responses import PROCESSING_ACK_TEXT
+                context.delivery.send(event.reply_address, IncomingResponse(text_content(PROCESSING_ACK_TEXT)))
+            return _present_result(self._process_article_command(context.app_user, event, value))
+
+        return PendingInputResult(IncomingResponse(text_content("")), PendingInputOutcome.COMPLETE, analyze)
 
     def _handle(
         self, context: HandlerContext, event: IncomingEvent, arguments: str | None = None
@@ -351,6 +408,14 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
                 origin,
                 completion_handler=completion_handler,
             )
+        return self._process_article_command(
+            app_user, event, parsed.arguments if command is ObsidianCommand.REANALYZE else None
+        )
+
+    def _process_article_command(
+        self, app_user: AppUser, event: IncomingEvent, reanalyze_id: str | None = None
+    ) -> ObsidianMessageResult:
+        """Проверяет окружение и запускает обработку статьи из прямого или пошагового входа."""
         incoming_message = ArticleIncomingMessage(
             channel=event.channel,
             chat_id=event.chat_id,
@@ -371,9 +436,9 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             )
         if self._selected_vault(app_user.id) is None:
             return ObsidianMessageResult(type=ObsidianResultType.VAULT_REQUIRED, app_user=app_user)
-        if command is ObsidianCommand.REANALYZE:
+        if reanalyze_id is not None:
             return self._reanalyze_article(
-                parsed.arguments if parsed is not None else "",
+                reanalyze_id,
                 incoming_message,
                 app_user,
             )
@@ -1123,7 +1188,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         self, arguments: str, incoming_message: ArticleIncomingMessage, app_user: AppUser
     ) -> ObsidianMessageResult:
         """Повторно анализирует статью, не подменяя активный proposal её цикла."""
-        if not arguments.isdigit():
+        if not _valid_article_id(arguments):
             return self._run_reanalyze_article(arguments, incoming_message, app_user)
         article = self._article_url_use_case.get_saved_for_user(int(arguments), app_user.id)
         if article is None:
@@ -1166,7 +1231,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
         app_user: AppUser,
     ) -> ObsidianMessageResult:
         """Повторно анализирует сохранённую статью по команде пользователя."""
-        if not arguments.isdigit():
+        if not _valid_article_id(arguments):
             return ObsidianMessageResult(
                 type=ObsidianResultType.REANALYZE_COMMAND_INVALID,
                 app_user=app_user,
@@ -1379,3 +1444,8 @@ def _operation_message(text: str, user: AppUser) -> ObsidianMessageResult:
     return ObsidianMessageResult(
         type=ObsidianResultType.CONFIRMATION_MISSING, app_user=user, text_override=text
     )
+
+
+def _valid_article_id(value: str) -> bool:
+    """Принимает числовой ID в диапазоне SQLite, исключая Unicode-псевдоцифры."""
+    return bool(value) and value.isascii() and value.isdecimal() and len(value) <= 19 and int(value) <= 2**63 - 1

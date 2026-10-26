@@ -11,7 +11,7 @@ from compadre_assistant.core.presentation.incoming.events import IncomingEvent, 
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
-    PendingInputContinuationPort, PendingInputOutcome,
+    PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -180,18 +180,30 @@ class IncomingMessageDispatcher:
         """Сериализует ожидание чата, затем запускает независимый обычный маршрут."""
         with self._pending_inputs.lock(event.reply_address):
             result = self._route_pending_input(event, completion_handler)
+            if result is None and not event.text.strip():
+                return IncomingResponse(text_content(
+                    "Пришли текстовое сообщение или выбери возможность через /help."
+                ))
             parsed = ParsedChatCommand.parse(event.text.strip())
             if result is None and parsed is not None:
                 command = parsed.command
                 if command in (ChatCommand.REGISTER, ChatCommand.LINK, ChatCommand.NAME,
                                ChatCommand.ENABLE, ChatCommand.DISABLE):
                     return self._dispatch_message(event, completion_handler)
+        if isinstance(result, PendingInputResult):
+            try:
+                return result.action() if result.action is not None else result.response
+            except Exception as error:
+                LOGGER.exception("Accepted pending input action failed")
+                return IncomingResponse(text_content(
+                    "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
+                ), error)
         return result if result is not None else self._dispatch_message(event, completion_handler)
 
     def _route_pending_input(
         self, event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None,
-    ) -> ProcessIncomingMessageResult | IncomingResponse | None:
+    ) -> ProcessIncomingMessageResult | IncomingResponse | PendingInputResult | None:
         """Атомарно выбирает продолжение, не блокируя обычные долгие операции."""
         text = event.text.strip()
         parsed = ParsedChatCommand.parse(text)
@@ -431,7 +443,7 @@ class IncomingMessageDispatcher:
     def _continue_input(
         self, pending: PendingInput, event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None,
-    ) -> ProcessIncomingMessageResult | IncomingResponse:
+    ) -> ProcessIncomingMessageResult | IncomingResponse | PendingInputResult:
         """Повторно проверяет допуск и передаёт исходное значение владельцу."""
         if pending.owner_id == "core" and pending.input_kind == "register_name":
             try:
@@ -469,6 +481,14 @@ class IncomingMessageDispatcher:
                 self._blocked_reply(access) if access is not None and not access.effective
                 else "Владелец ввода недоступен. Повтори команду."
             ))
+        mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+        if ((pending.app_user_id is not None and pending.app_user_id != user.id)
+                or (pending.required_mode is not None
+                    and (mode is None or mode.capability_id != pending.required_mode))):
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+            return IncomingResponse(text_content(
+                "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
+            ))
         context = HandlerContext(
             user, CallbackReplyDelivery(completion_handler) if completion_handler else None,
             self._pending_inputs,
@@ -484,7 +504,7 @@ class IncomingMessageDispatcher:
             ), error)
         if result.outcome is PendingInputOutcome.COMPLETE:
             self._pending_inputs.clear(event.reply_address, pending.request_id)
-        return result.response
+        return result
 
     def _continue_core_input(self, pending: PendingInput, event: IncomingEvent) -> ProcessIncomingMessageResult | IncomingResponse:
         """Повторно проверяет профиль и завершает либо сохраняет исходное ожидание."""
