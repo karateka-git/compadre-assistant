@@ -11,6 +11,7 @@ from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, Cha
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
+    CapabilityCommand,
     CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse,
 )
@@ -67,7 +68,7 @@ class FakeCapability(IncomingCapabilityPort):
     """Регистрируется без изменений core и адаптеров каналов."""
 
     def __init__(self, identifier: str = "selected", command: str = "/selected") -> None:
-        self._descriptor = CapabilityDescriptor(identifier, command, "тестовая возможность", enabled_by_default=True)
+        self._descriptor = CapabilityDescriptor(identifier, CapabilityCommand(command, (), "тестовая возможность"), enabled_by_default=True)
         self.calls: list[tuple[AppUser, IncomingEvent]] = []
         self.entries: list[tuple[AppUser, IncomingEvent]] = []
         self.entry_mode = CapabilityMode.ACTIVE
@@ -180,7 +181,7 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_capabilities_catalog_handles_default_override_and_incomplete_profile(self) -> None:
         """Каталог доступен до имени и показывает личный и серверный статусы."""
         self.identity.user = AppUser(id=23, display_name=None)
-        disabled = CapabilityDescriptor("offline", "/offline", "офлайн", enabled_by_default=True)
+        disabled = CapabilityDescriptor("offline", CapabilityCommand("/offline", (), "офлайн"), enabled_by_default=True)
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,),
             disabled_capabilities=(disabled,),
@@ -221,7 +222,7 @@ class IncomingBoundaryTest(unittest.TestCase):
 
     def test_enable_validates_exact_id_and_server_availability(self) -> None:
         """Некорректный ID и отключённый сервером вход не создают настроек."""
-        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        disabled = CapabilityDescriptor("offline", CapabilityCommand("/offline", (), "офлайн"))
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,), disabled_capabilities=(disabled,),
             user_identity_service=self.identity, chat_mode_repository=self.repository,
@@ -295,7 +296,7 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_disable_validates_id_and_accepts_server_disabled_entry(self) -> None:
         """Глобальное отключение не мешает личному выключению известного ID."""
         self.identity.user = AppUser(id=23, display_name=None)
-        disabled = CapabilityDescriptor("offline", "/offline", "офлайн")
+        disabled = CapabilityDescriptor("offline", CapabilityCommand("/offline", (), "офлайн"))
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,), disabled_capabilities=(disabled,),
             user_identity_service=self.identity, chat_mode_repository=self.repository,
@@ -587,7 +588,7 @@ class IncomingBoundaryTest(unittest.TestCase):
 
     def test_disabled_entry_metadata_is_generic_and_preserves_mode(self) -> None:
         """Метаданные любого отключённого входа не запускают выбранный обработчик."""
-        disabled = CapabilityDescriptor("unavailable", "/unavailable", "отключённая возможность")
+        disabled = CapabilityDescriptor("unavailable", CapabilityCommand("/unavailable", (), "отключённая возможность"))
         dispatcher = create_incoming_message_dispatcher(
             capabilities=(self.capability,), disabled_capabilities=(disabled,),
             user_identity_service=self.identity, chat_mode_repository=self.repository,
@@ -603,12 +604,12 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_registry_checks_disabled_metadata_conflicts(self) -> None:
         """Отключённые входы подчиняются общим ограничениям реестра."""
         for descriptor in (
-            CapabilityDescriptor("selected", "/different", "описание"),
-            CapabilityDescriptor("different", "/selected", "описание"),
-            CapabilityDescriptor("different", "/help", "описание"),
-            CapabilityDescriptor("different", "invalid", "описание"),
-            CapabilityDescriptor(" ", "/different", "описание"),
-            CapabilityDescriptor("different", "/different", " "),
+            CapabilityDescriptor("selected", CapabilityCommand("/different", (), "описание")),
+            CapabilityDescriptor("different", CapabilityCommand("/selected", (), "описание")),
+            CapabilityDescriptor("different", CapabilityCommand("/help", (), "описание")),
+            CapabilityDescriptor("different", CapabilityCommand("invalid", (), "описание")),
+            CapabilityDescriptor(" ", CapabilityCommand("/different", (), "описание")),
+            CapabilityDescriptor("different", CapabilityCommand("/different", (), " ")),
         ):
             with self.subTest(descriptor=descriptor), self.assertRaises(ValueError):
                 CapabilityRegistry((self.capability,), (descriptor,))

@@ -140,7 +140,7 @@ class IncomingMessageDispatcher:
         lines = ["Личные возможности:"]
         for access in personal.access:
             lines.append(
-                f"{access.descriptor.capability_id} — {access.descriptor.description}. "
+                f"{access.descriptor.capability_id} — {access.descriptor.entry.description}. "
                 f"Личный выбор: {'включена' if access.user_enabled else 'выключена'}; "
                 f"сервер: {'доступна' if access.server_available else 'недоступна'}."
             )
@@ -247,7 +247,7 @@ class IncomingMessageDispatcher:
             if mode is None or mode.capability_id != target:
                 capability = personal.by_id(target)
                 return IncomingResponse(
-                    text_content(f"Войди снова через {capability.descriptor.entry_command}, чтобы завершить действие в исходном чате."
+                    text_content(f"Войди снова через {capability.descriptor.entry.name}, чтобы завершить действие в исходном чате."
                     if capability
                     else personal.entry_hint())
                 )

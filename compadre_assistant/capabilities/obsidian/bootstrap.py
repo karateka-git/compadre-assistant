@@ -22,8 +22,9 @@ from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import A
 from compadre_assistant.capabilities.obsidian.domain.articles.ports import IncomingMessageRepository
 from compadre_assistant.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlUseCase
 from compadre_assistant.capabilities.obsidian.domain.articles.processing import ProcessArticleUrlCommand, ProcessArticleUrlError
-from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult, obsidian_capability_help
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
 from compadre_assistant.core.presentation.incoming.ports import CapabilityDescriptor, CapabilityResult, HandlerContext, IncomingCapabilityPort
 from compadre_assistant.capabilities.obsidian.domain.reviews.proposal import PrepareObsidianReviewUseCase
 from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
@@ -197,10 +198,7 @@ class ObsidianCapability(IncomingCapabilityPort):
             embedding_config=embedding_config,
             created_note_tag=created_note_tag,
         )
-        self._descriptor = CapabilityDescriptor(
-            "obsidian", "/obsidian", "работа со статьями и Obsidian vault",
-            obsidian_capability_help(),
-        )
+        self._descriptor = obsidian_descriptor()
 
     @property
     def descriptor(self) -> CapabilityDescriptor:

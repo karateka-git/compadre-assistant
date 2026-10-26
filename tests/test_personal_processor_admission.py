@@ -19,7 +19,7 @@ from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import CapabilityDescriptor
+from compadre_assistant.core.presentation.incoming.ports import CapabilityCommand, CapabilityDescriptor
 from compadre_assistant.presentation.telegram.bot import _register_handlers
 from compadre_assistant.presentation.vk.bot import _handle_update
 from test_chat_modes import DelayedCapability
@@ -35,7 +35,7 @@ class ProcessCapability(FakeCapability):
     def __init__(self, started, release) -> None:
         """Принимает межпроцессные сигналы для управляемой гонки."""
         super().__init__("example", "/example")
-        self._descriptor = CapabilityDescriptor("example", "/example", "пример")
+        self._descriptor = CapabilityDescriptor("example", CapabilityCommand("/example", (), "пример"))
         self.started = started
         self.release = release
 
@@ -160,7 +160,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
     def capability() -> FakeCapability:
         """Создаёт вход с default False, как у нового встроенного ID."""
         capability = FakeCapability("example", "/example")
-        capability._descriptor = CapabilityDescriptor("example", "/example", "пример")
+        capability._descriptor = CapabilityDescriptor("example", CapabilityCommand("/example", (), "пример"))
         return capability
 
     def test_two_processors_see_commits_and_isolate_users(self) -> None:
@@ -233,7 +233,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
     def test_admitted_entry_finishes_after_disable_commit(self) -> None:
         """Уже допущенный вызов завершается, следующий вход видит disable."""
         capability = DelayedCapability(delay_enter=True)
-        capability._descriptor = CapabilityDescriptor("selected", "/selected", "пример")
+        capability._descriptor = CapabilityDescriptor("selected", CapabilityCommand("/selected", (), "пример"))
         first = ChannelMessageProcessor(database_path=self.path, capabilities=(capability,))
         second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
         with connect_database(self.path) as connection:

@@ -70,10 +70,10 @@ class IncomingCommandsTest(unittest.TestCase):
     def test_obsidian_help_sections_keep_existing_order(self) -> None:
         """Разделы vault и статей идут после общих разделов в прежнем порядке."""
         sections = help_sections()
-        self.assertEqual([section[0] for section in sections], ["Obsidian vault", "Статьи"])
+        self.assertEqual([section.title for section in sections], ["Obsidian vault", "Статьи"])
         self.assertEqual(
-            [line.split(" — ")[0] for _, lines in sections for line in lines],
-            ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze <ID статьи>"],
+            [command.name for section in sections for command in section.commands],
+            ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze"],
         )
 
 

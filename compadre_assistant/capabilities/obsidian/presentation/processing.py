@@ -15,11 +15,11 @@ from compadre_assistant.capabilities.obsidian.domain.articles.url_utils import n
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
-    ConfirmationAction, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
-    HelpSection, IncomingCapabilityPort, IncomingResponse,
+    ConfirmationAction, CapabilityDescriptor, CapabilityResult, HandlerContext,
+    IncomingCapabilityPort, IncomingResponse,
 )
 from compadre_assistant.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
-from compadre_assistant.capabilities.obsidian.presentation.commands import help_sections as obsidian_help_sections
+from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleCommand,
@@ -113,21 +113,6 @@ ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
 
-def obsidian_capability_help() -> CapabilityHelp:
-    """Возвращает справку Obsidian без открытия предметного SQLite scope."""
-    return CapabilityHelp(
-        sections=tuple(
-            HelpSection(title, commands) for title, commands in obsidian_help_sections()
-        ),
-        instructions=(
-            "Войди через /obsidian [текст или URL]. Подключение vault выполняется внутри этого режима.",
-            "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
-            "",
-            "Ответы да и нет выбирают единственное ожидание этого чата; при нескольких используй адресную команду /confirm.",
-        ),
-    )
-
-
 class ObsidianMessageHandler(IncomingCapabilityPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
@@ -178,9 +163,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
     @property
     def descriptor(self) -> CapabilityDescriptor:
         """Объявляет единственный вход Obsidian без динамического поиска."""
-        return CapabilityDescriptor(
-            "obsidian", "/obsidian", "работа со статьями и Obsidian vault", self._help()
-        )
+        return obsidian_descriptor()
 
     def enter(
         self, context: HandlerContext, event: IncomingEvent, arguments: str
@@ -308,10 +291,6 @@ class ObsidianMessageHandler(IncomingCapabilityPort):
             # Ошибочный аргумент входа не должен заменять ранее выбранный режим чата.
             result = replace(result, error=ValueError("Некорректный аргумент входа Obsidian"))
         return CapabilityResult(_present_result(result))
-
-    def _help(self) -> CapabilityHelp:
-        """Описывает команды и подсказки Obsidian для общей справки."""
-        return obsidian_capability_help()
 
     def _selected_vault(self, app_user_id: int) -> ObsidianVault | None:
         """Читает vault только при предметном обращении к Obsidian."""

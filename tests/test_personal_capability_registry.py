@@ -5,6 +5,7 @@ import unittest
 
 from compadre_assistant.core.domain.capability_preferences import UserCapabilitySelection
 from compadre_assistant.core.presentation.incoming.ports import (
+    CapabilityCommand,
     CapabilityDescriptor,
     CapabilityResult,
     HandlerContext,
@@ -17,7 +18,7 @@ from compadre_assistant.core.presentation.incoming.registry import CapabilityReg
 class FakeCapability(IncomingCapabilityPort):
     """Представляет произвольную возможность вне каталога приложения."""
 
-    descriptor = CapabilityDescriptor("example", "/example", "пример", enabled_by_default=True)
+    descriptor = CapabilityDescriptor("example", CapabilityCommand("/example", (), "пример"), enabled_by_default=True)
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Не используется при проверке метаданных."""

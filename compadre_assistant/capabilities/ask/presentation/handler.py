@@ -8,7 +8,7 @@ from compadre_assistant.capabilities.ask.domain.errors import (
 from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
+    CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse,
 )
 
@@ -17,7 +17,8 @@ class AskCapability(IncomingCapabilityPort):
     """Выполняет один вопрос без установки длительного режима чата."""
 
     descriptor = CapabilityDescriptor(
-        "ask", "/ask", "один вопрос модели без истории: /ask <вопрос>",
+        "ask", CapabilityCommand("/ask", (CommandParameter("вопрос", "<вопрос>", False),),
+                                 "один вопрос модели без истории"),
         persistent_mode=False,
         enabled_by_default=True,
     )

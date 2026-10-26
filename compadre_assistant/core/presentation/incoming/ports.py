@@ -11,11 +11,29 @@ from compadre_assistant.core.presentation.message_content import MessageContent
 
 
 @dataclass(frozen=True, slots=True)
+class CommandParameter:
+    """Описывает имя, обозначение и обязательность параметра команды."""
+
+    name: str
+    syntax: str
+    required: bool  # False допускает вызов без значения по сценарию владельца.
+
+
+@dataclass(frozen=True, slots=True)
+class CapabilityCommand:
+    """Передаёт точное имя команды, её параметры и краткое назначение."""
+
+    name: str
+    parameters: tuple[CommandParameter, ...]
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
 class HelpSection:
     """Описывает раздел справки без зависимости от конкретной возможности."""
 
     title: str
-    commands: tuple[str, ...]
+    commands: tuple[CapabilityCommand, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,8 +94,7 @@ class CapabilityDescriptor:
     """Объявляет устойчивый ID, команду входа и общую справку возможности."""
 
     capability_id: str
-    entry_command: str
-    description: str
+    entry: CapabilityCommand
     help: CapabilityHelp = CapabilityHelp()
     persistent_mode: bool = True  # Длительный вход требует явного выхода из режима.
     enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.

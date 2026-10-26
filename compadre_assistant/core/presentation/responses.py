@@ -138,7 +138,10 @@ def _format_help(capability: CapabilityHelp | None) -> MessageContent:
             lines.append(str(command))
     if capability is not None:
         for section in capability.sections:
-            lines.extend(("", f"{section.title}:", *section.commands))
+            lines.extend(("", f"{section.title}:"))
+            for command in section.commands:
+                syntax = " ".join((command.name, *(parameter.syntax for parameter in command.parameters)))
+                lines.append(f"{syntax} — {command.description}")
         if capability.instructions:
             lines.extend(("", *capability.instructions))
     else:

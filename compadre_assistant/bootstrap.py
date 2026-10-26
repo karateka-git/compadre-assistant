@@ -14,7 +14,6 @@ from compadre_assistant.capabilities.ask.presentation.handler import AskCapabili
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
-    CapabilityDescriptor,
     IncomingCapabilityPort,
     IncomingResponse,
 )
@@ -29,6 +28,7 @@ from compadre_assistant.capabilities.obsidian.bootstrap import (
     ObsidianProcessRuntime,
     ProcessArticleUrlUseCaseFactory,
     ObsidianCapability,
+    obsidian_descriptor,
     create_obsidian_process_runtime,
     process_url_for_cli,
     validate_external_http_url,
@@ -213,7 +213,7 @@ def create_channel_message_processor(
         with create_ask_runtime(enabled="ask" in enabled_capabilities, config=ask_config) as ask:
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
-                CapabilityDescriptor("obsidian", "/obsidian", "работа со статьями и Obsidian vault"),
+                obsidian_descriptor(),
             )
             if ask is not None:
                 capabilities += (AskCapability(ask),)

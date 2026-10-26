@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from compadre_assistant.core.presentation.incoming.ports import (
+    CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CommandParameter, HelpSection,
+)
+
 
 class ObsidianCommand(StrEnum):
     """Перечисляет команды, принадлежащие возможности Obsidian."""
@@ -40,16 +44,35 @@ class ParsedObsidianCommand:
         return cls(command, parts[1].strip() if len(parts) == 2 else "")
 
 
-def help_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Возвращает разделы предметных команд в прежнем порядке справки."""
+def help_sections() -> tuple[HelpSection, ...]:
+    """Возвращает структурированные команды vault и статей в порядке справки."""
     return (
-        (
-            "Obsidian vault",
-            (
-                "/github_status — показать состояние локальной копии vault",
-                "/github_sync — проверить GitHub и синхронизировать vault",
-                "/github_disconnect — отключить vault после подтверждения",
+        HelpSection("Obsidian vault", (
+            CapabilityCommand(ObsidianCommand.GITHUB_STATUS.value, (), "показать состояние локальной копии vault"),
+            CapabilityCommand(ObsidianCommand.GITHUB_SYNC.value, (), "проверить GitHub и синхронизировать vault"),
+            CapabilityCommand(ObsidianCommand.GITHUB_DISCONNECT.value, (), "отключить vault после подтверждения"),
+        )),
+        HelpSection("Статьи", (
+            CapabilityCommand(ObsidianCommand.REANALYZE.value,
+                              (CommandParameter("ID статьи", "<ID статьи>", False),),
+                              "выполнить анализ статьи повторно"),
+        )),
+    )
+
+
+def obsidian_descriptor() -> CapabilityDescriptor:
+    """Объявляет полный каталог Obsidian без сборки внешних зависимостей."""
+    return CapabilityDescriptor(
+        "obsidian",
+        CapabilityCommand("/obsidian", (CommandParameter("текст или URL", "<текст или URL>", False),),
+                          "работа со статьями и Obsidian vault"),
+        CapabilityHelp(
+            sections=help_sections(),
+            instructions=(
+                "Войди через /obsidian [текст или URL]. Подключение vault выполняется внутри этого режима.",
+                "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
+                "",
+                "Ответы да и нет выбирают единственное ожидание этого чата; при нескольких используй адресную команду /confirm.",
             ),
         ),
-        ("Статьи", ("/reanalyze <ID статьи> — выполнить анализ статьи повторно",)),
     )
