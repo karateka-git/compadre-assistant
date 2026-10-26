@@ -180,6 +180,12 @@ class IncomingMessageDispatcher:
         """Сериализует ожидание чата, затем запускает независимый обычный маршрут."""
         with self._pending_inputs.lock(event.reply_address):
             result = self._route_pending_input(event, completion_handler)
+            parsed = ParsedChatCommand.parse(event.text.strip())
+            if result is None and parsed is not None:
+                command = parsed.command
+                if command in (ChatCommand.REGISTER, ChatCommand.LINK, ChatCommand.NAME,
+                               ChatCommand.ENABLE, ChatCommand.DISABLE):
+                    return self._dispatch_message(event, completion_handler)
         return result if result is not None else self._dispatch_message(event, completion_handler)
 
     def _route_pending_input(
@@ -250,7 +256,7 @@ class IncomingMessageDispatcher:
                 return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
             return IncomingResponse(text_content(self._capability_catalog(self._personal_registry(user))))
         if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
-            return self._change_capability(command, parsed.arguments if parsed else "", identity)
+            return self._change_capability(command, parsed.arguments if parsed else "", identity, event)
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if parts and parts[0] == "core":
@@ -327,45 +333,12 @@ class IncomingMessageDispatcher:
 
         if command is ChatCommand.LINK:
             if parsed is None or not parsed.arguments:
-                return ProcessIncomingMessageResult(type=IncomingMessageResultType.LINK_COMMAND_INVALID)
-            try:
-                user = self._user_identity_service.link(code=parsed.arguments, identity=identity)
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.LINKED,
-                    app_user=user,
-                )
-            except IdentityAlreadyBoundError as error:
-                try:
-                    pending = self._user_identity_service.request_rebind_confirmation(
-                        code=parsed.arguments, identity=identity
-                    )
-                    actions = tuple(
-                        ConfirmationAction(
-                            f"core:identity:{pending.id}:{pending.version}:{decision}",
-                            label,
-                            f"/confirm core identity {pending.id} {pending.version} {decision}",
-                        )
-                        for decision, label in (("yes", "Перенести identity"), ("no", "Отменить"))
-                    )
-                    return IncomingResponse(
-                        compose_content('Канал уже привязан к другому профилю. Подтверди перенос адресной командой.'),
-                        actions=actions,
-                    )
-                except IdentityAlreadyBoundError:
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.LINK_ALREADY_BOUND,
-                        error=error,
-                    )
-                except InvalidLinkCodeError as rebind_error:
-                    return ProcessIncomingMessageResult(
-                        type=IncomingMessageResultType.LINK_CODE_INVALID,
-                        error=rebind_error,
-                    )
-            except InvalidLinkCodeError as error:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.LINK_CODE_INVALID,
-                    error=error,
-                )
+                user = self._user_identity_service.resolve(identity)
+                self._pending_inputs.begin(event.reply_address, "core", "link_code", app_user_id=user.id if user else None)
+                return IncomingResponse(text_content(
+                    "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
+                ))
+            return self._link_identity(parsed.arguments, identity)
 
         user = self._user_identity_service.resolve(identity)
         if user is None:
@@ -386,6 +359,11 @@ class IncomingMessageDispatcher:
                 link_code=link_code,
             )
         if command is ChatCommand.NAME:
+            if not parsed.arguments:
+                self._pending_inputs.begin(event.reply_address, "core", "profile_name", app_user_id=user.id)
+                return IncomingResponse(text_content(
+                    "Пришли новое имя профиля. Ожидание действует 10 минут. Для отмены введи /cancel."
+                ))
             return self._save_name(
                 parsed.arguments if parsed is not None else "",
                 user,
@@ -408,6 +386,47 @@ class IncomingMessageDispatcher:
                 ),
             )
         return self._dispatch(user, event, completion_handler, self._personal_registry(user))
+
+    def _link_identity(self, code: str, identity: IncomingIdentity) -> ProcessIncomingMessageResult | IncomingResponse:
+        """Применяет код одинаково для прямой команды и ожидаемого значения."""
+        try:
+            user = self._user_identity_service.link(code=code, identity=identity)
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.LINKED,
+                app_user=user,
+            )
+        except IdentityAlreadyBoundError as error:
+            try:
+                pending = self._user_identity_service.request_rebind_confirmation(
+                    code=code, identity=identity
+                )
+                actions = tuple(
+                    ConfirmationAction(
+                        f"core:identity:{pending.id}:{pending.version}:{decision}",
+                        label,
+                        f"/confirm core identity {pending.id} {pending.version} {decision}",
+                    )
+                    for decision, label in (("yes", "Перенести identity"), ("no", "Отменить"))
+                )
+                return IncomingResponse(
+                    compose_content('Канал уже привязан к другому профилю. Подтверди перенос адресной командой.'),
+                    actions=actions,
+                )
+            except IdentityAlreadyBoundError:
+                return ProcessIncomingMessageResult(
+                    type=IncomingMessageResultType.LINK_ALREADY_BOUND,
+                    error=error,
+                )
+            except InvalidLinkCodeError as rebind_error:
+                return ProcessIncomingMessageResult(
+                    type=IncomingMessageResultType.LINK_CODE_INVALID,
+                    error=rebind_error,
+                )
+        except InvalidLinkCodeError as error:
+            return ProcessIncomingMessageResult(
+                type=IncomingMessageResultType.LINK_CODE_INVALID,
+                error=error,
+            )
 
     def _continue_input(
         self, pending: PendingInput, event: IncomingEvent,
@@ -438,6 +457,8 @@ class IncomingMessageDispatcher:
                  else IncomingMessageResultType.ALREADY_REGISTERED), app_user=user,
                 capability_reply=self._personal_registry(user).entry_hint(),
             )
+        if pending.owner_id == "core":
+            return self._continue_core_input(pending, event)
         user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user) if user is not None else None
         owner = personal.by_id(pending.owner_id) if personal is not None else None
@@ -465,8 +486,44 @@ class IncomingMessageDispatcher:
             self._pending_inputs.clear(event.reply_address, pending.request_id)
         return result.response
 
+    def _continue_core_input(self, pending: PendingInput, event: IncomingEvent) -> ProcessIncomingMessageResult | IncomingResponse:
+        """Повторно проверяет профиль и завершает либо сохраняет исходное ожидание."""
+        try:
+            identity = _incoming_identity_from_event(event)
+            user = self._user_identity_service.resolve(identity)
+            if (user.id if user else None) != pending.app_user_id:
+                self._pending_inputs.clear(event.reply_address, pending.request_id)
+                return IncomingResponse(text_content("Профиль канала изменился. Повтори команду."))
+            if pending.input_kind in ("enable", "disable"):
+                command = ChatCommand.ENABLE if pending.input_kind == "enable" else ChatCommand.DISABLE
+                return self._change_capability(command, event.text, identity, event, pending)
+            if pending.input_kind == "link_code":
+                result = self._link_identity(event.text.strip(), identity)
+                if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
+                    return IncomingResponse(text_content(
+                        "Код привязки не принят. Отправь исправленный код ещё раз до истечения ожидания; отмена: /cancel. "
+                        "Если код истёк, получи новый через /link_code в уже привязанном канале; код действует 10 минут."
+                    ), result.error)
+            elif pending.input_kind == "profile_name" and user is not None:
+                result = self._save_name(event.text, user)
+                if result.type is IncomingMessageResultType.NAME_COMMAND_INVALID:
+                    return IncomingResponse(text_content(
+                        "Имя не принято. Используй от 1 до 80 символов без ссылки или команды. "
+                        "Отправь исправленное имя ещё раз или введи /cancel."
+                    ), result.error)
+            else:
+                result = IncomingResponse(text_content("Ввод недоступен. Повтори команду."))
+        except Exception as error:
+            LOGGER.exception("Core pending input failed: kind=%s", pending.input_kind)
+            result = IncomingResponse(text_content(
+                "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
+            ), error)
+        self._pending_inputs.clear(event.reply_address, pending.request_id)
+        return result
+
     def _change_capability(
-        self, command: ChatCommand, arguments: str, identity: IncomingIdentity
+        self, command: ChatCommand, arguments: str, identity: IncomingIdentity,
+        event: IncomingEvent, pending: PendingInput | None = None,
     ) -> IncomingResponse:
         """Проверяет общую команду и сохраняет один личный выбор AppUser.
 
@@ -474,34 +531,58 @@ class IncomingMessageDispatcher:
             command: Команда включения либо отключения.
             arguments: Строка аргументов после команды.
             identity: Разрешаемая identity исходного канала.
+            event: Исходное событие для ожидания в конкретном чате.
+            pending: Продолжаемый ввод либо прямой вызов.
 
         Returns:
             Подтверждение собственного commit или понятный отказ без записи.
         """
-        parts = arguments.split()
-        if len(parts) != 1:
-            return IncomingResponse(compose_content(
-                'Используй ',
-                code_span(str(command.usage)),
-                '. Список: ',
-                code_span('/capabilities'),
-                '.',
-            ))
         user = self._user_identity_service.resolve(identity)
         if user is None:
+            if pending is not None:
+                self._pending_inputs.clear(event.reply_address, pending.request_id)
             return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
+        if pending is not None and user.id != pending.app_user_id:
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+            return IncomingResponse(text_content("Профиль канала изменился. Повтори команду."))
+        enabled = command is ChatCommand.ENABLE
+        parts = arguments.split()
+        if not parts and pending is None:
+            choices = tuple(
+                access for access in self._personal_registry(user).access
+                if access.server_available and not access.user_enabled
+            ) if enabled else tuple(
+                access for access in self._personal_registry(user).access if access.user_enabled
+            )
+            if not choices:
+                return IncomingResponse(text_content(
+                    "Нет возможностей, которые можно включить. Посмотри /capabilities." if enabled
+                    else "Нет включённых возможностей. Посмотри /capabilities."
+                ))
+            self._pending_inputs.begin(event.reply_address, "core", "enable" if enabled else "disable", app_user_id=user.id)
+            options = "\n".join(f"{access.descriptor.capability_id} — {access.descriptor.entry.description}" for access in choices)
+            return IncomingResponse(text_content(
+                f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
+                "Ожидание действует 10 минут. Для отмены введи /cancel."
+            ))
+        if len(parts) != 1:
+            return IncomingResponse(text_content(
+                "Значение не принято. Введи один ID из предложенного списка ещё раз или введи /cancel."
+                if pending else "Укажи один ID в команде /enable <id> или /disable <id>. "
+                "Чтобы выбрать возможность следующим сообщением, вызови /enable или /disable без аргументов."
+            ))
         access = self._personal_registry(user).status(parts[0])
         if access is None:
             return IncomingResponse(
                 compose_content(
-                    'Неизвестная возможность. Используй ',
+                    'Неизвестная возможность. Введи известный ID ещё раз или /cancel. Прямой вызов: '
+                    if pending else 'Неизвестная возможность. Используй ',
                     code_span(str(command.usage)),
                     '. Список: ',
                     code_span('/capabilities'),
                     '.',
                 )
             )
-        enabled = command is ChatCommand.ENABLE
         if enabled and not access.server_available:
             return IncomingResponse(
                 compose_content(
@@ -509,9 +590,12 @@ class IncomingMessageDispatcher:
                     code_span(str(parts[0])),
                     ' недоступна на сервере. Личный выбор не изменён. Список: ',
                     code_span('/capabilities'),
-                    '.',
+                    '. Выбери другой доступный ID или введи /cancel.' if pending else '.',
                 )
             )
+        if pending is not None:
+            # После допуска запись может иметь неизвестный исход; автоматического повтора нет.
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
         try:
             changed = SetUserCapabilityPreference(
                 self._capability_preference_repository, self._capability_defaults()

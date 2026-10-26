@@ -228,7 +228,7 @@ class IncomingBoundaryTest(unittest.TestCase):
             user_identity_service=self.identity, chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
-        for text in ("/enable", "/enable Selected", "/enable selected extra", "/enable unknown"):
+        for text in ("/enable Selected", "/enable unknown"):
             reply = dispatcher.execute(_event(text))
             self.assertIn("/capabilities", response_text(reply))
             self.assertEqual(self.preferences.rows, {})
@@ -302,7 +302,7 @@ class IncomingBoundaryTest(unittest.TestCase):
             user_identity_service=self.identity, chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
-        for text in ("/disable", "/disable Offline", "/disable offline extra", "/disable unknown"):
+        for text in ("/disable Offline", "/disable unknown"):
             self.assertIn("/capabilities", response_text(dispatcher.execute(_event(text))))
             self.assertEqual(self.preferences.rows, {})
         self.preferences.rows[(23, "offline")] = True
