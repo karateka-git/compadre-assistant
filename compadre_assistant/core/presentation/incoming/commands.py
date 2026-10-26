@@ -16,7 +16,7 @@ class ChatCommand(StrEnum):
     """Описывает поддерживаемую chat-команду и её строку справки.
 
     Каждый элемент является единым источником имени, аргументов, раздела и
-    пользовательского описания. Новый элемент автоматически попадает в /help.
+    пользовательского описания. Показ команды в /help определяет presentation.
     """
 
     section: CommandSection
@@ -37,6 +37,9 @@ class ChatCommand(StrEnum):
         member.description = description
         return member
 
+    CANCEL = (
+        "/cancel", CommandSection.BASIC, "", "отменить ожидающий ввод этого чата",
+    )
     CONFIRM = (
         "/confirm",
         CommandSection.BASIC,

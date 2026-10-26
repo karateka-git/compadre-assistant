@@ -11,7 +11,9 @@ from compadre_assistant.core.presentation.incoming.events import IncomingEvent, 
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
+    PendingInputContinuationPort, PendingInputOutcome,
 )
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry, CapabilityAccess
 from compadre_assistant.core.domain.capability_preferences import (
@@ -100,8 +102,10 @@ class IncomingMessageDispatcher:
         user_identity_service: UserIdentityService,
         chat_mode_repository: ChatModeRepository,
         capability_preference_repository: UserCapabilityPreferenceRepository,
+        pending_inputs: PendingInputStore | None = None,
     ) -> None:
         """Внедряет общий реестр и repositories независимого профиля."""
+        self._pending_inputs = pending_inputs or PendingInputStore()
         self._registry = registry
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
@@ -165,7 +169,8 @@ class IncomingMessageDispatcher:
         """
         from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
-        result = self._execute(event, completion_handler)
+        with self._pending_inputs.lock(event.reply_address):
+            result = self._execute(event, completion_handler)
         if isinstance(result, IncomingResponse):
             return result
         return IncomingResponse(format_incoming_message_result(result), result.error)
@@ -187,6 +192,27 @@ class IncomingMessageDispatcher:
         text = event.text.strip()
         parsed = ParsedChatCommand.parse(text)
         command = parsed.command if parsed is not None else None
+        pending = self._pending_inputs.get(event.reply_address)
+        expired = pending is not None and self._pending_inputs.expired(pending)
+        if expired:
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+        if command is ChatCommand.CANCEL:
+            if parsed.arguments:
+                return IncomingResponse(compose_content(
+                    "Используй ", code_span("/cancel"), " без аргументов."
+                ))
+            cleared = self._pending_inputs.clear(event.reply_address)
+            return IncomingResponse(text_content(
+                "Ввод отменён." if cleared else "Нет активного ожидания ввода."
+            ))
+        if text.startswith("/"):
+            if command not in (ChatCommand.HELP, ChatCommand.STATUS,
+                               ChatCommand.CAPABILITIES, ChatCommand.START):
+                self._pending_inputs.clear(event.reply_address)
+        elif expired:
+            return IncomingResponse(text_content("Время ожидания истекло. Повтори команду."))
+        elif pending is not None:
+            return self._continue_input(pending, event, completion_handler)
         is_general_entry = (
             command is not None
             or self._registry.by_command(text) is not None
@@ -389,6 +415,38 @@ class IncomingMessageDispatcher:
             )
         return self._dispatch(user, event, completion_handler, self._personal_registry(user))
 
+    def _continue_input(
+        self, pending: PendingInput, event: IncomingEvent,
+        completion_handler: ChannelCompletionHandler | None,
+    ) -> IncomingResponse:
+        """Повторно проверяет допуск и передаёт исходное значение владельцу."""
+        user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+        personal = self._personal_registry(user) if user is not None else None
+        owner = personal.by_id(pending.owner_id) if personal is not None else None
+        if owner is None or not isinstance(owner, PendingInputContinuationPort):
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+            access = personal.status(pending.owner_id) if personal is not None else None
+            return IncomingResponse(text_content(
+                self._blocked_reply(access) if access is not None and not access.effective
+                else "Владелец ввода недоступен. Повтори команду."
+            ))
+        context = HandlerContext(
+            user, CallbackReplyDelivery(completion_handler) if completion_handler else None,
+            self._pending_inputs,
+        )
+        try:
+            result = owner.continue_input(context, pending, event)
+        except Exception as error:
+            # При неизвестном исходе внешнего действия повтор опасен: закрываем ввод.
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+            LOGGER.exception("Pending input failed: owner_id=%s", pending.owner_id)
+            return IncomingResponse(text_content(
+                "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
+            ), error)
+        if result.outcome is PendingInputOutcome.COMPLETE:
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+        return result.response
+
     def _change_capability(
         self, command: ChatCommand, arguments: str, identity: IncomingIdentity
     ) -> IncomingResponse:
@@ -463,6 +521,7 @@ class IncomingMessageDispatcher:
         context = HandlerContext(
             user,
             CallbackReplyDelivery(completion_handler) if completion_handler else None,
+            self._pending_inputs,
         )
         key = ChatModeKey(user.id, event.channel, event.chat_id)
         blocked = personal.blocked_by_command(event.text)

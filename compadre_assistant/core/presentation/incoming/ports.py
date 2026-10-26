@@ -3,9 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.message_content import MessageContent
 
@@ -87,6 +88,7 @@ class HandlerContext:
 
     app_user: AppUser
     delivery: ReplyDeliveryPort | None = None
+    pending_inputs: PendingInputStore | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,5 +149,41 @@ class IncomingCapabilityPort(Protocol):
 
         Returns:
             Общий ответ и признак продолжения либо завершения режима.
+        """
+        ...
+
+
+class PendingInputOutcome(StrEnum):
+    """Определяет дальнейшую жизнь ожидания независимо от режима чата."""
+
+    RETRY = "retry"  # Неверное значение оставляет исходный срок.
+    COMPLETE = "complete"  # Принятый ввод не выполняется повторно автоматически.
+
+
+@dataclass(frozen=True, slots=True)
+class PendingInputResult:
+    """Передаёт ответ владельца и решение о завершении ввода."""
+
+    response: IncomingResponse
+    outcome: PendingInputOutcome
+
+
+@runtime_checkable
+class PendingInputContinuationPort(Protocol):
+    """Дополняет вход возможности публичным продолжением ожидаемого ввода."""
+
+    def continue_input(
+        self, context: HandlerContext, pending: PendingInput, event: IncomingEvent
+    ) -> PendingInputResult:
+        """Проверяет сырой ввод и сообщает retry либо complete.
+
+        Args:
+            context: Повторно проверенный пользователь и общие сервисы входа.
+            pending: Исходная запись с типом значения и ID запроса.
+            event: Полное событие без преобразования в синтетическую команду.
+
+        Returns:
+            Ответ с решением о сохранении исходного ожидания. После принятия
+            значения даже ошибка внешнего действия возвращается как complete.
         """
         ...

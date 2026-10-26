@@ -130,7 +130,10 @@ def _format_help(capability: CapabilityHelp | None) -> MessageContent:
     """Объединяет общие команды и разделы подключённой возможности."""
     lines = ["Compadre Assistant — справка.", "Доступные команды:"]
     for section in CommandSection:
-        commands = [command for command in ChatCommand if command.section is section]
+        commands = [
+            command for command in ChatCommand
+            if command.section is section and command is not ChatCommand.CANCEL
+        ]
         if not commands:
             continue
         lines.extend(("", f"{section.value}:"))
