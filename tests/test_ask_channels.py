@@ -95,7 +95,8 @@ class AskChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "/ask до имени")
                     model.answer.assert_not_called()
-                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "/register")
+                    self.send(channel, processor, "Тест")
                     for question in ("первый", "https://example.com/article"):
                         self.assertEqual(self.send(channel, processor, "/ask " + question), "Ответ: " + question)
                     self.assertEqual([call.kwargs["question"] for call in model.answer.call_args_list], ["первый", "https://example.com/article"])
@@ -117,7 +118,7 @@ class AskChannelsTest(unittest.TestCase):
                 database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config
             ) as processor:
                 self.send("telegram", processor, "/register")
-                self.send("telegram", processor, "/name Тест")
+                self.send("telegram", processor, "Тест")
                 self.assertIn("выключена", self.send("telegram", processor, "/disable ask"))
                 self.assertIn("/enable ask", self.send("telegram", processor, "/ask вопрос"))
                 model_type.return_value.answer.assert_not_called()
@@ -147,7 +148,7 @@ class AskChannelsTest(unittest.TestCase):
                     database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config
                 ) as processor:
                     self.send(channel, processor, "/register")
-                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "Тест")
                     with ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(self.send, channel, processor, "/ask долгий")
                         try:
@@ -175,7 +176,7 @@ class AskChannelsTest(unittest.TestCase):
                 model.answer.return_value = "/confirm obsidian review 1 1 yes"
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("obsidian", "ask"), obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
                     self.send(channel, processor, "/register")
-                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "Тест")
                     with connect_database(self.path) as connection:
                         owner = connection.execute(
                             "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = '7'",
@@ -213,7 +214,7 @@ class AskChannelsTest(unittest.TestCase):
             with create_channel_message_processor(database_path=self.path, enabled_capabilities=()) as processor:
                 for channel in ("telegram", "vk"):
                     self.send(channel, processor, "/register")
-                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "Тест")
                     self.assertIn("недоступна на сервере", self.send(channel, processor, "/ask вопрос"))
             loader.assert_not_called()
             model.assert_not_called()
@@ -227,7 +228,7 @@ class AskChannelsTest(unittest.TestCase):
             def polling(*, incoming_message_processor, **_kwargs):
                 """Проверяет вход из CLI вместо реального сетевого polling."""
                 self.send(channel, incoming_message_processor, "/register")
-                self.send(channel, incoming_message_processor, "/name Тест")
+                self.send(channel, incoming_message_processor, "Тест")
                 self.assertEqual(self.send(channel, incoming_message_processor, "/ask вопрос"), "Ответ")
 
             with self.subTest(channel=channel), patch("compadre_assistant.bootstrap.load_ask_config", return_value=self.config), patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot", side_effect=polling):
@@ -256,7 +257,7 @@ class AskChannelsTest(unittest.TestCase):
                 model_type.return_value.answer.side_effect = respond
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
                     self.send(channel, processor, "/register")
-                    self.send(channel, processor, "/name Тест")
+                    self.send(channel, processor, "Тест")
                     self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == "Вопрос принят. Готовлю ответ…" else None)
                     self.assertEqual(self.delivered[0], "Вопрос принят. Готовлю ответ…")
                     self.assertGreater(len(self.delivered), 2)
@@ -271,7 +272,7 @@ class AskChannelsTest(unittest.TestCase):
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=enabled, obsidian_config=ObsidianConfig(), ask_config=self.config) as processor:
                     for channel in ("telegram", "vk"):
                         self.send(channel, processor, "/register")
-                        self.send(channel, processor, "/name Тест")
+                        self.send(channel, processor, "Тест")
                         if "obsidian" in enabled:
                             with connect_database(self.path) as connection:
                                 owner = connection.execute(

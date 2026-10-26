@@ -90,29 +90,40 @@ class UserIdentityService:
         self._external_identity_repository.touch(identity)
         return self._app_user_repository.get_by_id(external_identity.app_user_id)
 
-    def register(self, identity: IncomingIdentity) -> AppUser:
-        """Атомарно возвращает профиль либо создаёт его с первой связью канала."""
-        return self._lifecycle_repository.register(identity)
+    def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
+        """Создаёт именованный профиль и identity одной атомарной операцией.
+
+        Args:
+            identity: Отправитель внешнего канала.
+            display_name: Имя, принятое при завершении регистрации.
+
+        Returns:
+            Созданный профиль либо существующий владелец identity без смены имени.
+
+        Raises:
+            InvalidDisplayNameError: Имя пустое, слишком длинное либо похоже на URL/команду.
+        """
+        return self._lifecycle_repository.register_with_name(
+            identity, display_name=_normalize_display_name(display_name)
+        )
 
     def update_display_name(
-        self,
-        *,
-        app_user_id: int,
-        display_name: str,
+        self, *, app_user_id: int, display_name: str,
     ) -> AppUser:
-        """Проверяет и сохраняет имя внутреннего профиля пользователя."""
-        normalized = " ".join(display_name.split())
-        if not normalized:
-            raise InvalidDisplayNameError("Display name must not be empty")
-        if len(normalized) > MAX_DISPLAY_NAME_LENGTH:
-            raise InvalidDisplayNameError(
-                f"Display name must not exceed {MAX_DISPLAY_NAME_LENGTH} characters"
-            )
-        if normalized.startswith("/") or "://" in normalized:
-            raise InvalidDisplayNameError("Display name looks like a command or URL")
+        """Проверяет и сохраняет имя внутреннего профиля пользователя.
+
+        Args:
+            app_user_id: ID существующего профиля.
+            display_name: Новое имя с допустимой длиной от 1 до 80 символов.
+
+        Returns:
+            Профиль с нормализованным именем.
+
+        Raises:
+            InvalidDisplayNameError: Имя не соответствует правилам регистрации.
+        """
         return self._app_user_repository.update_display_name(
-            app_user_id=app_user_id,
-            display_name=normalized,
+            app_user_id=app_user_id, display_name=_normalize_display_name(display_name),
         )
 
     def create_link_code(self, app_user_id: int) -> CreatedLinkCode:
@@ -248,3 +259,17 @@ class UserIdentityService:
 def _hash_code(code: str) -> str:
     """Возвращает SHA-256 хеш одноразового кода привязки."""
     return sha256(code.encode("utf-8")).hexdigest()
+
+
+def _normalize_display_name(display_name: str) -> str:
+    """Применяет единые правила имени при регистрации и переименовании."""
+    normalized = " ".join(display_name.split())
+    if not normalized:
+        raise InvalidDisplayNameError("Display name must not be empty")
+    if len(normalized) > MAX_DISPLAY_NAME_LENGTH:
+        raise InvalidDisplayNameError(
+            f"Display name must not exceed {MAX_DISPLAY_NAME_LENGTH} characters"
+        )
+    if normalized.startswith("/") or "://" in normalized:
+        raise InvalidDisplayNameError("Display name looks like a command or URL")
+    return normalized

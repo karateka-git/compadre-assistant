@@ -68,7 +68,7 @@ class ChatCommand(StrEnum):
         "/register",
         CommandSection.BASIC,
         "",
-        "зарегистрироваться",
+        "создать профиль после ввода имени",
     )
     NAME = (
         "/name",

@@ -594,7 +594,7 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare()
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            target = service.register(IncomingIdentity("telegram", "target-user", "target-chat"))
+            target = service.register_with_name(IncomingIdentity("telegram", "target-user", "target-chat"), display_name="Анатолий")
             code = service.create_link_code(target.id)
             pending = service.request_rebind_confirmation(
                 code=code.code, identity=IncomingIdentity("telegram", "tg-user", TG.chat_id)

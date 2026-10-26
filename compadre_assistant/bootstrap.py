@@ -7,6 +7,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
 
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
@@ -157,6 +158,7 @@ class ChannelMessageProcessor:
             ValueError: Повторный ID или команда входа в реестре.
         """
         self._database_path = database_path
+        self._pending_inputs = PendingInputStore()
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
 
     def __call__(self, incoming_message: IncomingEvent,
@@ -165,6 +167,7 @@ class ChannelMessageProcessor:
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
+                pending_inputs=self._pending_inputs,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),

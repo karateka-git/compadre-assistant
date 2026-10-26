@@ -116,7 +116,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                             with patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAIArticleAnalyzer") as analyzer, patch(
                                 "compadre_assistant.capabilities.obsidian.bootstrap.OpenAIObsidianProposalGenerator"
                             ) as proposal, patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAICompatibleEmbeddingProvider") as embedding:
-                                for text in ("/register", "/name Имя", "/help", "/status", "/exit", "/obsidian"):
+                                for text in ("/register", "Имя", "/help", "/status", "/exit", "/obsidian"):
                                     if text == "/obsidian" and enabled:
                                         with connect_database(self.root / "app.db") as connection:
                                             owner = connection.execute(
@@ -275,7 +275,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             code, _ = self.run_cli(["--telegram-bot"], self.env("telegram", True, "absent"))
         self.assertEqual(code, 0)
         processor = runner.call_args.kwargs["incoming_message_processor"]
-        for text in ("/register", "/name Имя"):
+        for text in ("/register", "Имя"):
             processor(IncomingEvent("telegram", "chat", text, text, "user"), None)
         with connect_database(self.root / "app.db") as connection:
             owner = connection.execute("SELECT id FROM app_users").fetchone()[0]

@@ -41,9 +41,8 @@ class IncomingMessageResultType(StrEnum):
     HELP = "help"
     START_UNREGISTERED = "start_unregistered"
     START_REGISTERED = "start_registered"
-    REGISTERED = "registered"
     ALREADY_REGISTERED = "already_registered"
-    REGISTRATION_NAME_REQUIRED = "registration_name_required"
+    REGISTRATION_NAME_REQUIRED = "registration_name_required"  # Профиль ещё не создан; ожидается имя.
     REGISTRATION_NAME_SAVED = "registration_name_saved"
     NAME_COMMAND_INVALID = "name_command_invalid"
     NAME_UPDATED = "name_updated"
@@ -169,26 +168,25 @@ class IncomingMessageDispatcher:
         """
         from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
-        with self._pending_inputs.lock(event.reply_address):
-            result = self._execute(event, completion_handler)
+        result = self._execute(event, completion_handler)
         if isinstance(result, IncomingResponse):
             return result
         return IncomingResponse(format_incoming_message_result(result), result.error)
 
     def _execute(
-        self,
-        event: IncomingEvent,
+        self, event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None = None,
     ) -> ProcessIncomingMessageResult | IncomingResponse:
-        """Обрабатывает общую часть сообщения и передаёт предметный текст.
+        """Сериализует ожидание чата, затем запускает независимый обычный маршрут."""
+        with self._pending_inputs.lock(event.reply_address):
+            result = self._route_pending_input(event, completion_handler)
+        return result if result is not None else self._dispatch_message(event, completion_handler)
 
-        Args:
-            event: Нормализованное событие канала без внутреннего ID пользователя.
-            completion_handler: Доставка результата фоновой операции в исходный чат.
-
-        Returns:
-            Общий ответ или ответ зарегистрированной возможности.
-        """
+    def _route_pending_input(
+        self, event: IncomingEvent,
+        completion_handler: ChannelCompletionHandler | None,
+    ) -> ProcessIncomingMessageResult | IncomingResponse | None:
+        """Атомарно выбирает продолжение, не блокируя обычные долгие операции."""
         text = event.text.strip()
         parsed = ParsedChatCommand.parse(text)
         command = parsed.command if parsed is not None else None
@@ -213,6 +211,25 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content("Время ожидания истекло. Повтори команду."))
         elif pending is not None:
             return self._continue_input(pending, event, completion_handler)
+        return None
+
+    def _dispatch_message(
+        self,
+        event: IncomingEvent,
+        completion_handler: ChannelCompletionHandler | None = None,
+    ) -> ProcessIncomingMessageResult | IncomingResponse:
+        """Обрабатывает общую часть сообщения и передаёт предметный текст.
+
+        Args:
+            event: Нормализованное событие канала без внутреннего ID пользователя.
+            completion_handler: Доставка результата фоновой операции в исходный чат.
+
+        Returns:
+            Общий ответ или ответ зарегистрированной возможности.
+        """
+        text = event.text.strip()
+        parsed = ParsedChatCommand.parse(text)
+        command = parsed.command if parsed is not None else None
         is_general_entry = (
             command is not None
             or self._registry.by_command(text) is not None
@@ -284,11 +301,6 @@ class IncomingMessageDispatcher:
             if user is None:
                 return ProcessIncomingMessageResult(type=IncomingMessageResultType.START_UNREGISTERED)
             personal = self._personal_registry(user)
-            if user.display_name is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=user,
-                )
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=user,
@@ -296,17 +308,16 @@ class IncomingMessageDispatcher:
             )
 
         if command is ChatCommand.REGISTER:
+            if parsed.arguments:
+                return IncomingResponse(compose_content(
+                    "Используй ", code_span("/register"),
+                    " без аргументов. Имя нужно отправить следующим сообщением.",
+                ))
             existing = self._user_identity_service.resolve(identity)
             if existing is None:
-                user = self._user_identity_service.register(identity)
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.REGISTERED,
-                    app_user=user,
-                )
-            if existing.display_name is None:
+                self._pending_inputs.begin(event.reply_address, "core", "register_name")
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=existing,
                 )
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
@@ -368,11 +379,6 @@ class IncomingMessageDispatcher:
                 capability_reply=personal.entry_hint(),
             )
         if command is ChatCommand.LINK_CODE:
-            if user.display_name is None:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=user,
-                )
             link_code = self._user_identity_service.create_link_code(user.id)
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
@@ -380,12 +386,9 @@ class IncomingMessageDispatcher:
                 link_code=link_code,
             )
         if command is ChatCommand.NAME:
-            personal = self._personal_registry(user)
             return self._save_name(
                 parsed.arguments if parsed is not None else "",
                 user,
-                registration=user.display_name is None,
-                personal=personal,
             )
         if command is ChatCommand.STATUS:
             personal = self._personal_registry(user)
@@ -404,22 +407,37 @@ class IncomingMessageDispatcher:
                     f"{personal.entry_hint()}{status_hint}"
                 ),
             )
-        if user.display_name is None:
-            if is_general_entry:
-                return ProcessIncomingMessageResult(
-                    type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
-                    app_user=user,
-                )
-            return self._save_name(
-                text, user, registration=True, personal=self._personal_registry(user)
-            )
         return self._dispatch(user, event, completion_handler, self._personal_registry(user))
 
     def _continue_input(
         self, pending: PendingInput, event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None,
-    ) -> IncomingResponse:
+    ) -> ProcessIncomingMessageResult | IncomingResponse:
         """Повторно проверяет допуск и передаёт исходное значение владельцу."""
+        if pending.owner_id == "core" and pending.input_kind == "register_name":
+            try:
+                user = self._user_identity_service.register_with_name(
+                    _incoming_identity_from_event(event), display_name=event.text,
+                )
+            except InvalidDisplayNameError as error:
+                return IncomingResponse(compose_content(
+                    "Имя не принято. Используй от 1 до 80 символов без ссылки или команды. "
+                    "Отправь исправленное имя ещё раз; для отмены введи ", code_span("/cancel"), ".",
+                ), error)
+            except Exception as error:
+                self._pending_inputs.clear(event.reply_address, pending.request_id)
+                LOGGER.exception("Registration failed")
+                return IncomingResponse(text_content(
+                    "Не удалось завершить регистрацию. Повтори /register."
+                ), error)
+            self._pending_inputs.clear(event.reply_address, pending.request_id)
+            return ProcessIncomingMessageResult(
+                # Параллельная регистрация могла сохранить другое имя раньше нас.
+                (IncomingMessageResultType.REGISTRATION_NAME_SAVED
+                 if user.display_name == " ".join(event.text.split())
+                 else IncomingMessageResultType.ALREADY_REGISTERED), app_user=user,
+                capability_reply=self._personal_registry(user).entry_hint(),
+            )
         user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user) if user is not None else None
         owner = personal.by_id(pending.owner_id) if personal is not None else None
@@ -598,11 +616,8 @@ class IncomingMessageDispatcher:
         self,
         display_name: str,
         user: AppUser,
-        *,
-        registration: bool,
-        personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult:
-        """Сохраняет имя и завершает регистрацию без выбора возможности."""
+        """Меняет имя уже зарегистрированного профиля."""
         try:
             updated = self._user_identity_service.update_display_name(
                 app_user_id=user.id, display_name=display_name
@@ -614,13 +629,8 @@ class IncomingMessageDispatcher:
                 error=error,
             )
         return ProcessIncomingMessageResult(
-            type=(
-                IncomingMessageResultType.REGISTRATION_NAME_SAVED
-                if registration
-                else IncomingMessageResultType.NAME_UPDATED
-            ),
+            type=IncomingMessageResultType.NAME_UPDATED,
             app_user=updated,
-            capability_reply=personal.entry_hint() if registration else None,
         )
 
 

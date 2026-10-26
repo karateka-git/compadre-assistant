@@ -369,9 +369,10 @@ class FakeRegisteringIdentityService:
         return self._existing
 
 
-    def register(self, _identity: IncomingIdentity) -> AppUser:
+    def register_with_name(self, _identity: IncomingIdentity, *, display_name: str) -> AppUser:
         """Создает пользователя и запоминает регистрацию."""
         self.register_calls += 1
+        self.app_user = AppUser(id=self.app_user.id, display_name=" ".join(display_name.split()))
         self._existing = self.app_user
         return self.app_user
 
@@ -1123,7 +1124,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(article_use_case.commands, [])
 
     def test_execute_registers_new_identity(self) -> None:
-        """Команда `/register` создаёт пользователя и запрашивает имя."""
+        """Команда `/register` запрашивает имя без создания пользователя."""
         identity_service = FakeRegisteringIdentityService()
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
@@ -1132,10 +1133,9 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/register"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.REGISTERED)
-        self.assertEqual(result.app_user.id, 77)
-        self.assertIsNone(result.app_user.display_name)
-        self.assertEqual(identity_service.register_calls, 1)
+        self.assertEqual(result.type, IncomingMessageResultType.REGISTRATION_NAME_REQUIRED)
+        self.assertIsNone(result.app_user)
+        self.assertEqual(identity_service.register_calls, 0)
 
     def test_execute_saves_registration_name_before_vault(self) -> None:
         """Обычный текст после `/register` становится общим именем профиля."""
@@ -1156,25 +1156,15 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.app_user.display_name, "Влад Ерофеев")
         self.assertIsNone(use_case.modes.get(ChatModeKey(77, "telegram", "chat-1")))
 
-    def test_execute_saves_name_without_reselecting_existing_vault(self) -> None:
-        """Профиль с vault завершает регистрацию именем без выбора режима."""
+    def test_ordinary_text_does_not_fill_legacy_null_name(self) -> None:
+        """Обычный текст не заполняет имя профиля без активного ожидания."""
         identity_service = FakeRegisteringIdentityService(existing=AppUser(id=42))
-        selected_vault = _test_vault(42)
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
-            vault_selection_manager=FakeVaultSelectionManager(
-                selected=selected_vault
-            ),
         )
-
-        result = use_case.execute(_telegram_message("Влад"))
-
-        self.assertEqual(
-            result.type,
-            IncomingMessageResultType.REGISTRATION_NAME_SAVED,
-        )
-        self.assertIsNone(use_case.modes.get(ChatModeKey(42, "telegram", "chat-1")))
+        use_case.execute(_telegram_message("Влад"))
+        self.assertIsNone(identity_service._existing.display_name)
 
     def test_execute_name_command_changes_profile_name(self) -> None:
         """`/name` меняет общее имя пользователя всех связанных каналов."""

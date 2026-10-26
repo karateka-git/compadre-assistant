@@ -2,6 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import Mock
 from concurrent.futures import ThreadPoolExecutor
 
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
@@ -147,6 +148,15 @@ class PendingInputTest(unittest.TestCase):
         self.dispatcher.execute(_event('/help'))
         self.assertEqual(self.store.get(pending.chat_key), pending)
         self.dispatcher.execute(_event('/cancel'))
+        self.assertIsNone(self.store.get(pending.chat_key))
+
+    def test_registration_race_reports_existing_name(self):
+        """Победившая регистрация не выдаётся за сохранение другого введённого имени."""
+        self.identity.register_with_name = Mock(return_value=self.identity.user)
+        pending = self.store.begin(_event('x').reply_address, 'core', 'register_name')
+        reply = response_text(self.dispatcher.execute(_event('Другое имя')))
+        self.assertIn('уже зарегистрирован', reply)
+        self.assertNotIn('Регистрация завершена', reply)
         self.assertIsNone(self.store.get(pending.chat_key))
 
     def test_restart_preserves_mode_without_input(self):

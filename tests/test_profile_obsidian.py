@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from compadre_assistant.bootstrap import create_incoming_message_dispatcher, create_user_identity_service
+from compadre_assistant.bootstrap import create_incoming_message_dispatcher, create_user_identity_service, create_channel_message_processor
 from channel_helpers import process_channel_incoming_message
 from compadre_assistant.capabilities.obsidian.bootstrap import ObsidianProcessRuntime
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
@@ -55,8 +55,19 @@ class ProfileObsidianTest(unittest.TestCase):
 
     def register(self, channel: str = "telegram", **overrides) -> None:
         """Создаёт профиль и сохраняет имя, не входя в возможность."""
-        self.process("/register", channel=channel, **overrides)
-        reply = self.process("Имя", channel=channel, **overrides)
+        options = dict(
+            database_path=self.database_path,
+            obsidian_config=ObsidianConfig(
+                openai_base_url="https://example.com/v1",
+                openai_api_key="test", openai_model="test",
+            ),
+            use_case_factory=lambda _connection: self.article,
+            analysis_use_case_factory=lambda _connection: self.analysis,
+        )
+        options.update(overrides)
+        with create_channel_message_processor(**options) as processor:
+            processor(self.event("/register", channel))
+            reply = processor(self.event("Имя", channel))
         self.assertIn("Регистрация завершена", response_text(reply))
         with connect_database(self.database_path) as connection:
             owner = connection.execute(
@@ -66,6 +77,25 @@ class ProfileObsidianTest(unittest.TestCase):
             SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                 UserCapabilityPreference(owner, "obsidian", True)
             )
+
+    def test_cancelled_or_restarted_registration_leaves_no_profile(self) -> None:
+        """Отмена и перезапуск удаляют только ожидание, не создавая записи БД."""
+        options = dict(database_path=self.database_path, enabled_capabilities=())
+        with create_channel_message_processor(**options) as processor:
+            reply = processor(self.event("/register Лишнее имя"))
+            self.assertIn("без аргументов", response_text(reply))
+            processor(self.event("/register"))
+            processor(self.event("/cancel"))
+            processor(self.event("Имя после отмены"))
+            processor(self.event("/register"))
+        with create_channel_message_processor(**options) as processor:
+            reply = processor(self.event("Имя после перезапуска"))
+            self.assertIn("Я пока не знаю", response_text(reply))
+        with connect_database(self.database_path) as connection:
+            for table in ("app_users", "external_identities"):
+                self.assertEqual(connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0], 0)
 
     def test_registration_and_profile_commands_work_with_disabled_obsidian(self) -> None:
         """Отключённый модуль не мешает имени, справке и связи каналов."""

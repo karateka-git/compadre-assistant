@@ -462,20 +462,12 @@ class ProcessUrlCliTest(unittest.TestCase):
         with TemporaryDirectory(prefix="compadre-assistant-telegram-") as temporary_directory:
             database_path = Path(temporary_directory) / "test.db"
             initialize_database(database_path, SilentLogger())
-            process_channel_incoming_message(
-                database_path=database_path,
-                incoming_message=_telegram_message("/register"),
-                obsidian_config=ObsidianConfig(openai_base_url="https://llm.example/v1", openai_api_key="token", openai_model="fake-model"),
-                use_case_factory=lambda _connection: fake_use_case,
-                analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
-            )
-            process_channel_incoming_message(
-                database_path=database_path,
-                incoming_message=_telegram_message("Test User", "msg-name"),
-                obsidian_config=ObsidianConfig(openai_base_url="https://llm.example/v1", openai_api_key="token", openai_model="fake-model"),
-                use_case_factory=lambda _connection: fake_use_case,
-                analysis_use_case_factory=lambda _connection: fake_analysis_use_case,
-            )
+            from compadre_assistant.bootstrap import create_channel_message_processor
+            with create_channel_message_processor(
+                database_path=database_path, enabled_capabilities=(),
+            ) as processor:
+                processor(_telegram_message("/register"))
+                processor(_telegram_message("Test User", "msg-name"))
             with connect_database(database_path) as connection:
                 owner = connection.execute("SELECT id FROM app_users").fetchone()[0]
                 SQLiteUserCapabilityPreferenceRepository(connection).upsert(

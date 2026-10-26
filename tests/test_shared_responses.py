@@ -93,7 +93,7 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("/github_sync", reply)
         self.assertIn("/github_status", reply)
         self.assertIn("/github_disconnect", reply)
-        self.assertIn("/register — зарегистрироваться", reply)
+        self.assertIn("/register — создать профиль после ввода имени", reply)
         self.assertNotIn("зарегистрироваться и подключить", reply)
         self.assertLess(reply.index("Основные:"), reply.index("Связь Telegram и VK:"))
         self.assertLess(reply.index("Связь Telegram и VK:"), reply.index("Obsidian vault:"))

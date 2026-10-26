@@ -75,8 +75,8 @@ class IdentityLinkTokenRepository(Protocol):
 class IdentityLifecycleRepository(Protocol):
     """Выполняет неделимые изменения профиля, identity и link-кода."""
 
-    def register(self, identity: IncomingIdentity) -> AppUser:
-        """Возвращает существующий профиль или создаёт его вместе с первой identity."""
+    def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
+        """Возвращает владельца identity либо атомарно создаёт профиль с проверенным именем и identity."""
 
     def link(self, *, identity: IncomingIdentity, token_hash: str, now: datetime) -> AppUser | None:
         """Погашает действующий код вместе с созданием identity.

@@ -47,7 +47,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             apply_migrations(connection)
             service = create_user_identity_service(connection)
-            user = service.register(IncomingIdentity("telegram", "external", "chat"))
+            user = service.register_with_name(IncomingIdentity("telegram", "external", "chat"), display_name="Анатолий")
             self.user = service.update_display_name(app_user_id=user.id, display_name="Тест")
             SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                 UserCapabilityPreference(self.user.id, "obsidian", True)
@@ -360,13 +360,13 @@ class CapabilityCompositionTest(unittest.TestCase):
             self.assertEqual(client.closes, 0)
         self.assertEqual(client.closes, 1)
 
-    def test_initial_name_completes_profile_without_mode(self) -> None:
-        """Первое имя завершает профиль и не выбирает Obsidian."""
+    def test_rename_keeps_profile_without_mode(self) -> None:
+        """Переименование готового профиля не выбирает Obsidian."""
         with connect_database(self.database_path) as connection:
-            user = create_user_identity_service(connection).register(IncomingIdentity("vk", "new", "peer"))
+            user = create_user_identity_service(connection).register_with_name(IncomingIdentity("vk", "new", "peer"), display_name="Анатолий")
         common = dict(database_path=self.database_path, obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"), use_case_factory=lambda _connection: self.article, analysis_use_case_factory=lambda _connection: self.analysis)
         reply = process_channel_incoming_message(incoming_message=IncomingEvent("vk", "peer", "1", "/name Имя", "new"), **common)
-        self.assertIn("Приятно познакомиться", response_text(reply))
+        self.assertIn("Теперь буду обращаться", response_text(reply))
         with connect_database(self.database_path) as connection:
             self.assertIsNone(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, "vk", "peer")))
 

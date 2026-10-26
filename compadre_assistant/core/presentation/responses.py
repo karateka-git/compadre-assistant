@@ -43,17 +43,11 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             return compose_content(
                 'Compadre Assistant запущен.\nРад тебя видеть, ' + str(_display_name(result)) + '.\n' + str(result.capability_reply or 'Справка: /help.'),
             )
-        case IncomingMessageResultType.REGISTERED:
-            return (
-                compose_content(
-                    'Готово, я зарегистрировал тебя.\nКак к тебе обращаться? Пришли имя или название профиля.',
-                )
-            )
         case IncomingMessageResultType.REGISTRATION_NAME_REQUIRED:
-            return (
-                compose_content(
-                    'Регистрация ещё не завершена.\nКак к тебе обращаться? Пришли имя или название профиля.',
-                )
+            return compose_content(
+                'Как к тебе обращаться? Пришли имя или название профиля. '
+                'Профиль будет создан после принятия имени; ожидание действует 10 минут. '
+                'Для отмены введи ', code_span('/cancel'), '.',
             )
         case IncomingMessageResultType.REGISTRATION_NAME_SAVED:
             return compose_content(

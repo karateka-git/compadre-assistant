@@ -296,11 +296,12 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
         """
         self._connection = connection
 
-    def register(self, identity: IncomingIdentity) -> AppUser:
+    def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
         """Создаёт профиль вместе с identity либо возвращает её владельца.
 
         Args:
             identity: Отправитель из внешнего канала.
+            display_name: Проверенное domain-слоем имя нового профиля.
 
         Returns:
             Существующий или созданный профиль.
@@ -319,7 +320,9 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
                     self._touch_identity(dto)
                     return self._require_user(existing["app_user_id"])
                 creating = True
-                cursor = self._connection.execute("INSERT INTO app_users DEFAULT VALUES")
+                cursor = self._connection.execute(
+                    "INSERT INTO app_users (display_name) VALUES (?)", (display_name,)
+                )
                 app_user_id = cursor.lastrowid
                 if app_user_id is None:
                     raise RuntimeError("SQLite did not return a new app user id")
