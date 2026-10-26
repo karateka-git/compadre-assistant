@@ -25,8 +25,8 @@ from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
-from test_incoming_boundary import MemoryChatModes
-from capability_preference_helpers import MemoryCapabilityPreferences
+from tests.test_incoming_boundary import MemoryChatModes
+from tests.capability_preference_helpers import MemoryCapabilityPreferences
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,

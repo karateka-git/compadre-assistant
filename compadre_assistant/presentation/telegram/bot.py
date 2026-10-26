@@ -9,6 +9,8 @@ from typing import Any
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,
@@ -54,7 +56,7 @@ def run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     """Запускает Telegram-бота в polling-режиме.
 
@@ -89,7 +91,7 @@ async def _run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     """Асинхронно запускает polling Telegram-бота."""
     aiogram = _load_aiogram()
@@ -243,7 +245,7 @@ def _register_handlers(
     *,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
     router = aiogram.Router()
@@ -254,7 +256,7 @@ def _register_handlers(
         if not message.text:
             await safe_send_telegram_reply(
                 message,
-                empty_message_reply,
+                IncomingResponse(text_content(empty_message_reply)),
                 logger=logger,
             )
             return
@@ -272,7 +274,7 @@ def _register_handlers(
         )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
-        await safe_send_telegram_reply(message, result.render_text(), logger=logger)
+        await safe_send_telegram_reply(message, result, logger=logger)
 
     dispatcher.include_router(router)
 
@@ -292,10 +294,9 @@ def _create_telegram_completion_handler(
         if reply.address.channel != "telegram":
             raise ValueError("Telegram adapter получил адрес другого канала")
         target = _TelegramReplyTarget(bot, reply.address.chat_id)
-        text = reply.response.render_text()
         try:
             asyncio.run_coroutine_threadsafe(
-                safe_send_telegram_reply(target, text, logger=logger),
+                safe_send_telegram_reply(target, reply.response, logger=logger),
                 loop,
             )
         except RuntimeError as error:
@@ -314,9 +315,9 @@ class _TelegramReplyTarget:
         self.chat = SimpleNamespace(id=chat_id)
         self._bot = bot
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str) -> None:
         """Доставляет один фрагмент ответа в сохранённый чат."""
-        await self._bot.send_message(chat_id=self.chat.id, text=text)
+        await self._bot.send_message(chat_id=self.chat.id, text=text, parse_mode=parse_mode)
 
 
 def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
@@ -350,7 +351,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
 
 async def send_telegram_reply(
     message: Any,
-    text: str,
+    response: IncomingResponse,
     *,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
 ) -> None:
@@ -358,16 +359,20 @@ async def send_telegram_reply(
 
     Args:
         message: Aiogram message или совместимый fake в тестах.
-        text: Текст ответа.
+        response: Нейтральное содержимое ответа и действия.
         limit: Максимальная длина одного сообщения с запасом ниже лимита Telegram.
+
+    Raises:
+        ValueError: Лимит не вмещает даже один символ с оформлением.
+        Exception: Ошибка отправки готовой части через Telegram API.
     """
-    for chunk in split_telegram_message(text, limit=limit):
-        await message.answer(chunk)
+    for chunk in render_telegram_content(response.content, response.actions, limit=limit):
+        await message.answer(chunk.text, parse_mode=chunk.parse_mode)
 
 
 async def safe_send_telegram_reply(
     message: Any,
-    text: str,
+    response: IncomingResponse,
     *,
     logger: logging.Logger,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
@@ -377,12 +382,15 @@ async def safe_send_telegram_reply(
 
     Args:
         message: Aiogram message или совместимый fake.
-        text: Текст ответа.
+        response: Нейтральное содержимое ответа и действия.
         logger: Logger Telegram adapter'а.
         limit: Безопасный предел длины одного сообщения.
         sleeper: Асинхронное ожидание между тестируемыми retry-попытками.
+
+    Raises:
+        ValueError: Лимит не вмещает даже один символ с оформлением.
     """
-    chunks = split_telegram_message(text, limit=limit)
+    chunks = render_telegram_content(response.content, response.actions, limit=limit)
     started_at = time.monotonic()
     target_id = str(message.chat.id)
     logger.info(
@@ -392,7 +400,7 @@ async def safe_send_telegram_reply(
     )
     for chunk in chunks:
         sent = await safe_send_async(
-            lambda chunk=chunk: message.answer(chunk),
+            lambda chunk=chunk: message.answer(chunk.text, parse_mode=chunk.parse_mode),
             logger=logger,
             channel="Telegram",
             target_id=target_id,

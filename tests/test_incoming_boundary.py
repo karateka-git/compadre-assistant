@@ -4,7 +4,7 @@ from tests.response_assertions import content_text, response_text
 
 from dataclasses import fields
 import unittest
-from capability_preference_helpers import MemoryCapabilityPreferences
+from tests.capability_preference_helpers import MemoryCapabilityPreferences
 
 from compadre_assistant.bootstrap import create_incoming_message_dispatcher
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
@@ -461,8 +461,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         import logging
         from compadre_assistant.presentation.telegram.bot import _register_handlers
         from compadre_assistant.presentation.vk.bot import _handle_update
-        from test_telegram_bot import FakeAiogram, TelegramMessage
-        from test_vk_bot import FakeVkClient
+        from tests.test_telegram_bot import FakeAiogram, TelegramMessage
+        from tests.test_vk_bot import FakeVkClient
 
         self.capability.handle_mode = CapabilityMode.COMPLETE
         self.capability.handle_exception = RuntimeError("секретная причина")
@@ -551,8 +551,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction
         from compadre_assistant.presentation.telegram.bot import _register_handlers
         from compadre_assistant.presentation.vk.bot import _handle_update
-        from test_telegram_bot import FakeAiogram, TelegramMessage
-        from test_vk_bot import FakeVkClient
+        from tests.test_telegram_bot import FakeAiogram, TelegramMessage
+        from tests.test_vk_bot import FakeVkClient
 
         self.capability.actions = (ConfirmationAction("test-action", "Выполнить", "/selected_confirm token"),)
         self.capability.handle_mode = CapabilityMode.COMPLETE

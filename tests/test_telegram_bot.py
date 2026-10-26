@@ -44,7 +44,7 @@ class FailingTelegramMessage:
     def __init__(self) -> None:
         self.attempts = 0
 
-    async def answer(self, _text: str) -> None:
+    async def answer(self, _text: str, *, parse_mode: str) -> None:
         """Имитирует ошибку Telegram API при отправке ответа."""
         self.attempts += 1
         raise RuntimeError("send failed")
@@ -158,15 +158,18 @@ class TelegramMessage:
     def __init__(self) -> None:
         self.bot = self
         self.answers: list[str] = []
+        self.parse_modes: list[str] = []
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str) -> None:
         """Сохраняет отправленный текст."""
         self.answers.append(text)
+        self.parse_modes.append(parse_mode)
 
-    async def send_message(self, *, chat_id: str, text: str) -> None:
+    async def send_message(self, *, chat_id: str, text: str, parse_mode: str) -> None:
         """Доставляет фоновый ответ по сохранённому адресу fake bot."""
         self.sent_chat_id = chat_id
         self.answers.append(text)
+        self.parse_modes.append(parse_mode)
 
 
 class FlakyTelegramMessage(TelegramMessage):
@@ -178,13 +181,14 @@ class FlakyTelegramMessage(TelegramMessage):
         self.calls: list[str] = []
         self.failed = False
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str) -> None:
         """Сохраняет попытку и один раз имитирует временный сетевой сбой."""
         self.calls.append(text)
         if text == self.failing_chunk and not self.failed:
             self.failed = True
             raise TelegramNetworkError("temporary failure")
         self.answers.append(text)
+        self.parse_modes.append(parse_mode)
 
 
 class RateLimitedTelegramMessage(TelegramMessage):
@@ -194,12 +198,13 @@ class RateLimitedTelegramMessage(TelegramMessage):
         super().__init__()
         self.attempts = 0
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str) -> None:
         """Требует задержку 2.5 секунды перед успешным повтором."""
         self.attempts += 1
         if self.attempts == 1:
             raise TelegramRetryAfter(2.5)
         self.answers.append(text)
+        self.parse_modes.append(parse_mode)
 
 
 class TelegramBotHelpersTest(unittest.TestCase):
@@ -252,7 +257,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
         async def run() -> None:
             await safe_send_telegram_reply(
                 message,
-                "hello",
+                IncomingResponse(text_content("hello")),
                 logger=logger,
             )
 
@@ -273,7 +278,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
         async def run() -> None:
             await safe_send_telegram_reply(
                 message,
-                "abcdefghij",
+                IncomingResponse(text_content("abcdefghij")),
                 logger=logger,
                 limit=4,
                 sleeper=sleeper,
@@ -299,7 +304,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
         async def run() -> None:
             await safe_send_telegram_reply(
                 message,
-                "hello",
+                IncomingResponse(text_content("hello")),
                 logger=logger,
                 sleeper=sleeper,
             )

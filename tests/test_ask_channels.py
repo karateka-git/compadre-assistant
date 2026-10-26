@@ -4,6 +4,7 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import logging
+from html import escape
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,9 +27,9 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.presentation.telegram.bot import _register_handlers
 from compadre_assistant.presentation.vk.bot import _handle_update
 from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
-from test_telegram_bot import FakeAiogram, TelegramMessage
-from test_vk_bot import FakeVkClient
-from test_process_incoming_message import FakeArticleUrlUseCase, FakeConfirmationService, _proposal
+from tests.test_telegram_bot import FakeAiogram, TelegramMessage
+from tests.test_vk_bot import FakeVkClient
+from tests.test_process_incoming_message import FakeArticleUrlUseCase, FakeConfirmationService, _proposal
 
 
 class AskChannelsTest(unittest.TestCase):
@@ -53,13 +54,13 @@ class AskChannelsTest(unittest.TestCase):
             _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=processor, logger=self.logger)
             message = TelegramMessage()
             original_answer = message.answer
-            async def answer(text):
-                await original_answer(text)
+            async def answer(text, *, parse_mode):
+                await original_answer(text, parse_mode=parse_mode)
                 if on_delivery:
                     on_delivery(text)
             message.answer = answer
-            async def send_message(*, chat_id, text):
-                await answer(text)
+            async def send_message(*, chat_id, text, parse_mode):
+                await answer(text, parse_mode=parse_mode)
             message.send_message = send_message
             message.chat = SimpleNamespace(id=chat_id)
             message.from_user = SimpleNamespace(id=7, username=None, full_name="Тест")
@@ -101,7 +102,7 @@ class AskChannelsTest(unittest.TestCase):
                     for text in ("обычный вопрос", "/unknown вопрос", "/asker вопрос"):
                         self.send(channel, processor, text)
                     self.assertEqual(model.answer.call_count, 2)
-                    self.assertIn("/ask <вопрос>", self.send(channel, processor, "/ask"))
+                    self.assertIn(escape("/ask <вопрос>") if channel == "telegram" else "/ask <вопрос>", self.send(channel, processor, "/ask"))
                     self.assertIn("100", self.send(channel, processor, "/ask " + "я" * 101))
                     self.assertEqual(model.answer.call_count, 2)
                     with connect_database(self.path) as connection:

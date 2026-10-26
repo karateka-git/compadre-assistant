@@ -15,6 +15,8 @@ from urllib.request import Request, urlopen
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.presentation.vk.rendering import render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send,
@@ -54,7 +56,7 @@ def run_vk_bot(
     group_id: int,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
@@ -277,29 +279,25 @@ class VkApiClient:
         peer_id: int,
         text: str,
         random_id: int | None = None,
+        format_data: str | None = None,
     ) -> None:
-        """Отправляет сообщение VK с опциональным idempotency `random_id`.
+        """Отправляет одну готовую часть VK без повторного разбиения.
 
         Args:
             peer_id: ID диалога-получателя.
-            text: Текст сообщения.
+            text: Готовый текст части, уже ограниченный renderer канала.
             random_id: Стабильный ID одной retry-серии или `None` для нового ID.
+            format_data: JSON диапазонов именно этой части или `None` для plain.
         """
-        chunks = split_vk_message(text)
-        for chunk in chunks:
-            chunk_random_id = (
-                random_id
-                if random_id is not None and len(chunks) == 1
-                else randint(1, 2_147_483_647)
-            )
-            self._api_call(
-                "messages.send",
-                {
-                    "peer_id": str(peer_id),
-                    "message": chunk,
-                    "random_id": str(chunk_random_id),
-                },
-            )
+        # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
+        params = {
+            "peer_id": str(peer_id),
+            "message": text,
+            "random_id": str(random_id if random_id is not None else randint(1, 2_147_483_647)),
+        }
+        if format_data is not None:
+            params["format_data"] = format_data
+        self._api_call("messages.send", params)
 
     def _api_call(self, method: str, params: dict[str, str]) -> dict[str, Any]:
         api_params = dict(params)
@@ -375,7 +373,7 @@ def _handle_update(
     incoming_message_processor: IncomingMessageProcessor,
     client: VkApiClient,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     if update.get("type") != "message_new":
         return
@@ -394,7 +392,7 @@ def _handle_update(
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
-            text=empty_message_reply,
+            response=IncomingResponse(text_content(empty_message_reply)),
             logger=logger,
         )
         return
@@ -415,7 +413,7 @@ def _handle_update(
     _safe_send_vk_message(
         client,
         peer_id=peer_id,
-        text=result.render_text(),
+        response=result,
         logger=logger,
     )
 
@@ -424,12 +422,13 @@ def _safe_send_vk_message(
     client: Any,
     *,
     peer_id: int,
-    text: str,
+    response: IncomingResponse,
     logger: logging.Logger,
     sleeper: Callable[[float], None] = time.sleep,
+    limit: int = VK_SAFE_MESSAGE_LIMIT,
 ) -> None:
     """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
-    chunks = split_vk_message(text)
+    chunks = render_vk_content(response.content, response.actions, limit=limit)
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
@@ -441,7 +440,8 @@ def _safe_send_vk_message(
         sent = safe_send(
             lambda chunk=chunk, random_id=random_id: client.send_message(
                 peer_id=peer_id,
-                text=chunk,
+                text=chunk.text,
+                format_data=chunk.format_data,
                 random_id=random_id,
             ),
             logger=logger,
@@ -485,7 +485,7 @@ def _create_vk_completion_handler(
         _safe_send_vk_message(
             client,
             peer_id=int(reply.address.chat_id),
-            text=reply.response.render_text(),
+            response=reply.response,
             logger=logger,
         )
 

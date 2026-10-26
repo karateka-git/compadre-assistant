@@ -30,6 +30,7 @@ class FakeVkClient:
     def __init__(self) -> None:
         self.messages: list[tuple[int, str]] = []
         self.random_ids: list[int | None] = []
+        self.formats: list[str | None] = []
 
     def send_message(
         self,
@@ -37,10 +38,12 @@ class FakeVkClient:
         peer_id: int,
         text: str,
         random_id: int | None = None,
+        format_data: str | None = None,
     ) -> None:
         """Запоминает отправленное сообщение."""
         self.random_ids.append(random_id)
         self.messages.append((peer_id, text))
+        self.formats.append(format_data)
 
 
 class FailingVkClient(FakeVkClient):
@@ -52,6 +55,7 @@ class FailingVkClient(FakeVkClient):
         peer_id: int,
         text: str,
         random_id: int | None = None,
+        format_data: str | None = None,
     ) -> None:
         """Имитирует ошибку VK API при отправке сообщения."""
         self.random_ids.append(random_id)
@@ -71,6 +75,7 @@ class FlakyVkClient(FakeVkClient):
         peer_id: int,
         text: str,
         random_id: int | None = None,
+        format_data: str | None = None,
     ) -> None:
         """Сохраняет `random_id` каждой попытки и завершается с третьей."""
         self.attempts += 1
@@ -78,6 +83,7 @@ class FlakyVkClient(FakeVkClient):
         if self.attempts < 3:
             raise VkTransientError("temporary failure")
         self.messages.append((peer_id, text))
+        self.formats.append(format_data)
 
 
 class FakeHttpResponse:
@@ -250,7 +256,7 @@ class VkBotTest(unittest.TestCase):
             _safe_send_vk_message(
                 client,
                 peer_id=22,
-                text="hello",
+                response=IncomingResponse(text_content("hello")),
                 logger=logger,
                 sleeper=delays.append,
             )
