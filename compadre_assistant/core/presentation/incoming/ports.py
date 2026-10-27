@@ -46,6 +46,35 @@ class CapabilityHelp:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandSuggestion:
+    """Описывает пункт меню с выполнимой командой без заполнителей аргументов."""
+
+    command: str
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandMenu:
+    """Передаёт меню текущего чата отдельно от действий конкретного ответа."""
+
+    items: tuple[CommandSuggestion, ...] = ()
+    pending_input_label: str | None = None  # Тип ожидаемого значения поверх базового режима.
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyAction:
+    """Предлагает следующий шаг ответа с точной командой для ручного ввода.
+
+    Подпись предназначена для отображения, а command — для выполнения через
+    обычный вход с повторной проверкой доступа. Адресные подтверждения
+    передаются только через ConfirmationAction, без дублирования здесь.
+    """
+
+    label: str
+    command: str
+
+
+@dataclass(frozen=True, slots=True)
 class ConfirmationAction:
     """Описывает адресное действие; конкретный сценарий определяет его команду."""
 
@@ -76,11 +105,17 @@ class ConfirmationQueryResult:
 
 @dataclass(frozen=True, slots=True)
 class IncomingResponse:
-    """Передаёт готовое содержимое и действия без предметных моделей."""
+    """Передаёт содержимое и явно выбранные владельцем действия ответа.
+
+    actions содержит точные адресные подтверждения; suggested_actions —
+    другие следующие шаги. Полное меню не копируется в ответ автоматически.
+    Текст содержимого сохраняет ручной путь независимо от поддержки кнопок.
+    """
 
     content: MessageContent
     error: Exception | None = None
     actions: tuple[ConfirmationAction, ...] = ()
+    suggested_actions: tuple[ReplyAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

@@ -12,7 +12,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
-    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort,
+    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -723,6 +723,29 @@ class IncomingMessageDispatcher:
         """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
         from compadre_assistant.core.presentation.incoming.help import format_contextual_help
 
+        personal, mode_id, pending, snapshot = self._command_context(event)
+        return format_contextual_help(
+            personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
+        )
+
+    def command_menu(self, event: IncomingEvent) -> CommandMenu:
+        """Возвращает актуальное меню чата, не публикуя и не выполняя его.
+
+        Args:
+            event: Identity и адрес чата; текст события не исполняется.
+
+        Returns:
+            Независимый от канала список команд и тип ожидаемого значения.
+            Просроченный или недоступный ввод очищается, как при /help.
+        """
+        from compadre_assistant.core.presentation.incoming.menu import build_command_menu
+
+        return build_command_menu(*self._command_context(event))
+
+    def _command_context(
+        self, event: IncomingEvent,
+    ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
+        """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user) if user is not None else None
         mode = self._chat_mode_repository.get(
@@ -744,10 +767,7 @@ class IncomingMessageDispatcher:
                     pending = None
         active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
         snapshot = self._confirmation_snapshot(event, user, active)
-        confirmation = self._confirmation_response(snapshot)
-        return format_contextual_help(
-            personal, mode.capability_id if mode else None, pending, snapshot, confirmation,
-        )
+        return personal, mode.capability_id if mode else None, pending, snapshot
 
     def list_pending_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Собирает снимок ядра и доступного активного режима без выбора решения.
