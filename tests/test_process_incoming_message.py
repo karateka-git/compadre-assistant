@@ -237,7 +237,7 @@ class FakeReviewUseCase:
 class FakeConfirmationService:
     """Имитирует pending и сохранённый результат Obsidian review."""
 
-    def __init__(self, proposal: ObsidianProposal) -> None:
+    def __init__(self, proposal: ObsidianProposal | None) -> None:
         self.proposal = proposal
         self.confirm_calls = 0
         self.cancel_calls = 0
@@ -245,7 +245,7 @@ class FakeConfirmationService:
     def list_pending(self, app_user_id: int, origin: PendingOrigin):
         return (
             (self.proposal,)
-            if self.proposal.status is ObsidianProposalStatus.PENDING
+            if self.proposal is not None and self.proposal.status is ObsidianProposalStatus.PENDING
             and self.proposal.origin == origin
             else ()
         )
@@ -953,6 +953,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
+            obsidian_confirmation_service=FakeConfirmationService(None),
         )
         pending = use_case.execute(
             _telegram_message("https://github.com/octocat/second")
@@ -983,6 +984,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
+            obsidian_confirmation_service=FakeConfirmationService(None),
         )
 
         requested = use_case.execute(_telegram_message("/github_disconnect"))

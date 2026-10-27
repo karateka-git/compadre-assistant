@@ -12,6 +12,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
+    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -271,12 +272,14 @@ class IncomingMessageDispatcher:
             return self._change_capability(command, parsed.arguments if parsed else "", identity, event)
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
+            if not parts:
+                return self._confirmation_response(self.list_pending_confirmations(event))
             if parts and parts[0] == "core":
                 if (
                     len(parts) != 5
                     or parts[1] != "identity"
-                    or not parts[2].isdigit()
-                    or not parts[3].isdigit()
+                    or any(not value.isascii() or not value.isdecimal() or len(value) > 19
+                           or not 0 < int(value) <= 2**63 - 1 for value in parts[2:4])
                     or parts[4] not in {"yes", "no"}
                 ):
                     return IncomingResponse(
@@ -715,6 +718,70 @@ class IncomingMessageDispatcher:
         if result.response.error is None and result.mode is CapabilityMode.COMPLETE:
             self._chat_mode_repository.replace_if_revision(key, state.revision, None)
         return result.response
+
+    def list_pending_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
+        """Собирает снимок ядра и доступного активного режима без выбора решения.
+
+        Args:
+            event: Исходная identity и адрес чата, включая канал без профиля.
+
+        Returns:
+            Полный снимок либо известная часть с признаком недоступности источников.
+        """
+        identity = _incoming_identity_from_event(event)
+        confirmations: list[PendingConfirmation] = []
+        complete = True
+        try:
+            pending = self._user_identity_service.get_pending_rebind(identity)
+            if (pending is not None and pending.channel == identity.channel
+                    and pending.chat_id == identity.external_chat_id
+                    and pending.external_user_id == identity.external_user_id):
+                actions = tuple(ConfirmationAction(
+                    f"core:identity:{pending.id}:{pending.version}:{decision}", label,
+                    f"/confirm core identity {pending.id} {pending.version} {decision}",
+                ) for decision, label in (("yes", "Перенести identity"), ("no", "Отменить перенос identity")))
+                confirmations.append(PendingConfirmation(
+                    "core", "identity", pending.id, pending.version, event.reply_address, actions,
+                ))
+        except Exception:
+            LOGGER.exception("Could not query identity confirmations")
+            complete = False
+        try:
+            user = self._user_identity_service.resolve(identity)
+            if user is not None:
+                personal = self._personal_registry(user)
+                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+                capability = personal.by_id(mode.capability_id) if mode is not None else None
+                # Недоступный режим не является источником: его действия нельзя выполнить.
+                if capability is not None:
+                    if not isinstance(capability, PendingConfirmationQueryPort):
+                        complete = False
+                    else:
+                        result = capability.list_pending_confirmations(HandlerContext(user), event.reply_address)
+                        complete = complete and result.status == "complete"
+                        confirmations.extend(item for item in result.confirmations
+                                             if item.origin == event.reply_address
+                                             and item.owner_id == capability.descriptor.capability_id)
+        except Exception:
+            LOGGER.exception("Could not query active capability confirmations")
+            complete = False
+        return ConfirmationQueryResult("complete" if complete else "unavailable", tuple(confirmations))
+
+    @staticmethod
+    def _confirmation_response(result: ConfirmationQueryResult) -> IncomingResponse:
+        """Показывает обе стороны каждого решения с явной оговоркой неполноты."""
+        if not result.confirmations:
+            return IncomingResponse(text_content(
+                "В этом чате нет действий, которые нужно подтвердить."
+                if result.status == "complete" else
+                "Не удалось получить полный список действий для подтверждения. Попробуй позже."
+            ))
+        prefix = ("Список действий неполный: часть источников подтверждений недоступна.\n"
+                  if result.status != "complete" else "")
+        actions = tuple(action for item in result.confirmations for action in item.actions)
+        parts = [text_content(prefix + "Доступные действия:")]
+        parts.extend(compose_content("\n" + action.label + ": ", code_span(action.command)) for action in actions)
+        return IncomingResponse(compose_content(*parts), actions=actions)
 
     def _save_name(
         self,

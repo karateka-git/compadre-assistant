@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
@@ -55,6 +55,26 @@ class ConfirmationAction:
 
 
 @dataclass(frozen=True, slots=True)
+class PendingConfirmation:
+    """Передаёт адресное ожидание владельца без его внутренних моделей."""
+
+    owner_id: str
+    operation: str
+    confirmation_id: int
+    version: int
+    origin: ReplyAddress
+    actions: tuple[ConfirmationAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmationQueryResult:
+    """Отличает проверенный список от неполноты, сохраняя известные действия."""
+
+    status: Literal["complete", "unavailable"]  # Ошибка источника не означает пустой список.
+    confirmations: tuple[PendingConfirmation, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class IncomingResponse:
     """Передаёт готовое содержимое и действия без предметных моделей."""
 
@@ -89,6 +109,25 @@ class HandlerContext:
     app_user: AppUser
     delivery: ReplyDeliveryPort | None = None
     pending_inputs: PendingInputStore | None = None
+
+
+@runtime_checkable
+class PendingConfirmationQueryPort(Protocol):
+    """Предоставляет актуальные подтверждения активной возможности только для чтения."""
+
+    def list_pending_confirmations(
+        self, context: HandlerContext, origin: ReplyAddress,
+    ) -> ConfirmationQueryResult:
+        """Читает действия пользователя в исходном чате без выбора решения.
+
+        Args:
+            context: Проверенный пользователь текущего события.
+            origin: Канал и чат, для которых запрошены действия.
+
+        Returns:
+            Полный список либо неполный снимок при недоступности источника.
+        """
+        ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -13,11 +13,12 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.entities import Vaul
 from compadre_assistant.capabilities.obsidian.domain.articles.ports import ArticleFlowLeaseRepository
 from compadre_assistant.capabilities.obsidian.domain.articles.url_utils import normalize_article_url
 
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, CapabilityDescriptor, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
     PendingInputResult, PendingInputOutcome, PendingInput,
+    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort,
 )
 from compadre_assistant.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
@@ -114,7 +115,7 @@ ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
 
-class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPort):
+class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPort, PendingConfirmationQueryPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
     def __init__(
@@ -444,6 +445,57 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             )
         return self._process_article_url(incoming_message, app_user)
 
+    def list_pending_confirmations(
+        self, context: HandlerContext, origin: ReplyAddress,
+    ) -> ConfirmationQueryResult:
+        """Читает независимые источники Obsidian, сохраняя известную часть при сбое.
+
+        Args:
+            context: Пользователь, допущенный ядром в активный режим.
+            origin: Исходный канал и чат ожидаемых решений.
+
+        Returns:
+            Актуальные адресные действия и полнота снимка обоих источников.
+        """
+        pending_origin = PendingOrigin(origin.channel, origin.chat_id)
+        confirmations: list[PendingConfirmation] = []
+        complete = True
+        try:
+            if self._obsidian_confirmation_service is None:
+                complete = False
+            else:
+                for proposal in self._obsidian_confirmation_service.list_pending(context.app_user.id, pending_origin):
+                    if proposal.origin != pending_origin or proposal.app_user_id != context.app_user.id:
+                        continue
+                    label = f"предложение для статьи {proposal.article_id}"
+                    if proposal.target_path:
+                        label += f" ({proposal.target_path})"
+                    confirmations.append(PendingConfirmation(
+                        "obsidian", "proposal", proposal.id, proposal.version, origin,
+                        tuple(replace(action, label=f"{action.label}: {label}")
+                              for action in _operation_actions("proposal", proposal.id, proposal.version)),
+                    ))
+        except Exception:
+            LOGGER.exception("Could not query Obsidian proposals")
+            complete = False
+        try:
+            if self._vault_selection_manager is None:
+                complete = False
+            else:
+                pending = self._vault_selection_manager.get_pending(context.app_user.id, pending_origin)
+                if (pending is not None and pending.origin == pending_origin
+                        and pending.app_user_id == context.app_user.id):
+                    label = "замену хранилища" if pending.action is VaultConfirmationAction.REPLACE else "отключение хранилища"
+                    confirmations.append(PendingConfirmation(
+                        "obsidian", pending.action.value, pending.id, pending.version, origin,
+                        tuple(replace(action, label=f"{action.label}: {label}")
+                              for action in _operation_actions(pending.action.value, pending.id, pending.version)),
+                    ))
+        except Exception:
+            LOGGER.exception("Could not query Obsidian vault confirmations")
+            complete = False
+        return ConfirmationQueryResult("complete" if complete else "unavailable", tuple(confirmations))
+
     def _decision(
         self, text: str, app_user: AppUser, origin: PendingOrigin
     ) -> ObsidianMessageResult | None:
@@ -454,36 +506,34 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
         if not simple and (not parts or parts[0] != "/confirm"):
             return None
         if simple:
-            proposals = (
-                self._obsidian_confirmation_service.list_pending(app_user.id, origin)
-                if self._obsidian_confirmation_service
-                else ()
+            snapshot = self.list_pending_confirmations(
+                HandlerContext(app_user), ReplyAddress(origin.channel, origin.chat_id),
             )
-            config = (
-                self._vault_selection_manager.get_pending(app_user.id, origin)
-                if self._vault_selection_manager
-                else None
-            )
-            if len(proposals) + int(config is not None) != 1:
+            if snapshot.status != "complete":
+                return _operation_message(
+                    "Не удалось получить полный список действий Obsidian. Ответ «да» или «нет» не обработан. "
+                    "Повтори позже или используй точную адресную команду из актуального запроса.", app_user,
+                )
+            if len(snapshot.confirmations) != 1:
                 return _operation_message(
                     (
                         "Есть несколько ожидающих действий, поэтому ответ «да» или «нет» неоднозначен. Выбери нужное действие точной командой /confirm из его ответа; команда содержит ID и версию."
-                        if proposals or config
+                        if snapshot.confirmations
                         else "В этом чате нет действия Obsidian, которое можно подтвердить. Чтобы посмотреть команды режима, вызови /help."
                     ),
                     app_user,
                 )
-            item = config if config else proposals[0]
-            operation = config.action.value if config else "proposal"
-            operation_id, version = item.id or 0, item.version
+            item = snapshot.confirmations[0]
+            operation = item.operation
+            operation_id, version = item.confirmation_id, item.version
             approve = normalized in {"да", "yes", "y"}
         else:
             if (
                 len(parts) != 6
                 or parts[1] != "obsidian"
                 or parts[2] not in {"proposal", "replace", "disconnect"}
-                or not parts[3].isdigit()
-                or not parts[4].isdigit()
+                or any(not value.isascii() or not value.isdecimal() or len(value) > 19
+                       or not 0 < int(value) <= 2**63 - 1 for value in parts[3:5])
                 or parts[5].lower() not in {"yes", "no"}
             ):
                 return _operation_message(
