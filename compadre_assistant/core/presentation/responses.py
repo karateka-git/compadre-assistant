@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from compadre_assistant.core.presentation.message_content import MessageContent, compose_content, text_content, code_span
 
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand, CommandSection
-from compadre_assistant.core.presentation.incoming.ports import CapabilityHelp
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageResultType, ProcessIncomingMessageResult
 
 
@@ -25,8 +23,6 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             )
         case IncomingMessageResultType.UNKNOWN_IDENTITY:
             return _format_unknown_identity_response()
-        case IncomingMessageResultType.HELP:
-            return _format_help(result.capability_help)
         case IncomingMessageResultType.START_UNREGISTERED:
             return (
                 compose_content(
@@ -118,32 +114,6 @@ def _display_name(result: ProcessIncomingMessageResult) -> str:
     if result.app_user is None or result.app_user.display_name is None:
         return "пользователь"
     return result.app_user.display_name
-
-
-def _format_help(capability: CapabilityHelp | None) -> MessageContent:
-    """Объединяет общие команды и разделы подключённой возможности."""
-    lines = ["Compadre Assistant — справка.", "Доступные команды:"]
-    for section in CommandSection:
-        commands = [
-            command for command in ChatCommand
-            if command.section is section and command is not ChatCommand.CANCEL
-        ]
-        if not commands:
-            continue
-        lines.extend(("", f"{section.value}:"))
-        for command in commands:
-            lines.append(str(command))
-    if capability is not None:
-        for section in capability.sections:
-            lines.extend(("", f"{section.title}:"))
-            for command in section.commands:
-                syntax = " ".join((command.name, *(parameter.syntax for parameter in command.parameters)))
-                lines.append(f"{syntax} — {command.description}")
-        if capability.instructions:
-            lines.extend(("", *capability.instructions))
-    else:
-        lines.extend(("", "Ответы да и нет подтверждают перепривязку канала."))
-    return text_content("\n".join(lines))
 
 
 def _format_unknown_identity_response() -> MessageContent:

@@ -54,7 +54,7 @@ class PersonalCapabilityRegistryTest(unittest.TestCase):
         self.assertIsNone(first.by_id("example"))
         self.assertIsNotNone(first.blocked_by_command("/example"))
         self.assertNotIn("/example", first.entry_hint())
-        self.assertEqual(first.help().sections, ())
+        self.assertFalse(any(item.effective for item in first.access))
         self.assertIsNotNone(second.by_command("/example"))
         self.assertIn("/example", second.entry_hint())
         self.assertIsNotNone(registry.by_id("example"))

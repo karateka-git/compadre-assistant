@@ -12,13 +12,12 @@ from compadre_assistant.capabilities.obsidian.domain.articles.processing import 
     ProcessArticleUrlResult,
 )
 from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
-from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageResult
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
 from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
@@ -67,39 +66,8 @@ from compadre_assistant.capabilities.obsidian.presentation.responses import (
 from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
 
-def _obsidian_handler() -> ObsidianMessageHandler:
-    """Собирает presentation-слой для метаданных предметной справки."""
-    return ObsidianMessageHandler(article_url_use_case=object())
-
-
 class TelegramResponsesTest(unittest.TestCase):
     """Проверяет пользовательский текст по результату обработки статьи."""
-
-    def test_format_help_lists_only_currently_available_commands(self) -> None:
-        """/help перечисляет общий набор реализованных Telegram/VK-команд."""
-        reply = content_text(format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.HELP,
-                capability_help=_obsidian_handler().descriptor.help,
-            )
-        ))
-
-        for command in ChatCommand:
-            with self.subTest(command=command.value):
-                if command is ChatCommand.CANCEL:
-                    self.assertNotIn(command.usage, reply)
-                else:
-                    self.assertIn(command.usage, reply)
-        self.assertIn("/github_sync", reply)
-        self.assertIn("/github_status", reply)
-        self.assertIn("/github_disconnect", reply)
-        self.assertIn("/register — создать профиль после ввода имени", reply)
-        self.assertNotIn("зарегистрироваться и подключить", reply)
-        self.assertLess(reply.index("Основные:"), reply.index("Связь Telegram и VK:"))
-        self.assertLess(reply.index("Связь Telegram и VK:"), reply.index("Obsidian vault:"))
-        self.assertLess(reply.index("Obsidian vault:"), reply.index("Статьи:"))
-        self.assertNotIn("/github_connect", reply)
-        self.assertNotIn("/github_vault", reply)
 
     def test_format_missing_vault_configuration_includes_ready_example(
         self,

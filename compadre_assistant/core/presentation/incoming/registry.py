@@ -4,15 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from compadre_assistant.core.domain.capability_preferences import UserCapabilitySelection
 
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityHelp,
     CapabilityDescriptor,
-    HelpSection,
     IncomingCapabilityPort,
 )
 
@@ -103,20 +101,6 @@ class CapabilityRegistry:
         parts = text.strip().split(maxsplit=1)
         return self._by_command.get(parts[0]) if parts else None
 
-    def help(self) -> CapabilityHelp:
-        """Формирует справку всех включённых входов и способ выхода."""
-        entries = tuple(
-            replace(entry.descriptor.entry, description=entry.descriptor.entry.description
-                    + ("; выход: /exit" if entry.descriptor.persistent_mode else ""))
-            for entry in self._by_id.values()
-        )
-        sections = (HelpSection("Возможности", entries),) if entries else ()
-        instructions: tuple[str, ...] = ()
-        for entry in self._by_id.values():
-            sections += entry.descriptor.help.sections
-            instructions += entry.descriptor.help.instructions
-        return CapabilityHelp(sections=sections, instructions=instructions)
-
     def disabled_by_command(self, text: str) -> CapabilityDescriptor | None:
         """Возвращает метаданные явно отключённого входа, сохраняя аргументы."""
         parts = text.strip().split(maxsplit=1)
@@ -184,21 +168,6 @@ class PersonalCapabilityRegistry:
              if entry.descriptor.entry.name == parts[0] and not entry.effective),
             None,
         )
-
-    def help(self) -> CapabilityHelp:
-        """Формирует справку только эффективно доступных возможностей."""
-        entries = tuple(entry for entry in self.access if entry.effective)
-        commands = tuple(
-            replace(entry.descriptor.entry, description=entry.descriptor.entry.description
-                    + ("; выход: /exit" if entry.descriptor.persistent_mode else ""))
-            for entry in entries
-        )
-        sections = (HelpSection("Возможности", commands),) if commands else ()
-        instructions: tuple[str, ...] = ()
-        for entry in entries:
-            sections += entry.descriptor.help.sections
-            instructions += entry.descriptor.help.instructions
-        return CapabilityHelp(sections, instructions)
 
     def entry_hint(self) -> str:
         """Предлагает только эффективно доступные команды входа."""

@@ -640,8 +640,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/help"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.HELP)
-        self.assertIsNone(result.app_user)
+        self.assertIn("/register", response_text(result))
+        self.assertNotIn("/obsidian", response_text(result))
 
     def test_execute_processes_url_and_links_saved_message(self) -> None:
         """Сообщение со ссылкой проходит общий flow и возвращает structured result."""

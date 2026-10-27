@@ -43,7 +43,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         """
         if not arguments.strip() and context.pending_inputs is not None:
             context.pending_inputs.begin(event.reply_address, "ask", "ask_question",
-                                         app_user_id=context.app_user.id)
+                                         app_user_id=context.app_user.id, value_label="вопрос для Ask")
             return CapabilityResult(IncomingResponse(text_content(
                 "Введи один вопрос для модели следующим сообщением. "
                 "Ожидание действует 10 минут. Для отмены введи /cancel."

@@ -121,6 +121,10 @@ class FakeIdentity:
         return self.user
 
 
+    def get_pending_rebind(self, _identity):
+        """Сообщает об отсутствии адресного ожидания в базовом fixture."""
+        return None
+
     def confirm_rebind(self, _identity: object, **_decision) -> AppUser:
         """Завершает подтверждённую перепривязку."""
         self.pending = False

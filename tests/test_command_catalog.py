@@ -11,7 +11,9 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CommandParameter, HelpSection,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
-from compadre_assistant.core.presentation.responses import _format_help
+from compadre_assistant.core.presentation.incoming.help import format_contextual_help
+from compadre_assistant.core.presentation.incoming.ports import ConfirmationQueryResult, IncomingResponse
+from compadre_assistant.core.presentation.message_content import text_content
 from tests.response_assertions import content_text
 
 
@@ -70,10 +72,14 @@ class CommandCatalogTest(unittest.TestCase):
             "описание с /псевдокомандой — и разделителем",
         ))
         registry = CapabilityRegistry((SimpleNamespace(descriptor=descriptor),))
-        for help_content in (registry.help(), registry.for_user(()).help()):
-            rendered = content_text(_format_help(help_content))
-            self.assertIn("/example <первый> [второй] — описание с /псевдокомандой — и разделителем", rendered)
-            self.assertIn("/action — действие", rendered)
+        def render(mode):
+            return content_text(format_contextual_help(
+                registry.for_user(()), mode, None, ConfirmationQueryResult("complete"),
+                IncomingResponse(text_content("")),
+            ).content)
+        self.assertIn("/example <первый> [второй] — описание с /псевдокомандой — и разделителем", render(None))
+        self.assertNotIn("/action — действие", render(None))
+        self.assertIn("/action — действие", render("example"))
         self.assertIsNone(registry.by_command("/action"))
         self.assertIsNotNone(registry.by_command("/example значение"))
 
@@ -89,4 +95,4 @@ class CommandCatalogTest(unittest.TestCase):
         self.assertEqual(commands[-1].parameters, (CommandParameter("ID статьи", "<ID статьи>", False),))
         disabled = CapabilityRegistry(disabled_capabilities=(ask, obsidian))
         self.assertEqual(disabled.disabled_by_command("/obsidian URL"), obsidian)
-        self.assertEqual(disabled.help().sections, ())
+        self.assertFalse(any(item.effective for item in disabled.for_user(()).access))

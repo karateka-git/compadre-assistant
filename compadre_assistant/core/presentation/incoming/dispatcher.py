@@ -9,8 +9,8 @@ from compadre_assistant.core.presentation.message_content import compose_content
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    ConfirmationAction, BackgroundReply, CapabilityHelp, CapabilityMode, ChannelCompletionHandler,
-    HandlerContext, IncomingResponse, ReplyDeliveryPort,
+    ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
+    HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort,
 )
@@ -39,7 +39,6 @@ class IncomingMessageResultType(StrEnum):
     """Тип результата обработки входящего сообщения."""
 
     UNKNOWN_IDENTITY = "unknown_identity"
-    HELP = "help"
     START_UNREGISTERED = "start_unregistered"
     START_REGISTERED = "start_registered"
     ALREADY_REGISTERED = "already_registered"
@@ -71,7 +70,6 @@ class ProcessIncomingMessageResult:
     link_code: CreatedLinkCode | None = None
     error: Exception | None = None
     capability_reply: str | None = None
-    capability_help: CapabilityHelp | None = None
 
 
 class CallbackReplyDelivery(ReplyDeliveryPort):
@@ -255,11 +253,7 @@ class IncomingMessageDispatcher:
             or self._registry.disabled_by_command(text) is not None
         )
         if command is ChatCommand.HELP:
-            user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
-            return ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.HELP,
-                capability_help=self._personal_registry(user).help() if user is not None else None,
-            )
+            return self._contextual_help(event)
         identity = _incoming_identity_from_event(event)
         if command is ChatCommand.CAPABILITIES:
             if parsed is not None and parsed.arguments:
@@ -719,6 +713,36 @@ class IncomingMessageDispatcher:
             self._chat_mode_repository.replace_if_revision(key, state.revision, None)
         return result.response
 
+    def _contextual_help(self, event: IncomingEvent) -> IncomingResponse:
+        """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
+        from compadre_assistant.core.presentation.incoming.help import format_contextual_help
+
+        user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+        personal = self._personal_registry(user) if user is not None else None
+        mode = self._chat_mode_repository.get(
+            ChatModeKey(user.id, event.channel, event.chat_id)
+        ) if user is not None else None
+        with self._pending_inputs.lock(event.reply_address):
+            pending = self._pending_inputs.get(event.reply_address)
+            if pending is not None:
+                valid = (not self._pending_inputs.expired(pending)
+                         and (pending.app_user_id == (user.id if user else None)
+                              or (pending.owner_id != "core" and pending.app_user_id is None)))
+                if pending.owner_id != "core":
+                    owner = personal.by_id(pending.owner_id) if personal else None
+                    valid = valid and isinstance(owner, PendingInputContinuationPort)
+                if pending.required_mode is not None:
+                    valid = valid and mode is not None and mode.capability_id == pending.required_mode
+                if not valid:
+                    self._pending_inputs.clear(event.reply_address, pending.request_id)
+                    pending = None
+        active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
+        snapshot = self._confirmation_snapshot(event, user, active)
+        confirmation = self._confirmation_response(snapshot)
+        return format_contextual_help(
+            personal, mode.capability_id if mode else None, pending, snapshot, confirmation,
+        )
+
     def list_pending_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Собирает снимок ядра и доступного активного режима без выбора решения.
 
@@ -728,9 +752,27 @@ class IncomingMessageDispatcher:
         Returns:
             Полный снимок либо известная часть с признаком недоступности источников.
         """
+        user = None
+        active = None
+        complete = True
+        try:
+            user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+            if user is not None:
+                personal = self._personal_registry(user)
+                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+                active = personal.by_id(mode.capability_id) if mode is not None else None
+        except Exception:
+            LOGGER.exception("Could not resolve confirmation context")
+            complete = False
+        return self._confirmation_snapshot(event, user, active, complete)
+
+    def _confirmation_snapshot(
+        self, event: IncomingEvent, user: AppUser | None,
+        capability: IncomingCapabilityPort | None, complete: bool = True,
+    ) -> ConfirmationQueryResult:
+        """Опрашивает источники по одному снимку допуска, сохраняя известные действия."""
         identity = _incoming_identity_from_event(event)
         confirmations: list[PendingConfirmation] = []
-        complete = True
         try:
             pending = self._user_identity_service.get_pending_rebind(identity)
             if (pending is not None and pending.channel == identity.channel
@@ -747,21 +789,16 @@ class IncomingMessageDispatcher:
             LOGGER.exception("Could not query identity confirmations")
             complete = False
         try:
-            user = self._user_identity_service.resolve(identity)
-            if user is not None:
-                personal = self._personal_registry(user)
-                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
-                capability = personal.by_id(mode.capability_id) if mode is not None else None
-                # Недоступный режим не является источником: его действия нельзя выполнить.
-                if capability is not None:
-                    if not isinstance(capability, PendingConfirmationQueryPort):
-                        complete = False
-                    else:
-                        result = capability.list_pending_confirmations(HandlerContext(user), event.reply_address)
-                        complete = complete and result.status == "complete"
-                        confirmations.extend(item for item in result.confirmations
-                                             if item.origin == event.reply_address
-                                             and item.owner_id == capability.descriptor.capability_id)
+            # Недоступный режим не является источником: его действия нельзя выполнить.
+            if capability is not None and capability.descriptor.persistent_mode and user is not None:
+                if not isinstance(capability, PendingConfirmationQueryPort):
+                    complete = False
+                else:
+                    result = capability.list_pending_confirmations(HandlerContext(user), event.reply_address)
+                    complete = complete and result.status == "complete"
+                    confirmations.extend(item for item in result.confirmations
+                                         if item.origin == event.reply_address
+                                         and item.owner_id == capability.descriptor.capability_id)
         except Exception:
             LOGGER.exception("Could not query active capability confirmations")
             complete = False
