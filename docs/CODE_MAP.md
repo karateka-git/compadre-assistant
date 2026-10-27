@@ -8,7 +8,7 @@
 
 | Задача | Где начать поиск | Связанные тесты | Подробности |
 | --- | --- | --- | --- |
-| Общие команды, identity и режим чата | `core/presentation/incoming/`, `core/domain/chat_modes.py`, `core/domain/users/` | `test_incoming_commands.py`, `test_chat_modes.py`, `test_user_identity_repository.py` | [Путь сообщения](ARCHITECTURE.md#как-проходит-сообщение) |
+| Общие команды, identity и режим чата | `core/presentation/incoming/`, `core/domain/chat_modes.py`, `core/domain/users/` | `test_incoming_commands.py`, `test_chat_modes.py`, `test_user_identity_repository.py`, `test_text_command_sequences.py` | [Путь сообщения](ARCHITECTURE.md#как-проходит-сообщение) |
 | Личный выбор возможностей и граница допуска | `core/domain/capability_preferences.py`, `core/data/sqlite/capability_preference_repository.py`, `core/presentation/incoming/dispatcher.py`, `core/presentation/incoming/registry.py` | `test_capability_preferences_domain.py`, `test_capability_preference_repository.py`, `test_personal_processor_admission.py`, `test_incoming_boundary.py` | [Профиль и включённые возможности](ARCHITECTURE.md#профиль-и-включённые-возможности), [команды](RUN.md#13-посмотреть-доступные-команды) |
 | Сборка и регистрация возможности | `bootstrap.py`, `core/presentation/incoming/registry.py`, `capabilities/ask/bootstrap.py` | `test_capability_composition.py`, `test_presentation_boundary.py` | [Сборка зависимостей](ARCHITECTURE.md#сборка-и-время-жизни-зависимостей) |
 | Telegram, VK и доставка ответа | `presentation/telegram/bot.py`, `presentation/vk/bot.py`, `presentation/shared/safe_send.py` | `test_telegram_bot.py`, `test_vk_bot.py`, `test_shared_responses.py` | [Ответ и фоновая доставка](ARCHITECTURE.md#ответ-ошибка-и-фоновая-доставка) |

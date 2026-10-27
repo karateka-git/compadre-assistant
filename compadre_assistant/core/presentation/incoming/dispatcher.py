@@ -148,7 +148,9 @@ class IncomingMessageDispatcher:
             )
         if not personal.access:
             lines.append("Сейчас нет известных возможностей.")
-        lines.append("Управление: /enable <id>, /disable <id>. Выбор действует во всех привязанных каналах.")
+        lines.append("Чтобы выбрать возможность следующим сообщением, вызови /enable или /disable. "
+                     "Если ID уже известен, укажи его сразу: /enable <id> или /disable <id>. "
+                     "Выбор действует во всех привязанных каналах.")
         return "\n".join(lines)
 
     def execute(
@@ -218,14 +220,18 @@ class IncomingMessageDispatcher:
                 ))
             cleared = self._pending_inputs.clear(event.reply_address)
             return IncomingResponse(text_content(
-                "Ввод отменён." if cleared else "Нет активного ожидания ввода."
+                "Ввод отменён. Активный режим этого чата не изменён." if cleared else
+                "В этом чате нечего отменять. Продолжай текущий режим или вызови нужную команду."
             ))
         if text.startswith("/"):
             if command not in (ChatCommand.HELP, ChatCommand.STATUS,
                                ChatCommand.CAPABILITIES, ChatCommand.START):
                 self._pending_inputs.clear(event.reply_address)
         elif expired:
-            return IncomingResponse(text_content("Время ожидания истекло. Повтори команду."))
+            command_hint = pending.retry_command or "команду ввода"
+            return IncomingResponse(text_content(
+                f"Срок ожидания ввода истёк. Повтори {command_hint}, чтобы начать заново."
+            ))
         elif pending is not None:
             return self._continue_input(pending, event, completion_handler)
         return None
@@ -293,7 +299,7 @@ class IncomingMessageDispatcher:
                     return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
-                        compose_content('Действие недоступно, устарело или истекло. Повтори /link в исходном чате.'),
+                        compose_content('Это действие устарело или истекло. Повтори /link в исходном чате, чтобы получить актуальные команды.'),
                         error,
                     )
             user = self._user_identity_service.resolve(identity)
@@ -330,7 +336,7 @@ class IncomingMessageDispatcher:
                 ))
             existing = self._user_identity_service.resolve(identity)
             if existing is None:
-                self._pending_inputs.begin(event.reply_address, "core", "register_name")
+                self._pending_inputs.begin(event.reply_address, "core", "register_name", retry_command="/register")
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                 )
@@ -343,7 +349,7 @@ class IncomingMessageDispatcher:
         if command is ChatCommand.LINK:
             if parsed is None or not parsed.arguments:
                 user = self._user_identity_service.resolve(identity)
-                self._pending_inputs.begin(event.reply_address, "core", "link_code", app_user_id=user.id if user else None)
+                self._pending_inputs.begin(event.reply_address, "core", "link_code", app_user_id=user.id if user else None, retry_command="/link")
                 return IncomingResponse(text_content(
                     "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
                 ))
@@ -369,7 +375,7 @@ class IncomingMessageDispatcher:
             )
         if command is ChatCommand.NAME:
             if not parsed.arguments:
-                self._pending_inputs.begin(event.reply_address, "core", "profile_name", app_user_id=user.id)
+                self._pending_inputs.begin(event.reply_address, "core", "profile_name", app_user_id=user.id, retry_command="/name")
                 return IncomingResponse(text_content(
                     "Пришли новое имя профиля. Ожидание действует 10 минут. Для отмены введи /cancel."
                 ))
@@ -576,7 +582,7 @@ class IncomingMessageDispatcher:
                     "Нет возможностей, которые можно включить. Посмотри /capabilities." if enabled
                     else "Нет включённых возможностей. Посмотри /capabilities."
                 ))
-            self._pending_inputs.begin(event.reply_address, "core", "enable" if enabled else "disable", app_user_id=user.id)
+            self._pending_inputs.begin(event.reply_address, "core", "enable" if enabled else "disable", app_user_id=user.id, retry_command="/enable" if enabled else "/disable")
             options = "\n".join(f"{access.descriptor.capability_id} — {access.descriptor.entry.description}" for access in choices)
             return IncomingResponse(text_content(
                 f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"

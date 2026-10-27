@@ -79,7 +79,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         """Истечение не доставляет вопрос в Obsidian, timeout закрывает ввод."""
         self.send('/ask')
         self.now += timedelta(minutes=10)
-        self.assertIn('истекло', response_text(self.send('https://example.com/article')))
+        self.assertIn('истёк', response_text(self.send('https://example.com/article')))
         self.model.answer.assert_not_called()
         self.assertFalse(self.articles.commands)
         self.send('/ask')
@@ -187,7 +187,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
                     try:
                         self.assertTrue(started.wait(3))
                         self.assertIsNone(self.store.get(_event('x').reply_address))
-                        self.assertIn('Нет активного', response_text(executor.submit(self.send, '/cancel').result(1)))
+                        self.assertIn('нечего отменять', response_text(executor.submit(self.send, '/cancel').result(1)))
                         executor.submit(self.send, value).result(1)
                         self.assertEqual(target.call_count, 1)
                     finally:

@@ -626,7 +626,7 @@ class OperationScopesTest(unittest.TestCase):
             )
             self.assertEqual(user.id, target.id)
         repeated = self.process(f"/confirm core identity {pending.id} {pending.version} yes")
-        self.assertIn("недоступно", response_text(repeated))
+        self.assertIn("устарело или истекло", response_text(repeated))
 
     def test_superseded_identity_operation_never_confirms_new_request(self):
         """Новое ожидание identity имеет новый ID; команда старого ID не переносит профиль."""

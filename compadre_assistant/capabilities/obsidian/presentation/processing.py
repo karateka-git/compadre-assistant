@@ -263,7 +263,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                 and not parsed.arguments and context.pending_inputs is not None):
             context.pending_inputs.begin(event.reply_address, "obsidian", "reanalyze_article",
                                          app_user_id=context.app_user.id, required_mode="obsidian",
-                                         value_label="ID статьи Obsidian")
+                                         value_label="ID статьи Obsidian", retry_command="/reanalyze")
             return CapabilityResult(IncomingResponse(text_content(
                 "Укажи числовой ID статьи для повторного анализа. "
                 "Ожидание действует 10 минут. Для отмены введи /cancel."

@@ -73,7 +73,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.assertIsNone(self.pending())
         self.assertIsNotNone(self.pending("other"))
         self.now += timedelta(minutes=10)
-        self.assertIn("истекло", self.send("Старое", "other"))
+        self.assertIn("истёк", self.send("Старое", "other"))
         self.identity.update_display_name.assert_not_called()
 
     def test_direct_commands_replace_pending(self):

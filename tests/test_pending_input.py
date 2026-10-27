@@ -89,7 +89,7 @@ class PendingInputTest(unittest.TestCase):
         self.dispatcher.execute(_event('неверно'))
         self.assertEqual(self.store.get(pending.chat_key), pending)
         self.now += timedelta(minutes=1)
-        self.assertIn('истекло', response_text(self.dispatcher.execute(_event('поздно'))))
+        self.assertIn('истёк', response_text(self.dispatcher.execute(_event('поздно'))))
         self.assertEqual(len(self.owner.values), 1)
         self.assertFalse(self.mode.calls)
         self.dispatcher.execute(_event('обычный маршрут'))
@@ -140,7 +140,7 @@ class PendingInputTest(unittest.TestCase):
         self.assertEqual(self.store.get(other_chat.chat_key), other_chat)
         self.assertEqual(self.store.get(other_channel.chat_key), other_channel)
         self.assertEqual(self.modes.get(self.key).capability_id, 'mode')
-        self.assertIn('Нет активного', response_text(self.dispatcher.execute(_event('/cancel'))))
+        self.assertIn('нечего отменять', response_text(self.dispatcher.execute(_event('/cancel'))))
 
     def test_pre_registration_storage_and_cancel(self):
         self.identity.user = None
