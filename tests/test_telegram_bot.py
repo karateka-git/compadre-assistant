@@ -18,7 +18,8 @@ from aiogram.methods import GetMe
 
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BackgroundReply, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
+    BackgroundReply, BoundReplyAction, ConfirmationAction, CommandMenu, CommandMenuUpdate,
+    CommandSuggestion, IncomingResponse, ReplyAction,
 )
 from compadre_assistant.presentation.telegram.bot import (
     TelegramBotError,
@@ -32,6 +33,8 @@ from compadre_assistant.presentation.telegram.bot import (
     _start_telegram_menu_reconciliation,
     _telegram_polling_retry_delay,
     safe_send_telegram_reply,
+    _serialize_telegram_inline_keyboard,
+    _TelegramReplyTarget,
 )
 
 
@@ -167,17 +170,20 @@ class TelegramMessage:
         self.bot = self
         self.answers: list[str] = []
         self.parse_modes: list[str] = []
+        self.reply_markups: list[object | None] = []
 
-    async def answer(self, text: str, *, parse_mode: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str, reply_markup: object = None) -> None:
         """Сохраняет отправленный текст."""
         self.answers.append(text)
         self.parse_modes.append(parse_mode)
+        self.reply_markups.append(reply_markup)
 
-    async def send_message(self, *, chat_id: str, text: str, parse_mode: str) -> None:
+    async def send_message(self, *, chat_id: str, text: str, parse_mode: str, reply_markup: object = None) -> None:
         """Доставляет фоновый ответ по сохранённому адресу fake bot."""
         self.sent_chat_id = chat_id
         self.answers.append(text)
         self.parse_modes.append(parse_mode)
+        self.reply_markups.append(reply_markup)
 
 
 class MenuTelegramBot:
@@ -231,6 +237,121 @@ class RateLimitedTelegramMessage(TelegramMessage):
 
 class TelegramBotHelpersTest(unittest.TestCase):
     """Проверяет helpers, не требующие реального Telegram."""
+
+    def test_bound_actions_serialize_only_opaque_tokens_and_validate_limits(self) -> None:
+        """Кнопки используют токены bound actions и Telegram callback limits."""
+        from aiogram.types import InlineKeyboardMarkup
+
+        response = IncomingResponse(text_content("Запусти /help"), bound_actions=(
+            BoundReplyAction("Справка", "a" * 32, "response-1"),
+            BoundReplyAction("Повторить", "b" * 32, "response-1"),
+        ))
+        keyboard = _serialize_telegram_inline_keyboard(response, __import__("aiogram"))
+        self.assertIsInstance(keyboard, InlineKeyboardMarkup)
+        self.assertEqual([(row[0].text, row[0].callback_data) for row in keyboard.inline_keyboard],
+                         [("Справка", "a" * 32), ("Повторить", "b" * 32)])
+        plain_actions = IncomingResponse(
+            text_content("Выполни /help"),
+            actions=(ConfirmationAction("c1", "Подтвердить", "/confirm x"),),
+            suggested_actions=(ReplyAction("Справка", "/help"),),
+        )
+        self.assertIsNone(_serialize_telegram_inline_keyboard(plain_actions, __import__("aiogram")))
+        invalid = IncomingResponse(text_content("x"), bound_actions=(
+            BoundReplyAction("Ок", "т" * 33, "response-1"),
+        ))
+        with self.assertRaises(ValueError):
+            _serialize_telegram_inline_keyboard(invalid, __import__("aiogram"))
+
+    def test_keyboard_is_gated_and_when_enabled_attaches_to_last_chunk_only(self) -> None:
+        """До callback-handler кнопок нет; тестовый gate прикрепляет их к финалу."""
+        message = TelegramMessage()
+        response = IncomingResponse(text_content("abcdefghij"), bound_actions=(
+            BoundReplyAction("Дальше", "x" * 32, "response-1"),
+        ))
+
+        async def run() -> None:
+            await safe_send_telegram_reply(message, response, logger=logging.getLogger("test.telegram.inline"), limit=4)
+
+        asyncio.run(run())
+        self.assertEqual(message.reply_markups, [None, None, None])
+        message.answers.clear()
+        message.reply_markups.clear()
+
+        async def enabled_run() -> None:
+            await safe_send_telegram_reply(
+                message, response, logger=logging.getLogger("test.telegram.inline"), limit=4,
+                include_bound_actions=True,
+            )
+
+        asyncio.run(enabled_run())
+        self.assertEqual(message.answers, ["abcd", "efgh", "ij"])
+        self.assertEqual(message.reply_markups[:2], [None, None])
+        self.assertEqual(message.reply_markups[2].inline_keyboard[0][0].callback_data, "x" * 32)
+
+    def test_background_keyboard_is_sent_with_original_reply(self) -> None:
+        """Фоновая доставка использует тот же сериализатор и адрес ответа."""
+        class Bot:
+            """Запоминает адрес и markup фонового Bot API-вызова."""
+
+            async def send_message(self, **kwargs: object) -> None:
+                self.kwargs = kwargs
+
+        bot = Bot()
+        target = _TelegramReplyTarget(bot, "42")
+        response = IncomingResponse(text_content("Готово"), bound_actions=(
+            BoundReplyAction("Открыть", "z" * 32, "response-1"),
+        ))
+
+        async def run() -> None:
+            await safe_send_telegram_reply(
+                target, response, logger=logging.getLogger("test.telegram.inline.background"),
+                include_bound_actions=True,
+            )
+
+        asyncio.run(run())
+        self.assertEqual(bot.kwargs["chat_id"], "42")
+        self.assertEqual(bot.kwargs["reply_markup"].inline_keyboard[0][0].callback_data, "z" * 32)
+
+    def test_final_chunk_retry_keeps_keyboard_bound_to_that_response(self) -> None:
+        """Retry последнего фрагмента не переносит кнопку на иной текст."""
+        class FailingLastChunk(TelegramMessage):
+            """Один раз отклоняет последний фрагмент и сохраняет обе попытки."""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.attempt_markups: list[object | None] = []
+                self.failed_last_chunk = False
+
+            async def answer(self, text: str, *, parse_mode: str, reply_markup: object = None) -> None:
+                self.attempt_markups.append(reply_markup)
+                if text == "ij" and not self.failed_last_chunk:
+                    self.failed_last_chunk = True
+                    raise TelegramNetworkError("temporary failure")
+                await super().answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+
+        message = FailingLastChunk()
+        response = IncomingResponse(text_content("abcdefghij"), bound_actions=(
+            BoundReplyAction("Дальше", "y" * 32, "response-2"),
+        ))
+        delays: list[float] = []
+
+        async def sleeper(delay: float) -> None:
+            delays.append(delay)
+
+        async def run() -> None:
+            await safe_send_telegram_reply(
+                message, response, logger=logging.getLogger("test.telegram.inline.retry"), limit=4,
+                include_bound_actions=True, sleeper=sleeper,
+            )
+
+        with self.assertLogs("test.telegram.inline.retry", level="WARNING"):
+            asyncio.run(run())
+        self.assertEqual(message.answers, ["abcd", "efgh", "ij"])
+        self.assertIsNone(message.attempt_markups[0])
+        self.assertIsNone(message.attempt_markups[1])
+        self.assertIsNotNone(message.attempt_markups[2])
+        self.assertIs(message.attempt_markups[2], message.attempt_markups[3])
+        self.assertEqual(delays, [0.5])
 
     def test_handler_delivers_general_progress_reply(self) -> None:
         """Telegram отправляет раннюю квитанцию по сигналу возможности."""

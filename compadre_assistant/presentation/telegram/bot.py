@@ -30,6 +30,8 @@ TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
 TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
 TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
+# Включить одновременно с callback-handler шага 7.10; до этого кнопки скрыты.
+TELEGRAM_INLINE_ACTIONS_ENABLED = False
 IncomingMessageProcessor = Callable[
     [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
@@ -428,9 +430,12 @@ class _TelegramReplyTarget:
         self.chat = SimpleNamespace(id=chat_id)
         self._bot = bot
 
-    async def answer(self, text: str, *, parse_mode: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str, reply_markup: Any = None) -> None:
         """Доставляет один фрагмент ответа в сохранённый чат."""
-        await self._bot.send_message(chat_id=self.chat.id, text=text, parse_mode=parse_mode)
+        kwargs: dict[str, Any] = {"chat_id": self.chat.id, "text": text, "parse_mode": parse_mode}
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        await self._bot.send_message(**kwargs)
 
 
 def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
@@ -479,8 +484,15 @@ async def send_telegram_reply(
         ValueError: Лимит не вмещает даже один символ с оформлением.
         Exception: Ошибка отправки готовой части через Telegram API.
     """
-    for chunk in render_telegram_content(response.content, response.actions, limit=limit):
-        await message.answer(chunk.text, parse_mode=chunk.parse_mode)
+    chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    for index, chunk in enumerate(chunks):
+        keyboard = None
+        if TELEGRAM_INLINE_ACTIONS_ENABLED and index == len(chunks) - 1:
+            keyboard = _serialize_telegram_inline_keyboard(response, _load_aiogram())
+        kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
+        if keyboard is not None:
+            kwargs["reply_markup"] = keyboard
+        await message.answer(chunk.text, **kwargs)
 
 
 async def safe_send_telegram_reply(
@@ -490,6 +502,7 @@ async def safe_send_telegram_reply(
     logger: logging.Logger,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
 ) -> None:
     """Отправляет Telegram-ответ с per-chunk retries временных ошибок.
 
@@ -504,6 +517,10 @@ async def safe_send_telegram_reply(
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
     chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    keyboard = (
+        _serialize_telegram_inline_keyboard(response, _load_aiogram())
+        if include_bound_actions else None
+    )
     started_at = time.monotonic()
     target_id = str(message.chat.id)
     logger.info(
@@ -511,9 +528,12 @@ async def safe_send_telegram_reply(
         target_id,
         len(chunks),
     )
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
+        send_kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
+        if keyboard is not None and index == len(chunks) - 1:
+            send_kwargs["reply_markup"] = keyboard
         sent = await safe_send_async(
-            lambda chunk=chunk: message.answer(chunk.text, parse_mode=chunk.parse_mode),
+            lambda chunk=chunk, send_kwargs=send_kwargs: message.answer(chunk.text, **send_kwargs),
             logger=logger,
             channel="Telegram",
             target_id=target_id,
@@ -532,6 +552,41 @@ async def safe_send_telegram_reply(
         target_id,
         time.monotonic() - started_at,
     )
+
+
+def _serialize_telegram_inline_keyboard(response: IncomingResponse, aiogram: Any) -> Any | None:
+    """Собирает клавиатуру из bound actions одного ответа.
+
+    Args:
+        response: Ответ с действиями, выданными общим processor'ом.
+        aiogram: Модуль aiogram для создания типов Bot API.
+
+    Returns:
+        Клавиатуру Telegram или `None`, если действий нет.
+
+    Raises:
+        ValueError: Если набор нарушает лимиты Telegram или принадлежит разным ответам.
+    """
+    actions = response.bound_actions
+    if not actions:
+        return None
+    if len(actions) > 100:
+        raise ValueError("Telegram inline keyboard supports at most 100 buttons")
+    if len({action.response_id for action in actions}) != 1:
+        raise ValueError("Telegram inline buttons must belong to one response")
+    rows = []
+    seen_tokens: set[str] = set()
+    for action in actions:
+        token = action.token
+        if not token or len(token.encode("utf-8")) > 64:
+            raise ValueError("Telegram callback_data must contain 1-64 bytes")
+        if token in seen_tokens:
+            raise ValueError("Telegram callback_data tokens must be unique")
+        seen_tokens.add(token)
+        if not action.label or len(action.label) > 64:
+            raise ValueError("Telegram inline button text must contain 1-64 characters")
+        rows.append([aiogram.types.InlineKeyboardButton(text=action.label, callback_data=token)])
+    return aiogram.types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _telegram_retry_delay(error: Exception, failed_attempt: int) -> float | None:
