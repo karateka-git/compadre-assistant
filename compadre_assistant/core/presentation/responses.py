@@ -14,7 +14,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
         case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS | IncomingMessageResultType.CAPABILITY_DISABLED:
             return text_content(result.capability_reply or "Выбери возможность через /help.")
         case IncomingMessageResultType.MODE_EXITED:
-            return compose_content('Режим этого чата завершён.\n' + str(result.capability_reply or 'Справка: /help.'))
+            return compose_content('Режим этого чата завершён.\n' + str(result.capability_reply or '') + '\nКоманды: /help.')
         case IncomingMessageResultType.MODE_UNAVAILABLE:
             return compose_content(
                 'Сохранённая возможность этого чата отключена или недоступна. Выйти: ',
@@ -47,7 +47,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             )
         case IncomingMessageResultType.REGISTRATION_NAME_SAVED:
             return compose_content(
-                'Приятно познакомиться, ' + str(_display_name(result)) + '.\nРегистрация завершена.\n' + str(result.capability_reply or 'Справка: /help.'),
+                'Приятно познакомиться, ' + str(_display_name(result)) + '.\nРегистрация завершена.\n' + str(result.capability_reply or '') + '\nКоманды: /help.',
             )
         case IncomingMessageResultType.NAME_COMMAND_INVALID:
             return (

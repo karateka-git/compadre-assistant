@@ -18,7 +18,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, CapabilityDescriptor, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
     PendingInputResult, PendingInputOutcome, PendingInput,
-    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort,
+    PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, ReplyAction,
 )
 from compadre_assistant.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
@@ -246,7 +246,13 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                     github_connection=connection,
                 )
                 lines.append(_present_result(result).content)
-        return CapabilityResult(IncomingResponse(join_content("\n", lines), actions=actions))
+        suggested_actions = (
+            (ReplyAction("Проверить состояние vault", "/github_status"),)
+            if vault is not None and self._vault_sync_manager is not None and not actions else ()
+        )
+        return CapabilityResult(IncomingResponse(
+            join_content("\n", lines), actions=actions, suggested_actions=suggested_actions,
+        ))
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Выполняет use cases Obsidian и переводит их результат в общий ответ.

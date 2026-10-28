@@ -13,7 +13,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
-    CommandMenuUpdate, CommandMenuUpdateHandler,
+    CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -189,8 +189,19 @@ class IncomingMessageDispatcher:
                 LOGGER.exception("Could not read command menu before incoming action")
 
         result = self._execute(event, completion_handler)
-        response = (result if isinstance(result, IncomingResponse) else
-                    IncomingResponse(format_incoming_message_result(result), result.error))
+        if isinstance(result, IncomingResponse):
+            response = result
+        else:
+            suggested_actions = (
+                (ReplyAction("Посмотреть команды", "/help"),)
+                if result.type in {IncomingMessageResultType.REGISTRATION_NAME_SAVED,
+                                   IncomingMessageResultType.MODE_EXITED}
+                else ()
+            )
+            response = IncomingResponse(
+                format_incoming_message_result(result), result.error,
+                suggested_actions=suggested_actions,
+            )
         if menu_update_handler is not None:
             try:
                 current_menu = self.command_menu(event)

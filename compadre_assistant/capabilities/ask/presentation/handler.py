@@ -10,7 +10,7 @@ from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
-    PendingInputResult, PendingInputOutcome, PendingInput,
+    PendingInputResult, PendingInputOutcome, PendingInput, ReplyAction,
 )
 
 
@@ -60,12 +60,20 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         except EmptyQuestionError as error:
             response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <вопрос>.'), error)
         except QuestionTooLongError as error:
-            response = IncomingResponse(compose_content(
-                str(error),
-                " Повтори ",
-                code_span("/ask <вопрос>"),
+            retry_content = compose_content(
+                str(error), " Повтори ", code_span("/ask <вопрос>"),
                 " с допустимым вопросом.",
-            ), error)
+            )
+            if context.pending_inputs is not None:
+                retry_content = compose_content(
+                    retry_content, " Чтобы ввести вопрос следующим сообщением, вызови ",
+                    code_span("/ask"), ".",
+                )
+            response = IncomingResponse(
+                retry_content, error,
+                suggested_actions=(ReplyAction("Ввести вопрос заново", "/ask"),)
+                if context.pending_inputs is not None else (),
+            )
         except AskModelTimeoutError as error:
             response = IncomingResponse(compose_content(
                 'Модель не успела ответить. Попробуй повторить /ask позже.',
