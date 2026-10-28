@@ -30,8 +30,8 @@ TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
 TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
 TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
-# Включить одновременно с callback-handler шага 7.10; до этого кнопки скрыты.
-TELEGRAM_INLINE_ACTIONS_ENABLED = False
+# Кнопки разрешены вместе с зарегистрированным ниже callback-handler.
+TELEGRAM_INLINE_ACTIONS_ENABLED = True
 IncomingMessageProcessor = Callable[
     [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
@@ -311,6 +311,56 @@ def _register_handlers(
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
         await safe_send_telegram_reply(message, result, logger=logger)
+
+    @router.callback_query()
+    async def handle_action(callback: Any) -> None:
+        """Подтверждает нажатие и передаёт непрозрачный token общему маршруту."""
+        try:
+            await callback.answer()
+        except Exception:
+            logger.exception("Telegram callback acknowledgement failed")
+
+        source = getattr(callback, "message", None)
+        chat = getattr(source, "chat", None)
+        author = getattr(callback, "from_user", None)
+        callback_id = getattr(callback, "id", None)
+        if (chat is None or getattr(chat, "id", None) is None
+                or author is None or getattr(author, "id", None) is None
+                or callback_id is None or not str(callback_id)):
+            logger.warning("Telegram callback missing chat, author or callback ID")
+            return
+
+        event = IncomingEvent(
+            channel="telegram",
+            chat_id=str(chat.id),
+            message_id=str(callback_id),
+            text="callback",
+            external_user_id=str(author.id),
+            username=getattr(author, "username", None),
+            display_name=(getattr(author, "full_name", None)
+                          or getattr(author, "first_name", None)),
+        )
+        target = _TelegramReplyTarget(callback.bot, event.chat_id)
+        completion_handler = _create_telegram_completion_handler(
+            callback, loop=asyncio.get_running_loop(), logger=logger,
+        )
+        token = callback.data if isinstance(getattr(callback, "data", None), str) else ""
+        select_action = incoming_message_processor.select_action
+        if menu_update_handler is None:
+            result = await asyncio.to_thread(select_action, event, token, completion_handler)
+        else:
+            result = await asyncio.to_thread(
+                select_action, event, token, completion_handler, menu_update_handler,
+            )
+        if result.error is not None:
+            logger.error("Telegram callback processing failed: %s", result.error)
+        try:
+            await callback.bot.edit_message_reply_markup(
+                chat_id=chat.id, message_id=source.message_id, reply_markup=None,
+            )
+        except Exception:
+            logger.exception("Telegram callback keyboard removal failed")
+        await safe_send_telegram_reply(target, result, logger=logger)
 
     dispatcher.include_router(router)
 

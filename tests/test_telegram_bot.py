@@ -105,12 +105,21 @@ class FakeRouter:
 
     def __init__(self) -> None:
         self.handler = None
+        self.callback_handler = None
 
     def message(self):  # type: ignore[no-untyped-def]
         """Возвращает декоратор, оставляющий handler без изменений."""
         def register(handler):  # type: ignore[no-untyped-def]
             """Сохраняет зарегистрированный обработчик тестового router."""
             self.handler = handler
+            return handler
+
+        return register
+
+    def callback_query(self):  # type: ignore[no-untyped-def]
+        """Сохраняет обработчик callback-query отдельно от сообщений."""
+        def register(handler):  # type: ignore[no-untyped-def]
+            self.callback_handler = handler
             return handler
 
         return register
@@ -262,8 +271,8 @@ class TelegramBotHelpersTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             _serialize_telegram_inline_keyboard(invalid, __import__("aiogram"))
 
-    def test_keyboard_is_gated_and_when_enabled_attaches_to_last_chunk_only(self) -> None:
-        """До callback-handler кнопок нет; тестовый gate прикрепляет их к финалу."""
+    def test_keyboard_attaches_to_last_chunk_only(self) -> None:
+        """После регистрации callback-handler кнопки прикрепляются к финалу."""
         message = TelegramMessage()
         response = IncomingResponse(text_content("abcdefghij"), bound_actions=(
             BoundReplyAction("Дальше", "x" * 32, "response-1"),
@@ -273,7 +282,8 @@ class TelegramBotHelpersTest(unittest.TestCase):
             await safe_send_telegram_reply(message, response, logger=logging.getLogger("test.telegram.inline"), limit=4)
 
         asyncio.run(run())
-        self.assertEqual(message.reply_markups, [None, None, None])
+        self.assertEqual(message.reply_markups[:2], [None, None])
+        self.assertEqual(message.reply_markups[2].inline_keyboard[0][0].callback_data, "x" * 32)
         message.answers.clear()
         message.reply_markups.clear()
 
@@ -377,6 +387,182 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertEqual(len(message.answers), 2)
         self.assertIn("Принял, обрабатываю", message.answers[0])
         self.assertEqual(message.answers[-1], "Готово")
+
+    def test_callback_ack_selects_opaque_token_and_removes_keyboard(self) -> None:
+        """Callback подтверждается до выбора и передаёт фактическую identity."""
+        order: list[str] = []
+
+        class Bot:
+            """Запоминает очистку markup и ответ callback."""
+
+            async def edit_message_reply_markup(self, **kwargs: object) -> None:
+                order.append("edit")
+                self.edit_kwargs = kwargs
+
+            async def send_message(self, **kwargs: object) -> None:
+                order.append("send")
+                self.sent = kwargs
+
+        class Callback:
+            """Имитирует Telegram callback с чужим текстом исходного сообщения."""
+
+            def __init__(self) -> None:
+                self.bot = Bot()
+                self.id = "callback-7"
+                self.data = "opaque-token"
+                self.from_user = SimpleNamespace(id=99, username="tester", full_name="Автор")
+                self.message = SimpleNamespace(
+                    chat=SimpleNamespace(id=42), message_id=18, text="/disable obsidian",
+                    from_user=SimpleNamespace(id=123),
+                )
+
+            async def answer(self) -> None:
+                order.append("ack")
+
+        class Processor:
+            """Фиксирует только API выбора, не разбирая callback текст."""
+
+            def select_action(self, event, token, completion, menu=None):  # type: ignore[no-untyped-def]
+                order.append("select")
+                self.selected = event, token, completion, menu
+                return IncomingResponse(text_content("Выбрано"))
+
+        aiogram = FakeAiogram()
+        processor = Processor()
+        callback = Callback()
+        _register_handlers(
+            aiogram.dispatcher, aiogram, incoming_message_processor=processor,
+            logger=logging.getLogger("test.telegram.callback"),
+        )
+        asyncio.run(aiogram.dispatcher.included_router.callback_handler(callback))
+        event, token, completion, menu = processor.selected
+        self.assertEqual(order, ["ack", "select", "edit", "send"])
+        self.assertEqual((event.channel, event.chat_id, event.message_id, event.external_user_id),
+                         ("telegram", "42", "callback-7", "99"))
+        self.assertEqual((event.username, event.display_name, event.text),
+                         ("tester", "Автор", "callback"))
+        self.assertEqual(token, "opaque-token")
+        self.assertTrue(callable(completion))
+        self.assertIsNone(menu)
+        self.assertEqual(callback.bot.edit_kwargs,
+                         {"chat_id": 42, "message_id": 18, "reply_markup": None})
+        self.assertEqual(callback.bot.sent["text"], "Выбрано")
+
+    def test_invalid_or_repeated_callback_and_edit_error_keep_response(self) -> None:
+        """Неверный и повторный token остаются отказом даже при сбое edit API."""
+        class Bot:
+            """Отклоняет очистку клавиатуры, но принимает ответ."""
+
+            def __init__(self) -> None:
+                self.answers: list[str] = []
+
+            async def edit_message_reply_markup(self, **_kwargs: object) -> None:
+                raise RuntimeError("edit failed")
+
+            async def send_message(self, **kwargs: object) -> None:
+                self.answers.append(str(kwargs["text"]))
+
+        class Callback:
+            """Сохраняет факт acknowledgement каждого нажатия."""
+
+            def __init__(self, token: str) -> None:
+                self.bot = bot
+                self.id = token + "-id"
+                self.data = token
+                self.from_user = SimpleNamespace(id=42)
+                self.message = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=7)
+                self.acked = False
+
+            async def answer(self) -> None:
+                self.acked = True
+
+        class Processor:
+            """Имитирует одноразовое принятие token общим маршрутом."""
+
+            def __init__(self) -> None:
+                self.used: set[str] = set()
+                self.executions = 0
+
+            def select_action(self, _event, token, _completion):  # type: ignore[no-untyped-def]
+                if token != "valid" or token in self.used:
+                    return IncomingResponse(text_content("Кнопка недоступна"))
+                self.used.add(token)
+                self.executions += 1
+                return IncomingResponse(text_content("Выполнено"))
+
+        bot = Bot()
+        processor = Processor()
+        aiogram = FakeAiogram()
+        _register_handlers(
+            aiogram.dispatcher, aiogram, incoming_message_processor=processor,
+            logger=logging.getLogger("test.telegram.callback.edit"),
+        )
+        callbacks = [Callback("bad"), Callback("valid"), Callback("valid")]
+        async def run() -> None:
+            for callback in callbacks:
+                await aiogram.dispatcher.included_router.callback_handler(callback)
+
+        with self.assertLogs("test.telegram.callback.edit", level="ERROR"):
+            asyncio.run(run())
+        self.assertTrue(all(callback.acked for callback in callbacks))
+        self.assertEqual(processor.executions, 1)
+        self.assertEqual(bot.answers, ["Кнопка недоступна", "Выполнено", "Кнопка недоступна"])
+
+    def test_callback_keeps_background_reply_and_menu_update_path(self) -> None:
+        """Выбор доставляет фоновый ответ и передаёт callback меню processor'у."""
+        class Bot:
+            """Сохраняет оба ответа через общий Bot API."""
+
+            def __init__(self) -> None:
+                self.sent: list[dict[str, object]] = []
+
+            async def edit_message_reply_markup(self, **_kwargs: object) -> None:
+                pass
+
+            async def send_message(self, **kwargs: object) -> None:
+                self.sent.append(kwargs)
+
+        class Callback:
+            """Предоставляет минимальную identity и адрес callback."""
+
+            bot = Bot()
+            id = "cb-background"
+            data = "token"
+            from_user = SimpleNamespace(id=42)
+            message = SimpleNamespace(chat=SimpleNamespace(id=42), message_id=5)
+
+            async def answer(self) -> None:
+                pass
+
+        class Processor:
+            """Выдаёт фоновый ответ и обновление меню при выборе."""
+
+            def select_action(self, event, token, completion, menu):  # type: ignore[no-untyped-def]
+                self.args = event, token
+                completion(BackgroundReply(event.reply_address, IncomingResponse(text_content("Фон"))))
+                menu(CommandMenuUpdate(event.reply_address, CommandMenu()))
+                return IncomingResponse(text_content("Итог"))
+
+        aiogram = FakeAiogram()
+        processor = Processor()
+        updates: list[CommandMenuUpdate] = []
+        _register_handlers(
+            aiogram.dispatcher, aiogram, incoming_message_processor=processor,
+            logger=logging.getLogger("test.telegram.callback.background"),
+            menu_update_handler=updates.append,
+        )
+
+        async def run() -> None:
+            await aiogram.dispatcher.included_router.callback_handler(Callback())
+            for _ in range(10):
+                if len(Callback.bot.sent) == 2:
+                    break
+                await asyncio.sleep(0)
+
+        asyncio.run(run())
+        self.assertEqual({item["text"] for item in Callback.bot.sent}, {"Фон", "Итог"})
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(updates[0].address, ReplyAddress("telegram", "42"))
 
     def test_menu_publication_uses_chat_scope_and_exact_commands(self) -> None:
         """Меню публикуется в личном scope с точными именами и описаниями."""
