@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import logging
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -15,6 +16,8 @@ from compadre_assistant.capabilities.ask.presentation.handler import AskCapabili
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
+    CommandMenuUpdate,
+    CommandMenuUpdateHandler,
     IncomingCapabilityPort,
     IncomingResponse,
 )
@@ -22,6 +25,7 @@ from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+
 from compadre_assistant.core.domain.users.identity import UserIdentityService
 from compadre_assistant.capabilities.obsidian.bootstrap import (
     AnalyzeArticleUseCaseFactory,
@@ -60,6 +64,9 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteIdentityRebindConfirmationRepository,
     SQLiteIdentityLifecycleRepository,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -162,8 +169,19 @@ class ChannelMessageProcessor:
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
 
     def __call__(self, incoming_message: IncomingEvent,
-                 completion_handler: ChannelCompletionHandler | None = None) -> IncomingResponse:
-        """Читает identity и режим в коротком независимом core scope."""
+                 completion_handler: ChannelCompletionHandler | None = None,
+                 menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+        """Обрабатывает событие в коротком core scope.
+
+        Args:
+            incoming_message: Событие с identity и адресом исходного чата.
+            completion_handler: Доставка последующего ответа каналу.
+            menu_update_handler: Необязательная доставка изменившегося меню.
+
+        Returns:
+            Текстовый ответ независимо от результата обновления меню.
+        """
+        menu_updates: list[CommandMenuUpdate] = []
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
@@ -172,7 +190,17 @@ class ChannelMessageProcessor:
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
-            return dispatcher.execute(incoming_message, completion_handler)
+            response = dispatcher.execute(
+                incoming_message, completion_handler,
+                menu_updates.append if menu_update_handler is not None else None,
+            )
+        if menu_update_handler is not None:
+            for update in menu_updates:
+                try:
+                    menu_update_handler(update)
+                except Exception:
+                    LOGGER.exception("Could not deliver command menu update after core scope")
+        return response
 
 
 @contextmanager

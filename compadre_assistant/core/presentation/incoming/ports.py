@@ -62,6 +62,17 @@ class CommandMenu:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandMenuUpdate:
+    """Связывает новое меню с адресом чата для адаптера канала."""
+
+    address: ReplyAddress
+    menu: CommandMenu
+
+
+CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], None]
+
+
+@dataclass(frozen=True, slots=True)
 class ReplyAction:
     """Предлагает следующий шаг ответа с точной командой для ручного ввода.
 

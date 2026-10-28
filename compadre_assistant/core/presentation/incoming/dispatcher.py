@@ -13,6 +13,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
+    CommandMenuUpdate, CommandMenuUpdateHandler,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -157,22 +158,43 @@ class IncomingMessageDispatcher:
         self,
         event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None = None,
+        menu_update_handler: CommandMenuUpdateHandler | None = None,
     ) -> IncomingResponse:
         """Возвращает каналу общий ответ, сохраняя предметные модели внутри возможности.
 
         Args:
             event: Нормализованное событие канала.
             completion_handler: Доставка последующего ответа по сохранённому адресу.
+            menu_update_handler: Передача изменившегося меню адаптеру текущего чата.
 
         Returns:
             Готовое содержимое ответа и необязательные адресные действия.
         """
         from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
+        previous_menu = None
+        if menu_update_handler is not None:
+            try:
+                from compadre_assistant.core.presentation.incoming.menu import build_command_menu
+
+                # Предварительное чтение не очищает ожидание: ответ об истечении
+                # или смене контекста должен сформировать обычный маршрут ввода.
+                previous_menu = build_command_menu(*self._command_context(event, cleanup_pending=False))
+            except Exception:
+                LOGGER.exception("Could not read command menu before incoming action")
+
         result = self._execute(event, completion_handler)
-        if isinstance(result, IncomingResponse):
-            return result
-        return IncomingResponse(format_incoming_message_result(result), result.error)
+        response = (result if isinstance(result, IncomingResponse) else
+                    IncomingResponse(format_incoming_message_result(result), result.error))
+        if menu_update_handler is not None:
+            try:
+                current_menu = self.command_menu(event)
+                if current_menu != previous_menu:
+                    menu_update_handler(CommandMenuUpdate(event.reply_address, current_menu))
+            except Exception:
+                # Публикация меню вторична: обработанный текстовый ответ остаётся доступным.
+                LOGGER.exception("Could not update command menu for current chat")
+        return response
 
     def _execute(
         self, event: IncomingEvent,
@@ -743,7 +765,7 @@ class IncomingMessageDispatcher:
         return build_command_menu(*self._command_context(event))
 
     def _command_context(
-        self, event: IncomingEvent,
+        self, event: IncomingEvent, *, cleanup_pending: bool = True,
     ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
@@ -763,8 +785,9 @@ class IncomingMessageDispatcher:
                 if pending.required_mode is not None:
                     valid = valid and mode is not None and mode.capability_id == pending.required_mode
                 if not valid:
-                    self._pending_inputs.clear(event.reply_address, pending.request_id)
-                    pending = None
+                    if cleanup_pending:
+                        self._pending_inputs.clear(event.reply_address, pending.request_id)
+                        pending = None
         active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
         snapshot = self._confirmation_snapshot(event, user, active)
         return personal, mode.capability_id if mode else None, pending, snapshot
