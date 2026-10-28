@@ -37,6 +37,8 @@ class FakeVkClient:
         self.formats: list[str | None] = []
         self.keyboards: list[str | None] = []
         self.attempt_keyboards: list[str | None] = []
+        self.acks: list[tuple[str, int, int]] = []
+        self.cleared: list[tuple[int, int]] = []
 
     def send_message(
         self,
@@ -53,6 +55,14 @@ class FakeVkClient:
         self.messages.append((peer_id, text))
         self.formats.append(format_data)
         self.keyboards.append(keyboard)
+
+    def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
+        """Запоминает подтверждение VK callback."""
+        self.acks.append((event_id, user_id, peer_id))
+
+    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
+        """Запоминает очистку исходного сообщения."""
+        self.cleared.append((peer_id, conversation_message_id))
 
 
 class FailingVkClient(FakeVkClient):
@@ -213,8 +223,8 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(len(set(client.attempt_keyboards)), 1)
         self.assertIsNotNone(client.attempt_keyboards[0])
 
-    def test_vk_inline_runtime_gate_and_background_reply_stay_disabled(self) -> None:
-        """Runtime gate скрывает кнопки и в обычном, и в фоновом ответе."""
+    def test_vk_inline_runtime_gate_and_background_reply_are_enabled(self) -> None:
+        """Runtime gate показывает кнопки в обычном и фоновом ответе."""
         client = FakeVkClient()
         response = IncomingResponse(text_content("reply"), bound_actions=(
             BoundReplyAction("Далее", "opaque", "response"),
@@ -225,7 +235,119 @@ class VkBotTest(unittest.TestCase):
         callback._create_vk_completion_handler(client, logger=logging.getLogger("test.vk.inline.background"))(
             BackgroundReply(ReplyAddress("vk", "22"), response)
         )
-        self.assertEqual(client.keyboards, [None, None])
+        self.assertEqual(len(client.keyboards), 2)
+        self.assertTrue(all(__import__("json").loads(value)["inline"] for value in client.keyboards))
+
+    def test_message_event_acks_first_and_selects_only_payload_token(self) -> None:
+        """Callback подтверждается до общего выбора с фактическими ID VK."""
+        client = FakeVkClient()
+        seen = []
+
+        class Processor:
+            def select_action(self, event, token, completion, menu=None):
+                self_outer.assertEqual(client.acks[-1], ("event-1", 33, 22))
+                seen.append((event, token, menu))
+                completion(BackgroundReply(event.reply_address, IncomingResponse(text_content("Фон"))))
+                return IncomingResponse(text_content("Готово"))
+
+        self_outer = self
+        _handle_update({"type": "message_event", "object": {
+            "peer_id": 22, "user_id": 33, "event_id": "event-1",
+            "conversation_message_id": 44,
+            "payload": '{"token":"opaque","label":"/cancel"}',
+        }}, incoming_message_processor=Processor(), client=client,
+            logger=logging.getLogger("test.vk.event"))
+        self.assertEqual(seen, [])
+        self.assertEqual(client.acks, [("event-1", 33, 22)])
+
+        _handle_update({"type": "message_event", "object": {
+            "peer_id": 22, "user_id": 33, "event_id": "event-1",
+            "conversation_message_id": 44,
+            "payload": '{"token":"opaque"}',
+        }}, incoming_message_processor=Processor(), client=client,
+            logger=logging.getLogger("test.vk.event"))
+        event, token, menu = seen[0]
+        self.assertEqual((event.channel, event.chat_id, event.external_user_id, event.message_id),
+                         ("vk", "22", "33", "event-1"))
+        self.assertEqual((event.text, token, menu), ("opaque", "opaque", None))
+        self.assertEqual(client.cleared, [(22, 44)])
+        self.assertEqual(client.messages[-2:], [(22, "Фон"), (22, "Готово")])
+
+    def test_message_event_rejects_malformed_payload_and_cleanup_error_is_nonfatal(self) -> None:
+        """Некорректный payload не исполняется; сбой очистки не теряет ответ."""
+        class Client(FakeVkClient):
+            def clear_inline_keyboard(self, *, peer_id, conversation_message_id):
+                raise VkBotError("edit failed")
+
+        client = Client()
+        calls = []
+
+        class Processor:
+            def select_action(self, event, token, completion):
+                calls.append((event.external_user_id, token))
+                return IncomingResponse(text_content("Недоступно"))
+
+        for payload in ("not json", '"opaque"', '{"label":"/cancel"}', '{"token":1}'):
+            _handle_update({"type": "message_event", "object": {
+                "peer_id": 22, "user_id": 99, "event_id": "e", "payload": payload,
+            }}, incoming_message_processor=Processor(), client=client,
+                logger=logging.getLogger("test.vk.event.bad"))
+        self.assertEqual(calls, [])
+        with self.assertLogs("test.vk.event.bad", level="WARNING"):
+            _handle_update({"type": "message_event", "object": {
+                "peer_id": 22, "user_id": 99, "event_id": "e2",
+                "conversation_message_id": 44, "payload": '{"token":"stale"}',
+            }}, incoming_message_processor=Processor(), client=client,
+                logger=logging.getLogger("test.vk.event.bad"))
+        self.assertEqual(calls, [("99", "stale")])
+        self.assertEqual(client.messages[-1], (22, "Недоступно"))
+
+    def test_message_event_repeated_and_foreign_choice_never_execute_twice(self) -> None:
+        """Общий выбор получает автора callback и отклоняет повторный token."""
+        client = FakeVkClient()
+        executed = []
+
+        class Processor:
+            def __init__(self):
+                self.used = False
+
+            def select_action(self, event, token, completion):
+                if event.external_user_id != "33" or self.used:
+                    return IncomingResponse(text_content("Кнопка больше недоступна"))
+                self.used = True
+                executed.append(token)
+                return IncomingResponse(text_content("Выполнено"))
+
+        processor = Processor()
+        for user_id in (99, 33, 33):
+            _handle_update({"type": "message_event", "object": {
+                "peer_id": 22, "user_id": user_id, "event_id": f"event-{user_id}",
+                "payload": '{"token":"opaque"}',
+            }}, incoming_message_processor=processor, client=client,
+                logger=logging.getLogger("test.vk.event.repeat"))
+        self.assertEqual(executed, ["opaque"])
+        self.assertEqual([message for _, message in client.messages], [
+            "Кнопка больше недоступна", "Выполнено", "Кнопка больше недоступна",
+        ])
+
+    def test_long_poll_dispatches_message_event_without_touching_menu(self) -> None:
+        """Long Poll отправляет callback worker по peer ID и не меняет меню."""
+        update = {"type": "message_event", "object": {
+            "peer_id": 22, "user_id": 33, "event_id": "event-1",
+            "payload": '{"token":"opaque"}',
+        }}
+        client = LongPollMessageClient(waits=[{"ts": "2", "updates": [update]}, KeyboardInterrupt()])
+
+        class Processor:
+            def select_action(self, event, token, completion):
+                return IncomingResponse(text_content("Выбрано"))
+
+        with self.assertRaises(KeyboardInterrupt):
+            run_vk_bot(token="token", group_id=1, incoming_message_processor=Processor(),
+                       logger=logging.getLogger("test.vk.event.poll"), client=client)
+        self.assertEqual(client.acks, [("event-1", 33, 22)])
+        self.assertEqual(client.messages, [(22, "Выбрано")])
+        self.assertEqual(client.keyboards, [None])
 
     def test_handle_update_converts_vk_message_to_incoming_message(self) -> None:
         """VK update превращается в channel-agnostic IncomingEvent."""
@@ -614,6 +736,70 @@ class VkBotTest(unittest.TestCase):
         self.assertIn("keyboard=%7B%22buttons%22%3A%5B%5D%7D", menu_body)
         self.assertIn("message=plain", plain_body)
         self.assertNotIn("keyboard=", plain_body)
+
+    def test_vk_api_acks_event_and_edits_only_known_plain_source(self) -> None:
+        """VK API сохраняет исходный текст и не редактирует неизвестный ответ."""
+        from urllib.parse import parse_qs
+
+        requests = []
+
+        class Response:
+            def __init__(self, data):
+                self.data = data
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return __import__("json").dumps(self.data).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            requests.append(request)
+            method = request.full_url.rsplit("/", 1)[-1]
+            if method == "messages.send":
+                return Response({"response": 101})
+            if method == "messages.getByConversationMessageId":
+                return Response({"response": {"items": [{"id": 101, "text": "Ручная команда: /help"}]}})
+            return Response({"response": 1})
+
+        client = VkApiClient(token="secret")
+        with patch("compadre_assistant.presentation.vk.bot.urlopen", fake_urlopen):
+            client.send_message(peer_id=22, text="Ручная команда: /help", random_id=1,
+                                keyboard='{"inline":true,"buttons":[]}')
+            client.answer_message_event(event_id="event-1", user_id=33, peer_id=22)
+            client.clear_inline_keyboard(peer_id=22, conversation_message_id=44)
+            client.clear_inline_keyboard(peer_id=22, conversation_message_id=44)
+
+        methods = [request.full_url.rsplit("/", 1)[-1] for request in requests]
+        self.assertEqual(methods.count("messages.edit"), 1)
+        ack = parse_qs(requests[1].data.decode("utf-8"))
+        self.assertEqual((ack["event_id"], ack["user_id"], ack["peer_id"]),
+                         (["event-1"], ["33"], ["22"]))
+        edit = parse_qs(requests[3].data.decode("utf-8"))
+        self.assertEqual(edit["message"], ["Ручная команда: /help"])
+        self.assertEqual(edit["cmid"], ["44"])
+        self.assertEqual(__import__("json").loads(edit["keyboard"][0]),
+                         {"inline": True, "buttons": []})
+
+    def test_vk_api_leaves_formatted_source_untouched(self) -> None:
+        """Очистка не стирает оформление, которое messages.edit не принимает."""
+        requests = []
+
+        def fake_urlopen(request, timeout):
+            requests.append(request)
+            return FakeHttpResponse()
+
+        client = VkApiClient(token="secret")
+        with patch("compadre_assistant.presentation.vk.bot.urlopen", fake_urlopen):
+            client.send_message(peer_id=22, text="Важный текст", random_id=1,
+                                format_data='{"version":"1","items":[]}',
+                                keyboard='{"inline":true,"buttons":[]}')
+            client.clear_inline_keyboard(peer_id=22, conversation_message_id=44)
+        self.assertEqual([request.full_url.rsplit("/", 1)[-1] for request in requests],
+                         ["messages.send", "messages.getByConversationMessageId"])
 
     def test_api_call_classifies_network_failure_as_transient(self) -> None:
         """Оборванное соединение VK допускает безопасный повтор отправки."""

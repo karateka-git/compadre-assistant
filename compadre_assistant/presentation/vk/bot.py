@@ -4,7 +4,7 @@ import json
 import logging
 import random
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from random import randint
 from threading import Condition, Event, Lock, Thread
@@ -36,8 +36,7 @@ VK_LONG_POLL_RETRY_MAX_SECONDS = 30.0
 VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_UPDATE_WORKER_COUNT = 4
 VK_UPDATE_QUEUE_SIZE = 128
-# VK inline-кнопки остаются скрытыми до подключения обработчика message_event.
-VK_INLINE_ACTIONS_ENABLED = False
+VK_INLINE_ACTIONS_ENABLED = True
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
@@ -149,11 +148,14 @@ def run_vk_bot(
                 if not isinstance(update, dict):
                     logger.error("VK update handling failed: unexpected update format")
                     continue
-                if update.get("type") != "message_new":
+                if update.get("type") not in {"message_new", "message_event"}:
                     continue
                 object_data = update.get("object")
-                message = object_data.get("message") if isinstance(object_data, dict) else None
-                chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
+                if update["type"] == "message_event":
+                    chat_id = str(object_data.get("peer_id")) if isinstance(object_data, dict) else ""
+                else:
+                    message = object_data.get("message") if isinstance(object_data, dict) else None
+                    chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
                 workers.submit(chat_id, update)
     finally:
         menu_stop.set()
@@ -269,6 +271,8 @@ class VkApiClient:
             raise ValueError("token must not be empty")
         self._token = token
         self._api_version = api_version
+        self._inline_messages: OrderedDict[tuple[int, int], str] = OrderedDict()
+        self._inline_lock = Lock()
 
     def get_long_poll_server(self, *, group_id: int) -> LongPollServer:
         """Получает VK Bots Long Poll server для группы."""
@@ -325,7 +329,59 @@ class VkApiClient:
             params["format_data"] = format_data
         if keyboard is not None:
             params["keyboard"] = keyboard
-        self._api_call("messages.send", params)
+        result = self._api_call("messages.send", params).get("response")
+        if (keyboard is not None and format_data is None and isinstance(result, int)
+                and not isinstance(result, bool) and result > 0):
+            try:
+                is_inline = json.loads(keyboard).get("inline") is True
+            except (ValueError, AttributeError):
+                is_inline = False
+            if is_inline:
+                with self._inline_lock:
+                    self._inline_messages[peer_id, result] = text
+                    if len(self._inline_messages) > 512:
+                        self._inline_messages.popitem(last=False)
+
+    def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
+        """Подтверждает нажатие callback-кнопки до обработки действия.
+
+        Args:
+            event_id: ID фактического события VK.
+            user_id: ID пользователя, присланный VK.
+            peer_id: ID исходного диалога.
+        """
+        self._api_call("messages.sendMessageEventAnswer", {
+            "event_id": event_id, "user_id": str(user_id), "peer_id": str(peer_id),
+        })
+
+    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
+        """Убирает кнопки исходного plain-сообщения при сохранённом тексте.
+
+        Если исходный ответ не найден в памяти или имел format_data, редактирование
+        пропускается: VK messages.edit не принимает format_data.
+        """
+        result = self._api_call("messages.getByConversationMessageId", {
+            "peer_id": str(peer_id),
+            "conversation_message_ids": str(conversation_message_id),
+        }).get("response")
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            return
+        message = items[0]
+        message_id = message.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        with self._inline_lock:
+            original_text = self._inline_messages.get((peer_id, message_id))
+        if original_text is None or message.get("text") != original_text:
+            return
+        self._api_call("messages.edit", {
+            "peer_id": str(peer_id), "cmid": str(conversation_message_id),
+            "message": original_text,
+            "keyboard": '{"inline":true,"buttons":[]}',
+        })
+        with self._inline_lock:
+            self._inline_messages.pop((peer_id, message_id), None)
 
     def _api_call(self, method: str, params: dict[str, str]) -> dict[str, Any]:
         api_params = dict(params)
@@ -383,6 +439,12 @@ def _handle_update(
     empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
     menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
+    if update.get("type") == "message_event":
+        _handle_message_event(
+            update, incoming_message_processor=incoming_message_processor,
+            client=client, logger=logger, menu_update_handler=menu_update_handler,
+        )
+        return
     if update.get("type") != "message_new":
         return
     object_data = update.get("object")
@@ -427,6 +489,61 @@ def _handle_update(
         response=result,
         logger=logger,
     )
+
+
+def _handle_message_event(
+    update: dict[str, Any], *, incoming_message_processor: IncomingMessageProcessor,
+    client: VkApiClient, logger: logging.Logger,
+    menu_update_handler: CommandMenuUpdateHandler | None,
+) -> None:
+    """Подтверждает VK callback и выбирает действие только по opaque token."""
+    data = update.get("object")
+    if not isinstance(data, dict):
+        return
+    peer_id = data.get("peer_id")
+    user_id = data.get("user_id")
+    event_id = data.get("event_id")
+    if (not isinstance(peer_id, int) or isinstance(peer_id, bool)
+            or not isinstance(user_id, int) or isinstance(user_id, bool)
+            or not isinstance(event_id, str) or not event_id):
+        return
+    try:
+        client.answer_message_event(event_id=event_id, user_id=user_id, peer_id=peer_id)
+    except VkBotError as error:
+        logger.warning("VK message event ack failed: %s", error)
+    payload = data.get("payload")
+    if not isinstance(payload, str):
+        return
+    try:
+        parsed = json.loads(payload)
+    except (ValueError, TypeError):
+        return
+    if not isinstance(parsed, dict) or set(parsed) != {"token"}:
+        return
+    token = parsed["token"]
+    if not isinstance(token, str) or not token:
+        return
+    select_action = getattr(incoming_message_processor, "select_action", None)
+    if not callable(select_action):
+        return
+    event = IncomingEvent(
+        channel="vk", chat_id=str(peer_id), message_id=event_id,
+        text=token, external_user_id=str(user_id),
+    )
+    completion_handler = _create_vk_completion_handler(client, logger=logger)
+    if menu_update_handler is None:
+        result = select_action(event, token, completion_handler)
+    else:
+        result = select_action(event, token, completion_handler, menu_update_handler)
+    if result.error is not None:
+        logger.error("VK action selection failed: %s", result.error)
+    cmid = data.get("conversation_message_id")
+    if isinstance(cmid, int) and not isinstance(cmid, bool) and cmid > 0:
+        try:
+            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=cmid)
+        except VkBotError as error:
+            logger.warning("VK inline keyboard cleanup failed: %s", error)
+    _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger)
 
 
 def _create_vk_menu_update_handler(
@@ -553,7 +670,7 @@ def _safe_send_vk_message(
                 peer_id=peer_id,
                 text=chunk.text,
                 format_data=chunk.format_data,
-                keyboard=keyboard,
+                keyboard=chunk_keyboard,
                 random_id=random_id,
             ),
             logger=logger,
