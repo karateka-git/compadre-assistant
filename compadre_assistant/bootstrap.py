@@ -380,14 +380,20 @@ class ChannelMessageProcessor:
             response = dispatcher.bind_response_actions(incoming_message, response, self._response_actions)
         if menu_update_handler is not None:
             with self._menu_lock:
-                for update in menu_updates:
+                # Первое сообщение личного чата также требует публикации:
+                # до него у адаптера ещё нет снимка, даже если команда не меняла меню.
+                addresses = list(dict.fromkeys(update.address for update in menu_updates))
+                if (incoming_message.reply_address not in addresses
+                        and incoming_message.reply_address not in self._published_menus):
+                    addresses.append(incoming_message.reply_address)
+                for address in addresses:
                     self._reconcile_menu_event(
-                        IncomingEvent(update.address.channel, update.address.chat_id,
+                        IncomingEvent(address.channel, address.chat_id,
                                       "menu-reconcile", "/help",
                                       incoming_message.external_user_id
-                                      if update.address == incoming_message.reply_address else None),
+                                      if address == incoming_message.reply_address else None),
                         menu_update_handler,
-                        allow_unknown=update.address == incoming_message.reply_address,
+                        allow_unknown=address == incoming_message.reply_address,
                     )
         return response
 
