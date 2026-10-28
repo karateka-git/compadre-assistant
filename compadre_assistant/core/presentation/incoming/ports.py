@@ -115,6 +115,19 @@ class ConfirmationQueryResult:
 
 
 @dataclass(frozen=True, slots=True)
+class BoundReplyAction:
+    """Передаёт адаптеру подпись, opaque token и ID конкретного ответа.
+
+    Только token отправляется назад через select_action; подпись не исполняется.
+    response_id позволяет сопоставить кнопки с отправленным сообщением канала.
+    """
+
+    label: str
+    token: str
+    response_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class IncomingResponse:
     """Передаёт содержимое и явно выбранные владельцем действия ответа.
 
@@ -127,6 +140,7 @@ class IncomingResponse:
     error: Exception | None = None
     actions: tuple[ConfirmationAction, ...] = ()
     suggested_actions: tuple[ReplyAction, ...] = ()
+    bound_actions: tuple[BoundReplyAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

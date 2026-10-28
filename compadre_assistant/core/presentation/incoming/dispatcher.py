@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 import logging
 
@@ -31,6 +31,8 @@ from compadre_assistant.core.domain.users.identity import (
 )
 from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
 from compadre_assistant.core.domain.chat_modes import ChatModeKey, ChatModeRepository
+from compadre_assistant.core.domain.users.entities import is_private_chat_address
+from compadre_assistant.core.presentation.incoming.action_selection import ActionContext, ResponseActionStore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -116,6 +118,142 @@ class IncomingMessageDispatcher:
             self._capability_preference_repository, self._capability_defaults()
         ).execute(user.id)
         return self._registry.for_user(selections)
+
+    def action_context(self, event: IncomingEvent) -> ActionContext:
+        """Читает контекст кнопок без изменения identity по непроверенному адресу.
+
+        Raises:
+            ValueError: Нет явного автора личного чата либо адрес занят другой identity.
+        """
+        if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            raise ValueError("Действие требует явного автора личного чата")
+        known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+        if known is None:
+            if self._user_identity_service.has_known_chat_address(event.channel, event.chat_id):
+                raise ValueError("Неоднозначный адрес")
+            user = None
+        else:
+            user, identity = known
+            if identity.external_user_id != event.external_user_id:
+                raise ValueError("Адрес принадлежит другой identity")
+        state = self._chat_mode_repository.get_state(
+            ChatModeKey(user.id, event.channel, event.chat_id)
+        ) if user else None
+        personal = self._personal_registry(user) if user else None
+        pending = self._pending_inputs.get(event.reply_address)
+        return ActionContext(
+            user.id if user else None, state.capability_id if state else None,
+            state.revision if state else 0,
+            tuple((item.descriptor.capability_id, item.server_available, item.user_enabled)
+                  for item in personal.access) if personal else (),
+            pending.request_id if pending and not self._pending_inputs.expired(pending) else None,
+        )
+
+    def bind_response_actions(self, event: IncomingEvent, response: IncomingResponse,
+                              store: ResponseActionStore) -> IncomingResponse:
+        """Регистрирует только действия конкретного ответа после проверки контекста.
+
+        Ошибка чтения отключает кнопки, сохраняя текстовый ручной путь.
+        Адресные подтверждения связываются только с актуальным публичным ожиданием.
+        """
+        response = replace(response, bound_actions=())
+        if not response.actions and not response.suggested_actions:
+            return response
+        if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            return response
+        try:
+            context = self.action_context(event)
+            snapshot = self._action_confirmations(event) if response.actions else None
+            actions = []
+            for action in response.actions:
+                matches = [item for item in snapshot.confirmations
+                           if item.origin == event.reply_address and action in item.actions]
+                if snapshot.status == "complete" and len(matches) == 1:
+                    actions.append((action.label, action.command, matches[0], action))
+            confirmation_commands = {action.command for action in response.actions}
+            for action in response.suggested_actions:
+                parts = action.command.split()
+                # Адресное решение никогда не разрешается через общий ReplyAction.
+                if (not parts or not parts[0].startswith("/")
+                        or (parts[0] == "/confirm" and len(parts) > 1)
+                        or action.command in confirmation_commands
+                        or not self._suggestion_allowed(parts[0], context)):
+                    continue
+                actions.append((action.label, action.command, None, None))
+            return replace(response, bound_actions=store.register(event, context, tuple(actions)))
+        except Exception:
+            LOGGER.exception("Could not bind response actions")
+            return response
+
+    def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
+                      completion_handler: ChannelCompletionHandler | None = None,
+                      menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+        """Принимает одноразовый выбор и повторяет проверки перед обычным входом.
+
+        Args:
+            event: Адрес и автор callback; его текст не исполняется.
+            token: Непрозрачный ID из bound_actions конкретного ответа.
+            store: Общий процессный реестр; после перезапуска старые ID не действуют.
+            completion_handler: Обычная доставка последующего ответа.
+            menu_update_handler: Обычная доставка изменений меню.
+
+        Returns:
+            Ответ обычного маршрута либо одинаковый безопасный отказ для всех
+            отсутствующих, чужих, устаревших и уже использованных действий.
+        """
+        rejected = IncomingResponse(text_content(
+            "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
+        ))
+        entry = store.claim(event, token)
+        if entry is None:
+            return rejected
+        try:
+            if self.action_context(event) != entry.context:
+                return rejected
+            if entry.confirmation is not None:
+                snapshot = self._action_confirmations(event)
+                if snapshot.status != "complete" or not any(
+                        item == entry.confirmation and entry.action in item.actions
+                        for item in snapshot.confirmations):
+                    return rejected
+            elif not self._suggestion_allowed(entry.command.split()[0], entry.context):
+                return rejected
+            if entry.command.strip() == "/confirm":
+                snapshot = self._action_confirmations(event)
+                if snapshot.status != "complete" or not snapshot.confirmations:
+                    return rejected
+        except Exception:
+            LOGGER.exception("Could not validate selected response action")
+            return rejected
+        # Команда берётся только из серверной записи, никогда из callback/подписи.
+        return self.execute(replace(event, text=entry.command), completion_handler, menu_update_handler)
+
+    def _suggestion_allowed(self, command: str, context: ActionContext) -> bool:
+        """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
+        if command == "/cancel":
+            return context.pending_request_id is not None
+        if command in {item.value for item in ChatCommand}:
+            return True
+        effective = {owner for owner, server, enabled in context.access if server and enabled}
+        for descriptor in self._registry.descriptors():
+            if descriptor.capability_id not in effective:
+                continue
+            if command == descriptor.entry.name:
+                return True
+            if descriptor.capability_id == context.mode_id and any(
+                    command == item.name for section in descriptor.help.sections for item in section.commands):
+                return True
+        return False
+
+    def _action_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
+        """Читает ожидания проверенного адреса без touch исходной identity."""
+        known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+        user = known[0] if known else None
+        state = self._chat_mode_repository.get_state(
+            ChatModeKey(user.id, event.channel, event.chat_id)
+        ) if user else None
+        active = self._personal_registry(user).by_id(state.capability_id) if state and state.capability_id else None
+        return self._confirmation_snapshot(event, user, active)
 
     def _capability_defaults(self) -> tuple[CapabilityDefault, ...]:
         """Передаёт domain только устойчивые ID и defaults общего каталога."""

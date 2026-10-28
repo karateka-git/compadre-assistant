@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 import logging
+from dataclasses import replace
 from threading import Event, RLock
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
 
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
+from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
@@ -21,6 +23,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CommandMenuUpdateHandler,
     IncomingCapabilityPort,
     IncomingResponse,
+    BackgroundReply,
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
@@ -170,6 +173,7 @@ class ChannelMessageProcessor:
         """
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
+        self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
@@ -307,6 +311,30 @@ class ChannelMessageProcessor:
         Returns:
             Текстовый ответ независимо от результата обновления меню.
         """
+        return self._process(incoming_message, completion_handler, menu_update_handler)
+
+    def select_action(self, event: IncomingEvent, token: str,
+                      completion_handler: ChannelCompletionHandler | None = None,
+                      menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+        """Передаёт callback адаптера общему безопасному маршруту выбора.
+
+        Args:
+            event: Проверенные адаптером канал, чат, явный автор и ID callback.
+                Текст игнорируется; при отсутствии текста можно передать token.
+            token: Только непрозрачный token из response.bound_actions.
+            completion_handler: Доставка фоновых ответов с тем же контрактом.
+            menu_update_handler: Публикация изменившегося меню.
+
+        Returns:
+            Обычный ответ с новыми действиями либо безопасный отказ.
+        """
+        return self._process(event, completion_handler, menu_update_handler,
+                             token=token if isinstance(token, str) else "")
+
+    def _process(self, incoming_message: IncomingEvent,
+                 completion_handler: ChannelCompletionHandler | None,
+                 menu_update_handler: CommandMenuUpdateHandler | None,
+                 *, token: str | None = None) -> IncomingResponse:
         menu_updates: list[CommandMenuUpdate] = []
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
@@ -316,10 +344,40 @@ class ChannelMessageProcessor:
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
-            response = dispatcher.execute(
-                incoming_message, completion_handler,
-                menu_updates.append if menu_update_handler is not None else None,
-            )
+            try:
+                original_context = dispatcher.action_context(incoming_message)
+            except Exception:
+                original_context = None
+
+            def deliver(reply: BackgroundReply) -> None:
+                """Связывает фоновые действия только с неизменившимся исходным чатом."""
+                response = replace(reply.response, bound_actions=())
+                if original_context is not None and reply.address == incoming_message.reply_address:
+                    try:
+                        with connect_database(self._database_path) as background_connection:
+                            background_dispatcher = IncomingMessageDispatcher(
+                                registry=self._registry, pending_inputs=self._pending_inputs,
+                                user_identity_service=create_user_identity_service(background_connection),
+                                chat_mode_repository=SQLiteChatModeRepository(background_connection),
+                                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
+                            )
+                            if background_dispatcher.action_context(incoming_message) == original_context:
+                                response = background_dispatcher.bind_response_actions(
+                                    incoming_message, response, self._response_actions,
+                                )
+                    except Exception:
+                        LOGGER.exception("Could not bind background response actions")
+                completion_handler(BackgroundReply(reply.address, response))
+
+            completion = deliver if completion_handler is not None else None
+            menu_handler = menu_updates.append if menu_update_handler is not None else None
+            if token is None:
+                response = dispatcher.execute(incoming_message, completion, menu_handler)
+            else:
+                response = dispatcher.select_action(
+                    incoming_message, token, self._response_actions, completion, menu_handler,
+                )
+            response = dispatcher.bind_response_actions(incoming_message, response, self._response_actions)
         if menu_update_handler is not None:
             with self._menu_lock:
                 for update in menu_updates:
