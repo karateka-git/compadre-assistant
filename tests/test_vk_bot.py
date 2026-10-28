@@ -9,13 +9,17 @@ from urllib.error import URLError
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
+)
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.presentation.vk.bot import (
     LongPollServer,
     VkApiClient,
     VkBotError,
     VkTransientError,
     _VkUpdateWorkers,
+    _create_vk_menu_update_handler,
     _handle_update,
     _long_poll_retry_delay,
     _safe_send_vk_message,
@@ -30,6 +34,7 @@ class FakeVkClient:
         self.messages: list[tuple[int, str]] = []
         self.random_ids: list[int | None] = []
         self.formats: list[str | None] = []
+        self.keyboards: list[str | None] = []
 
     def send_message(
         self,
@@ -38,11 +43,13 @@ class FakeVkClient:
         text: str,
         random_id: int | None = None,
         format_data: str | None = None,
+        keyboard: str | None = None,
     ) -> None:
         """Запоминает отправленное сообщение."""
         self.random_ids.append(random_id)
         self.messages.append((peer_id, text))
         self.formats.append(format_data)
+        self.keyboards.append(keyboard)
 
 
 class FailingVkClient(FakeVkClient):
@@ -55,6 +62,7 @@ class FailingVkClient(FakeVkClient):
         text: str,
         random_id: int | None = None,
         format_data: str | None = None,
+        keyboard: str | None = None,
     ) -> None:
         """Имитирует ошибку VK API при отправке сообщения."""
         self.random_ids.append(random_id)
@@ -177,6 +185,30 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(processed[0].external_user_id, "33")
         self.assertEqual(client.messages[0][0], 22)
         self.assertIn("Пришли ссылку", client.messages[0][1])
+
+    def test_handle_update_passes_menu_callback_and_keeps_plain_reply(self) -> None:
+        """VK передаёт callback меню в processor и отдельно отправляет его ответ."""
+        client = FakeVkClient()
+        received_handlers = []
+
+        def processor(_message, _completion_handler, menu_handler):
+            received_handlers.append(menu_handler)
+            menu_handler(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu()))
+            return IncomingResponse(text_content("Обычный ответ"))
+
+        _handle_update(
+            _update(11, 22, "hello"),
+            incoming_message_processor=processor,
+            client=client,
+            logger=logging.getLogger("test.vk.menu.callback"),
+            menu_update_handler=_create_vk_menu_update_handler(
+                client, logger=logging.getLogger("test.vk.menu.callback")
+            ),
+        )
+
+        self.assertIsNotNone(received_handlers[0])
+        self.assertEqual(client.messages[0], (22, "Меню команд обновлено."))
+        self.assertEqual(client.messages[-1], (22, "Обычный ответ"))
 
     def test_handle_update_delivers_general_progress_reply(self) -> None:
         """VK отправляет квитанцию по нейтральному сигналу до запуска worker."""
@@ -347,6 +379,164 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(request.full_url, "https://api.vk.com/method/messages.send")
         self.assertIn(b"message=hello", request.data)
         self.assertIn(b"access_token=token", request.data)
+
+    def test_menu_handler_builds_persistent_text_keyboard_and_uses_exact_commands(self) -> None:
+        """Меню содержит текстовые команды, включая явный режим очистки."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu"))
+        publish(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu((
+            CommandSuggestion("/help", "Помощь"), CommandSuggestion("/cancel", "Отмена"),
+        ))))
+
+        keyboard = __import__("json").loads(client.keyboards[0])
+        self.assertFalse(keyboard["inline"])
+        self.assertFalse(keyboard["one_time"])
+        self.assertEqual(
+            [button["action"] for row in keyboard["buttons"] for button in row],
+            [{"type": "text", "label": "/help"}, {"type": "text", "label": "/cancel"}],
+        )
+        self.assertEqual(client.messages[0], (22, "Меню команд обновлено."))
+
+        publish(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu()))
+        self.assertEqual(__import__("json").loads(client.keyboards[1])["buttons"], [])
+
+    def test_menu_handler_preserves_full_main_command_list_with_vk_row_limits(self) -> None:
+        """Полный набор основных команд помещается в допустимые строки без потерь."""
+        commands = [command.value for command in ChatCommand if not command.arguments_hint]
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu.full"))
+        publish(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu(tuple(
+            CommandSuggestion(command, command) for command in commands
+        ))))
+        keyboard = __import__("json").loads(client.keyboards[0])
+        self.assertLessEqual(len(keyboard["buttons"]), 10)
+        self.assertTrue(all(len(row) <= 5 for row in keyboard["buttons"]))
+        self.assertEqual(
+            [button["action"]["label"] for row in keyboard["buttons"] for button in row],
+            commands,
+        )
+
+        oversized = CommandMenu(tuple(
+            CommandSuggestion(f"/c{index}", f"Команда {index}") for index in range(51)
+        ))
+        with self.assertRaisesRegex(ValueError, "at most 50"):
+            publish(CommandMenuUpdate(ReplyAddress("vk", "22"), oversized))
+
+    def test_menu_handler_ignores_other_channels_and_non_private_peers(self) -> None:
+        """Клавиатура не публикуется в Telegram, сообщества и некорректные адреса."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu.scope"))
+        menu = CommandMenu((CommandSuggestion("/help", "Помощь"),))
+        for address in (ReplyAddress("telegram", "22"), ReplyAddress("vk", "2000000001"),
+                        ReplyAddress("vk", "not-an-id")):
+            publish(CommandMenuUpdate(address, menu))
+        self.assertEqual(client.messages, [])
+
+    def test_menu_handler_keeps_retry_identity_and_propagates_api_error(self) -> None:
+        """Повтор одного меню переиспользует random_id, а ошибка доходит до caller."""
+        client = FailingVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu.retry"))
+        update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
+        with self.assertRaisesRegex(VkBotError, "send failed"):
+            publish(update)
+        first_id = client.random_ids[-1]
+        with self.assertRaisesRegex(VkBotError, "send failed"):
+            publish(update)
+        self.assertEqual(client.random_ids[-1], first_id)
+
+    def test_menu_handler_uses_a_new_retry_identity_after_a_menu_transition(self) -> None:
+        """Возврат A после B начинает новую серию, а повтор ошибки A сохраняет ID."""
+        client = FailingVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu.transition"))
+        menu_a = CommandMenu((CommandSuggestion("/help", "Помощь"),))
+        menu_b = CommandMenu((CommandSuggestion("/status", "Состояние"),))
+        for menu in (menu_a, menu_b, menu_a, menu_a):
+            with self.assertRaises(VkBotError):
+                publish(CommandMenuUpdate(ReplyAddress("vk", "22"), menu))
+        first_a, menu_b_id, second_a, retried_a = client.random_ids
+        self.assertNotEqual(first_a, menu_b_id)
+        self.assertNotEqual(menu_b_id, second_a)
+        self.assertEqual(second_a, retried_a)
+
+    def test_vk_runtime_starts_and_stops_menu_reconciliation_without_changing_replies(self) -> None:
+        """Runtime запускает сверку и сохраняет штатную доставку текстового ответа."""
+        client = LongPollMessageClient(waits=[KeyboardInterrupt()])
+        started = Event()
+        stopped = Event()
+
+        def processor(_message, _completion_handler):
+            return IncomingResponse(text_content("Ответ без изменений"))
+
+        def reconcile(handler, stop):
+            started.set()
+            handler(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu()))
+            stop.wait(2)
+            stopped.set()
+
+        processor.run_menu_reconciliation = reconcile
+        with self.assertRaises(KeyboardInterrupt):
+            run_vk_bot(
+                token="token", group_id=1, incoming_message_processor=processor,
+                logger=logging.getLogger("test.vk.menu.lifecycle"), client=client,
+            )
+
+        self.assertTrue(started.is_set())
+        self.assertTrue(stopped.is_set())
+        self.assertEqual(client.keyboards, ['{"one_time":false,"inline":false,"buttons":[]}'])
+        self.assertTrue(client.messages)
+
+    def test_vk_runtime_logs_menu_reconciliation_thread_that_misses_shutdown(self) -> None:
+        """VK runtime сообщает, если поток сверки пережил ограниченное ожидание."""
+        class StuckThread:
+            def __init__(self, *, target, name, daemon=None):
+                self.target = target
+
+            def start(self):
+                pass
+
+            def join(self, timeout=None):
+                self.timeout = timeout
+
+            def is_alive(self):
+                return True
+
+        client = LongPollSequenceClient(
+            servers=[LongPollServer(server="https://long-poll.example", key="key", ts="1")],
+            waits=[KeyboardInterrupt()],
+        )
+
+        def processor(_message, _completion_handler):
+            return IncomingResponse(text_content("Ответ"))
+
+        processor.run_menu_reconciliation = lambda _handler, _stop: None
+        logger = logging.getLogger("test.vk.menu.shutdown_timeout")
+        with patch("compadre_assistant.presentation.vk.bot.Thread", StuckThread):
+            with self.assertLogs(logger, level="ERROR") as logs:
+                with self.assertRaises(KeyboardInterrupt):
+                    run_vk_bot(
+                        token="token", group_id=1, incoming_message_processor=processor,
+                        logger=logger, client=client, worker_count=1,
+                    )
+        self.assertIn("VK menu reconciliation did not stop before timeout", logs.output[0])
+
+    def test_vk_send_message_includes_keyboard_without_changing_plain_message_params(self) -> None:
+        """VK API получает JSON клавиатуры как параметр обычного messages.send."""
+        requests = []
+
+        def fake_urlopen(request, timeout):
+            requests.append(request)
+            return FakeHttpResponse()
+
+        client = VkApiClient(token="token")
+        with patch("compadre_assistant.presentation.vk.bot.urlopen", fake_urlopen):
+            client.send_message(peer_id=22, text="menu", random_id=123, keyboard='{"buttons":[]}')
+            client.send_message(peer_id=22, text="plain", random_id=124)
+
+        menu_body = requests[0].data.decode("utf-8")
+        plain_body = requests[1].data.decode("utf-8")
+        self.assertIn("keyboard=%7B%22buttons%22%3A%5B%5D%7D", menu_body)
+        self.assertIn("message=plain", plain_body)
+        self.assertNotIn("keyboard=", plain_body)
 
     def test_api_call_classifies_network_failure_as_transient(self) -> None:
         """Оборванное соединение VK допускает безопасный повтор отправки."""

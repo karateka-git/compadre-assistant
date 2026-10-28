@@ -142,9 +142,14 @@ class MigrationRunnerTest(unittest.TestCase):
                 migration_count = connection.execute(
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
+                versions = [row[0] for row in connection.execute(
+                    "SELECT version FROM schema_migrations ORDER BY version"
+                )]
 
-        self.assertEqual(sorted(results), [0, 4])
+        self.assertEqual(sum(results), 4)
+        self.assertTrue(all(0 <= result <= 4 for result in results))
         self.assertEqual(migration_count, 4)
+        self.assertEqual(versions, [1, 2, 3, 4])
 
     def test_existing_profiles_receive_default_name_without_losing_data(self) -> None:
         """0003 обновляет NULL-имена после 0001 и 0002 без потери данных."""

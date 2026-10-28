@@ -7,14 +7,17 @@ import time
 from collections import deque
 from collections.abc import Callable
 from random import randint
-from threading import Condition, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
+    CommandMenuUpdateHandler, IncomingResponse,
+)
 from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
@@ -37,7 +40,7 @@ VK_UPDATE_QUEUE_SIZE = 128
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
 IncomingMessageProcessor = Callable[
-    [IncomingEvent, ChannelCompletionHandler | None],
+    [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
 ]
 
@@ -78,6 +81,12 @@ def run_vk_bot(
         max_queue_size: Максимальное число ожидающих обработки обновлений.
     """
     api_client = client or VkApiClient(token=token)
+    menu_update_handler = _create_vk_menu_update_handler(api_client, logger=logger)
+    runtime_menu_handler = (
+        menu_update_handler
+        if callable(getattr(incoming_message_processor, "run_menu_reconciliation", None))
+        else None
+    )
     long_poll = _get_long_poll_server_with_retry(
         api_client,
         group_id=group_id,
@@ -93,10 +102,18 @@ def run_vk_bot(
             client=api_client,
             logger=logger,
             empty_message_reply=empty_message_reply,
+            menu_update_handler=runtime_menu_handler,
         ),
         logger=logger,
         worker_count=worker_count,
         max_queue_size=max_queue_size,
+    )
+    menu_stop = Event()
+    menu_thread = _start_vk_menu_reconciliation(
+        incoming_message_processor,
+        menu_update_handler,
+        menu_stop,
+        logger=logger,
     )
     logger.info("VK bot long polling started for group_id=%s", group_id)
     try:
@@ -137,6 +154,11 @@ def run_vk_bot(
                 chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
                 workers.submit(chat_id, update)
     finally:
+        menu_stop.set()
+        if menu_thread is not None:
+            menu_thread.join(timeout=VK_LONG_POLL_WAIT_SECONDS + 5)
+            if menu_thread.is_alive():
+                logger.error("VK menu reconciliation did not stop before timeout")
         workers.close()
 
 
@@ -280,6 +302,7 @@ class VkApiClient:
         text: str,
         random_id: int | None = None,
         format_data: str | None = None,
+        keyboard: str | None = None,
     ) -> None:
         """Отправляет одну готовую часть VK без повторного разбиения.
 
@@ -288,6 +311,7 @@ class VkApiClient:
             text: Готовый текст части, уже ограниченный renderer канала.
             random_id: Стабильный ID одной retry-серии или `None` для нового ID.
             format_data: JSON диапазонов именно этой части или `None` для plain.
+            keyboard: JSON VK-клавиатуры; `None` оставляет обычное сообщение без клавиатуры.
         """
         # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
         params = {
@@ -297,6 +321,8 @@ class VkApiClient:
         }
         if format_data is not None:
             params["format_data"] = format_data
+        if keyboard is not None:
+            params["keyboard"] = keyboard
         self._api_call("messages.send", params)
 
     def _api_call(self, method: str, params: dict[str, str]) -> dict[str, Any]:
@@ -353,6 +379,7 @@ def _handle_update(
     client: VkApiClient,
     logger: logging.Logger,
     empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
     if update.get("type") != "message_new":
         return
@@ -386,7 +413,10 @@ def _handle_update(
         client,
         logger=logger,
     )
-    result = incoming_message_processor(incoming_message, completion_handler)
+    if menu_update_handler is None:
+        result = incoming_message_processor(incoming_message, completion_handler)  # type: ignore[call-arg]
+    else:
+        result = incoming_message_processor(incoming_message, completion_handler, menu_update_handler)
     if result.error is not None:
         logger.error("VK incoming message processing failed: %s", result.error)
     _safe_send_vk_message(
@@ -395,6 +425,96 @@ def _handle_update(
         response=result,
         logger=logger,
     )
+
+
+def _create_vk_menu_update_handler(
+    client: Any, *, logger: logging.Logger,
+) -> CommandMenuUpdateHandler:
+    """Создаёт обработчик постоянной текстовой клавиатуры VK.
+
+    VK применяет клавиатуру через `messages.send`, поэтому обновление
+    сопровождается коротким служебным сообщением. Повтор одной попытки
+    сохраняет `random_id`, а переход меню создаёт новую серию публикации.
+    """
+    state_guard = Lock()
+    peer_locks: dict[int, Lock] = {}
+    last_attempt: dict[int, tuple[str, int]] = {}
+
+    def publish(update: CommandMenuUpdate) -> None:
+        """Отправляет клавиатуру только в личный VK-адрес."""
+        if update.address.channel != "vk":
+            return
+        try:
+            peer_id = int(update.address.chat_id)
+        except (TypeError, ValueError):
+            logger.warning("Skipping VK menu with non-numeric peer ID")
+            return
+        if not 0 < peer_id < 2_000_000_000:
+            logger.warning("Skipping VK menu for a non-private peer")
+            return
+
+        items = update.menu.items
+        if len(items) > 50:
+            raise ValueError("VK keyboard supports at most 50 buttons")
+        rows: list[list[dict[str, object]]] = []
+        for start in range(0, len(items), 5):
+            row: list[dict[str, object]] = []
+            for item in items[start:start + 5]:
+                label = item.command
+                if not label or len(label) > 40:
+                    raise ValueError("VK text button command must contain 1-40 characters")
+                row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+            rows.append(row)
+        keyboard = json.dumps(
+            {"one_time": False, "inline": False, "buttons": rows},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with state_guard:
+            peer_lock = peer_locks.setdefault(peer_id, Lock())
+        with peer_lock:
+            previous = last_attempt.get(peer_id)
+            if previous is not None and previous[0] == keyboard:
+                random_id = previous[1]
+            else:
+                # Новый ID для перехода A→B→A; повтор того же состояния после
+                # ошибки сохраняет ID, а новый runtime автоматически начинает
+                # новую retry-серию.
+                random_id = randint(1, 2_147_483_647)
+                last_attempt[peer_id] = (keyboard, random_id)
+            # Ошибка намеренно выходит наружу: reconciliation оставит адрес на повтор.
+            client.send_message(
+                peer_id=peer_id,
+                text="Меню команд обновлено.",
+                keyboard=keyboard,
+                random_id=random_id,
+            )
+
+    return publish
+
+
+def _start_vk_menu_reconciliation(
+    processor: IncomingMessageProcessor,
+    handler: CommandMenuUpdateHandler,
+    stop: Event,
+    *,
+    logger: logging.Logger,
+) -> Thread | None:
+    """Запускает восстановление меню при старте и его периодическую сверку."""
+    reconcile = getattr(processor, "run_menu_reconciliation", None)
+    if not callable(reconcile):
+        return None
+
+    def run() -> None:
+        """Сверяет меню до завершения VK runtime."""
+        try:
+            reconcile(handler, stop)
+        except Exception:
+            logger.exception("VK menu reconciliation stopped unexpectedly")
+
+    thread = Thread(target=run, name="vk-menu-reconciliation", daemon=True)
+    thread.start()
+    return thread
 
 
 def _safe_send_vk_message(
