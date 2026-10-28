@@ -10,7 +10,9 @@ from compadre_assistant.core.domain.users.ports import (
     IdentityLinkTokenRepository,
     IdentityLifecycleRepository,
 )
-from compadre_assistant.core.domain.users.entities import AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation
+from compadre_assistant.core.domain.users.entities import (
+    AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, is_private_chat_address,
+)
 from compadre_assistant.core.domain.users.identity import IdentityAlreadyBoundError, InvalidLinkCodeError
 from compadre_assistant.core.data.sqlite.user_identity_dtos import (
     AppUserDto, ExternalIdentityDto, IncomingIdentityDto, IdentityLinkTokenDto, IdentityRebindConfirmationDto,
@@ -99,6 +101,48 @@ class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
+    def find_private_chat(self, channel: str, chat_id: str) -> ExternalIdentity | None:
+        """Читает точный адрес через индекс и отвергает неоднозначные связи."""
+        rows = self._connection.execute(
+            """SELECT e.id, e.app_user_id, e.channel, e.external_user_id,
+                      e.external_chat_id, e.username, e.display_name
+               FROM external_identities e JOIN app_users u ON u.id = e.app_user_id
+               WHERE e.channel = ? AND e.external_chat_id = ?
+               LIMIT 2""", (channel, chat_id),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        identity = external_identity_from_dto(ExternalIdentityDto(**dict(rows[0])))
+        return identity if is_private_chat_address(
+            identity.channel, identity.external_user_id, identity.external_chat_id) else None
+
+    def has_chat_address(self, channel: str, chat_id: str) -> bool:
+        """Проверяет занятость адреса по индексу без чтения остальных чатов."""
+        row = self._connection.execute(
+            "SELECT 1 FROM external_identities WHERE channel = ? AND external_chat_id = ? LIMIT 1",
+            (channel, chat_id),
+        ).fetchone()
+        return row is not None
+
+    def list_all_private_chats(self) -> tuple[ExternalIdentity, ...]:
+        """Читает сохранённые однозначные адреса через DTO и mapper."""
+        rows = self._connection.execute(
+            """SELECT e.id, e.app_user_id, e.channel, e.external_user_id,
+                      e.external_chat_id, e.username, e.display_name
+               FROM external_identities e JOIN app_users u ON u.id = e.app_user_id
+               WHERE trim(e.external_chat_id) <> '' AND trim(e.channel) <> ''
+                 AND trim(e.external_user_id) <> ''
+                 AND NOT EXISTS (
+                   SELECT 1 FROM external_identities other
+                   WHERE other.channel = e.channel
+                     AND other.external_chat_id = e.external_chat_id AND other.id <> e.id
+                 )
+               ORDER BY e.id"""
+        ).fetchall()
+        identities = (external_identity_from_dto(ExternalIdentityDto(**dict(row))) for row in rows)
+        return tuple(item for item in identities if is_private_chat_address(
+            item.channel, item.external_user_id, item.external_chat_id))
+
     def list_for_user(self, app_user_id: int) -> tuple[ExternalIdentity, ...]:
         """Читает однозначные адреса существующего профиля через DTO и mapper."""
         rows = self._connection.execute(
@@ -119,7 +163,9 @@ class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
             ORDER BY e.id
             """, (app_user_id,),
         ).fetchall()
-        return tuple(external_identity_from_dto(ExternalIdentityDto(**dict(row))) for row in rows)
+        identities = (external_identity_from_dto(ExternalIdentityDto(**dict(row))) for row in rows)
+        return tuple(item for item in identities if is_private_chat_address(
+            item.channel, item.external_user_id, item.external_chat_id))
 
     def find(self, identity: IncomingIdentity) -> ExternalIdentity | None:
         """Ищет связь по каналу и внешнему ID пользователя."""

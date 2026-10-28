@@ -37,6 +37,7 @@ class PendingInputStore:
         """Создаёт пустой реестр и ограниченный набор блокировок чатов."""
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._entries: dict[ReplyAddress, PendingInput] = {}
+        self._entries_lock = RLock()
         # Полосы ограничивают память и сериализуют повторные события одного чата.
         self._locks = tuple(RLock() for _ in range(64))
 
@@ -69,13 +70,20 @@ class PendingInputStore:
             now = self._now()
             pending = PendingInput(chat_key, owner_id, input_kind, uuid4().hex,
                                    now, now + timedelta(minutes=10), app_user_id, value_label, required_mode, retry_command)
-            self._entries[chat_key] = pending
+            with self._entries_lock:
+                self._entries[chat_key] = pending
             return pending
 
     def get(self, chat_key: ReplyAddress) -> PendingInput | None:
         """Читает запись, сохраняя истёкшую до первого обрабатываемого события."""
         with self.lock(chat_key):
-            return self._entries.get(chat_key)
+            with self._entries_lock:
+                return self._entries.get(chat_key)
+
+    def addresses(self) -> tuple[ReplyAddress, ...]:
+        """Возвращает адреса активной памяти для периодической проверки TTL."""
+        with self._entries_lock:
+            return tuple(self._entries)
 
     def expired(self, pending: PendingInput) -> bool:
         """Проверяет исходный срок, не продлевая его при повторной попытке."""
@@ -92,8 +100,9 @@ class PendingInputStore:
             True, если существующая запись удалена.
         """
         with self.lock(chat_key):
-            current = self._entries.get(chat_key)
-            if current is None or (request_id is not None and current.request_id != request_id):
-                return False
-            del self._entries[chat_key]
-            return True
+            with self._entries_lock:
+                current = self._entries.get(chat_key)
+                if current is None or (request_id is not None and current.request_id != request_id):
+                    return False
+                del self._entries[chat_key]
+                return True

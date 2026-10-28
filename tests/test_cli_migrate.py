@@ -142,7 +142,7 @@ class MigrateCommandTest(unittest.TestCase):
         ):
             self.assertEqual(self.run_cli(["--migrate"], {"DATABASE_PATH": str(self.database)}), 1)
         with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
             self.assertIsNone(connection.execute("SELECT name FROM sqlite_master WHERE name = 'partial_change'").fetchone())
 
@@ -170,7 +170,7 @@ class MigrateCommandTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
         with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 3)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
 
 
 if __name__ == "__main__":

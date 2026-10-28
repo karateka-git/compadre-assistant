@@ -27,9 +27,9 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.connection = self.enterContext(connect_database(Path(directory.name) / "test.db"))
         apply_migrations(self.connection)
         self.service = create_user_identity_service(self.connection)
-        self.tg = IncomingIdentity("telegram", "tg-user", "tg-chat")
-        self.vk = IncomingIdentity("vk", "vk-user", "vk-chat")
-        self.foreign = IncomingIdentity("telegram", "foreign", "foreign-chat")
+        self.tg = IncomingIdentity("telegram", "101", "101")
+        self.vk = IncomingIdentity("vk", "202", "202")
+        self.foreign = IncomingIdentity("telegram", "303", "303")
         self.user = self.service.register_with_name(self.tg, display_name="Первый")
         self.other = self.service.register_with_name(self.foreign, display_name="Второй")
         self.service.link(code=self.service.create_link_code(self.user.id).code, identity=self.vk)
@@ -54,7 +54,7 @@ class LinkedChatMenusTest(unittest.TestCase):
 
     def test_preference_updates_other_mode_and_clears_only_invalid_pending(self):
         """Общий выбор пересчитывает разные режимы, сохраняя допустимый ввод."""
-        key = ChatModeKey(self.user.id, "vk", "vk-chat")
+        key = ChatModeKey(self.user.id, "vk", "202")
         self.fixture.modes.save(ChatMode(key, "obsidian"))
         self.send("/ask", self.vk)
         self.send("/name", self.foreign)
@@ -63,11 +63,11 @@ class LinkedChatMenusTest(unittest.TestCase):
         response = self.send("/disable ask")
         self.assertIn("выключена", response_text(response))
         menus = self.menus()
-        self.assertEqual(set(menus), {"tg-chat", "vk-chat"})
-        self.assertIn("/obsidian", menus["tg-chat"])
-        self.assertIn("/reanalyze", menus["vk-chat"])
-        self.assertNotIn("/ask", menus["vk-chat"])
-        self.assertNotIn("/cancel", menus["vk-chat"])
+        self.assertEqual(set(menus), {"101", "202"})
+        self.assertIn("/obsidian", menus["101"])
+        self.assertIn("/reanalyze", menus["202"])
+        self.assertNotIn("/ask", menus["202"])
+        self.assertNotIn("/cancel", menus["202"])
         self.assertIsNone(self.fixture.store.get(self.event("x", self.vk).reply_address))
         self.assertEqual(self.fixture.store.get(foreign_pending.chat_key), foreign_pending)
         self.assertEqual(self.fixture.modes.get(key).capability_id, "obsidian")
@@ -76,32 +76,32 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.updates.clear()
         self.send("/enable")
         self.send("ask")
-        self.assertIn("/ask", self.menus()["vk-chat"])
-        self.assertIn("/cancel", self.menus()["vk-chat"])
+        self.assertIn("/ask", self.menus()["202"])
+        self.assertIn("/cancel", self.menus()["202"])
         self.assertEqual(self.fixture.store.get(pending.chat_key), pending)
 
     def test_link_and_rebind_refresh_both_owners_without_leaking_preferences(self):
         """Перенесённый чат получает новый профиль, оставшиеся — своего владельца."""
-        fresh = IncomingIdentity("vk", "fresh", "fresh-chat")
+        fresh = IncomingIdentity("vk", "404", "404")
         self.send("/link " + self.service.create_link_code(self.user.id).code, fresh)
-        self.assertEqual(set(self.menus()), {"tg-chat", "vk-chat", "fresh-chat"})
+        self.assertEqual(set(self.menus()), {"101", "202", "404"})
         self.send("/disable ask", self.foreign)
         confirmation = self.service.request_rebind_confirmation(
             code=self.service.create_link_code(self.other.id).code, identity=self.vk)
         self.updates.clear()
         self.send(f"/confirm core identity {confirmation.id} {confirmation.version} yes", self.vk)
         menus = self.menus()
-        self.assertEqual(set(menus), {"tg-chat", "vk-chat", "fresh-chat", "foreign-chat"})
-        self.assertIn("/ask", menus["tg-chat"])
-        self.assertIn("/ask", menus["fresh-chat"])
-        self.assertNotIn("/ask", menus["vk-chat"])
-        self.assertNotIn("/ask", menus["foreign-chat"])
+        self.assertEqual(set(menus), {"101", "202", "404", "303"})
+        self.assertIn("/ask", menus["101"])
+        self.assertIn("/ask", menus["404"])
+        self.assertNotIn("/ask", menus["202"])
+        self.assertNotIn("/ask", menus["303"])
         self.assertNotIn(self.vk, self.service.list_known_private_chats(self.user))
 
     def test_stale_enumeration_does_not_restore_or_publish_old_address(self):
         """Смена адреса между перечислением и проверкой не оживляет прежний чат."""
         original = self.service.list_known_private_chats
-        moved = replace(self.vk, external_chat_id="new-chat")
+        moved = replace(self.vk, external_chat_id="505")
         calls = [0]
         def enumerate_chats(user):
             calls[0] += 1
@@ -111,8 +111,8 @@ class LinkedChatMenusTest(unittest.TestCase):
             return result
         with patch.object(self.service, "list_known_private_chats", side_effect=enumerate_chats):
             self.send("/disable ask")
-        self.assertEqual(set(self.menus()), {"tg-chat"})
-        self.assertIn(moved, original(self.user))
+        self.assertEqual(set(self.menus()), {"101"})
+        self.assertNotIn(moved, original(self.user))
         self.assertNotIn(self.vk, original(self.user))
 
     def test_enumeration_rejects_blank_ambiguous_and_deleted_addresses(self):
@@ -121,7 +121,7 @@ class LinkedChatMenusTest(unittest.TestCase):
         with self.connection:
             self.connection.execute("UPDATE external_identities SET external_chat_id = '  ' WHERE channel = 'vk'")
         self.assertEqual(self.service.list_known_private_chats(self.user), (self.tg,))
-        repository.create(app_user_id=self.other.id, identity=replace(self.tg, external_user_id="collision"))
+        repository.create(app_user_id=self.other.id, identity=replace(self.tg, external_user_id="606"))
         self.assertEqual(self.service.list_known_private_chats(self.user), ())
         self.assertFalse(self.service.owns_known_private_chat(self.user, self.tg))
         self.assertFalse(self.service.owns_known_private_chat(self.other, self.vk))
@@ -135,24 +135,24 @@ class LinkedChatMenusTest(unittest.TestCase):
         repository = SQLiteExternalIdentityRepository(self.connection)
         def read_context(event, **kwargs):
             result = original(event, **kwargs)
-            if event.chat_id == "vk-chat":
+            if event.chat_id == "202":
                 repository.reassign(app_user_id=self.other.id, identity=self.vk)
             return result
         with patch.object(self.dispatcher, "_command_context", side_effect=read_context):
             self.send("/disable ask")
-        self.assertEqual(set(self.menus()), {"tg-chat"})
+        self.assertEqual(set(self.menus()), {"101"})
         self.assertTrue(self.service.owns_known_private_chat(self.other, self.vk))
 
     def test_delivery_and_enumeration_errors_preserve_text_and_other_updates(self):
         """Сбой одного адреса не отменяет ответ, /help или следующий адрес."""
         def fail_current(update):
-            if update.address.chat_id == "tg-chat":
+            if update.address.chat_id == "101":
                 raise RuntimeError("transport")
             self.updates.append(update)
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
             response = self.send("/disable ask", handler=fail_current)
         self.assertIn("выключена", response_text(response))
-        self.assertEqual(set(self.menus()), {"vk-chat"})
+        self.assertEqual(set(self.menus()), {"202"})
         with patch.object(self.service, "list_known_private_chats", side_effect=RuntimeError("read")):
             with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
                 response = self.send("/enable ask")

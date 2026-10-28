@@ -18,6 +18,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.message_content import text_content
 from tests import test_contextual_help as help_tests
 from tests.test_incoming_boundary import _event
@@ -301,15 +302,18 @@ class ChannelMenuDeliveryTest(unittest.TestCase):
                         scope_active[0] = False
 
             updates = []
+            def private_event(text):
+                return IncomingEvent("telegram", "1001", "msg-1", text, "1001")
+
             def receive(update):
                 self.assertFalse(scope_active[0])
                 updates.append(update)
 
             with patch("compadre_assistant.bootstrap.connect_database", tracked_connection):
-                response = processor(_event("/register"), menu_update_handler=receive)
+                response = processor(private_event("/register"), menu_update_handler=receive)
                 self.assertIn("имя", response_text(response))
                 self.assertEqual(len(updates), 1)
-                self.assertEqual(updates[0].address, _event("x").reply_address)
+                self.assertEqual(updates[0].address, private_event("x").reply_address)
                 self.assertEqual([item.command for item in updates[0].menu.items], ["/cancel"])
 
                 def fail(update):
@@ -318,7 +322,7 @@ class ChannelMenuDeliveryTest(unittest.TestCase):
                     raise RuntimeError("menu transport unavailable")
 
                 with self.assertLogs("compadre_assistant.bootstrap", level="ERROR"):
-                    response = processor(_event("/cancel"), menu_update_handler=fail)
+                    response = processor(private_event("/cancel"), menu_update_handler=fail)
                 self.assertIn("Ввод отменён", response_text(response))
 
 

@@ -143,8 +143,8 @@ class MigrationRunnerTest(unittest.TestCase):
                     "SELECT COUNT(*) FROM schema_migrations"
                 ).fetchone()[0]
 
-        self.assertEqual(sorted(results), [0, 3])
-        self.assertEqual(migration_count, 3)
+        self.assertEqual(sorted(results), [0, 4])
+        self.assertEqual(migration_count, 4)
 
     def test_existing_profiles_receive_default_name_without_losing_data(self) -> None:
         """0003 обновляет NULL-имена после 0001 и 0002 без потери данных."""
@@ -232,12 +232,39 @@ class MigrationRunnerTest(unittest.TestCase):
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
     def test_clean_install_applies_all_migrations_without_creating_profiles(self) -> None:
-        """Чистая установка применяет 0001–0003, оставляя каталог пользователей пустым."""
+        """Чистая установка применяет 0001–0004, оставляя каталог пользователей пустым."""
         with TemporaryDirectory(prefix="user-name-clean-install-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
-                self.assertEqual([item.version for item in apply_migrations(connection)], [1, 2, 3])
+                self.assertEqual([item.version for item in apply_migrations(connection)], [1, 2, 3, 4])
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
                 self.assertEqual(apply_migrations(connection), [])
+
+    def test_private_chat_index_migrates_existing_rows(self) -> None:
+        """Новый индекс применяется к старой БД без изменения identity."""
+        with TemporaryDirectory(prefix="private-chat-index-") as directory:
+            root = Path(directory)
+            migrations = root / "migrations"
+            migrations.mkdir()
+            for version in (1, 2, 3):
+                source = next(MIGRATIONS_DIR.glob(f"{version:04d}_*.sql"))
+                (migrations / source.name).write_bytes(source.read_bytes())
+            with connect_database(root / "test.db") as connection:
+                self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [1, 2, 3])
+                connection.execute("INSERT INTO app_users (id, display_name) VALUES (1, 'Fixture')")
+                connection.execute(
+                    "INSERT INTO external_identities (app_user_id, channel, external_user_id, external_chat_id) "
+                    "VALUES (1, 'telegram', '1001', '1001')"
+                )
+                connection.commit()
+                source = next(MIGRATIONS_DIR.glob("0004_*.sql"))
+                (migrations / source.name).write_bytes(source.read_bytes())
+                self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [4])
+                self.assertEqual(connection.execute(
+                    "SELECT external_user_id, external_chat_id FROM external_identities"
+                ).fetchone()[:], ("1001", "1001"))
+                indexes = {row[1] for row in connection.execute("PRAGMA index_list('external_identities')")}
+                self.assertIn("idx_external_identities_channel_chat", indexes)
+                self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
     def test_capability_preferences_migrate_fresh_and_previous_database(self) -> None:
         """Новая таблица появляется без backfill и сохраняет данные схемы 0001."""

@@ -40,6 +40,15 @@ class ExternalIdentityRepository(Protocol):
         обновляет время посещения и не восстанавливает удалённые связи.
         """
 
+    def list_all_private_chats(self) -> tuple[ExternalIdentity, ...]:
+        """Возвращает однозначные личные адреса всех существующих профилей."""
+
+    def find_private_chat(self, channel: str, chat_id: str) -> ExternalIdentity | None:
+        """Возвращает одну текущую личную identity адреса либо None при неоднозначности."""
+
+    def has_chat_address(self, channel: str, chat_id: str) -> bool:
+        """Сообщает, занят ли адрес хотя бы одной сохранённой identity."""
+
     def create(
         self,
         *,

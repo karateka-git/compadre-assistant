@@ -806,9 +806,24 @@ class IncomingMessageDispatcher:
             Независимый от канала список команд и тип ожидаемого значения.
             Просроченный или недоступный ввод очищается, как при /help.
         """
+        return self.command_menu_snapshot(event)[0]
+
+    def command_menu_snapshot(
+        self, event: IncomingEvent, *, known_user: AppUser | None = None,
+    ) -> tuple[CommandMenu, bool]:
+        """Возвращает меню и полноту снимка подтверждений для безопасной публикации.
+
+        Args:
+            event: Сохранённый адрес и identity; текст не исполняется.
+            known_user: Повторно проверенный владелец адреса без обновления identity.
+
+        Returns:
+            Меню и признак успешного чтения всех источников подтверждений.
+        """
         from compadre_assistant.core.presentation.incoming.menu import build_command_menu
 
-        return build_command_menu(*self._command_context(event))
+        context = self._command_context(event, known_user=known_user)
+        return build_command_menu(*context), context[3].status == "complete"
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,

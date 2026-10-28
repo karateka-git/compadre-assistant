@@ -109,18 +109,54 @@ class UserIdentityService:
             if item.app_user_id == user.id
         )
 
+    def list_all_known_private_chats(self) -> tuple[tuple[AppUser, IncomingIdentity], ...]:
+        """Перечисляет известные личные чаты с владельцами для восстановления меню.
+
+        Returns:
+            Пары профиля и адреса без неоднозначных или удалённых связей.
+            Перед публикацией требуется повторная проверка владения.
+        """
+        result = []
+        for item in self._external_identity_repository.list_all_private_chats():
+            user = self._app_user_repository.get_by_id(item.app_user_id)
+            if user is not None:
+                result.append((user, IncomingIdentity(item.channel, item.external_user_id,
+                              item.external_chat_id, item.username, item.display_name)))
+        return tuple(result)
+
+    def find_known_private_chat(
+        self, channel: str, chat_id: str,
+    ) -> tuple[AppUser, IncomingIdentity] | None:
+        """Читает владельца одного однозначного личного адреса без touch.
+
+        Args:
+            channel: Канал сохранённого адреса.
+            chat_id: ID чата в канале.
+
+        Returns:
+            Текущие профиль и identity либо None при отсутствии или коллизии.
+        """
+        item = self._external_identity_repository.find_private_chat(channel, chat_id)
+        if item is None:
+            return None
+        user = self._app_user_repository.get_by_id(item.app_user_id)
+        if user is None:
+            return None
+        return user, IncomingIdentity(item.channel, item.external_user_id,
+                                      item.external_chat_id, item.username, item.display_name)
+
+    def has_known_chat_address(self, channel: str, chat_id: str) -> bool:
+        """Сообщает, занят ли адрес, чтобы не считать коллизию новым чатом."""
+        return self._external_identity_repository.has_chat_address(channel, chat_id)
+
     def owns_known_private_chat(self, user: AppUser, identity: IncomingIdentity) -> bool:
         """Проверяет владельца и точный актуальный адрес без побочного touch.
 
         Повторное перечисление исключает адрес, перенесённый другой identity,
         удалённый профиль и неоднозначный адрес. Проверка не оживляет старый чат.
         """
-        return any(
-            item.channel == identity.channel
-            and item.external_user_id == identity.external_user_id
-            and item.external_chat_id == identity.external_chat_id
-            for item in self.list_known_private_chats(user)
-        )
+        current = self.find_known_private_chat(identity.channel, identity.external_chat_id)
+        return current is not None and current[0].id == user.id and current[1] == identity
 
     def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
         """Создаёт именованный профиль и identity одной атомарной операцией.
