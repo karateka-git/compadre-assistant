@@ -34,6 +34,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.identity = Mock()
         self.identity.resolve.return_value = AppUser(23, "Имя")
         self.identity.get_pending_rebind.return_value = None
+        self.identity.list_known_private_chats.return_value = ()
         self.obsidian = HelpCapability()
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
         self.ask = AskCapability(Mock())

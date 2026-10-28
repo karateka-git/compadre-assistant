@@ -99,6 +99,28 @@ class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
 
+    def list_for_user(self, app_user_id: int) -> tuple[ExternalIdentity, ...]:
+        """Читает однозначные адреса существующего профиля через DTO и mapper."""
+        rows = self._connection.execute(
+            """
+            SELECT e.id, e.app_user_id, e.channel, e.external_user_id,
+                   e.external_chat_id, e.username, e.display_name
+            FROM external_identities e
+            JOIN app_users u ON u.id = e.app_user_id
+            WHERE e.app_user_id = ?
+              AND trim(e.external_chat_id) <> ''
+              AND trim(e.channel) <> '' AND trim(e.external_user_id) <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM external_identities other
+                  WHERE other.channel = e.channel
+                    AND other.external_chat_id = e.external_chat_id
+                    AND other.id <> e.id
+              )
+            ORDER BY e.id
+            """, (app_user_id,),
+        ).fetchall()
+        return tuple(external_identity_from_dto(ExternalIdentityDto(**dict(row))) for row in rows)
+
     def find(self, identity: IncomingIdentity) -> ExternalIdentity | None:
         """Ищет связь по каналу и внешнему ID пользователя."""
         dto = incoming_identity_to_dto(identity)

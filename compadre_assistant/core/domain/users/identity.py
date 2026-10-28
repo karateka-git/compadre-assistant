@@ -90,6 +90,38 @@ class UserIdentityService:
         self._external_identity_repository.touch(identity)
         return self._app_user_repository.get_by_id(external_identity.app_user_id)
 
+    def list_known_private_chats(self, user: AppUser) -> tuple[IncomingIdentity, ...]:
+        """Перечисляет сохранённые личные чаты проверенного профиля.
+
+        Args:
+            user: Профиль, разрешённый обычным входом перед пересчётом меню.
+
+        Returns:
+            Identity с последними известными адресами; удалённый профиль даёт
+            пустой список. Перед публикацией адрес нужно проверить повторно.
+        """
+        if self._app_user_repository.get_by_id(user.id) is None:
+            return ()
+        return tuple(
+            IncomingIdentity(item.channel, item.external_user_id, item.external_chat_id,
+                             item.username, item.display_name)
+            for item in self._external_identity_repository.list_for_user(user.id)
+            if item.app_user_id == user.id
+        )
+
+    def owns_known_private_chat(self, user: AppUser, identity: IncomingIdentity) -> bool:
+        """Проверяет владельца и точный актуальный адрес без побочного touch.
+
+        Повторное перечисление исключает адрес, перенесённый другой identity,
+        удалённый профиль и неоднозначный адрес. Проверка не оживляет старый чат.
+        """
+        return any(
+            item.channel == identity.channel
+            and item.external_user_id == identity.external_user_id
+            and item.external_chat_id == identity.external_chat_id
+            for item in self.list_known_private_chats(user)
+        )
+
     def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
         """Создаёт именованный профиль и identity одной атомарной операцией.
 

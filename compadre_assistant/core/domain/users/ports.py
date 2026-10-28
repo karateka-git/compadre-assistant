@@ -33,6 +33,13 @@ class ExternalIdentityRepository(Protocol):
     def find(self, identity: IncomingIdentity) -> ExternalIdentity | None:
         """Ищет связь по каналу и внешнему ID пользователя."""
 
+    def list_for_user(self, app_user_id: int) -> tuple[ExternalIdentity, ...]:
+        """Возвращает известные личные адреса профиля без пустых и неоднозначных чатов.
+
+        Адреса поступают только от входов личных диалогов. Перечисление не
+        обновляет время посещения и не восстанавливает удалённые связи.
+        """
+
     def create(
         self,
         *,

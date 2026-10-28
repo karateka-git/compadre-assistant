@@ -165,7 +165,7 @@ class IncomingMessageDispatcher:
         Args:
             event: Нормализованное событие канала.
             completion_handler: Доставка последующего ответа по сохранённому адресу.
-            menu_update_handler: Передача изменившегося меню адаптеру текущего чата.
+            menu_update_handler: Доставка меню по адресу текущего или связанного чата.
 
         Returns:
             Готовое содержимое ответа и необязательные адресные действия.
@@ -173,6 +173,8 @@ class IncomingMessageDispatcher:
         from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
         previous_menu = None
+        previous_user = None
+        previous_preferences = None
         if menu_update_handler is not None:
             try:
                 from compadre_assistant.core.presentation.incoming.menu import build_command_menu
@@ -180,6 +182,9 @@ class IncomingMessageDispatcher:
                 # Предварительное чтение не очищает ожидание: ответ об истечении
                 # или смене контекста должен сформировать обычный маршрут ввода.
                 previous_menu = build_command_menu(*self._command_context(event, cleanup_pending=False))
+                previous_user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+                if previous_user is not None:
+                    previous_preferences = self._capability_preference_repository.get_for_user(previous_user.id)
             except Exception:
                 LOGGER.exception("Could not read command menu before incoming action")
 
@@ -194,7 +199,48 @@ class IncomingMessageDispatcher:
             except Exception:
                 # Публикация меню вторична: обработанный текстовый ответ остаётся доступным.
                 LOGGER.exception("Could not update command menu for current chat")
+            try:
+                current_user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+                owner_changed = (previous_user.id if previous_user else None) != (current_user.id if current_user else None)
+                preferences_changed = (current_user is not None and
+                    self._capability_preference_repository.get_for_user(current_user.id) != previous_preferences)
+                if owner_changed or preferences_changed:
+                    # После переноса перечитываем обе стороны: старый снимок адресов
+                    # нельзя использовать для доставки меню прежнего владельца.
+                    affected = {user.id: user for user in (previous_user, current_user) if user is not None}
+                    for user in affected.values():
+                        self._update_linked_chat_menus(user, event.reply_address, menu_update_handler)
+            except Exception:
+                LOGGER.exception("Could not refresh linked chat menus after incoming action")
         return response
+
+    def _update_linked_chat_menus(
+        self, user: AppUser, origin: ReplyAddress, handler: CommandMenuUpdateHandler,
+    ) -> None:
+        """Пересчитывает каждый связанный адрес с его режимом и ожиданием."""
+        from compadre_assistant.core.presentation.incoming.menu import build_command_menu
+
+        try:
+            identities = self._user_identity_service.list_known_private_chats(user)
+        except Exception:
+            LOGGER.exception("Could not enumerate linked chats for menu update")
+            return
+        for identity in identities:
+            address = ReplyAddress(identity.channel, identity.external_chat_id)
+            if address == origin:
+                continue
+            try:
+                if not self._user_identity_service.owns_known_private_chat(user, identity):
+                    continue
+                event = IncomingEvent(identity.channel, identity.external_chat_id,
+                    "command-menu-refresh", "/help", identity.external_user_id)
+                # Это чтение сохранённого адреса, а не новое событие пользователя:
+                # resolve с touch мог бы вернуть устаревший адрес обратно в БД.
+                menu = build_command_menu(*self._command_context(event, known_user=user))
+                if self._user_identity_service.owns_known_private_chat(user, identity):
+                    handler(CommandMenuUpdate(address, menu))
+            except Exception:
+                LOGGER.exception("Could not update command menu for linked chat")
 
     def _execute(
         self, event: IncomingEvent,
@@ -766,9 +812,10 @@ class IncomingMessageDispatcher:
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,
+        known_user: AppUser | None = None,
     ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
-        user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
+        user = known_user or self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user) if user is not None else None
         mode = self._chat_mode_repository.get(
             ChatModeKey(user.id, event.channel, event.chat_id)
