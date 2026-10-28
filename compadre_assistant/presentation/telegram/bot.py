@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import threading
 from types import SimpleNamespace
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
+    CommandMenuUpdateHandler, IncomingResponse,
+)
 from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.shared.safe_send import (
@@ -22,8 +28,10 @@ TELEGRAM_POLLING_RETRY_BASE_SECONDS = 0.5
 TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 # При этой степени базовая задержка уже достигает установленного потолка.
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
+TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
+TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
 IncomingMessageProcessor = Callable[
-    [IncomingEvent, ChannelCompletionHandler | None],
+    [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
 ]
 
@@ -97,6 +105,9 @@ async def _run_telegram_bot(
     aiogram = _load_aiogram()
     bot = _create_polling_bot(aiogram, token=token, proxy_url=proxy_url)
     dispatcher = aiogram.Dispatcher()
+    menu_update_handler = _create_telegram_menu_update_handler(
+        bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
+    )
 
     _register_handlers(
         dispatcher,
@@ -104,9 +115,17 @@ async def _run_telegram_bot(
         incoming_message_processor=incoming_message_processor,
         logger=logger,
         empty_message_reply=empty_message_reply,
+        menu_update_handler=menu_update_handler,
     )
 
     logger.info("Telegram bot polling started")
+    reconciliation_stop = threading.Event()
+    reconciliation_thread = _start_telegram_menu_reconciliation(
+        incoming_message_processor,
+        menu_update_handler,
+        reconciliation_stop,
+        logger=logger,
+    )
     try:
         await _start_polling_with_retries(
             dispatcher,
@@ -120,6 +139,14 @@ async def _run_telegram_bot(
             f"{type(error.error).__name__}"
         ) from error.error
     finally:
+        reconciliation_stop.set()
+        if reconciliation_thread is not None:
+            await asyncio.to_thread(
+                reconciliation_thread.join,
+                TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            if reconciliation_thread.is_alive():
+                logger.error("Telegram menu reconciliation did not stop before timeout")
         await bot.session.close()
 
 
@@ -246,6 +273,7 @@ def _register_handlers(
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
     empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
     router = aiogram.Router()
@@ -267,16 +295,101 @@ def _register_handlers(
             loop=asyncio.get_running_loop(),
             logger=logger,
         )
-        result = await asyncio.to_thread(
-            incoming_message_processor,
-            incoming_message,
-            completion_handler,
-        )
+        if menu_update_handler is None:
+            result = await asyncio.to_thread(
+                incoming_message_processor, incoming_message, completion_handler,
+            )
+        else:
+            result = await asyncio.to_thread(
+                incoming_message_processor,
+                incoming_message,
+                completion_handler,
+                menu_update_handler,
+            )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
         await safe_send_telegram_reply(message, result, logger=logger)
 
     dispatcher.include_router(router)
+
+
+def _create_telegram_menu_update_handler(
+    bot: Any,
+    *,
+    loop: asyncio.AbstractEventLoop,
+    aiogram: Any,
+    logger: logging.Logger,
+) -> CommandMenuUpdateHandler:
+    """Создаёт синхронный callback публикации меню личного чата Telegram.
+
+    Callback вызывается из рабочего потока processor'а. Он передаёт запрос
+    event loop и ждёт ограниченное время, чтобы ошибка Telegram API вернулась
+    в механизм повторной сверки, не блокируя сам event loop.
+    """
+
+    def publish(update: CommandMenuUpdate) -> None:
+        """Публикует команды только для положительного числового Telegram ID."""
+        if update.address.channel != "telegram":
+            return
+        try:
+            chat_id = int(update.address.chat_id)
+        except (TypeError, ValueError):
+            logger.warning("Skipping Telegram menu with non-numeric chat ID")
+            return
+        if chat_id <= 0:
+            logger.warning("Skipping Telegram menu for a non-private chat")
+            return
+
+        commands = []
+        if len(update.menu.items) > 100:
+            raise ValueError("Telegram menu supports at most 100 commands")
+        for item in update.menu.items:
+            command = item.command[1:] if item.command.startswith("/") else item.command
+            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
+                raise ValueError("Telegram command name must contain 1-32 lowercase letters, digits or underscores")
+            if not 1 <= len(item.description) <= 256:
+                raise ValueError("Telegram command description must contain 1-256 characters")
+            commands.append(aiogram.types.BotCommand(command=command, description=item.description))
+
+        scope = aiogram.types.BotCommandScopeChat(chat_id=chat_id)
+        future = asyncio.run_coroutine_threadsafe(
+            bot.set_my_commands(commands=commands, scope=scope), loop,
+        )
+        try:
+            future.result(timeout=TELEGRAM_MENU_API_TIMEOUT_SECONDS)
+        except _FatalPollingError as error:
+            # PollingBot прерывает retry при фатальной ошибке. Меню обрабатывается
+            # отдельно и должно передать исходную ошибку processor'у для retry.
+            raise error.error from error
+        except FutureTimeoutError:
+            future.cancel()
+            raise TimeoutError("Telegram menu API call timed out")
+
+    return publish
+
+
+def _start_telegram_menu_reconciliation(
+    processor: IncomingMessageProcessor,
+    handler: CommandMenuUpdateHandler,
+    stop: threading.Event,
+    *,
+    logger: logging.Logger,
+) -> threading.Thread | None:
+    """Запускает периодическое восстановление меню, если его поддерживает processor."""
+    reconcile = getattr(processor, "run_menu_reconciliation", None)
+    if not callable(reconcile):
+        return None
+
+    def run() -> None:
+        """Выполняет сверку до остановки владельцем Telegram runtime."""
+        try:
+            reconcile(handler, stop)
+        except Exception:
+            logger.exception("Telegram menu reconciliation stopped unexpectedly")
+
+    thread = threading.Thread(target=run, name="telegram-menu-reconciliation", daemon=True)
+    thread.start()
+    return thread
 
 
 def _create_telegram_completion_handler(

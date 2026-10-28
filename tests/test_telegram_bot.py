@@ -3,6 +3,7 @@ from compadre_assistant.core.presentation.message_content import text_content
 
 import asyncio
 import logging
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,15 +17,19 @@ from aiogram.exceptions import (
 from aiogram.methods import GetMe
 
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
+)
 from compadre_assistant.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,
     _create_telegram_completion_handler,
+    _create_telegram_menu_update_handler,
     _register_handlers,
     _create_polling_bot,
     _run_telegram_bot,
     _start_polling_with_retries,
+    _start_telegram_menu_reconciliation,
     _telegram_polling_retry_delay,
     safe_send_telegram_reply,
 )
@@ -86,6 +91,10 @@ class FakePollingBot:
         if self.request_error is not None:
             raise self.request_error
         return "ok"
+
+    async def set_my_commands(self, *, commands: list[object], scope: object) -> str:
+        """Имитирует setMyCommands через тот же Bot.__call__, что и aiogram."""
+        return await self(object(), commands=commands, scope=scope)
 
 
 class FakeRouter:
@@ -171,6 +180,20 @@ class TelegramMessage:
         self.parse_modes.append(parse_mode)
 
 
+class MenuTelegramBot:
+    """Сохраняет вызовы публикации меню и умеет имитировать отказ API."""
+
+    def __init__(self) -> None:
+        self.menu_calls: list[tuple[list[object], object]] = []
+        self.menu_error: Exception | None = None
+
+    async def set_my_commands(self, *, commands: list[object], scope: object) -> None:
+        """Запоминает меню либо возвращает настроенную ошибку API."""
+        if self.menu_error is not None:
+            raise self.menu_error
+        self.menu_calls.append((commands, scope))
+
+
 class FlakyTelegramMessage(TelegramMessage):
     """Один раз роняет выбранный chunk, затем принимает повтор."""
 
@@ -233,6 +256,133 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertEqual(len(message.answers), 2)
         self.assertIn("Принял, обрабатываю", message.answers[0])
         self.assertEqual(message.answers[-1], "Готово")
+
+    def test_menu_publication_uses_chat_scope_and_exact_commands(self) -> None:
+        """Меню публикуется в личном scope с точными именами и описаниями."""
+        from aiogram.types import BotCommandScopeChat
+
+        bot = MenuTelegramBot()
+        loop = asyncio.new_event_loop()
+        try:
+            handler = _create_telegram_menu_update_handler(
+                bot, loop=loop, aiogram=__import__("aiogram"),
+                logger=logging.getLogger("test.telegram.menu"),
+            )
+            update = CommandMenuUpdate(
+                ReplyAddress("telegram", "42"),
+                CommandMenu((CommandSuggestion("/help", "Показать справку"),
+                             CommandSuggestion("/ask", "Задать вопрос"))),
+            )
+            async def invoke() -> None:
+                await asyncio.to_thread(handler, update)
+            loop.run_until_complete(invoke())
+        finally:
+            loop.close()
+        self.assertEqual(len(bot.menu_calls), 1)
+        commands, scope = bot.menu_calls[0]
+        self.assertEqual([(item.command, item.description) for item in commands],
+                         [("help", "Показать справку"), ("ask", "Задать вопрос")])
+        self.assertIsInstance(scope, BotCommandScopeChat)
+        self.assertEqual(scope.chat_id, 42)
+
+    def test_empty_menu_clears_commands_and_foreign_or_group_addresses_are_ignored(self) -> None:
+        """Пустой список очищает меню, а другой канал и group не получают публикацию."""
+        bot = MenuTelegramBot()
+        loop = asyncio.new_event_loop()
+        try:
+            handler = _create_telegram_menu_update_handler(
+                bot, loop=loop, aiogram=__import__("aiogram"),
+                logger=logging.getLogger("test.telegram.menu"),
+            )
+            async def invoke() -> None:
+                await asyncio.to_thread(handler, CommandMenuUpdate(
+                    ReplyAddress("telegram", "42"), CommandMenu(),
+                ))
+                await asyncio.to_thread(handler, CommandMenuUpdate(
+                    ReplyAddress("vk", "42"), CommandMenu(),
+                ))
+                await asyncio.to_thread(handler, CommandMenuUpdate(
+                    ReplyAddress("telegram", "-10042"), CommandMenu(),
+                ))
+                await asyncio.to_thread(handler, CommandMenuUpdate(
+                    ReplyAddress("telegram", "not-an-id"), CommandMenu(),
+                ))
+            loop.run_until_complete(invoke())
+        finally:
+            loop.close()
+        self.assertEqual(len(bot.menu_calls), 1)
+        self.assertEqual(bot.menu_calls[0][0], [])
+
+    def test_menu_api_error_propagates_for_processor_retry(self) -> None:
+        """Ошибка Telegram API выходит из callback, чтобы processor повторил публикацию."""
+        bot = MenuTelegramBot()
+        loop = asyncio.new_event_loop()
+        try:
+            handler = _create_telegram_menu_update_handler(
+                bot, loop=loop, aiogram=__import__("aiogram"),
+                logger=logging.getLogger("test.telegram.menu"),
+            )
+            update = CommandMenuUpdate(ReplyAddress("telegram", "42"), CommandMenu())
+            async def invoke() -> None:
+                await asyncio.to_thread(handler, update)
+            bot.menu_error = RuntimeError("telegram unavailable")
+            with self.assertRaisesRegex(RuntimeError, "telegram unavailable"):
+                loop.run_until_complete(invoke())
+            bot.menu_error = None
+            loop.run_until_complete(invoke())
+        finally:
+            loop.close()
+        self.assertEqual(len(bot.menu_calls), 1)
+
+    def test_menu_unwraps_polling_fatal_error_for_processor_retry(self) -> None:
+        """Фатальная polling-обёртка меню возвращает в processor исходный API error."""
+        unauthorized = AiogramTelegramUnauthorizedError(GetMe(), "Unauthorized")
+        FakePollingBot.request_error = unauthorized
+        bot = _create_polling_bot(FakeAiogram(), token="token")
+        loop = asyncio.new_event_loop()
+        try:
+            handler = _create_telegram_menu_update_handler(
+                bot, loop=loop, aiogram=__import__("aiogram"),
+                logger=logging.getLogger("test.telegram.menu"),
+            )
+            async def invoke() -> None:
+                await asyncio.to_thread(handler, CommandMenuUpdate(
+                    ReplyAddress("telegram", "42"), CommandMenu(),
+                ))
+            with self.assertRaises(AiogramTelegramUnauthorizedError) as raised:
+                loop.run_until_complete(invoke())
+            self.assertIs(raised.exception, unauthorized)
+        finally:
+            loop.close()
+            FakePollingBot.request_error = None
+
+    def test_reconciliation_starts_immediately_and_stops_with_runtime(self) -> None:
+        """Фоновая сверка запускается и завершается по сигналу владельца runtime."""
+        class ReconciliationProcessor:
+            """Фиксирует callback первой сверки и ожидает stop."""
+
+            def __init__(self) -> None:
+                self.called = threading.Event()
+
+            def run_menu_reconciliation(self, handler, stop) -> None:  # type: ignore[no-untyped-def]
+                """Имитирует первый проход и периодическое ожидание."""
+                handler(CommandMenuUpdate(ReplyAddress("telegram", "42"), CommandMenu()))
+                self.called.set()
+                stop.wait()
+
+        processor = ReconciliationProcessor()
+        stop = threading.Event()
+        updates: list[CommandMenuUpdate] = []
+        thread = _start_telegram_menu_reconciliation(
+            processor, updates.append, stop,
+            logger=logging.getLogger("test.telegram.reconciliation"),
+        )
+        self.assertIsNotNone(thread)
+        self.assertTrue(processor.called.wait(1))
+        self.assertEqual(len(updates), 1)
+        stop.set()
+        thread.join(1)
+        self.assertFalse(thread.is_alive())
 
     def test_safe_send_telegram_reply_does_not_raise_when_send_fails(self) -> None:
         """Ошибка отправки Telegram-сообщения логируется и не роняет handler."""
