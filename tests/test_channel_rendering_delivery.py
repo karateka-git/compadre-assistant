@@ -10,7 +10,7 @@ from urllib.parse import parse_qs
 
 from compadre_assistant.core.presentation.incoming.dispatcher import CallbackReplyDelivery
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
-from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import BoundReplyAction, ConfirmationAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import MessageContent, Paragraph, TextSpan, TextStyle, text_content
 from compadre_assistant.presentation.telegram.bot import _register_handlers, safe_send_telegram_reply
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
@@ -187,3 +187,29 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
         with self.assertLogs(self.logger, level="ERROR"):
             asyncio.run(safe_send_telegram_reply(target, IncomingResponse(text_content("abcdefghij")), logger=self.logger, limit=4))
         self.assertEqual(calls, [("abcd", "HTML"), ("efgh", "HTML")])
+
+    def test_invalid_keyboard_preserves_all_parts_and_text_commands(self) -> None:
+        """Лимиты кнопок не теряют длинный ответ и его адресные команды."""
+        for channel, max_buttons, max_label in (("telegram", 100, 64), ("vk", 30, 40)):
+            for labels in (("я" * (max_label + 1),), ("Выбор",) * (max_buttons + 1)):
+                with self.subTest(channel=channel, count=len(labels)):
+                    actions = tuple(ConfirmationAction(str(index), label,
+                        f"/confirm core identity {index + 1} 1 no")
+                        for index, label in enumerate(labels))
+                    response = IncomingResponse(self.response.content, actions=actions,
+                        bound_actions=tuple(BoundReplyAction(label, str(index).zfill(32), "response")
+                                            for index, label in enumerate(labels)))
+                    with self.assertLogs(self.logger, level="WARNING"):
+                        if channel == "telegram":
+                            target = TelegramMessage()
+                            asyncio.run(safe_send_telegram_reply(
+                                target, response, logger=self.logger, include_bound_actions=True))
+                            self.assertEqual(target.answers,
+                                [part.text for part in render_telegram_content(response.content, actions)])
+                        else:
+                            target = FakeVkClient()
+                            _safe_send_vk_message(target, peer_id=42, response=response,
+                                logger=self.logger, include_bound_actions=True)
+                            self.assertEqual(target.messages,
+                                [(42, part.text) for part in render_vk_content(response.content, actions)])
+                            self.assertTrue(all(keyboard is None for keyboard in target.keyboards))

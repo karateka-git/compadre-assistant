@@ -538,7 +538,7 @@ async def send_telegram_reply(
     for index, chunk in enumerate(chunks):
         keyboard = None
         if TELEGRAM_INLINE_ACTIONS_ENABLED and index == len(chunks) - 1:
-            keyboard = _serialize_telegram_inline_keyboard(response, _load_aiogram())
+            keyboard = _optional_telegram_inline_keyboard(response, logging.getLogger(__name__))
         kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
         if keyboard is not None:
             kwargs["reply_markup"] = keyboard
@@ -568,7 +568,7 @@ async def safe_send_telegram_reply(
     """
     chunks = render_telegram_content(response.content, response.actions, limit=limit)
     keyboard = (
-        _serialize_telegram_inline_keyboard(response, _load_aiogram())
+        _optional_telegram_inline_keyboard(response, logger)
         if include_bound_actions else None
     )
     started_at = time.monotonic()
@@ -602,6 +602,17 @@ async def safe_send_telegram_reply(
         target_id,
         time.monotonic() - started_at,
     )
+
+
+def _optional_telegram_inline_keyboard(response: IncomingResponse, logger: logging.Logger) -> Any | None:
+    """Сохраняет текстовый путь, если действия не помещаются в клавиатуру."""
+    try:
+        return _serialize_telegram_inline_keyboard(response, _load_aiogram())
+    except ValueError:
+        # Ошибка локальной валидации известна до API-вызова: можно убрать
+        # необязательные кнопки без риска повторной доставки сообщения.
+        logger.warning("Telegram inline keyboard omitted: invalid action layout")
+        return None
 
 
 def _serialize_telegram_inline_keyboard(response: IncomingResponse, aiogram: Any) -> Any | None:

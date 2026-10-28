@@ -166,10 +166,14 @@ class IncomingMessageDispatcher:
             snapshot = self._action_confirmations(event) if response.actions else None
             actions = []
             for action in response.actions:
-                matches = [item for item in snapshot.confirmations
-                           if item.origin == event.reply_address and action in item.actions]
+                # Подпись в списке ожиданий может уточнять предмет действия.
+                # Исполняемую идентичность задают ID и точная адресная команда.
+                matches = [(item, candidate) for item in snapshot.confirmations
+                           if item.origin == event.reply_address for candidate in item.actions
+                           if candidate.action_id == action.action_id and candidate.command == action.command]
                 if snapshot.status == "complete" and len(matches) == 1:
-                    actions.append((action.label, action.command, matches[0], action))
+                    pending, canonical_action = matches[0]
+                    actions.append((action.label, action.command, pending, canonical_action))
             confirmation_commands = {action.command for action in response.actions}
             for action in response.suggested_actions:
                 parts = action.command.split()

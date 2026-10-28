@@ -652,10 +652,14 @@ def _safe_send_vk_message(
         VK_INLINE_ACTIONS_ENABLED
         if include_bound_actions is None else include_bound_actions
     )
-    keyboard = (
-        _serialize_vk_inline_keyboard(response)
-        if show_bound_actions else None
-    )
+    keyboard = None
+    if show_bound_actions:
+        try:
+            keyboard = _serialize_vk_inline_keyboard(response)
+        except ValueError:
+            # Необязательная клавиатура не должна скрывать текстовые команды.
+            # Решение принимается до API-вызова, поэтому повторной отправки нет.
+            logger.warning("VK inline keyboard omitted: invalid action layout")
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",

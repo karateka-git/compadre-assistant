@@ -178,6 +178,23 @@ class ResponseActionSelectionTest(unittest.TestCase):
                 self.processor.select_action(self.event, button.token)
                 execute.assert_not_called()
 
+    def test_confirmation_label_may_differ_but_id_and_command_must_match(self):
+        """Уточнение подписи допустимо, подмена ID или команды не выдаёт token."""
+        action, pending = self.confirmation()
+        with patch.object(IncomingMessageDispatcher, "_action_confirmations",
+                          return_value=ConfirmationQueryResult("complete", (pending,))):
+            for changed in (replace(action, action_id="other"),
+                            replace(action, command="/confirm core identity 2 1 yes")):
+                self.assertFalse(self.issue(response=IncomingResponse(
+                    text_content("Выбор"), actions=(changed,))).bound_actions)
+            response = self.issue(response=IncomingResponse(text_content("Выбор"),
+                actions=(replace(action, label="Короткая подпись"),)))
+            with patch.object(IncomingMessageDispatcher, "execute",
+                              return_value=IncomingResponse(text_content("OK"))) as execute:
+                self.processor.select_action(self.event, response.bound_actions[0].token)
+                execute.assert_called_once()
+                self.assertEqual(execute.call_args.args[0].text, action.command)
+
     def test_no_confirmation_bypass_or_unknown_command_as_suggestion(self):
         action, _ = self.confirmation()
         self.assertFalse(self.issue(command=action.command).bound_actions)

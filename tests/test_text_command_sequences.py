@@ -22,6 +22,9 @@ from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from tests.response_assertions import response_text
+from tests.test_message_rendering import _HtmlReader
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+from compadre_assistant.presentation.vk.rendering import render_vk_content
 from tests.test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 from tests.test_telegram_flow_smoke import FakeArticleHtmlFetcher, FakeArticleTextExtractor, FakeArticleAnalyzer
 
@@ -266,3 +269,46 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say(command)
         self.assertFalse(self.manager.disconnect_pending)
         self.assertIsNone(self.manager.selected)
+
+    def test_variable_name_and_model_output_remain_literal_in_both_channels(self):
+        """Реальные ответы профиля и Ask не превращают переменные данные в разметку."""
+        name = 'Аня <b>& "😀"'
+        self.register(name)
+        model_text = ('Ответ <b>модели</b> &amp; `код` 👩‍💻 е\u0301\n' * 220)
+        self.model.answer.return_value = model_text
+        responses = (self.send("/status"), self.send("/ask Вопрос"))
+        self.assertIn(name, response_text(responses[0]))
+        self.assertEqual(response_text(responses[1]), model_text)
+        for response in responses:
+            expected = response_text(response)
+            telegram = render_telegram_content(response.content, response.actions)
+            vk = render_vk_content(response.content, response.actions)
+            self.assertEqual("".join("".join(_HtmlReader(part.text).parts) for part in telegram), expected)
+            self.assertEqual("".join(part.text for part in vk), expected)
+        self.assertGreater(len(telegram), 1)
+        self.assertGreater(len(vk), 1)
+
+    def test_text_confirmation_makes_visible_old_button_unusable(self):
+        """Текстовый отказ закрывает ожидание; старая кнопка не отключает хранилище."""
+        address = {"chat": "1001", "user": "1001"}
+        self.register(**address)
+        self.say("/enable obsidian", **address)
+        self.say("/obsidian", **address)
+        response = self.send("/github_disconnect", **address)
+        self.assertTrue(response.bound_actions)
+        old_button = response.bound_actions[0]
+        cancel = next(action.command for action in response.actions if action.command.endswith(" no"))
+        self.say(cancel, **address)
+        self.assertFalse(self.manager.disconnect_pending)
+        self.assertIsNotNone(self.manager.selected)
+        event = IncomingEvent("telegram", "1001", "old-click", "выбор", "1001")
+        selected = self.processor.select_action(event, old_button.token)
+        self.assertIn("больше недоступна", response_text(selected))
+        self.assertFalse(self.manager.disconnect_pending)
+        self.assertIsNotNone(self.manager.selected)
+
+        fresh = self.send("/github_disconnect", **address)
+        cancel_button = fresh.bound_actions[1]
+        self.processor.select_action(event, cancel_button.token)
+        self.assertFalse(self.manager.disconnect_pending)
+        self.assertIsNotNone(self.manager.selected)
