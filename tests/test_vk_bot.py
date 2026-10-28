@@ -10,7 +10,7 @@ from urllib.error import URLError
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BackgroundReply, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
+    BackgroundReply, BoundReplyAction, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
 )
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.presentation.vk.bot import (
@@ -23,6 +23,7 @@ from compadre_assistant.presentation.vk.bot import (
     _handle_update,
     _long_poll_retry_delay,
     _safe_send_vk_message,
+    _serialize_vk_inline_keyboard,
     run_vk_bot,
 )
 
@@ -35,6 +36,7 @@ class FakeVkClient:
         self.random_ids: list[int | None] = []
         self.formats: list[str | None] = []
         self.keyboards: list[str | None] = []
+        self.attempt_keyboards: list[str | None] = []
 
     def send_message(
         self,
@@ -47,6 +49,7 @@ class FakeVkClient:
     ) -> None:
         """Запоминает отправленное сообщение."""
         self.random_ids.append(random_id)
+        self.attempt_keyboards.append(keyboard)
         self.messages.append((peer_id, text))
         self.formats.append(format_data)
         self.keyboards.append(keyboard)
@@ -83,10 +86,12 @@ class FlakyVkClient(FakeVkClient):
         text: str,
         random_id: int | None = None,
         format_data: str | None = None,
+        keyboard: str | None = None,
     ) -> None:
         """Сохраняет `random_id` каждой попытки и завершается с третьей."""
         self.attempts += 1
         self.random_ids.append(random_id)
+        self.attempt_keyboards.append(keyboard)
         if self.attempts < 3:
             raise VkTransientError("temporary failure")
         self.messages.append((peer_id, text))
@@ -149,6 +154,78 @@ class LongPollMessageClient(LongPollSequenceClient, FakeVkClient):
 
 class VkBotTest(unittest.TestCase):
     """Проверяет helpers VK adapter."""
+
+    def test_vk_inline_keyboard_serializes_bound_actions_and_opaque_token(self) -> None:
+        """Inline-клавиатура содержит только callback с token из контракта."""
+        response = IncomingResponse(text_content("Текст /confirm core identity 1 2 yes"), bound_actions=(
+            BoundReplyAction("Подтвердить", "opaque-1", "response-1"),
+            BoundReplyAction("Отклонить", "opaque-2", "response-1"),
+        ))
+        keyboard = __import__("json").loads(_serialize_vk_inline_keyboard(response))
+        self.assertTrue(keyboard["inline"])
+        self.assertFalse(keyboard["one_time"])
+        actions = [button["action"] for row in keyboard["buttons"] for button in row]
+        self.assertEqual([action["type"] for action in actions], ["callback", "callback"])
+        self.assertEqual([__import__("json").loads(action["payload"]) for action in actions],
+                         [{"token": "opaque-1"}, {"token": "opaque-2"}])
+
+    def test_vk_inline_keyboard_enforces_verified_limits_and_response_binding(self) -> None:
+        """Сериализатор проверяет лимит 30, подпись, payload и единый response ID."""
+        def response(actions):
+            return IncomingResponse(text_content("text"), bound_actions=tuple(actions))
+
+        too_many = [BoundReplyAction("a", f"t{i}", "r") for i in range(31)]
+        with self.assertRaisesRegex(ValueError, "at most 30"):
+            _serialize_vk_inline_keyboard(response(too_many))
+        with self.assertRaisesRegex(ValueError, "1-40"):
+            _serialize_vk_inline_keyboard(response([BoundReplyAction("x" * 41, "t", "r")]))
+        with self.assertRaisesRegex(ValueError, "255 bytes"):
+            _serialize_vk_inline_keyboard(response([BoundReplyAction("x", "t" * 260, "r")]))
+        with self.assertRaisesRegex(ValueError, "one response"):
+            _serialize_vk_inline_keyboard(response([
+                BoundReplyAction("a", "t1", "r1"), BoundReplyAction("b", "t2", "r2"),
+            ]))
+
+    def test_vk_inline_keyboard_is_attached_only_to_last_chunk_and_preserves_text(self) -> None:
+        """Клавиатура приходит только с последней частью без изменения текста."""
+        client = FakeVkClient()
+        response = IncomingResponse(
+            text_content("abcdefghij"),
+            bound_actions=(BoundReplyAction("Да", "token", "response"),),
+        )
+        _safe_send_vk_message(client, peer_id=22, response=response,
+                              logger=logging.getLogger("test.vk.inline.chunks"), limit=4,
+                              include_bound_actions=True)
+        self.assertEqual("".join(text for _, text in client.messages), "abcdefghij")
+        self.assertEqual(client.keyboards[:-1], [None, None])
+        self.assertIsNotNone(client.keyboards[-1])
+
+    def test_vk_inline_retry_reuses_keyboard_and_random_id(self) -> None:
+        """Повтор последней части сохраняет клавиатуру и random_id."""
+        client = FlakyVkClient()
+        response = IncomingResponse(text_content("reply"), bound_actions=(
+            BoundReplyAction("Далее", "opaque", "response"),
+        ))
+        _safe_send_vk_message(client, peer_id=22, response=response,
+                              logger=logging.getLogger("test.vk.inline.retry"),
+                              sleeper=lambda _delay: None, include_bound_actions=True)
+        self.assertEqual(len(set(client.random_ids)), 1)
+        self.assertEqual(len(set(client.attempt_keyboards)), 1)
+        self.assertIsNotNone(client.attempt_keyboards[0])
+
+    def test_vk_inline_runtime_gate_and_background_reply_stay_disabled(self) -> None:
+        """Runtime gate скрывает кнопки и в обычном, и в фоновом ответе."""
+        client = FakeVkClient()
+        response = IncomingResponse(text_content("reply"), bound_actions=(
+            BoundReplyAction("Далее", "opaque", "response"),
+        ))
+        _safe_send_vk_message(client, peer_id=22, response=response,
+                              logger=logging.getLogger("test.vk.inline.gate"))
+        callback = __import__("compadre_assistant.presentation.vk.bot", fromlist=["_create_vk_completion_handler"])
+        callback._create_vk_completion_handler(client, logger=logging.getLogger("test.vk.inline.background"))(
+            BackgroundReply(ReplyAddress("vk", "22"), response)
+        )
+        self.assertEqual(client.keyboards, [None, None])
 
     def test_handle_update_converts_vk_message_to_incoming_message(self) -> None:
         """VK update превращается в channel-agnostic IncomingEvent."""

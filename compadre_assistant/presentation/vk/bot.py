@@ -36,6 +36,8 @@ VK_LONG_POLL_RETRY_MAX_SECONDS = 30.0
 VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_UPDATE_WORKER_COUNT = 4
 VK_UPDATE_QUEUE_SIZE = 128
+# VK inline-кнопки остаются скрытыми до подключения обработчика message_event.
+VK_INLINE_ACTIONS_ENABLED = False
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
@@ -525,22 +527,33 @@ def _safe_send_vk_message(
     logger: logging.Logger,
     sleeper: Callable[[float], None] = time.sleep,
     limit: int = VK_SAFE_MESSAGE_LIMIT,
+    include_bound_actions: bool | None = None,
 ) -> None:
     """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
+    show_bound_actions = (
+        VK_INLINE_ACTIONS_ENABLED
+        if include_bound_actions is None else include_bound_actions
+    )
+    keyboard = (
+        _serialize_vk_inline_keyboard(response)
+        if show_bound_actions else None
+    )
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
         peer_id,
         len(chunks),
     )
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         random_id = randint(1, 2_147_483_647)
+        chunk_keyboard = keyboard if index == len(chunks) - 1 else None
         sent = safe_send(
-            lambda chunk=chunk, random_id=random_id: client.send_message(
+            lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
                 peer_id=peer_id,
                 text=chunk.text,
                 format_data=chunk.format_data,
+                keyboard=keyboard,
                 random_id=random_id,
             ),
             logger=logger,
@@ -560,6 +573,55 @@ def _safe_send_vk_message(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,
         time.monotonic() - started_at,
+    )
+
+
+def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
+    """Сериализует только действия, привязанные к конкретному ответу VK.
+
+    Args:
+        response: Ответ с явно связанными действиями.
+
+    Returns:
+        JSON inline-клавиатуры или `None`, если действий нет.
+
+    Raises:
+        ValueError: Если действия нарушают ограничения VK или относятся к
+            разным ответам.
+    """
+    actions = response.bound_actions
+    if not actions:
+        return None
+    # Для inline VK поддерживает до 6 строк и 5 кнопок в строке.
+    if len(actions) > 30:
+        raise ValueError("VK inline keyboard supports at most 30 buttons")
+    if len({action.response_id for action in actions}) != 1:
+        raise ValueError("VK inline buttons must belong to one response")
+    seen_tokens: set[str] = set()
+    rows: list[list[dict[str, object]]] = []
+    for start in range(0, len(actions), 5):
+        row: list[dict[str, object]] = []
+        for action in actions[start:start + 5]:
+            token = action.token
+            if not token:
+                raise ValueError("VK callback token must not be empty")
+            if token in seen_tokens:
+                raise ValueError("VK callback tokens must be unique")
+            seen_tokens.add(token)
+            if not action.label or len(action.label) > 40:
+                raise ValueError("VK callback label must contain 1-40 characters")
+            payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > 255:
+                raise ValueError("VK callback payload must contain at most 255 bytes")
+            row.append({
+                "action": {"type": "callback", "label": action.label, "payload": payload},
+                "color": "secondary",
+            })
+        rows.append(row)
+    return json.dumps(
+        {"one_time": False, "inline": True, "buttons": rows},
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
