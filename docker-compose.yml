@@ -19,7 +19,7 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "telegram"]
       interval: 30s
-      timeout: 5s
+      timeout: 30s
       retries: 3
       start_period: 5s
 
@@ -30,6 +30,6 @@ services:
     healthcheck:
       test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "vk"]
       interval: 30s
-      timeout: 5s
+      timeout: 30s
       retries: 3
       start_period: 5s
