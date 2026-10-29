@@ -92,23 +92,21 @@ class MessageRenderingTest(unittest.TestCase):
                     self.assertLessEqual(len(chunk.text.encode("utf-16-le")) // 2, 61)
 
     def test_vk_ranges_are_local_and_target_exact_cyrillic(self) -> None:
-        """Диапазоны bold указывают на нужный текст после разбиения, CODE plain."""
+        """Диапазоны bold и italic указывают на нужные фрагменты каждой части."""
         content = MessageContent(tuple(
             Paragraph((TextSpan("До: "), TextSpan("Жирный", TextStyle.EMPHASIS),
                        TextSpan(" /ask", TextStyle.CODE)))
             for _ in range(4)
         ))
         chunks = render_vk_content(content, limit=19)
-        bold_texts = []
+        styled_texts = []
         for chunk in chunks:
             if chunk.format_data:
                 data = json.loads(chunk.format_data)
                 self.assertEqual(data["version"], "1")
                 for item in data["items"]:
-                    self.assertEqual(item["type"], "bold")
-                    self.assertEqual(item["offset"], chunk.text.index("Жирный"))
-                    bold_texts.append(chunk.text[item["offset"]:item["offset"] + item["length"]])
-        self.assertEqual(bold_texts, ["Жирный"] * 4)
+                    styled_texts.append((item["type"], chunk.text[item["offset"]:item["offset"] + item["length"]]))
+        self.assertEqual(styled_texts, [("bold", "Жирный"), ("italic", " /ask")] * 4)
 
     def test_vk_ambiguous_unicode_falls_back_only_in_affected_chunk(self) -> None:
         """Непроверенные offsets emoji не выдаются за подтверждённую API-разметку."""
@@ -124,12 +122,14 @@ class MessageRenderingTest(unittest.TestCase):
             item, = data["items"]
             self.assertEqual(last.text[item["offset"]:item["offset"] + item["length"]], "Жирный")
 
-    def test_vk_external_markup_and_code_are_plain(self) -> None:
-        """Не анализирует HTML/Markdown в данных и не добавляет маркеры CODE."""
+    def test_vk_external_markup_is_literal_and_code_is_italic(self) -> None:
+        """Не анализирует внешнюю разметку; CODE оформляет точный текст курсивом."""
         raw = '<b>Привет</b> **мир** `код` &amp;'
         chunk, = render_vk_content(_content(TextSpan(raw), TextSpan("/ask", TextStyle.CODE)))
         self.assertEqual(chunk.text, raw + "/ask")
-        self.assertIsNone(chunk.format_data)
+        self.assertEqual(json.loads(chunk.format_data)["items"], [
+            {"type": "italic", "offset": len(raw), "length": 4},
+        ])
 
     def test_empty_and_invalid_limits(self) -> None:
         """Пустой ответ не отправляется; невозможный лимит приводит к явной ошибке."""

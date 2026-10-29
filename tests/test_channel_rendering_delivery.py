@@ -146,8 +146,8 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
         self.assertEqual(requests[0]["peer_id"], ["42"])
         self.assertNotIn("format_data", requests[1])
 
-    def test_vk_unsupported_style_and_emoji_choose_plain_before_send(self) -> None:
-        """CODE и неоднозначные emoji offsets не добавляют маркеров или повторов."""
+    def test_vk_emoji_choose_plain_before_send(self) -> None:
+        """Неоднозначные emoji offsets отключают разметку всей части без повтора."""
         client = FakeVkClient()
         response = IncomingResponse(MessageContent((Paragraph((
             TextSpan("😀Заголовок", TextStyle.EMPHASIS), TextSpan("/help", TextStyle.CODE),

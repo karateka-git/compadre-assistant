@@ -29,7 +29,7 @@ def _unambiguous_offsets(text: str) -> bool:
 def render_vk_content(
     content: MessageContent, actions: tuple[ConfirmationAction, ...] = (), *, limit: int = 3500,
 ) -> tuple[VkChunk, ...]:
-    """Возвращает текст и диапазоны bold; CODE остаётся буквальным текстом.
+    """Возвращает текст и диапазоны bold/italic для смысловых стилей.
 
     Args:
         content: Нейтральные блоки ответа, без доверенной разметки.
@@ -56,8 +56,12 @@ def render_vk_content(
         offset = 0
         if _unambiguous_offsets(text):
             for span in group:
-                if span.style == TextStyle.EMPHASIS:
-                    items.append({"type": "bold", "offset": offset, "length": len(span.text)})
+                style_type = {
+                    TextStyle.EMPHASIS: "bold",
+                    TextStyle.CODE: "italic",
+                }.get(span.style)
+                if style_type and span.text:
+                    items.append({"type": style_type, "offset": offset, "length": len(span.text)})
                 offset += len(span.text)
         data = json.dumps({"version": "1", "items": items}) if items else None
         chunks.append(VkChunk(text, data))
