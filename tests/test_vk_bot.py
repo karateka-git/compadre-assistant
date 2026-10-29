@@ -245,7 +245,7 @@ class VkBotTest(unittest.TestCase):
 
         class Processor:
             def select_action(self, event, token, completion, menu=None):
-                self_outer.assertEqual(client.acks[-1], ("event-1", 33, 22))
+                self_outer.assertEqual(client.acks[-1], (event.message_id, 33, 22))
                 seen.append((event, token, menu))
                 completion(BackgroundReply(event.reply_address, IncomingResponse(text_content("Фон"))))
                 return IncomingResponse(text_content("Готово"))
@@ -273,6 +273,16 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(client.cleared, [(22, 44)])
         self.assertEqual(client.messages[-2:], [(22, "Фон"), (22, "Готово")])
 
+        _handle_update({"type": "message_event", "object": {
+            "peer_id": 22, "user_id": 33, "event_id": "event-2",
+            "conversation_message_id": 45,
+            "payload": {"token": "second"},
+        }}, incoming_message_processor=Processor(), client=client,
+            logger=logging.getLogger("test.vk.event"))
+        self.assertEqual(seen[-1][1], "second")
+        self.assertEqual(client.acks[-1], ("event-2", 33, 22))
+        self.assertEqual(client.cleared[-1], (22, 45))
+
     def test_message_event_rejects_malformed_payload_and_cleanup_error_is_nonfatal(self) -> None:
         """Некорректный payload не исполняется; сбой очистки не теряет ответ."""
         class Client(FakeVkClient):
@@ -287,7 +297,8 @@ class VkBotTest(unittest.TestCase):
                 calls.append((event.external_user_id, token))
                 return IncomingResponse(text_content("Недоступно"))
 
-        for payload in ("not json", '"opaque"', '{"label":"/cancel"}', '{"token":1}'):
+        for payload in ("not json", '"opaque"', '{"label":"/cancel"}', '{"token":1}',
+                        {"label": "/cancel"}, {"token": 1}, {"token": "opaque", "label": "/cancel"}):
             _handle_update({"type": "message_event", "object": {
                 "peer_id": 22, "user_id": 99, "event_id": "e", "payload": payload,
             }}, incoming_message_processor=Processor(), client=client,

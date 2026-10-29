@@ -639,9 +639,12 @@ Inline-клавиатура прикрепляется только к посл�
 
 ### Обработка VK callback: реализация шага 7.12
 
-Long Poll передаёт `message_event` с `peer_id`, `user_id`, `event_id`, строкой
+Long Poll передаёт `message_event` с `peer_id`, `user_id`, `event_id`,
 `payload` и необязательным `conversation_message_id` согласно
 [схеме VK](https://github.com/VKCOM/vk-api-schema/blob/master/callback/objects.json).
+В клиентской пробе 29.10.2026 `payload` пришёл уже разобранным JSON-объектом;
+адаптер принимает и его, и строку с JSON, применяя одну строгую проверку
+единственного поля `token`.
 Адаптер сразу вызывает
 [`messages.sendMessageEventAnswer`](https://github.com/VKCOM/vk-api-schema/blob/master/messages/methods.json)
 с фактическими ID, затем принимает только JSON-объект с единственным строковым

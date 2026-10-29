@@ -512,12 +512,15 @@ def _handle_message_event(
     except VkBotError as error:
         logger.warning("VK message event ack failed: %s", error)
     payload = data.get("payload")
-    if not isinstance(payload, str):
-        return
-    try:
-        parsed = json.loads(payload)
-    except (ValueError, TypeError):
-        return
+    # VK Long Poll может уже разобрать JSON payload в объект, хотя схема
+    # описывает строку. Обе формы проходят одинаковую строгую проверку ниже.
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+    else:
+        parsed = payload
     if not isinstance(parsed, dict) or set(parsed) != {"token"}:
         return
     token = parsed["token"]
