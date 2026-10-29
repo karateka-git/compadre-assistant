@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверки конфигурации шага 2.5 через реальные CLI и bootstrap без live API."""
 
 from dataclasses import replace
@@ -115,7 +116,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                             with patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAIArticleAnalyzer") as analyzer, patch(
                                 "compadre_assistant.capabilities.obsidian.bootstrap.OpenAIObsidianProposalGenerator"
                             ) as proposal, patch("compadre_assistant.capabilities.obsidian.bootstrap.OpenAICompatibleEmbeddingProvider") as embedding:
-                                for text in ("/register", "/name Имя", "/help", "/status", "/exit", "/obsidian"):
+                                for text in ("/register", "Имя", "/help", "/status", "/exit", "/obsidian"):
                                     if text == "/obsidian" and enabled:
                                         with connect_database(self.root / "app.db") as connection:
                                             owner = connection.execute(
@@ -128,8 +129,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
                                             )
                                     reply = processor(IncomingEvent(channel, channel, text, text, channel), None)
                                     if text == "/obsidian":
-                                        expected = "Провайдер GitHub не настроен" if enabled else "недоступна на сервере"
-                                        self.assertIn(expected, reply.text)
+                                        expected = "провайдер GitHub не настроен" if enabled else "недоступна на сервере"
+                                        self.assertIn(expected, response_text(reply))
                                 analyzer.assert_not_called()
                                 proposal.assert_not_called()
                                 embedding.assert_not_called()
@@ -274,7 +275,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             code, _ = self.run_cli(["--telegram-bot"], self.env("telegram", True, "absent"))
         self.assertEqual(code, 0)
         processor = runner.call_args.kwargs["incoming_message_processor"]
-        for text in ("/register", "/name Имя"):
+        for text in ("/register", "Имя"):
             processor(IncomingEvent("telegram", "chat", text, text, "user"), None)
         with connect_database(self.root / "app.db") as connection:
             owner = connection.execute("SELECT id FROM app_users").fetchone()[0]
@@ -290,8 +291,8 @@ class RuntimeConfigurationTest(unittest.TestCase):
                     "telegram", "chat", "article", "/obsidian https://article.example/page", "user"
                 ), obsidian_config=ObsidianConfig(openai_base_url="", openai_api_key="", openai_model=""), runtime=runtime,
             )
-        self.assertIn("Провайдер LLM не настроен", reply.text)
-        self.assertNotIn("vault не подключён", reply.text)
+        self.assertIn("провайдер LLM не настроен", response_text(reply))
+        self.assertNotIn("vault не подключён", response_text(reply))
 
     def test_ask_healthcheck_and_startup_matrix(self) -> None:
         """Все сочетания проверяют ASK_* только при включении и не вызывают API."""

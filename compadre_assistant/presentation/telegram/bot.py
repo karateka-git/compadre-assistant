@@ -2,13 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+import threading
 from types import SimpleNamespace
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
+    CommandMenuUpdateHandler, IncomingResponse,
+)
+from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,
@@ -20,8 +28,12 @@ TELEGRAM_POLLING_RETRY_BASE_SECONDS = 0.5
 TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 # При этой степени базовая задержка уже достигает установленного потолка.
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
+TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
+TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
+# Кнопки разрешены вместе с зарегистрированным ниже callback-handler.
+TELEGRAM_INLINE_ACTIONS_ENABLED = True
 IncomingMessageProcessor = Callable[
-    [IncomingEvent, ChannelCompletionHandler | None],
+    [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
 ]
 
@@ -54,7 +66,7 @@ def run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     """Запускает Telegram-бота в polling-режиме.
 
@@ -89,12 +101,15 @@ async def _run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
 ) -> None:
     """Асинхронно запускает polling Telegram-бота."""
     aiogram = _load_aiogram()
     bot = _create_polling_bot(aiogram, token=token, proxy_url=proxy_url)
     dispatcher = aiogram.Dispatcher()
+    menu_update_handler = _create_telegram_menu_update_handler(
+        bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
+    )
 
     _register_handlers(
         dispatcher,
@@ -102,9 +117,17 @@ async def _run_telegram_bot(
         incoming_message_processor=incoming_message_processor,
         logger=logger,
         empty_message_reply=empty_message_reply,
+        menu_update_handler=menu_update_handler,
     )
 
     logger.info("Telegram bot polling started")
+    reconciliation_stop = threading.Event()
+    reconciliation_thread = _start_telegram_menu_reconciliation(
+        incoming_message_processor,
+        menu_update_handler,
+        reconciliation_stop,
+        logger=logger,
+    )
     try:
         await _start_polling_with_retries(
             dispatcher,
@@ -118,6 +141,14 @@ async def _run_telegram_bot(
             f"{type(error.error).__name__}"
         ) from error.error
     finally:
+        reconciliation_stop.set()
+        if reconciliation_thread is not None:
+            await asyncio.to_thread(
+                reconciliation_thread.join,
+                TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            if reconciliation_thread.is_alive():
+                logger.error("Telegram menu reconciliation did not stop before timeout")
         await bot.session.close()
 
 
@@ -243,7 +274,8 @@ def _register_handlers(
     *,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
     router = aiogram.Router()
@@ -254,7 +286,7 @@ def _register_handlers(
         if not message.text:
             await safe_send_telegram_reply(
                 message,
-                empty_message_reply,
+                IncomingResponse(text_content(empty_message_reply)),
                 logger=logger,
             )
             return
@@ -265,16 +297,151 @@ def _register_handlers(
             loop=asyncio.get_running_loop(),
             logger=logger,
         )
-        result = await asyncio.to_thread(
-            incoming_message_processor,
-            incoming_message,
-            completion_handler,
-        )
+        if menu_update_handler is None:
+            result = await asyncio.to_thread(
+                incoming_message_processor, incoming_message, completion_handler,
+            )
+        else:
+            result = await asyncio.to_thread(
+                incoming_message_processor,
+                incoming_message,
+                completion_handler,
+                menu_update_handler,
+            )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
-        await safe_send_telegram_reply(message, result.render_text(), logger=logger)
+        await safe_send_telegram_reply(message, result, logger=logger)
+
+    @router.callback_query()
+    async def handle_action(callback: Any) -> None:
+        """Подтверждает нажатие и передаёт непрозрачный token общему маршруту."""
+        try:
+            await callback.answer()
+        except Exception:
+            logger.exception("Telegram callback acknowledgement failed")
+
+        source = getattr(callback, "message", None)
+        chat = getattr(source, "chat", None)
+        author = getattr(callback, "from_user", None)
+        callback_id = getattr(callback, "id", None)
+        if (chat is None or getattr(chat, "id", None) is None
+                or author is None or getattr(author, "id", None) is None
+                or callback_id is None or not str(callback_id)):
+            logger.warning("Telegram callback missing chat, author or callback ID")
+            return
+
+        event = IncomingEvent(
+            channel="telegram",
+            chat_id=str(chat.id),
+            message_id=str(callback_id),
+            text="callback",
+            external_user_id=str(author.id),
+            username=getattr(author, "username", None),
+            display_name=(getattr(author, "full_name", None)
+                          or getattr(author, "first_name", None)),
+        )
+        target = _TelegramReplyTarget(callback.bot, event.chat_id)
+        completion_handler = _create_telegram_completion_handler(
+            callback, loop=asyncio.get_running_loop(), logger=logger,
+        )
+        token = callback.data if isinstance(getattr(callback, "data", None), str) else ""
+        select_action = incoming_message_processor.select_action
+        if menu_update_handler is None:
+            result = await asyncio.to_thread(select_action, event, token, completion_handler)
+        else:
+            result = await asyncio.to_thread(
+                select_action, event, token, completion_handler, menu_update_handler,
+            )
+        if result.error is not None:
+            logger.error("Telegram callback processing failed: %s", result.error)
+        try:
+            await callback.bot.edit_message_reply_markup(
+                chat_id=chat.id, message_id=source.message_id, reply_markup=None,
+            )
+        except Exception:
+            logger.exception("Telegram callback keyboard removal failed")
+        await safe_send_telegram_reply(target, result, logger=logger)
 
     dispatcher.include_router(router)
+
+
+def _create_telegram_menu_update_handler(
+    bot: Any,
+    *,
+    loop: asyncio.AbstractEventLoop,
+    aiogram: Any,
+    logger: logging.Logger,
+) -> CommandMenuUpdateHandler:
+    """Создаёт синхронный callback публикации меню личного чата Telegram.
+
+    Callback вызывается из рабочего потока processor'а. Он передаёт запрос
+    event loop и ждёт ограниченное время, чтобы ошибка Telegram API вернулась
+    в механизм повторной сверки, не блокируя сам event loop.
+    """
+
+    def publish(update: CommandMenuUpdate) -> None:
+        """Публикует команды только для положительного числового Telegram ID."""
+        if update.address.channel != "telegram":
+            return
+        try:
+            chat_id = int(update.address.chat_id)
+        except (TypeError, ValueError):
+            logger.warning("Skipping Telegram menu with non-numeric chat ID")
+            return
+        if chat_id <= 0:
+            logger.warning("Skipping Telegram menu for a non-private chat")
+            return
+
+        commands = []
+        if len(update.menu.items) > 100:
+            raise ValueError("Telegram menu supports at most 100 commands")
+        for item in update.menu.items:
+            command = item.command[1:] if item.command.startswith("/") else item.command
+            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
+                raise ValueError("Telegram command name must contain 1-32 lowercase letters, digits or underscores")
+            if not 1 <= len(item.description) <= 256:
+                raise ValueError("Telegram command description must contain 1-256 characters")
+            commands.append(aiogram.types.BotCommand(command=command, description=item.description))
+
+        scope = aiogram.types.BotCommandScopeChat(chat_id=chat_id)
+        future = asyncio.run_coroutine_threadsafe(
+            bot.set_my_commands(commands=commands, scope=scope), loop,
+        )
+        try:
+            future.result(timeout=TELEGRAM_MENU_API_TIMEOUT_SECONDS)
+        except _FatalPollingError as error:
+            # PollingBot прерывает retry при фатальной ошибке. Меню обрабатывается
+            # отдельно и должно передать исходную ошибку processor'у для retry.
+            raise error.error from error
+        except FutureTimeoutError:
+            future.cancel()
+            raise TimeoutError("Telegram menu API call timed out")
+
+    return publish
+
+
+def _start_telegram_menu_reconciliation(
+    processor: IncomingMessageProcessor,
+    handler: CommandMenuUpdateHandler,
+    stop: threading.Event,
+    *,
+    logger: logging.Logger,
+) -> threading.Thread | None:
+    """Запускает периодическое восстановление меню, если его поддерживает processor."""
+    reconcile = getattr(processor, "run_menu_reconciliation", None)
+    if not callable(reconcile):
+        return None
+
+    def run() -> None:
+        """Выполняет сверку до остановки владельцем Telegram runtime."""
+        try:
+            reconcile(handler, stop)
+        except Exception:
+            logger.exception("Telegram menu reconciliation stopped unexpectedly")
+
+    thread = threading.Thread(target=run, name="telegram-menu-reconciliation", daemon=True)
+    thread.start()
+    return thread
 
 
 def _create_telegram_completion_handler(
@@ -292,10 +459,9 @@ def _create_telegram_completion_handler(
         if reply.address.channel != "telegram":
             raise ValueError("Telegram adapter получил адрес другого канала")
         target = _TelegramReplyTarget(bot, reply.address.chat_id)
-        text = reply.response.render_text()
         try:
             asyncio.run_coroutine_threadsafe(
-                safe_send_telegram_reply(target, text, logger=logger),
+                safe_send_telegram_reply(target, reply.response, logger=logger),
                 loop,
             )
         except RuntimeError as error:
@@ -314,9 +480,12 @@ class _TelegramReplyTarget:
         self.chat = SimpleNamespace(id=chat_id)
         self._bot = bot
 
-    async def answer(self, text: str) -> None:
+    async def answer(self, text: str, *, parse_mode: str, reply_markup: Any = None) -> None:
         """Доставляет один фрагмент ответа в сохранённый чат."""
-        await self._bot.send_message(chat_id=self.chat.id, text=text)
+        kwargs: dict[str, Any] = {"chat_id": self.chat.id, "text": text, "parse_mode": parse_mode}
+        if reply_markup is not None:
+            kwargs["reply_markup"] = reply_markup
+        await self._bot.send_message(**kwargs)
 
 
 def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
@@ -350,7 +519,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
 
 async def send_telegram_reply(
     message: Any,
-    text: str,
+    response: IncomingResponse,
     *,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
 ) -> None:
@@ -358,31 +527,50 @@ async def send_telegram_reply(
 
     Args:
         message: Aiogram message или совместимый fake в тестах.
-        text: Текст ответа.
+        response: Нейтральное содержимое ответа и действия.
         limit: Максимальная длина одного сообщения с запасом ниже лимита Telegram.
+
+    Raises:
+        ValueError: Лимит не вмещает даже один символ с оформлением.
+        Exception: Ошибка отправки готовой части через Telegram API.
     """
-    for chunk in split_telegram_message(text, limit=limit):
-        await message.answer(chunk)
+    chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    for index, chunk in enumerate(chunks):
+        keyboard = None
+        if TELEGRAM_INLINE_ACTIONS_ENABLED and index == len(chunks) - 1:
+            keyboard = _optional_telegram_inline_keyboard(response, logging.getLogger(__name__))
+        kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
+        if keyboard is not None:
+            kwargs["reply_markup"] = keyboard
+        await message.answer(chunk.text, **kwargs)
 
 
 async def safe_send_telegram_reply(
     message: Any,
-    text: str,
+    response: IncomingResponse,
     *,
     logger: logging.Logger,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
 ) -> None:
     """Отправляет Telegram-ответ с per-chunk retries временных ошибок.
 
     Args:
         message: Aiogram message или совместимый fake.
-        text: Текст ответа.
+        response: Нейтральное содержимое ответа и действия.
         logger: Logger Telegram adapter'а.
         limit: Безопасный предел длины одного сообщения.
         sleeper: Асинхронное ожидание между тестируемыми retry-попытками.
+
+    Raises:
+        ValueError: Лимит не вмещает даже один символ с оформлением.
     """
-    chunks = split_telegram_message(text, limit=limit)
+    chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    keyboard = (
+        _optional_telegram_inline_keyboard(response, logger)
+        if include_bound_actions else None
+    )
     started_at = time.monotonic()
     target_id = str(message.chat.id)
     logger.info(
@@ -390,9 +578,12 @@ async def safe_send_telegram_reply(
         target_id,
         len(chunks),
     )
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
+        send_kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
+        if keyboard is not None and index == len(chunks) - 1:
+            send_kwargs["reply_markup"] = keyboard
         sent = await safe_send_async(
-            lambda chunk=chunk: message.answer(chunk),
+            lambda chunk=chunk, send_kwargs=send_kwargs: message.answer(chunk.text, **send_kwargs),
             logger=logger,
             channel="Telegram",
             target_id=target_id,
@@ -413,6 +604,52 @@ async def safe_send_telegram_reply(
     )
 
 
+def _optional_telegram_inline_keyboard(response: IncomingResponse, logger: logging.Logger) -> Any | None:
+    """Сохраняет текстовый путь, если действия не помещаются в клавиатуру."""
+    try:
+        return _serialize_telegram_inline_keyboard(response, _load_aiogram())
+    except ValueError:
+        # Ошибка локальной валидации известна до API-вызова: можно убрать
+        # необязательные кнопки без риска повторной доставки сообщения.
+        logger.warning("Telegram inline keyboard omitted: invalid action layout")
+        return None
+
+
+def _serialize_telegram_inline_keyboard(response: IncomingResponse, aiogram: Any) -> Any | None:
+    """Собирает клавиатуру из bound actions одного ответа.
+
+    Args:
+        response: Ответ с действиями, выданными общим processor'ом.
+        aiogram: Модуль aiogram для создания типов Bot API.
+
+    Returns:
+        Клавиатуру Telegram или `None`, если действий нет.
+
+    Raises:
+        ValueError: Если набор нарушает лимиты Telegram или принадлежит разным ответам.
+    """
+    actions = response.bound_actions
+    if not actions:
+        return None
+    if len(actions) > 100:
+        raise ValueError("Telegram inline keyboard supports at most 100 buttons")
+    if len({action.response_id for action in actions}) != 1:
+        raise ValueError("Telegram inline buttons must belong to one response")
+    rows = []
+    seen_tokens: set[str] = set()
+    for action in actions:
+        token = action.token
+        if not token or len(token.encode("utf-8")) > 64:
+            raise ValueError("Telegram callback_data must contain 1-64 bytes")
+        if token in seen_tokens:
+            raise ValueError("Telegram callback_data tokens must be unique")
+        seen_tokens.add(token)
+        if not action.label or len(action.label) > 64:
+            raise ValueError("Telegram inline button text must contain 1-64 characters")
+        rows.append([aiogram.types.InlineKeyboardButton(text=action.label, callback_data=token)])
+    return aiogram.types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def _telegram_retry_delay(error: Exception, failed_attempt: int) -> float | None:
     """Возвращает задержку только для временных ошибок Telegram API и сети."""
     class_names = {base.__name__ for base in type(error).__mro__}
@@ -426,47 +663,6 @@ def _telegram_retry_delay(error: Exception, failed_attempt: int) -> float | None
     if isinstance(error, (ConnectionError, TimeoutError, OSError)):
         return exponential_retry_delay(failed_attempt)
     return None
-
-
-def split_telegram_message(text: str, *, limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT) -> list[str]:
-    """Делит текст на части, не превышающие безопасный лимит Telegram.
-
-    Args:
-        text: Исходный ответ.
-        limit: Максимальная длина одного фрагмента.
-
-    Returns:
-        Непустой список фрагментов для последовательной отправки.
-    """
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-
-        split_at = _find_split_position(remaining, limit)
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-
-    return chunks
-
-
-def _find_split_position(text: str, limit: int) -> int:
-    """Находит позицию разреза по абзацу, строке или пробелу."""
-    window = text[:limit]
-    for separator in ("\n\n", "\n", " "):
-        position = window.rfind(separator)
-        if position > 0:
-            return position + len(separator)
-    return limit
 
 
 def _load_aiogram() -> Any:

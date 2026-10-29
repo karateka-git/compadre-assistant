@@ -3,13 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from compadre_assistant.core.presentation.incoming.ports import (
+    CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CommandParameter, HelpSection,
+)
+
 
 class ObsidianCommand(StrEnum):
     """Перечисляет команды, принадлежащие возможности Obsidian."""
 
-    GITHUB_STATUS = "/github_status"
-    GITHUB_SYNC = "/github_sync"
-    GITHUB_DISCONNECT = "/github_disconnect"
+    GITHUB_STATUS = "/vault_status"
+    GITHUB_SYNC = "/vault_sync"
+    GITHUB_DISCONNECT = "/vault_disconnect"
     REANALYZE = "/reanalyze"
 
 
@@ -40,16 +44,33 @@ class ParsedObsidianCommand:
         return cls(command, parts[1].strip() if len(parts) == 2 else "")
 
 
-def help_sections() -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Возвращает разделы предметных команд в прежнем порядке справки."""
+def help_sections() -> tuple[HelpSection, ...]:
+    """Возвращает структурированные команды vault и статей в порядке справки."""
     return (
-        (
-            "Obsidian vault",
-            (
-                "`/github_status` — показать состояние локальной копии vault",
-                "`/github_sync` — проверить GitHub и синхронизировать vault",
-                "`/github_disconnect` — отключить vault после подтверждения",
+        HelpSection("Obsidian vault", (
+            CapabilityCommand(ObsidianCommand.GITHUB_STATUS.value, (), "показать состояние локальной копии vault"),
+            CapabilityCommand(ObsidianCommand.GITHUB_SYNC.value, (), "проверить GitHub и синхронизировать vault"),
+            CapabilityCommand(ObsidianCommand.GITHUB_DISCONNECT.value, (), "отключить vault после подтверждения"),
+        )),
+        HelpSection("Статьи", (
+            CapabilityCommand(ObsidianCommand.REANALYZE.value,
+                              (CommandParameter("ID статьи", "<article_id>", False),),
+                              "выполнить анализ статьи повторно"),
+        )),
+    )
+
+
+def obsidian_descriptor() -> CapabilityDescriptor:
+    """Объявляет полный каталог Obsidian без сборки внешних зависимостей."""
+    return CapabilityDescriptor(
+        "obsidian",
+        CapabilityCommand("/obsidian", (CommandParameter("текст или URL", "<text or URL>", False),),
+                          "работа со статьями и Obsidian vault"),
+        CapabilityHelp(
+            sections=help_sections(),
+            instructions=(
+                "Подключение vault выполняется внутри этого режима.",
+                "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
             ),
         ),
-        ("Статьи", ("`/reanalyze <ID статьи>` — выполнить анализ статьи повторно",)),
     )

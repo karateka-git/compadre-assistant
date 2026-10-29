@@ -7,6 +7,24 @@ from datetime import datetime
 MAX_DISPLAY_NAME_LENGTH = 80
 
 
+def is_private_chat_address(channel: str, external_user_id: str | None, external_chat_id: str) -> bool:
+    """Проверяет поддерживаемый личный адрес для публикации меню.
+
+    Args:
+        channel: ID поддерживаемого канала Telegram или VK.
+        external_user_id: ID отправителя; отсутствие не доказывает личный чат.
+        external_chat_id: ID диалога, полученный адаптером.
+
+    Returns:
+        True только при совпадении положительных числовых ID отправителя и чата.
+        Групповые и нераспознанные адреса исключаются консервативно.
+    """
+    return (channel in ("telegram", "vk") and external_user_id is not None
+            and external_user_id == external_chat_id
+            and external_chat_id.isascii() and external_chat_id.isdecimal()
+            and external_chat_id[0] != "0")
+
+
 @dataclass(frozen=True, slots=True)
 class AppUser:
     """Представляет внутреннего пользователя приложения, общего для всех каналов."""

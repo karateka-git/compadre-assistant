@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверки шага 2.4 с настоящими SQLite repositories и автономными gateways."""
 
 from concurrent.futures import ThreadPoolExecutor
@@ -199,8 +200,8 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare("https://example.com/c", other)
         self.assertEqual([len(self.pending(origin)) for origin in (TG, VK, other)], [1, 1, 1])
         local = self.process("/obsidian", VK)
-        self.assertIn("Notes/2.md", local.text)
-        self.assertNotIn("Notes/1.md", local.text)
+        self.assertIn("Notes/2.md", response_text(local))
+        self.assertNotIn("Notes/1.md", response_text(local))
         self.assertEqual(len(local.actions), 2)
 
     def test_two_local_proposals_require_id_and_do_not_consider_remote_pending(self):
@@ -209,10 +210,10 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare("https://example.com/b", TG)
         remote = self.prepare("https://example.com/c", VK)
         ambiguous = self.process("да", TG)
-        self.assertIn("неоднозначен", ambiguous.text)
+        self.assertIn("неоднозначен", response_text(ambiguous))
         self.assertEqual(self.gateway.commits, 0)
         cancelled = self.process(first.actions[1].command, TG)
-        self.assertIn("отменено", cancelled.text)
+        self.assertIn("отменено", response_text(cancelled))
         self.assertEqual(len(self.pending(TG)), 1)
         self.process(remote.actions[1].command, VK)
         self.assertEqual(len(self.pending(VK)), 0)
@@ -225,9 +226,9 @@ class OperationScopesTest(unittest.TestCase):
         for origin in (VK, PendingOrigin("telegram", "other")):
             self.process("/obsidian", origin)
             denied = self.process(response.actions[0].command, origin)
-            self.assertIn("исходном чате", denied.text)
-            self.assertNotIn("Notes/1.md", denied.text)
-            self.assertNotIn("Новый материал", denied.text)
+            self.assertIn("исходном чате", response_text(denied))
+            self.assertNotIn("Notes/1.md", response_text(denied))
+            self.assertNotIn("Новый материал", response_text(denied))
             self.assertEqual(denied.actions, ())
         with connect_database(self.path) as connection:
             pending = self.pending()[0]
@@ -243,8 +244,8 @@ class OperationScopesTest(unittest.TestCase):
         """Выход сохраняет адресное ожидание и требует явного входа перед решением."""
         response = self.prepare()
         self.process("/exit")
-        self.assertIn("Войди снова", self.process(response.actions[0].command).text)
-        self.assertIn("Профиль", self.process("/status").text)
+        self.assertIn("Войди снова", response_text(self.process(response.actions[0].command)))
+        self.assertIn("Профиль", response_text(self.process("/status")))
         self.assertEqual(len(self.pending()), 1)
         reopened = self.process("/obsidian")
         self.assertEqual(reopened.actions, response.actions)
@@ -257,7 +258,7 @@ class OperationScopesTest(unittest.TestCase):
         second = self.process("https://example.com/a?utm_source=other")
         self.assertEqual(first.actions, second.actions)
         remote = self.process("/obsidian https://example.com/a", VK)
-        self.assertIn("исходном чате", remote.text)
+        self.assertIn("исходном чате", response_text(remote))
         self.assertEqual(remote.actions, ())
         self.assertEqual(self.fetcher.calls, 1)
         with connect_database(self.path) as connection:
@@ -278,7 +279,7 @@ class OperationScopesTest(unittest.TestCase):
             self.assertTrue(entered.wait(2))
             try:
                 duplicate = self.process("/obsidian https://example.com/a", VK)
-                self.assertIn("уже обрабатывается", duplicate.text)
+                self.assertIn("уже обрабатывается", response_text(duplicate))
                 self.assertEqual(duplicate.actions, ())
             finally:
                 release.set()
@@ -326,7 +327,7 @@ class OperationScopesTest(unittest.TestCase):
         for origin in (TG, VK):
             self.process("/obsidian", origin)
             denied = self.process(f"/reanalyze {pending.article_id}", origin)
-            self.assertIn("исходном чате", denied.text)
+            self.assertIn("исходном чате", response_text(denied))
             self.assertEqual(denied.actions, ())
         self.assertEqual(self.pending()[0].id, pending.id)
         self.assertEqual(self.process("/obsidian").actions, response.actions)
@@ -336,7 +337,7 @@ class OperationScopesTest(unittest.TestCase):
         """Неизвестная slash-команда не запускает предметный pipeline через URL аргумента."""
         self.process("/obsidian")
         reply = self.process("/unknown https://example.com/a")
-        self.assertIn("Неизвестная команда", reply.text)
+        self.assertIn("Не знаю такой команды Obsidian", response_text(reply))
         self.assertEqual(self.fetcher.calls, 0)
         self.assertFalse(self.pending())
 
@@ -355,14 +356,14 @@ class OperationScopesTest(unittest.TestCase):
                 expires_at=now + timedelta(minutes=5),
             )
             busy = self.process(second.actions[0].command, VK)
-            self.assertIn("занят", busy.text)
+            self.assertIn("занят", response_text(busy))
             self.assertEqual(len(self.pending(VK)), 1)
             self.assertEqual(len(self.pending(TG)), 1)
             leases.release(app_user_id=1, vault_id=1, owner="sync-worker")
         self.process(first.actions[0].command)
         self.assertEqual(self.gateway.commits, 1)
         conflict = self.process(second.actions[0].command, VK)
-        self.assertIn("Vault изменился", conflict.text)
+        self.assertIn("Хранилище изменилось", response_text(conflict))
         self.assertEqual(self.gateway.commits, 1)
         self.assertFalse(self.pending(VK))
         refreshed = self.prepare("https://example.com/b", VK)
@@ -396,7 +397,7 @@ class OperationScopesTest(unittest.TestCase):
             )
             restored = SQLiteObsidianProposalRepository(first).release_claim(claimed)
         stale = self.process(response.actions[0].command)
-        self.assertIn("устарело", stale.text)
+        self.assertIn("устарело", response_text(stale))
         current = self.process("/obsidian")
         self.process(current.actions[0].command)
         self.process(current.actions[0].command)
@@ -418,7 +419,7 @@ class OperationScopesTest(unittest.TestCase):
                 release.set()
             self.assertIsNone(applying.result(timeout=3).error)
         self.assertEqual(self.gateway.commits, 1)
-        self.assertIn("Vault изменился", self.process(second.actions[0].command, VK).text)
+        self.assertIn("Хранилище изменилось", response_text(self.process(second.actions[0].command, VK)))
         self.assertEqual(self.gateway.commits, 1)
 
     def test_expired_lease_taken_during_preflight_blocks_remote_commit(self):
@@ -549,18 +550,18 @@ class OperationScopesTest(unittest.TestCase):
             with self.assertRaises(PendingOperationError):
                 confirmations.decide(replace(pending, origin=VK), approve=True, now=now)
         other = self.process("/obsidian", VK)
-        self.assertNotIn("secret-replacement", other.text)
+        self.assertNotIn("secret-replacement", response_text(other))
         self.assertFalse(other.actions)
         self.prepare("https://example.com/b", VK)
-        conflict = self.process("/github_disconnect", VK)
-        self.assertIn("Конфигурация vault", conflict.text)
-        self.assertNotIn("secret-replacement", conflict.text)
+        conflict = self.process("/vault_disconnect", VK)
+        self.assertIn("Конфигурация vault", response_text(conflict))
+        self.assertNotIn("secret-replacement", response_text(conflict))
         self.assertEqual(conflict.actions, ())
 
     def test_configuration_decision_checks_ttl_version_and_shared_write_lease(self):
         """Занятый ресурс и неверная версия сохраняют адресное ожидание конфигурации."""
         self.process("/obsidian")
-        response = self.process("/github_disconnect")
+        response = self.process("/vault_disconnect")
         with connect_database(self.path) as connection:
             repository = SQLiteVaultActionConfirmationRepository(connection)
             now = datetime.now(UTC)
@@ -593,7 +594,7 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare()
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            target = service.register(IncomingIdentity("telegram", "target-user", "target-chat"))
+            target = service.register_with_name(IncomingIdentity("telegram", "target-user", "target-chat"), display_name="Анатолий")
             code = service.create_link_code(target.id)
             pending = service.request_rebind_confirmation(
                 code=code.code, identity=IncomingIdentity("telegram", "tg-user", TG.chat_id)
@@ -618,14 +619,14 @@ class OperationScopesTest(unittest.TestCase):
                     version=999,
                 )
         response = self.process(f"/confirm core identity {pending.id} {pending.version} yes")
-        self.assertIn("перепривязал", response.text)
+        self.assertIn("перепривязал", response_text(response))
         with connect_database(self.path) as connection:
             user = create_user_identity_service(connection).resolve(
                 IncomingIdentity("telegram", "tg-user", TG.chat_id)
             )
             self.assertEqual(user.id, target.id)
         repeated = self.process(f"/confirm core identity {pending.id} {pending.version} yes")
-        self.assertIn("недоступно", repeated.text)
+        self.assertIn("устарело или истекло", response_text(repeated))
 
     def test_superseded_identity_operation_never_confirms_new_request(self):
         """Новое ожидание identity имеет новый ID; команда старого ID не переносит профиль."""

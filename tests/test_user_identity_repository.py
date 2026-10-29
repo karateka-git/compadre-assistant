@@ -9,7 +9,7 @@ import sqlite3
 import unittest
 
 from compadre_assistant.core.domain.users.identity import (
-    IdentityAlreadyBoundError, InvalidLinkCodeError, UserIdentityService,
+    IdentityAlreadyBoundError, InvalidDisplayNameError, InvalidLinkCodeError, UserIdentityService,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -33,17 +33,48 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(connection)
                 service = _service(connection)
 
-                user = service.register(_identity("telegram", "tg-1", "chat-1"))
+                user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 named_user = service.update_display_name(
                     app_user_id=user.id,
                     display_name="  Влад   Ерофеев  ",
                 )
                 resolved = service.resolve(_identity("telegram", "tg-1", "chat-1"))
 
-        self.assertIsNone(user.display_name)
+        self.assertEqual(user.display_name, "Анатолий")
         self.assertEqual(named_user.display_name, "Влад Ерофеев")
         self.assertEqual(resolved, named_user)
         self.assertEqual(user.id, 1)
+
+    def test_invalid_registration_name_creates_no_records(self) -> None:
+        """Недопустимые имена не создают ни профиль, ни внешнюю identity."""
+        with TemporaryDirectory() as directory:
+            with connect_database(Path(directory) / "test.db") as connection:
+                apply_migrations(connection)
+                for name in (" ", "я" * 81, "/name", "https://example.com"):
+                    with self.subTest(name=name), self.assertRaises(InvalidDisplayNameError):
+                        _service(connection).register_with_name(
+                            _identity("telegram", "tg-1", "chat-1"), display_name=name,
+                        )
+                    for table in ("app_users", "external_identities"):
+                        self.assertEqual(connection.execute(
+                            f"SELECT COUNT(*) FROM {table}"
+                        ).fetchone()[0], 0)
+
+    def test_failure_after_identity_insert_rolls_back_both_records(self) -> None:
+        """Ошибка после обеих вставок откатывает всю транзакцию регистрации."""
+        with TemporaryDirectory() as directory:
+            with connect_database(Path(directory) / "test.db") as connection:
+                apply_migrations(connection)
+                connection.execute("""CREATE TRIGGER reject_identity AFTER INSERT
+                    ON external_identities BEGIN SELECT RAISE(ABORT, 'test failure'); END""")
+                with self.assertRaises(sqlite3.IntegrityError):
+                    _service(connection).register_with_name(
+                        _identity("telegram", "tg-1", "chat-1"), display_name="Имя",
+                    )
+                for table in ("app_users", "external_identities"):
+                    self.assertEqual(connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0], 0)
 
     def test_link_code_binds_second_channel_to_same_user(self) -> None:
         """Одноразовый код привязывает новый канал к существующему пользователю."""
@@ -52,7 +83,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(connection)
                 service = _service(connection)
 
-                user = service.register(_identity("telegram", "tg-1", "chat-1"))
+                user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 link_code = service.create_link_code(user.id)
                 linked = service.link(
                     code=link_code.code,
@@ -70,8 +101,8 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(connection)
                 service = _service(connection)
 
-                old_user = service.register(_identity("telegram", "tg-1", "chat-1"))
-                new_user = service.register(_identity("vk", "vk-1", "chat-2"))
+                old_user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
+                new_user = service.register_with_name(_identity("vk", "vk-1", "chat-2"), display_name="Анатолий")
                 link_code = service.create_link_code(new_user.id)
                 target_user = service.request_rebind_confirmation(
                     code=link_code.code,
@@ -97,7 +128,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(connection)
                 _install_identity_unique_conflict(connection)
                 with self.assertRaises(sqlite3.IntegrityError):
-                    _service(connection).register(_identity("vk", "vk-1", "chat-1"))
+                    _service(connection).register_with_name(_identity("vk", "vk-1", "chat-1"), display_name="Анатолий")
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM external_identities").fetchone()[0], 0)
 
@@ -107,7 +138,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
             with connect_database(Path(directory) / "test.db") as connection:
                 apply_migrations(connection)
                 service = _service(connection)
-                user = service.register(_identity("telegram", "tg-1", "chat-1"))
+                user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 code = service.create_link_code(user.id)
                 _install_identity_unique_conflict(connection)
                 with self.assertRaises(sqlite3.IntegrityError):
@@ -128,7 +159,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(first)
                 started = Event()
                 first.execute("BEGIN IMMEDIATE")
-                user_id = first.execute("INSERT INTO app_users DEFAULT VALUES").lastrowid
+                user_id = first.execute("INSERT INTO app_users (display_name) VALUES ('Исходное имя')").lastrowid
                 first.execute(
                     """INSERT INTO external_identities
                     (app_user_id, channel, external_user_id, external_chat_id)
@@ -143,6 +174,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                     first.commit()
                     returned = future.result(timeout=5)
                 self.assertEqual(returned.id, user_id)
+                self.assertEqual(returned.display_name, "Исходное имя")
                 self.assertEqual(first.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 1)
                 self.assertEqual(first.execute("SELECT COUNT(*) FROM external_identities").fetchone()[0], 1)
 
@@ -153,8 +185,8 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
             with connect_database(path) as first:
                 apply_migrations(first)
                 service = _service(first)
-                target = service.register(_identity("telegram", "tg-1", "chat-1"))
-                owner = service.register(_identity("vk", "vk-owner", "chat-2"))
+                target = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
+                owner = service.register_with_name(_identity("vk", "vk-owner", "chat-2"), display_name="Анатолий")
                 code = service.create_link_code(target.id)
                 started = Event()
                 first.execute("BEGIN IMMEDIATE")
@@ -183,7 +215,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
             with connect_database(path) as first:
                 apply_migrations(first)
                 service = _service(first)
-                target = service.register(_identity("telegram", "tg-1", "chat-1"))
+                target = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 code = service.create_link_code(target.id)
                 started = Event()
                 first.execute("BEGIN IMMEDIATE")
@@ -251,7 +283,7 @@ def _register_on_connection(path: Path, started: Event):
     """Регистрирует пользователя в отдельном SQLite-соединении тестового worker."""
     with connect_database(path) as connection:
         started.set()
-        return _service(connection).register(_identity("telegram", "tg-1", "chat-1"))
+        return _service(connection).register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
 
 
 def _link_on_connection(path: Path, code: str, started: Event, user_id: str = "vk-1"):

@@ -17,7 +17,7 @@ from compadre_assistant.capabilities.obsidian.presentation.commands import (
 class IncomingCommandsTest(unittest.TestCase):
     """Проверяет metadata команд и точный общий parser."""
 
-    def test_each_command_has_help_metadata_and_markdown_representation(self) -> None:
+    def test_each_command_has_help_metadata_and_plain_representation(self) -> None:
         """Каждая команда знает раздел, usage и пользовательское описание."""
         for command in ChatCommand:
             with self.subTest(command=command.value):
@@ -26,7 +26,7 @@ class IncomingCommandsTest(unittest.TestCase):
                 self.assertIn(command.value, command.usage)
                 self.assertEqual(
                     str(command),
-                    f"`{command.usage}` — {command.description}",
+                    f"{command.usage} — {command.description}",
                 )
 
     def test_parser_returns_typed_command_and_raw_arguments(self) -> None:
@@ -70,10 +70,10 @@ class IncomingCommandsTest(unittest.TestCase):
     def test_obsidian_help_sections_keep_existing_order(self) -> None:
         """Разделы vault и статей идут после общих разделов в прежнем порядке."""
         sections = help_sections()
-        self.assertEqual([section[0] for section in sections], ["Obsidian vault", "Статьи"])
+        self.assertEqual([section.title for section in sections], ["Obsidian vault", "Статьи"])
         self.assertEqual(
-            [line.split("`")[1] for _, lines in sections for line in lines],
-            ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze <ID статьи>"],
+            [command.name for section in sections for command in section.commands],
+            ["/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze"],
         )
 
 

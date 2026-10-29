@@ -3,32 +3,42 @@
 from __future__ import annotations
 
 import sqlite3
+import logging
+from dataclasses import replace
+from threading import Event, RLock
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Iterator
 
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
+from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
-    CapabilityDescriptor,
+    CommandMenuUpdate,
+    CommandMenuUpdateHandler,
     IncomingCapabilityPort,
     IncomingResponse,
+    BackgroundReply,
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+
 from compadre_assistant.core.domain.users.identity import UserIdentityService
+from compadre_assistant.core.domain.users.entities import is_private_chat_address
 from compadre_assistant.capabilities.obsidian.bootstrap import (
     AnalyzeArticleUseCaseFactory,
     GitHubConnectionStarter,
     ObsidianProcessRuntime,
     ProcessArticleUrlUseCaseFactory,
     ObsidianCapability,
+    obsidian_descriptor,
     create_obsidian_process_runtime,
     process_url_for_cli,
     validate_external_http_url,
@@ -59,6 +69,11 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteIdentityRebindConfirmationRepository,
     SQLiteIdentityLifecycleRepository,
 )
+
+
+LOGGER = logging.getLogger(__name__)
+# Неполный снимок требует нового чтения, даже если консервативное меню доставлено.
+INCOMPLETE_MENU_SNAPSHOT = "Неполный снимок подтверждений"
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -157,19 +172,230 @@ class ChannelMessageProcessor:
             ValueError: Повторный ID или команда входа в реестре.
         """
         self._database_path = database_path
+        self._pending_inputs = PendingInputStore()
+        self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
+        # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
+        self._menu_lock = RLock()
+        self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}
+        self._menu_failures: dict[ReplyAddress, str] = {}
+        self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
+
+    @property
+    def menu_delivery_failures(self) -> dict[ReplyAddress, str]:
+        """Возвращает снимок ошибок доставки, ожидающих повторной попытки."""
+        with self._menu_lock:
+            return dict(self._menu_failures)
+
+    def reconcile_menus(self, handler: CommandMenuUpdateHandler) -> None:
+        """Восстанавливает или сверяет меню всех известных личных чатов.
+
+        Вызывать при запуске с готовым обработчиком и после изменения серверной
+        доступности или подтверждений. Повторный вызов проверяет TTL ввода и
+        доставляет только изменившиеся либо ранее не доставленные меню.
+
+        Args:
+            handler: Нейтральный callback публикации меню вне SQLite scope.
+        """
+        with self._menu_lock:
+            try:
+                with connect_database(self._database_path) as connection:
+                    service = create_user_identity_service(connection)
+                    identities = service.list_all_known_private_chats()
+            except Exception:
+                LOGGER.exception("Could not enumerate known chats for menu reconciliation")
+                return
+            events = {
+                ReplyAddress(identity.channel, identity.external_chat_id):
+                    (IncomingEvent(identity.channel, identity.external_chat_id, "menu-reconcile",
+                                   "/help"), False)
+                for _, identity in identities
+            }
+            for address in self._pending_inputs.addresses():
+                if address not in events and address in self._unregistered_menu_events:
+                    events[address] = (self._unregistered_menu_events[address], True)
+            for address in self._menu_failures:
+                if address not in events and address in self._unregistered_menu_events:
+                    events[address] = (self._unregistered_menu_events[address], True)
+            for event, allow_unknown in events.values():
+                self._reconcile_menu_event(event, handler, allow_unknown=allow_unknown)
+
+    def run_menu_reconciliation(
+        self, handler: CommandMenuUpdateHandler, stop: Event, *, interval_seconds: float = 30.0,
+    ) -> None:
+        """Запускает сверку при старте и периодически до сигнала остановки.
+
+        Args:
+            handler: Callback канала для публикации меню.
+            stop: Сигнал завершения фонового цикла владельцем процесса.
+            interval_seconds: Период проверки TTL и повторных доставок.
+
+        Raises:
+            ValueError: Период не положителен.
+        """
+        if interval_seconds <= 0:
+            raise ValueError("interval_seconds must be positive")
+        self.reconcile_menus(handler)
+        while not stop.wait(interval_seconds):
+            self.reconcile_menus(handler)
+
+    def _reconcile_menu_event(
+        self, event: IncomingEvent, handler: CommandMenuUpdateHandler, *,
+        allow_unknown: bool,
+    ) -> None:
+        """Под процессной блокировкой перечитывает состояние перед доставкой."""
+        address = event.reply_address
+        if allow_unknown and not is_private_chat_address(
+                address.channel, event.external_user_id, address.chat_id):
+            return
+        try:
+            with connect_database(self._database_path) as connection:
+                service = create_user_identity_service(connection)
+                known = service.find_known_private_chat(address.channel, address.chat_id)
+                if known is not None:
+                    owner, current = known
+                    if event.external_user_id != current.external_user_id:
+                        # Явный автор исходного события не может получить меню
+                        # другого владельца совпавшего адреса. Только внутренний
+                        # проход без автора подставляет текущую identity из БД.
+                        if event.external_user_id is not None:
+                            return
+                        event = IncomingEvent(address.channel, address.chat_id, "menu-reconcile",
+                                              "/help", current.external_user_id)
+                elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
+                    return
+                else:
+                    self._unregistered_menu_events[address] = event
+                dispatcher = IncomingMessageDispatcher(
+                    registry=self._registry, pending_inputs=self._pending_inputs,
+                    user_identity_service=service,
+                    chat_mode_repository=SQLiteChatModeRepository(connection),
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
+                )
+                menu, complete = dispatcher.command_menu_snapshot(
+                    event, known_user=owner if known is not None else None)
+                if known is not None and not service.owns_known_private_chat(owner, current):
+                    return
+            if not complete:
+                # Проекция уже скрыла /confirm. Доставляем её, чтобы прежнее
+                # полное меню не оставалось видимым при ошибке источника.
+                self._menu_failures.setdefault(address, INCOMPLETE_MENU_SNAPSHOT)
+            update = CommandMenuUpdate(address, menu)
+            if (self._published_menus.get(address) == update
+                    and self._menu_failures.get(address) in (None, INCOMPLETE_MENU_SNAPSHOT)):
+                if complete:
+                    self._menu_failures.pop(address, None)
+                    if self._pending_inputs.get(address) is None:
+                        self._unregistered_menu_events.pop(address, None)
+                return
+            handler(update)
+            self._published_menus[address] = update
+            if complete:
+                self._menu_failures.pop(address, None)
+                if self._pending_inputs.get(address) is None:
+                    self._unregistered_menu_events.pop(address, None)
+        except Exception as error:
+            self._menu_failures[address] = str(error)
+            LOGGER.exception("Could not deliver reconciled command menu")
 
     def __call__(self, incoming_message: IncomingEvent,
-                 completion_handler: ChannelCompletionHandler | None = None) -> IncomingResponse:
-        """Читает identity и режим в коротком независимом core scope."""
+                 completion_handler: ChannelCompletionHandler | None = None,
+                 menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+        """Обрабатывает событие в коротком core scope.
+
+        Args:
+            incoming_message: Событие с identity и адресом исходного чата.
+            completion_handler: Доставка последующего ответа каналу.
+            menu_update_handler: Необязательная доставка изменившегося меню.
+
+        Returns:
+            Текстовый ответ независимо от результата обновления меню.
+        """
+        return self._process(incoming_message, completion_handler, menu_update_handler)
+
+    def select_action(self, event: IncomingEvent, token: str,
+                      completion_handler: ChannelCompletionHandler | None = None,
+                      menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+        """Передаёт callback адаптера общему безопасному маршруту выбора.
+
+        Args:
+            event: Проверенные адаптером канал, чат, явный автор и ID callback.
+                Текст игнорируется; при отсутствии текста можно передать token.
+            token: Только непрозрачный token из response.bound_actions.
+            completion_handler: Доставка фоновых ответов с тем же контрактом.
+            menu_update_handler: Публикация изменившегося меню.
+
+        Returns:
+            Обычный ответ с новыми действиями либо безопасный отказ.
+        """
+        return self._process(event, completion_handler, menu_update_handler,
+                             token=token if isinstance(token, str) else "")
+
+    def _process(self, incoming_message: IncomingEvent,
+                 completion_handler: ChannelCompletionHandler | None,
+                 menu_update_handler: CommandMenuUpdateHandler | None,
+                 *, token: str | None = None) -> IncomingResponse:
+        menu_updates: list[CommandMenuUpdate] = []
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
+                pending_inputs=self._pending_inputs,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
-            return dispatcher.execute(incoming_message, completion_handler)
+            try:
+                original_context = dispatcher.action_context(incoming_message)
+            except Exception:
+                original_context = None
+
+            def deliver(reply: BackgroundReply) -> None:
+                """Связывает фоновые действия только с неизменившимся исходным чатом."""
+                response = replace(reply.response, bound_actions=())
+                if original_context is not None and reply.address == incoming_message.reply_address:
+                    try:
+                        with connect_database(self._database_path) as background_connection:
+                            background_dispatcher = IncomingMessageDispatcher(
+                                registry=self._registry, pending_inputs=self._pending_inputs,
+                                user_identity_service=create_user_identity_service(background_connection),
+                                chat_mode_repository=SQLiteChatModeRepository(background_connection),
+                                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
+                            )
+                            if background_dispatcher.action_context(incoming_message) == original_context:
+                                response = background_dispatcher.bind_response_actions(
+                                    incoming_message, response, self._response_actions,
+                                )
+                    except Exception:
+                        LOGGER.exception("Could not bind background response actions")
+                completion_handler(BackgroundReply(reply.address, response))
+
+            completion = deliver if completion_handler is not None else None
+            menu_handler = menu_updates.append if menu_update_handler is not None else None
+            if token is None:
+                response = dispatcher.execute(incoming_message, completion, menu_handler)
+            else:
+                response = dispatcher.select_action(
+                    incoming_message, token, self._response_actions, completion, menu_handler,
+                )
+            response = dispatcher.bind_response_actions(incoming_message, response, self._response_actions)
+        if menu_update_handler is not None:
+            with self._menu_lock:
+                # Первое сообщение личного чата также требует публикации:
+                # до него у адаптера ещё нет снимка, даже если команда не меняла меню.
+                addresses = list(dict.fromkeys(update.address for update in menu_updates))
+                if (incoming_message.reply_address not in addresses
+                        and incoming_message.reply_address not in self._published_menus):
+                    addresses.append(incoming_message.reply_address)
+                for address in addresses:
+                    self._reconcile_menu_event(
+                        IncomingEvent(address.channel, address.chat_id,
+                                      "menu-reconcile", "/help",
+                                      incoming_message.external_user_id
+                                      if address == incoming_message.reply_address else None),
+                        menu_update_handler,
+                        allow_unknown=address == incoming_message.reply_address,
+                    )
+        return response
 
 
 @contextmanager
@@ -213,7 +439,7 @@ def create_channel_message_processor(
         with create_ask_runtime(enabled="ask" in enabled_capabilities, config=ask_config) as ask:
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
-                CapabilityDescriptor("obsidian", "/obsidian", "работа со статьями и Obsidian vault"),
+                obsidian_descriptor(),
             )
             if ask is not None:
                 capabilities += (AskCapability(ask),)

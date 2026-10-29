@@ -90,29 +90,108 @@ class UserIdentityService:
         self._external_identity_repository.touch(identity)
         return self._app_user_repository.get_by_id(external_identity.app_user_id)
 
-    def register(self, identity: IncomingIdentity) -> AppUser:
-        """Атомарно возвращает профиль либо создаёт его с первой связью канала."""
-        return self._lifecycle_repository.register(identity)
+    def list_known_private_chats(self, user: AppUser) -> tuple[IncomingIdentity, ...]:
+        """Перечисляет сохранённые личные чаты проверенного профиля.
+
+        Args:
+            user: Профиль, разрешённый обычным входом перед пересчётом меню.
+
+        Returns:
+            Identity с последними известными адресами; удалённый профиль даёт
+            пустой список. Перед публикацией адрес нужно проверить повторно.
+        """
+        if self._app_user_repository.get_by_id(user.id) is None:
+            return ()
+        return tuple(
+            IncomingIdentity(item.channel, item.external_user_id, item.external_chat_id,
+                             item.username, item.display_name)
+            for item in self._external_identity_repository.list_for_user(user.id)
+            if item.app_user_id == user.id
+        )
+
+    def list_all_known_private_chats(self) -> tuple[tuple[AppUser, IncomingIdentity], ...]:
+        """Перечисляет известные личные чаты с владельцами для восстановления меню.
+
+        Returns:
+            Пары профиля и адреса без неоднозначных или удалённых связей.
+            Перед публикацией требуется повторная проверка владения.
+        """
+        result = []
+        for item in self._external_identity_repository.list_all_private_chats():
+            user = self._app_user_repository.get_by_id(item.app_user_id)
+            if user is not None:
+                result.append((user, IncomingIdentity(item.channel, item.external_user_id,
+                              item.external_chat_id, item.username, item.display_name)))
+        return tuple(result)
+
+    def find_known_private_chat(
+        self, channel: str, chat_id: str,
+    ) -> tuple[AppUser, IncomingIdentity] | None:
+        """Читает владельца одного однозначного личного адреса без touch.
+
+        Args:
+            channel: Канал сохранённого адреса.
+            chat_id: ID чата в канале.
+
+        Returns:
+            Текущие профиль и identity либо None при отсутствии или коллизии.
+        """
+        item = self._external_identity_repository.find_private_chat(channel, chat_id)
+        if item is None:
+            return None
+        user = self._app_user_repository.get_by_id(item.app_user_id)
+        if user is None:
+            return None
+        return user, IncomingIdentity(item.channel, item.external_user_id,
+                                      item.external_chat_id, item.username, item.display_name)
+
+    def has_known_chat_address(self, channel: str, chat_id: str) -> bool:
+        """Сообщает, занят ли адрес, чтобы не считать коллизию новым чатом."""
+        return self._external_identity_repository.has_chat_address(channel, chat_id)
+
+    def owns_known_private_chat(self, user: AppUser, identity: IncomingIdentity) -> bool:
+        """Проверяет владельца и точный актуальный адрес без побочного touch.
+
+        Повторное перечисление исключает адрес, перенесённый другой identity,
+        удалённый профиль и неоднозначный адрес. Проверка не оживляет старый чат.
+        """
+        current = self.find_known_private_chat(identity.channel, identity.external_chat_id)
+        return current is not None and current[0].id == user.id and current[1] == identity
+
+    def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
+        """Создаёт именованный профиль и identity одной атомарной операцией.
+
+        Args:
+            identity: Отправитель внешнего канала.
+            display_name: Имя, принятое при завершении регистрации.
+
+        Returns:
+            Созданный профиль либо существующий владелец identity без смены имени.
+
+        Raises:
+            InvalidDisplayNameError: Имя пустое, слишком длинное либо похоже на URL/команду.
+        """
+        return self._lifecycle_repository.register_with_name(
+            identity, display_name=_normalize_display_name(display_name)
+        )
 
     def update_display_name(
-        self,
-        *,
-        app_user_id: int,
-        display_name: str,
+        self, *, app_user_id: int, display_name: str,
     ) -> AppUser:
-        """Проверяет и сохраняет имя внутреннего профиля пользователя."""
-        normalized = " ".join(display_name.split())
-        if not normalized:
-            raise InvalidDisplayNameError("Display name must not be empty")
-        if len(normalized) > MAX_DISPLAY_NAME_LENGTH:
-            raise InvalidDisplayNameError(
-                f"Display name must not exceed {MAX_DISPLAY_NAME_LENGTH} characters"
-            )
-        if normalized.startswith("/") or "://" in normalized:
-            raise InvalidDisplayNameError("Display name looks like a command or URL")
+        """Проверяет и сохраняет имя внутреннего профиля пользователя.
+
+        Args:
+            app_user_id: ID существующего профиля.
+            display_name: Новое имя с допустимой длиной от 1 до 80 символов.
+
+        Returns:
+            Профиль с нормализованным именем.
+
+        Raises:
+            InvalidDisplayNameError: Имя не соответствует правилам регистрации.
+        """
         return self._app_user_repository.update_display_name(
-            app_user_id=app_user_id,
-            display_name=normalized,
+            app_user_id=app_user_id, display_name=_normalize_display_name(display_name),
         )
 
     def create_link_code(self, app_user_id: int) -> CreatedLinkCode:
@@ -248,3 +327,17 @@ class UserIdentityService:
 def _hash_code(code: str) -> str:
     """Возвращает SHA-256 хеш одноразового кода привязки."""
     return sha256(code.encode("utf-8")).hexdigest()
+
+
+def _normalize_display_name(display_name: str) -> str:
+    """Применяет единые правила имени при регистрации и переименовании."""
+    normalized = " ".join(display_name.split())
+    if not normalized:
+        raise InvalidDisplayNameError("Display name must not be empty")
+    if len(normalized) > MAX_DISPLAY_NAME_LENGTH:
+        raise InvalidDisplayNameError(
+            f"Display name must not exceed {MAX_DISPLAY_NAME_LENGTH} characters"
+        )
+    if normalized.startswith("/") or "://" in normalized:
+        raise InvalidDisplayNameError("Display name looks like a command or URL")
+    return normalized

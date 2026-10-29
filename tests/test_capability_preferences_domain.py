@@ -10,7 +10,7 @@ from compadre_assistant.core.domain.capability_preferences import (
     UserCapabilityPreference,
     UserCapabilityPreferenceRepository,
 )
-from compadre_assistant.core.presentation.incoming.ports import CapabilityDescriptor
+from compadre_assistant.core.presentation.incoming.ports import CapabilityCommand, CapabilityDescriptor
 
 
 class FakeRepository(UserCapabilityPreferenceRepository):
@@ -41,8 +41,8 @@ class CapabilityPreferencesDomainTest(unittest.TestCase):
     def test_descriptors_define_defaults(self) -> None:
         """Ask включён, Obsidian и будущий встроенный ID выключены."""
         self.assertTrue(AskCapability.descriptor.enabled_by_default)
-        self.assertFalse(CapabilityDescriptor("obsidian", "/obsidian", "Vault").enabled_by_default)
-        self.assertFalse(CapabilityDescriptor("new", "/new", "New").enabled_by_default)
+        self.assertFalse(CapabilityDescriptor("obsidian", CapabilityCommand("/obsidian", (), "Vault")).enabled_by_default)
+        self.assertFalse(CapabilityDescriptor("new", CapabilityCommand("/new", (), "New")).enabled_by_default)
 
     def test_defaults_and_explicit_choices_are_independent(self) -> None:
         """Отсутствующие строки получают default, неизвестная строка не открывает маршрут."""

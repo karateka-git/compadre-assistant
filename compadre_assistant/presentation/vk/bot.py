@@ -4,17 +4,22 @@ import json
 import logging
 import random
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from random import randint
-from threading import Condition, Thread
+from threading import Condition, Event, Lock, Thread
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import BackgroundReply, ChannelCompletionHandler, IncomingResponse
+from compadre_assistant.core.presentation.incoming.ports import (
+    BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
+    CommandMenuUpdateHandler, IncomingResponse,
+)
+from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.presentation.vk.rendering import render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send,
@@ -31,11 +36,12 @@ VK_LONG_POLL_RETRY_MAX_SECONDS = 30.0
 VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_UPDATE_WORKER_COUNT = 4
 VK_UPDATE_QUEUE_SIZE = 128
+VK_INLINE_ACTIONS_ENABLED = True
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
 IncomingMessageProcessor = Callable[
-    [IncomingEvent, ChannelCompletionHandler | None],
+    [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
 ]
 
@@ -54,7 +60,7 @@ def run_vk_bot(
     group_id: int,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
@@ -76,6 +82,12 @@ def run_vk_bot(
         max_queue_size: Максимальное число ожидающих обработки обновлений.
     """
     api_client = client or VkApiClient(token=token)
+    menu_update_handler = _create_vk_menu_update_handler(api_client, logger=logger)
+    runtime_menu_handler = (
+        menu_update_handler
+        if callable(getattr(incoming_message_processor, "run_menu_reconciliation", None))
+        else None
+    )
     long_poll = _get_long_poll_server_with_retry(
         api_client,
         group_id=group_id,
@@ -91,10 +103,18 @@ def run_vk_bot(
             client=api_client,
             logger=logger,
             empty_message_reply=empty_message_reply,
+            menu_update_handler=runtime_menu_handler,
         ),
         logger=logger,
         worker_count=worker_count,
         max_queue_size=max_queue_size,
+    )
+    menu_stop = Event()
+    menu_thread = _start_vk_menu_reconciliation(
+        incoming_message_processor,
+        menu_update_handler,
+        menu_stop,
+        logger=logger,
     )
     logger.info("VK bot long polling started for group_id=%s", group_id)
     try:
@@ -128,13 +148,21 @@ def run_vk_bot(
                 if not isinstance(update, dict):
                     logger.error("VK update handling failed: unexpected update format")
                     continue
-                if update.get("type") != "message_new":
+                if update.get("type") not in {"message_new", "message_event"}:
                     continue
                 object_data = update.get("object")
-                message = object_data.get("message") if isinstance(object_data, dict) else None
-                chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
+                if update["type"] == "message_event":
+                    chat_id = str(object_data.get("peer_id")) if isinstance(object_data, dict) else ""
+                else:
+                    message = object_data.get("message") if isinstance(object_data, dict) else None
+                    chat_id = str(message.get("peer_id")) if isinstance(message, dict) else ""
                 workers.submit(chat_id, update)
     finally:
+        menu_stop.set()
+        if menu_thread is not None:
+            menu_thread.join(timeout=VK_LONG_POLL_WAIT_SECONDS + 5)
+            if menu_thread.is_alive():
+                logger.error("VK menu reconciliation did not stop before timeout")
         workers.close()
 
 
@@ -243,6 +271,8 @@ class VkApiClient:
             raise ValueError("token must not be empty")
         self._token = token
         self._api_version = api_version
+        self._inline_messages: OrderedDict[tuple[int, int], str] = OrderedDict()
+        self._inline_lock = Lock()
 
     def get_long_poll_server(self, *, group_id: int) -> LongPollServer:
         """Получает VK Bots Long Poll server для группы."""
@@ -277,29 +307,81 @@ class VkApiClient:
         peer_id: int,
         text: str,
         random_id: int | None = None,
+        format_data: str | None = None,
+        keyboard: str | None = None,
     ) -> None:
-        """Отправляет сообщение VK с опциональным idempotency `random_id`.
+        """Отправляет одну готовую часть VK без повторного разбиения.
 
         Args:
             peer_id: ID диалога-получателя.
-            text: Текст сообщения.
+            text: Готовый текст части, уже ограниченный renderer канала.
             random_id: Стабильный ID одной retry-серии или `None` для нового ID.
+            format_data: JSON диапазонов именно этой части или `None` для plain.
+            keyboard: JSON VK-клавиатуры; `None` оставляет обычное сообщение без клавиатуры.
         """
-        chunks = split_vk_message(text)
-        for chunk in chunks:
-            chunk_random_id = (
-                random_id
-                if random_id is not None and len(chunks) == 1
-                else randint(1, 2_147_483_647)
-            )
-            self._api_call(
-                "messages.send",
-                {
-                    "peer_id": str(peer_id),
-                    "message": chunk,
-                    "random_id": str(chunk_random_id),
-                },
-            )
+        # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
+        params = {
+            "peer_id": str(peer_id),
+            "message": text,
+            "random_id": str(random_id if random_id is not None else randint(1, 2_147_483_647)),
+        }
+        if format_data is not None:
+            params["format_data"] = format_data
+        if keyboard is not None:
+            params["keyboard"] = keyboard
+        result = self._api_call("messages.send", params).get("response")
+        if (keyboard is not None and format_data is None and isinstance(result, int)
+                and not isinstance(result, bool) and result > 0):
+            try:
+                is_inline = json.loads(keyboard).get("inline") is True
+            except (ValueError, AttributeError):
+                is_inline = False
+            if is_inline:
+                with self._inline_lock:
+                    self._inline_messages[peer_id, result] = text
+                    if len(self._inline_messages) > 512:
+                        self._inline_messages.popitem(last=False)
+
+    def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
+        """Подтверждает нажатие callback-кнопки до обработки действия.
+
+        Args:
+            event_id: ID фактического события VK.
+            user_id: ID пользователя, присланный VK.
+            peer_id: ID исходного диалога.
+        """
+        self._api_call("messages.sendMessageEventAnswer", {
+            "event_id": event_id, "user_id": str(user_id), "peer_id": str(peer_id),
+        })
+
+    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
+        """Убирает кнопки исходного plain-сообщения при сохранённом тексте.
+
+        Если исходный ответ не найден в памяти или имел format_data, редактирование
+        пропускается: VK messages.edit не принимает format_data.
+        """
+        result = self._api_call("messages.getByConversationMessageId", {
+            "peer_id": str(peer_id),
+            "conversation_message_ids": str(conversation_message_id),
+        }).get("response")
+        items = result.get("items") if isinstance(result, dict) else None
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            return
+        message = items[0]
+        message_id = message.get("id")
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        with self._inline_lock:
+            original_text = self._inline_messages.get((peer_id, message_id))
+        if original_text is None or message.get("text") != original_text:
+            return
+        self._api_call("messages.edit", {
+            "peer_id": str(peer_id), "cmid": str(conversation_message_id),
+            "message": original_text,
+            "keyboard": '{"inline":true,"buttons":[]}',
+        })
+        with self._inline_lock:
+            self._inline_messages.pop((peer_id, message_id), None)
 
     def _api_call(self, method: str, params: dict[str, str]) -> dict[str, Any]:
         api_params = dict(params)
@@ -348,35 +430,21 @@ class VkApiClient:
         return payload
 
 
-def split_vk_message(text: str, *, limit: int = VK_SAFE_MESSAGE_LIMIT) -> list[str]:
-    """Делит длинный VK-ответ на безопасные части."""
-    if limit <= 0:
-        raise ValueError("limit must be positive")
-    if not text:
-        return [""]
-    if len(text) <= limit:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        if len(remaining) <= limit:
-            chunks.append(remaining)
-            break
-        split_at = _find_split_position(remaining, limit)
-        chunks.append(remaining[:split_at].rstrip())
-        remaining = remaining[split_at:].lstrip()
-    return chunks
-
-
 def _handle_update(
     update: dict[str, Any],
     *,
     incoming_message_processor: IncomingMessageProcessor,
     client: VkApiClient,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через `/help`.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
+    if update.get("type") == "message_event":
+        _handle_message_event(
+            update, incoming_message_processor=incoming_message_processor,
+            client=client, logger=logger, menu_update_handler=menu_update_handler,
+        )
+        return
     if update.get("type") != "message_new":
         return
     object_data = update.get("object")
@@ -390,11 +458,11 @@ def _handle_update(
     message_id = _require_int(message.get("id"), "id")
     from_id = _require_int(message.get("from_id"), "from_id")
 
-    if not text.strip():
+    if not text:
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
-            text=empty_message_reply,
+            response=IncomingResponse(text_content(empty_message_reply)),
             logger=logger,
         )
         return
@@ -409,39 +477,210 @@ def _handle_update(
         client,
         logger=logger,
     )
-    result = incoming_message_processor(incoming_message, completion_handler)
+    if menu_update_handler is None:
+        result = incoming_message_processor(incoming_message, completion_handler)  # type: ignore[call-arg]
+    else:
+        result = incoming_message_processor(incoming_message, completion_handler, menu_update_handler)
     if result.error is not None:
         logger.error("VK incoming message processing failed: %s", result.error)
     _safe_send_vk_message(
         client,
         peer_id=peer_id,
-        text=result.render_text(),
+        response=result,
         logger=logger,
     )
+
+
+def _handle_message_event(
+    update: dict[str, Any], *, incoming_message_processor: IncomingMessageProcessor,
+    client: VkApiClient, logger: logging.Logger,
+    menu_update_handler: CommandMenuUpdateHandler | None,
+) -> None:
+    """Подтверждает VK callback и выбирает действие только по opaque token."""
+    data = update.get("object")
+    if not isinstance(data, dict):
+        return
+    peer_id = data.get("peer_id")
+    user_id = data.get("user_id")
+    event_id = data.get("event_id")
+    if (not isinstance(peer_id, int) or isinstance(peer_id, bool)
+            or not isinstance(user_id, int) or isinstance(user_id, bool)
+            or not isinstance(event_id, str) or not event_id):
+        return
+    try:
+        client.answer_message_event(event_id=event_id, user_id=user_id, peer_id=peer_id)
+    except VkBotError as error:
+        logger.warning("VK message event ack failed: %s", error)
+    payload = data.get("payload")
+    # VK Long Poll может уже разобрать JSON payload в объект, хотя схема
+    # описывает строку. Обе формы проходят одинаковую строгую проверку ниже.
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except (ValueError, TypeError):
+            return
+    else:
+        parsed = payload
+    if not isinstance(parsed, dict) or set(parsed) != {"token"}:
+        return
+    token = parsed["token"]
+    if not isinstance(token, str) or not token:
+        return
+    select_action = getattr(incoming_message_processor, "select_action", None)
+    if not callable(select_action):
+        return
+    event = IncomingEvent(
+        channel="vk", chat_id=str(peer_id), message_id=event_id,
+        text=token, external_user_id=str(user_id),
+    )
+    completion_handler = _create_vk_completion_handler(client, logger=logger)
+    if menu_update_handler is None:
+        result = select_action(event, token, completion_handler)
+    else:
+        result = select_action(event, token, completion_handler, menu_update_handler)
+    if result.error is not None:
+        logger.error("VK action selection failed: %s", result.error)
+    cmid = data.get("conversation_message_id")
+    if isinstance(cmid, int) and not isinstance(cmid, bool) and cmid > 0:
+        try:
+            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=cmid)
+        except VkBotError as error:
+            logger.warning("VK inline keyboard cleanup failed: %s", error)
+    _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger)
+
+
+def _create_vk_menu_update_handler(
+    client: Any, *, logger: logging.Logger,
+) -> CommandMenuUpdateHandler:
+    """Создаёт обработчик постоянной текстовой клавиатуры VK.
+
+    VK применяет клавиатуру через `messages.send`, поэтому обновление
+    сопровождается коротким служебным сообщением. Повтор одной попытки
+    сохраняет `random_id`, а переход меню создаёт новую серию публикации.
+    """
+    state_guard = Lock()
+    peer_locks: dict[int, Lock] = {}
+    last_attempt: dict[int, tuple[str, int]] = {}
+
+    def publish(update: CommandMenuUpdate) -> None:
+        """Отправляет клавиатуру только в личный VK-адрес."""
+        if update.address.channel != "vk":
+            return
+        try:
+            peer_id = int(update.address.chat_id)
+        except (TypeError, ValueError):
+            logger.warning("Skipping VK menu with non-numeric peer ID")
+            return
+        if not 0 < peer_id < 2_000_000_000:
+            logger.warning("Skipping VK menu for a non-private peer")
+            return
+
+        items = update.menu.items
+        if len(items) > 50:
+            raise ValueError("VK keyboard supports at most 50 buttons")
+        # Два столбца сохраняют читаемость длинных команд в клиенте VK;
+        # при росте каталога расширяем ряд, чтобы не превысить 10 строк API.
+        columns = max(2, (len(items) + 9) // 10)
+        rows: list[list[dict[str, object]]] = []
+        for start in range(0, len(items), columns):
+            row: list[dict[str, object]] = []
+            for item in items[start:start + columns]:
+                label = item.command
+                if not label or len(label) > 40:
+                    raise ValueError("VK text button command must contain 1-40 characters")
+                row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+            rows.append(row)
+        keyboard = json.dumps(
+            {"one_time": False, "inline": False, "buttons": rows},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        with state_guard:
+            peer_lock = peer_locks.setdefault(peer_id, Lock())
+        with peer_lock:
+            previous = last_attempt.get(peer_id)
+            if previous is not None and previous[0] == keyboard:
+                random_id = previous[1]
+            else:
+                # Новый ID для перехода A→B→A; повтор того же состояния после
+                # ошибки сохраняет ID, а новый runtime автоматически начинает
+                # новую retry-серию.
+                random_id = randint(1, 2_147_483_647)
+                last_attempt[peer_id] = (keyboard, random_id)
+            # Ошибка намеренно выходит наружу: reconciliation оставит адрес на повтор.
+            client.send_message(
+                peer_id=peer_id,
+                text="Меню команд обновлено.",
+                keyboard=keyboard,
+                random_id=random_id,
+            )
+
+    return publish
+
+
+def _start_vk_menu_reconciliation(
+    processor: IncomingMessageProcessor,
+    handler: CommandMenuUpdateHandler,
+    stop: Event,
+    *,
+    logger: logging.Logger,
+) -> Thread | None:
+    """Запускает восстановление меню при старте и его периодическую сверку."""
+    reconcile = getattr(processor, "run_menu_reconciliation", None)
+    if not callable(reconcile):
+        return None
+
+    def run() -> None:
+        """Сверяет меню до завершения VK runtime."""
+        try:
+            reconcile(handler, stop)
+        except Exception:
+            logger.exception("VK menu reconciliation stopped unexpectedly")
+
+    thread = Thread(target=run, name="vk-menu-reconciliation", daemon=True)
+    thread.start()
+    return thread
 
 
 def _safe_send_vk_message(
     client: Any,
     *,
     peer_id: int,
-    text: str,
+    response: IncomingResponse,
     logger: logging.Logger,
     sleeper: Callable[[float], None] = time.sleep,
+    limit: int = VK_SAFE_MESSAGE_LIMIT,
+    include_bound_actions: bool | None = None,
 ) -> None:
     """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
-    chunks = split_vk_message(text)
+    chunks = render_vk_content(response.content, response.actions, limit=limit)
+    show_bound_actions = (
+        VK_INLINE_ACTIONS_ENABLED
+        if include_bound_actions is None else include_bound_actions
+    )
+    keyboard = None
+    if show_bound_actions:
+        try:
+            keyboard = _serialize_vk_inline_keyboard(response)
+        except ValueError:
+            # Необязательная клавиатура не должна скрывать текстовые команды.
+            # Решение принимается до API-вызова, поэтому повторной отправки нет.
+            logger.warning("VK inline keyboard omitted: invalid action layout")
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
         peer_id,
         len(chunks),
     )
-    for chunk in chunks:
+    for index, chunk in enumerate(chunks):
         random_id = randint(1, 2_147_483_647)
+        chunk_keyboard = keyboard if index == len(chunks) - 1 else None
         sent = safe_send(
-            lambda chunk=chunk, random_id=random_id: client.send_message(
+            lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
                 peer_id=peer_id,
-                text=chunk,
+                text=chunk.text,
+                format_data=chunk.format_data,
+                keyboard=chunk_keyboard,
                 random_id=random_id,
             ),
             logger=logger,
@@ -461,6 +700,55 @@ def _safe_send_vk_message(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,
         time.monotonic() - started_at,
+    )
+
+
+def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
+    """Сериализует только действия, привязанные к конкретному ответу VK.
+
+    Args:
+        response: Ответ с явно связанными действиями.
+
+    Returns:
+        JSON inline-клавиатуры или `None`, если действий нет.
+
+    Raises:
+        ValueError: Если действия нарушают ограничения VK или относятся к
+            разным ответам.
+    """
+    actions = response.bound_actions
+    if not actions:
+        return None
+    # Для inline VK поддерживает до 6 строк и 5 кнопок в строке.
+    if len(actions) > 30:
+        raise ValueError("VK inline keyboard supports at most 30 buttons")
+    if len({action.response_id for action in actions}) != 1:
+        raise ValueError("VK inline buttons must belong to one response")
+    seen_tokens: set[str] = set()
+    rows: list[list[dict[str, object]]] = []
+    for start in range(0, len(actions), 5):
+        row: list[dict[str, object]] = []
+        for action in actions[start:start + 5]:
+            token = action.token
+            if not token:
+                raise ValueError("VK callback token must not be empty")
+            if token in seen_tokens:
+                raise ValueError("VK callback tokens must be unique")
+            seen_tokens.add(token)
+            if not action.label or len(action.label) > 40:
+                raise ValueError("VK callback label must contain 1-40 characters")
+            payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > 255:
+                raise ValueError("VK callback payload must contain at most 255 bytes")
+            row.append({
+                "action": {"type": "callback", "label": action.label, "payload": payload},
+                "color": "secondary",
+            })
+        rows.append(row)
+    return json.dumps(
+        {"one_time": False, "inline": True, "buttons": rows},
+        ensure_ascii=False,
+        separators=(",", ":"),
     )
 
 
@@ -485,7 +773,7 @@ def _create_vk_completion_handler(
         _safe_send_vk_message(
             client,
             peer_id=int(reply.address.chat_id),
-            text=reply.response.render_text(),
+            response=reply.response,
             logger=logger,
         )
 
@@ -651,15 +939,6 @@ def _safe_network_error_details(error: VkTransientError) -> str:
     if isinstance(errno, int) and not isinstance(errno, bool):
         details.append(f"errno={errno}")
     return " ".join(details)
-
-
-def _find_split_position(text: str, limit: int) -> int:
-    window = text[:limit]
-    for separator in ("\n\n", "\n", " "):
-        position = window.rfind(separator)
-        if position > 0:
-            return position + len(separator)
-    return limit
 
 
 def _require_int(value: object, field_name: str) -> int:

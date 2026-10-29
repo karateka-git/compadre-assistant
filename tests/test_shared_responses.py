@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Тесты форматирования общих ответов presentation-слоя."""
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 
@@ -11,13 +12,12 @@ from compadre_assistant.capabilities.obsidian.domain.articles.processing import 
     ProcessArticleUrlResult,
 )
 from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
-from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageResult
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
     ProcessIncomingMessageResult,
 )
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.capabilities.obsidian.domain.search.models import EmbeddingIndexCoverage
 from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
     ObsidianConfirmationResult,
@@ -66,57 +66,29 @@ from compadre_assistant.capabilities.obsidian.presentation.responses import (
 from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
 
-def _obsidian_handler() -> ObsidianMessageHandler:
-    """Собирает presentation-слой для метаданных предметной справки."""
-    return ObsidianMessageHandler(article_url_use_case=object())
-
-
 class TelegramResponsesTest(unittest.TestCase):
     """Проверяет пользовательский текст по результату обработки статьи."""
-
-    def test_format_help_lists_only_currently_available_commands(self) -> None:
-        """`/help` перечисляет общий набор реализованных Telegram/VK-команд."""
-        reply = format_incoming_message_result(
-            ProcessIncomingMessageResult(
-                type=IncomingMessageResultType.HELP,
-                capability_help=_obsidian_handler().descriptor.help,
-            )
-        )
-
-        for command in ChatCommand:
-            with self.subTest(command=command.value):
-                self.assertIn(f"`{command.usage}`", reply)
-        self.assertIn("/github_sync", reply)
-        self.assertIn("/github_status", reply)
-        self.assertIn("/github_disconnect", reply)
-        self.assertIn("`/register` — зарегистрироваться", reply)
-        self.assertNotIn("зарегистрироваться и подключить", reply)
-        self.assertLess(reply.index("Основные:"), reply.index("Связь Telegram и VK:"))
-        self.assertLess(reply.index("Связь Telegram и VK:"), reply.index("Obsidian vault:"))
-        self.assertLess(reply.index("Obsidian vault:"), reply.index("Статьи:"))
-        self.assertNotIn("/github_connect", reply)
-        self.assertNotIn("/github_vault", reply)
 
     def test_format_missing_vault_configuration_includes_ready_example(
         self,
     ) -> None:
         """Ошибка первой синхронизации объясняет ручное создание YAML."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_SYNC_FAILED,
                 error=VaultConfigurationError(
                     VaultConfigurationErrorCode.MISSING
                 ),
             )
-        )
+        ))
 
         self.assertIn(".knowledge-catcher.yml", reply)
         self.assertIn("memory-bank/AGENTS.md.txt", reply)
-        self.assertIn("```yaml", reply)
+        self.assertIn("Пример:\nversion: 1", reply)
 
     def test_format_missing_instruction_names_required_path(self) -> None:
         """Ошибка перечисленного файла показывает исправляемый path."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_SYNC_FAILED,
                 error=VaultConfigurationError(
@@ -124,13 +96,13 @@ class TelegramResponsesTest(unittest.TestCase):
                     path="memory-bank/docs/workflows.md.txt",
                 ),
             )
-        )
+        ))
 
         self.assertIn("memory-bank/docs/workflows.md.txt", reply)
 
     def test_format_sync_reports_optional_embedding_failure(self) -> None:
         """Частичный semantic index показывает точное покрытие и fallback."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_SYNC_COMPLETED,
                 vault_sync_result=VaultSyncResult(
@@ -143,16 +115,16 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
-        self.assertIn("Vault синхронизирован", reply)
+        self.assertIn("Локальная копия vault обновлена из GitHub", reply)
         self.assertIn("576 из 623", reply)
-        self.assertIn("Осталось обработать 47 chunks", reply)
+        self.assertIn("осталось chunks 47", reply)
         self.assertIn("FTS fallback", reply)
 
     def test_format_sync_reports_embedding_retry_counts(self) -> None:
         """Повторное построение отличает новые embeddings от переиспользованных."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_SYNC_COMPLETED,
                 vault_sync_result=VaultSyncResult(
@@ -166,10 +138,10 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
-        self.assertIn("Semantic index: готов (embeddings: 623 из 623)", reply)
-        self.assertIn("добавлено: 47; переиспользовано: 576", reply)
+        self.assertIn("Семантический индекс готов: embeddings 623 из 623", reply)
+        self.assertIn("добавлено 47, переиспользовано 576", reply)
 
     def test_format_github_status_reports_semantic_index_readiness(self) -> None:
         """Статус показывает готовый и частичный semantic index отдельно."""
@@ -183,7 +155,7 @@ class TelegramResponsesTest(unittest.TestCase):
             id=1,
         )
 
-        ready = format_obsidian_message_result(
+        ready = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_STATUS,
                 vault_status=VaultStatus(
@@ -195,8 +167,8 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
-        partial = format_obsidian_message_result(
+        ))
+        partial = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_STATUS,
                 vault_status=VaultStatus(
@@ -208,21 +180,21 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
-        self.assertIn("готов (embeddings: 623 из 623)", ready)
-        self.assertIn("сохранено embeddings 576 из 623", partial)
-        self.assertIn("Осталось обработать 47 chunks", partial)
+        self.assertIn("готов: embeddings 623 из 623", ready)
+        self.assertIn("embeddings 576 из 623", partial)
+        self.assertIn("осталось chunks 47", partial)
 
     def test_format_article_processing_result_reports_created_article(self) -> None:
         """Новая статья получает понятный текст с названием, статусом, ID и длиной."""
-        reply = format_article_processing_result(
+        reply = content_text(format_article_processing_result(
             ProcessArticleUrlResult(
                 article=_article(),
                 created=True,
                 extracted=True,
             )
-        )
+        ))
 
         self.assertIn("Готово: статья сохранена.", reply)
         self.assertIn("Название: Article title", reply)
@@ -232,37 +204,37 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_article_processing_result_reports_existing_article(self) -> None:
         """Повторная ссылка получает отдельный текст без намека на новую запись."""
-        reply = format_article_processing_result(
+        reply = content_text(format_article_processing_result(
             ProcessArticleUrlResult(
                 article=_article(),
                 created=False,
                 extracted=False,
             )
-        )
+        ))
 
         self.assertIn("Эта статья уже была сохранена.", reply)
 
     def test_format_article_processing_result_reports_updated_article(self) -> None:
         """Повторно извлеченная статья получает текст обновления."""
-        reply = format_article_processing_result(
+        reply = content_text(format_article_processing_result(
             ProcessArticleUrlResult(
                 article=_article(),
                 created=False,
                 extracted=True,
             )
-        )
+        ))
 
         self.assertIn("Готово: статья обновлена.", reply)
 
     def test_format_article_processing_result_uses_fallbacks(self) -> None:
         """Ответ остается понятным, если у статьи нет заголовка или ID."""
-        reply = format_article_processing_result(
+        reply = content_text(format_article_processing_result(
             ProcessArticleUrlResult(
                 article=replace(_article(), id=None, title=None, cleaned_text=None),
                 created=True,
                 extracted=False,
             )
-        )
+        ))
 
         self.assertIn("Название: без заголовка", reply)
         self.assertIn("ID статьи: не сохранен", reply)
@@ -287,7 +259,7 @@ class TelegramResponsesTest(unittest.TestCase):
             created=True,
         )
 
-        reply = format_article_analysis_result(processing_result, analysis_result)
+        reply = content_text(format_article_analysis_result(processing_result, analysis_result))
 
         self.assertIn("Готово: статья сохранена.", reply)
         self.assertIn("Анализ готов.", reply)
@@ -296,49 +268,49 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_missing_url(self) -> None:
         """Общий результат без URL получает пользовательскую подсказку."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_URL_MISSING
             )
-        )
+        ))
 
         self.assertIn("Пришли ссылку", reply)
 
     def test_format_incoming_message_result_reports_start_registered(self) -> None:
-        """`/start` приветствует зарегистрированного пользователя по имени."""
-        reply = format_incoming_message_result(
+        """/start приветствует зарегистрированного пользователя по имени."""
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
             )
-        )
+        ))
 
         self.assertEqual(
             reply,
             "Compadre Assistant запущен.\n"
             "Рад тебя видеть, Влад.\n"
-            "Справка: `/help`.",
+            "Справка: /help.",
         )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
-        """`/start` для нового канала объясняет регистрацию и привязку."""
-        reply = format_incoming_message_result(
+        """/start для нового канала объясняет регистрацию и привязку."""
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.START_UNREGISTERED,
             )
-        )
+        ))
 
         self.assertIn("пока не зарегистрирован", reply)
         self.assertIn("/register", reply)
 
     def test_format_incoming_message_result_reports_already_registered(self) -> None:
-        """Повторный `/register` получает честный ответ."""
-        reply = format_incoming_message_result(
+        """Повторный /register получает честный ответ."""
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.ALREADY_REGISTERED,
                 app_user=AppUser(id=42, display_name="Влад"),
             )
-        )
+        ))
 
         self.assertIn("уже зарегистрирован", reply)
         self.assertIn("Влад", reply)
@@ -347,19 +319,19 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_name_completion_reports_independent_profile(self) -> None:
         """Сохранение имени завершает профиль без предметного ответа о vault."""
-        reply = format_incoming_message_result(
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.REGISTRATION_NAME_SAVED,
                 app_user=AppUser(id=42, display_name="Влад"),
             )
-        )
+        ))
 
         self.assertIn("Регистрация завершена", reply)
         self.assertNotIn("vault", reply)
 
     def test_format_incoming_message_result_reports_link_code(self) -> None:
         """Код привязки форматируется как команда для второго канала."""
-        reply = format_incoming_message_result(
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
                 link_code=CreatedLinkCode(
@@ -367,19 +339,19 @@ class TelegramResponsesTest(unittest.TestCase):
                     expires_at=datetime(2026, 7, 17, tzinfo=UTC),
                 ),
             )
-        )
+        ))
 
         self.assertIn("ABC123", reply)
         self.assertIn("/link ABC123", reply)
 
     def test_format_incoming_message_result_reports_rebind_success(self) -> None:
         """Подтвержденная перепривязка сообщает нового пользователя."""
-        reply = format_incoming_message_result(
+        reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_REBOUND,
                 app_user=AppUser(id=99, display_name="Основной профиль"),
             )
-        )
+        ))
 
         self.assertIn("перепривязал", reply)
         self.assertIn("Основной профиль", reply)
@@ -387,7 +359,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_processing_error(self) -> None:
         """Ошибка article pipeline получает понятный текст ответа."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_PROCESSING_FAILED,
                 error=ProcessArticleUrlError(
@@ -395,7 +367,7 @@ class TelegramResponsesTest(unittest.TestCase):
                     stage=ProcessingStage.FETCHING,
                 ),
             )
-        )
+        ))
 
         self.assertIn("Не удалось загрузить страницу", reply)
 
@@ -420,7 +392,7 @@ class TelegramResponsesTest(unittest.TestCase):
         )
         error = RuntimeError("embedding unavailable")
 
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_REVIEW_APPLIED,
                 obsidian_confirmation=ObsidianConfirmationResult(
@@ -430,24 +402,24 @@ class TelegramResponsesTest(unittest.TestCase):
                 ),
                 error=error,
             )
-        )
+        ))
 
-        self.assertIn("Изменение применено", reply)
-        self.assertIn("поисковый индекс пока не обновлён", reply)
-        self.assertIn("/github_sync", reply)
+        self.assertIn("Изменение записано в GitHub прямым commit", reply)
+        self.assertIn("поисковый индекс ещё не обновлён", reply)
+        self.assertIn("/vault_sync", reply)
 
     def test_format_profile_status_preserves_general_text(self) -> None:
         """Общий статус профиля не требует модели vault."""
-        reply = format_incoming_message_result(ProcessIncomingMessageResult(
+        reply = content_text(format_incoming_message_result(ProcessIncomingMessageResult(
             type=IncomingMessageResultType.PROFILE_STATUS,
             capability_reply="Профиль: Влад.\nРежим этого чата: не выбран.",
-        ))
+        )))
         self.assertIn("Влад", reply)
         self.assertIn("не выбран", reply)
 
     def test_format_github_authorization_returns_device_url_and_code(self) -> None:
         """Оба channel adapters получают безопасную инструкцию Device Flow."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_CONNECT_STARTED,
                 app_user=AppUser(id=42),
@@ -465,7 +437,7 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
         self.assertNotIn("installations/new", reply)
         self.assertIn("https://github.com/login/device", reply)
@@ -482,43 +454,43 @@ class TelegramResponsesTest(unittest.TestCase):
 
         for status, expected_text in cases.items():
             with self.subTest(status=status):
-                reply = format_obsidian_message_result(
+                reply = content_text(format_obsidian_message_result(
                     ObsidianMessageResult(
                         type=ObsidianResultType.GITHUB_CONNECT_FAILED,
                         github_completion=GitHubConnectionCompletion(status),
                     )
-                )
+                ))
                 self.assertIn(expected_text, reply)
                 self.assertIn("ссылку", reply)
 
     def test_format_github_app_required_returns_installation_url(self) -> None:
         """После OAuth без installation бот предлагает настроить App."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_APP_REQUIRED,
                 installation_url=(
                     "https://github.com/apps/compadre-assistant/installations/new"
                 ),
             )
-        )
+        ))
 
         self.assertIn("installations/new", reply)
         self.assertIn("read and write", reply)
 
     def test_format_github_authorized_announces_first_sync(self) -> None:
         """После Device Flow пользователь сразу видит начало первой синхронизации."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_AUTHORIZED_SYNC_STARTED,
             )
-        )
+        ))
 
         self.assertIn("GitHub авторизован", reply)
         self.assertIn("первую синхронизацию", reply)
 
     def test_format_vault_selection_shows_repository_branch_and_path(self) -> None:
         """Успешный выбор vault возвращает понятные проверенные параметры."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_VAULT_SELECTED,
                 app_user=AppUser(id=42),
@@ -536,27 +508,27 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
-        self.assertIn("Obsidian vault подключён", reply)
+        self.assertIn("Хранилище подключено:", reply)
         self.assertIn("octocat/notes", reply)
         self.assertIn("main", reply)
         self.assertIn("Vault", reply)
 
     def test_format_unavailable_vault_explains_required_write_access(self) -> None:
         """Ошибка выбора объясняет требование чтения и записи repository."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.GITHUB_VAULT_REPOSITORY_UNAVAILABLE,
             )
-        )
+        ))
 
-        self.assertIn("чтение и запись", reply)
+        self.assertIn("читать и записывать", reply)
         self.assertIn("Contents: read and write", reply)
 
     def test_format_vault_replacement_requests_yes_or_no(self) -> None:
         """Предложение замены явно предупреждает об удалении локальных данных."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=(
                     ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CONFIRMATION_REQUIRED
@@ -573,15 +545,15 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
-        self.assertIn("заменит текущее", reply)
+        self.assertIn("текущее подключение и его локальные данные будут заменены", reply)
         self.assertIn("да", reply)
         self.assertIn("нет", reply)
 
     def test_format_vault_disconnect_explains_scope_and_confirmation(self) -> None:
         """Отключение предупреждает об очистке локальных, но не пользовательских данных."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=(
                     ObsidianResultType.GITHUB_DISCONNECT_CONFIRMATION_REQUIRED
@@ -599,10 +571,10 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
         self.assertIn("octocat/notes", reply)
-        self.assertIn("GitHub repository не изменится", reply)
+        self.assertIn("Repository на GitHub не изменится", reply)
         self.assertIn("статьи и анализы сохранятся", reply)
         self.assertIn("да", reply)
         self.assertIn("нет", reply)
@@ -611,7 +583,7 @@ class TelegramResponsesTest(unittest.TestCase):
         self,
     ) -> None:
         """Сбой GitHub сохраняет основной ответ и поясняет локальный fallback."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_PROCESSED,
                 article_result=ProcessArticleUrlResult(
@@ -632,7 +604,7 @@ class TelegramResponsesTest(unittest.TestCase):
                     ),
                 ),
             )
-        )
+        ))
 
         self.assertIn("статья сохранена.", reply)
         self.assertIn("последняя локальная копия", reply)
@@ -641,7 +613,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_sync_in_progress_warns_about_current_local_copy(self) -> None:
         """Параллельная синхронизация не скрывает успешный результат статьи."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_PROCESSED,
                 article_result=ProcessArticleUrlResult(
@@ -654,7 +626,7 @@ class TelegramResponsesTest(unittest.TestCase):
                     note_count=17,
                 ),
             )
-        )
+        ))
 
         self.assertIn("статья сохранена.", reply)
         self.assertIn("другом связанном канале", reply)
@@ -662,7 +634,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
     def test_format_incoming_message_result_reports_reanalysis(self) -> None:
         """Повторный анализ форматируется как полезный Markdown-ответ."""
-        reply = format_obsidian_message_result(
+        reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
                 type=ObsidianResultType.ARTICLE_REANALYZED,
                 analysis_result=AnalyzeArticleResult(
@@ -677,9 +649,9 @@ class TelegramResponsesTest(unittest.TestCase):
                     created=True,
                 ),
             )
-        )
+        ))
 
-        self.assertIn("Анализ обновлен.", reply)
+        self.assertIn("Анализ обновлён.", reply)
         self.assertIn("## Кратко", reply)
 
 

@@ -33,6 +33,22 @@ class ExternalIdentityRepository(Protocol):
     def find(self, identity: IncomingIdentity) -> ExternalIdentity | None:
         """Ищет связь по каналу и внешнему ID пользователя."""
 
+    def list_for_user(self, app_user_id: int) -> tuple[ExternalIdentity, ...]:
+        """Возвращает известные личные адреса профиля без пустых и неоднозначных чатов.
+
+        Адреса поступают только от входов личных диалогов. Перечисление не
+        обновляет время посещения и не восстанавливает удалённые связи.
+        """
+
+    def list_all_private_chats(self) -> tuple[ExternalIdentity, ...]:
+        """Возвращает однозначные личные адреса всех существующих профилей."""
+
+    def find_private_chat(self, channel: str, chat_id: str) -> ExternalIdentity | None:
+        """Возвращает одну текущую личную identity адреса либо None при неоднозначности."""
+
+    def has_chat_address(self, channel: str, chat_id: str) -> bool:
+        """Сообщает, занят ли адрес хотя бы одной сохранённой identity."""
+
     def create(
         self,
         *,
@@ -75,8 +91,8 @@ class IdentityLinkTokenRepository(Protocol):
 class IdentityLifecycleRepository(Protocol):
     """Выполняет неделимые изменения профиля, identity и link-кода."""
 
-    def register(self, identity: IncomingIdentity) -> AppUser:
-        """Возвращает существующий профиль или создаёт его вместе с первой identity."""
+    def register_with_name(self, identity: IncomingIdentity, *, display_name: str) -> AppUser:
+        """Возвращает владельца identity либо атомарно создаёт профиль с проверенным именем и identity."""
 
     def link(self, *, identity: IncomingIdentity, token_hash: str, now: datetime) -> AppUser | None:
         """Погашает действующий код вместе с созданием identity.

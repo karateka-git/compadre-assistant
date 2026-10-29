@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Тесты общего application-flow входящих сообщений."""
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
@@ -24,8 +25,8 @@ from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
-from test_incoming_boundary import MemoryChatModes
-from capability_preference_helpers import MemoryCapabilityPreferences
+from tests.test_incoming_boundary import MemoryChatModes
+from tests.capability_preference_helpers import MemoryCapabilityPreferences
 from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageResultType,
@@ -236,7 +237,7 @@ class FakeReviewUseCase:
 class FakeConfirmationService:
     """Имитирует pending и сохранённый результат Obsidian review."""
 
-    def __init__(self, proposal: ObsidianProposal) -> None:
+    def __init__(self, proposal: ObsidianProposal | None) -> None:
         self.proposal = proposal
         self.confirm_calls = 0
         self.cancel_calls = 0
@@ -244,7 +245,7 @@ class FakeConfirmationService:
     def list_pending(self, app_user_id: int, origin: PendingOrigin):
         return (
             (self.proposal,)
-            if self.proposal.status is ObsidianProposalStatus.PENDING
+            if self.proposal is not None and self.proposal.status is ObsidianProposalStatus.PENDING
             and self.proposal.origin == origin
             else ()
         )
@@ -368,9 +369,10 @@ class FakeRegisteringIdentityService:
         return self._existing
 
 
-    def register(self, _identity: IncomingIdentity) -> AppUser:
+    def register_with_name(self, _identity: IncomingIdentity, *, display_name: str) -> AppUser:
         """Создает пользователя и запоминает регистрацию."""
         self.register_calls += 1
+        self.app_user = AppUser(id=self.app_user.id, display_name=" ".join(display_name.split()))
         self._existing = self.app_user
         return self.app_user
 
@@ -638,8 +640,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/help"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.HELP)
-        self.assertIsNone(result.app_user)
+        self.assertIn("/register", response_text(result))
+        self.assertNotIn("/obsidian", response_text(result))
 
     def test_execute_processes_url_and_links_saved_message(self) -> None:
         """Сообщение со ссылкой проходит общий flow и возвращает structured result."""
@@ -951,6 +953,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
+            obsidian_confirmation_service=FakeConfirmationService(None),
         )
         pending = use_case.execute(
             _telegram_message("https://github.com/octocat/second")
@@ -981,11 +984,12 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
             vault_selection_manager=manager,
+            obsidian_confirmation_service=FakeConfirmationService(None),
         )
 
-        requested = use_case.execute(_telegram_message("/github_disconnect"))
+        requested = use_case.execute(_telegram_message("/vault_disconnect"))
         cancelled = use_case.execute(_telegram_message("нет"))
-        use_case.execute(_telegram_message("/github_disconnect"))
+        use_case.execute(_telegram_message("/vault_disconnect"))
         confirmed = use_case.execute(_telegram_message("да"))
 
         self.assertEqual(
@@ -1010,7 +1014,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             vault_selection_manager=FakeVaultSelectionManager(),
         )
 
-        result = use_case.execute(_telegram_message("/github_disconnect"))
+        result = use_case.execute(_telegram_message("/vault_disconnect"))
 
         self.assertEqual(
             result.type,
@@ -1068,8 +1072,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         self.assertEqual(started.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(len(completions), 3)  # Квитанция, авторизация, выбранный vault.
-        self.assertIn("первую синхронизацию", completions[1].response.text)
-        self.assertIn("octocat/notes", completions[2].response.text)
+        self.assertIn("первую синхронизацию", response_text(completions[1].response))
+        self.assertIn("octocat/notes", response_text(completions[2].response))
         self.assertTrue(all(reply.address == _telegram_message("текст").reply_address for reply in completions))
         self.assertEqual(
             manager.calls[-1],
@@ -1100,7 +1104,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             )
         )
 
-        self.assertIn(starter.installation_url, completions[-1].response.text)
+        self.assertIn(starter.installation_url, response_text(completions[-1].response))
 
     def test_article_is_blocked_until_obsidian_has_vault(self) -> None:
         """Статьи внутри Obsidian требуют подключённый vault готового профиля."""
@@ -1122,7 +1126,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(article_use_case.commands, [])
 
     def test_execute_registers_new_identity(self) -> None:
-        """Команда `/register` создаёт пользователя и запрашивает имя."""
+        """Команда `/register` запрашивает имя без создания пользователя."""
         identity_service = FakeRegisteringIdentityService()
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
@@ -1131,10 +1135,9 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/register"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.REGISTERED)
-        self.assertEqual(result.app_user.id, 77)
-        self.assertIsNone(result.app_user.display_name)
-        self.assertEqual(identity_service.register_calls, 1)
+        self.assertEqual(result.type, IncomingMessageResultType.REGISTRATION_NAME_REQUIRED)
+        self.assertIsNone(result.app_user)
+        self.assertEqual(identity_service.register_calls, 0)
 
     def test_execute_saves_registration_name_before_vault(self) -> None:
         """Обычный текст после `/register` становится общим именем профиля."""
@@ -1155,25 +1158,15 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.app_user.display_name, "Влад Ерофеев")
         self.assertIsNone(use_case.modes.get(ChatModeKey(77, "telegram", "chat-1")))
 
-    def test_execute_saves_name_without_reselecting_existing_vault(self) -> None:
-        """Профиль с vault завершает регистрацию именем без выбора режима."""
+    def test_ordinary_text_does_not_fill_legacy_null_name(self) -> None:
+        """Обычный текст не заполняет имя профиля без активного ожидания."""
         identity_service = FakeRegisteringIdentityService(existing=AppUser(id=42))
-        selected_vault = _test_vault(42)
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=identity_service,
-            vault_selection_manager=FakeVaultSelectionManager(
-                selected=selected_vault
-            ),
         )
-
-        result = use_case.execute(_telegram_message("Влад"))
-
-        self.assertEqual(
-            result.type,
-            IncomingMessageResultType.REGISTRATION_NAME_SAVED,
-        )
-        self.assertIsNone(use_case.modes.get(ChatModeKey(42, "telegram", "chat-1")))
+        use_case.execute(_telegram_message("Влад"))
+        self.assertIsNone(identity_service._existing.display_name)
 
     def test_execute_name_command_changes_profile_name(self) -> None:
         """`/name` меняет общее имя пользователя всех связанных каналов."""
@@ -1248,7 +1241,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.type, IncomingMessageResultType.START_UNREGISTERED)
 
     def test_execute_link_requests_rebind_confirmation_for_bound_identity(self) -> None:
-        """`/link <код>` для привязанного канала просит подтвердить перепривязку."""
+        """`/link <code>` для привязанного канала просит подтвердить перепривязку."""
         identity_service = FakeRebindIdentityService()
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
@@ -1257,7 +1250,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
 
         result = use_case.execute(_telegram_message("/link ABC123"))
 
-        self.assertIn("адресной командой", result.text)
+        self.assertIn("адресной командой", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
         self.assertTrue(identity_service.rebind_requested)
 

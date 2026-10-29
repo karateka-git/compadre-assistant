@@ -1,3 +1,4 @@
+from tests.response_assertions import content_text, response_text
 """Проверки сохранённого маршрута между чатами и процессными соединениями."""
 
 from concurrent.futures import ThreadPoolExecutor
@@ -237,11 +238,11 @@ class ChatModesTest(unittest.TestCase):
             capability = FakeCapability()
             dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry((capability,)), user_identity_service=FakeIdentity(), chat_mode_repository=repository, capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection))
             result = dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="1", text="да"))
-            self.assertIn("отключена", result.text)
+            self.assertIn("отключена", response_text(result))
             self.assertEqual(capability.calls, [])
             self.assertEqual(repository.get(mode.key), mode)
             help_result = dispatcher.execute(IncomingEvent(channel="telegram", chat_id="chat", message_id="2", text="/help"))
-            self.assertIn("/selected", help_result.text)
+            self.assertIn("/selected", response_text(help_result))
 
     def test_composition_root_requires_explicit_entry_without_general_message_journal(self) -> None:
         """Реальный общий вход подключает SQLite-режим и не журналирует обычный текст."""
@@ -255,7 +256,7 @@ class ChatModesTest(unittest.TestCase):
                 openai_api_key="test", openai_model="test",
             ),
         )
-        self.assertTrue(response.text)
+        self.assertTrue(response_text(response))
         with connect_database(self.database_path) as connection:
             mode = SQLiteChatModeRepository(connection).get(ChatModeKey(1, "telegram", "chat"))
             self.assertIsNone(mode)

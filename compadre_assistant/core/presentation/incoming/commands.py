@@ -16,7 +16,7 @@ class ChatCommand(StrEnum):
     """Описывает поддерживаемую chat-команду и её строку справки.
 
     Каждый элемент является единым источником имени, аргументов, раздела и
-    пользовательского описания. Новый элемент автоматически попадает в `/help`.
+    пользовательского описания. Показ команды в /help определяет presentation.
     """
 
     section: CommandSection
@@ -37,10 +37,13 @@ class ChatCommand(StrEnum):
         member.description = description
         return member
 
+    CANCEL = (
+        "/cancel", CommandSection.BASIC, "", "отменить ожидающий ввод этого чата",
+    )
     CONFIRM = (
         "/confirm",
         CommandSection.BASIC,
-        "<модуль> <операция> <id> <версия> <yes|no>",
+        "<module> <operation> <id> <version> <yes|no>",
         "подтвердить конкретное действие",
     )
     START = (
@@ -65,12 +68,12 @@ class ChatCommand(StrEnum):
         "/register",
         CommandSection.BASIC,
         "",
-        "зарегистрироваться",
+        "создать профиль после ввода имени",
     )
     NAME = (
         "/name",
         CommandSection.BASIC,
-        "<имя>",
+        "<name>",
         "изменить имя или название профиля",
     )
     STATUS = (
@@ -106,7 +109,7 @@ class ChatCommand(StrEnum):
     LINK = (
         "/link",
         CommandSection.CHANNEL_LINKING,
-        "<код>",
+        "<code>",
         "привязать канал по полученному коду",
     )
 
@@ -118,8 +121,8 @@ class ChatCommand(StrEnum):
         return f"{self.value} {self.arguments_hint}"
 
     def __str__(self) -> str:
-        """Форматирует одну строку Markdown для `/help`."""
-        return f"`{self.usage}` — {self.description}"
+        """Форматирует одну строку Markdown для /help."""
+        return f"{self.usage} — {self.description}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,7 +140,7 @@ class ParsedChatCommand:
             text: Полный текст входящего сообщения.
 
         Returns:
-            Команду с аргументами или `None` для обычного текста и неизвестной
+            Команду с аргументами или None для обычного текста и неизвестной
             slash-команды.
         """
         parts = text.strip().split(maxsplit=1)

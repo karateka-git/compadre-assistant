@@ -4,6 +4,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sqlite3
 import unittest
+from tests.response_assertions import response_text
 
 from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleUseCase
 from compadre_assistant.capabilities.obsidian.domain.articles.extracted import ExtractedArticle
@@ -89,14 +90,14 @@ class TelegramFlowSmokeTest(unittest.TestCase):
                     capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
                 )
                 incoming_use_case.execute(IncomingEvent(channel="telegram", chat_id="100", message_id="9", text="/obsidian"))
-                first_reply = incoming_use_case.execute(_message("10")).text
-                second_reply = incoming_use_case.execute(_message("11")).text
+                first_reply = response_text(incoming_use_case.execute(_message("10")))
+                second_reply = response_text(incoming_use_case.execute(_message("11")))
 
                 counts = _read_counts(connection)
 
         self.assertIn("Анализ готов.", first_reply)
         self.assertIn("## Кратко", first_reply)
-        self.assertIn("Использую сохраненный анализ.", second_reply)
+        self.assertIn("Использую сохранённый анализ.", second_reply)
         self.assertEqual(fetcher.calls, ["https://example.com/article?utm_source=tg"])
         self.assertEqual(analyzer.article_ids, [1])
         self.assertEqual(counts["articles"], 1)
