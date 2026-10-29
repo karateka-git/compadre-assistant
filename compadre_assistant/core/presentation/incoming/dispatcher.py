@@ -808,6 +808,11 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
+            ), suggested_actions=tuple(
+                ReplyAction(
+                    f"{'Включить' if enabled else 'Выключить'} {access.descriptor.capability_id}",
+                    f"{command.value} {access.descriptor.capability_id}",
+                ) for access in choices
             ))
         if len(parts) != 1:
             return IncomingResponse(text_content(

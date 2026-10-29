@@ -580,24 +580,40 @@ class VkBotTest(unittest.TestCase):
         self.assertIn(b"access_token=token", request.data)
 
     def test_menu_handler_builds_persistent_text_keyboard_and_uses_exact_commands(self) -> None:
-        """Меню содержит текстовые команды, включая явный режим очистки."""
+        """Меню показывает временный ID первым и затем постоянные команды."""
         client = FakeVkClient()
         publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu"))
         publish(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu((
             CommandSuggestion("/help", "Помощь"), CommandSuggestion("/cancel", "Отмена"),
-        ))))
+        ), pending_choices=("obsidian",))))
 
         keyboard = __import__("json").loads(client.keyboards[0])
         self.assertFalse(keyboard["inline"])
         self.assertFalse(keyboard["one_time"])
         self.assertEqual(
             [button["action"] for row in keyboard["buttons"] for button in row],
-            [{"type": "text", "label": "/help"}, {"type": "text", "label": "/cancel"}],
+            [{"type": "text", "label": "obsidian"}, {"type": "text", "label": "/help"},
+             {"type": "text", "label": "/cancel"}],
         )
+        self.assertEqual(keyboard["buttons"][0][0]["color"], "primary")
         self.assertEqual(client.messages[0], (22, "Меню команд обновлено."))
 
         publish(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu()))
         self.assertEqual(__import__("json").loads(client.keyboards[1])["buttons"], [])
+
+    def test_menu_handler_omits_invalid_pending_choice_without_losing_commands(self) -> None:
+        """Слишком длинный ID не мешает обновить постоянную клавиатуру."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=logging.getLogger("test.vk.menu.choice"))
+        menu = CommandMenu((CommandSuggestion("/help", "Помощь"),),
+                           pending_choices=("x" * 41, "obsidian"))
+        with self.assertLogs("test.vk.menu.choice", level="WARNING"):
+            publish(CommandMenuUpdate(ReplyAddress("vk", "22"), menu))
+        keyboard = __import__("json").loads(client.keyboards[0])
+        self.assertEqual(
+            [button["action"]["label"] for row in keyboard["buttons"] for button in row],
+            ["obsidian", "/help"],
+        )
 
     def test_menu_handler_preserves_full_main_command_list_with_vk_row_limits(self) -> None:
         """Полный набор основных команд помещается в допустимые строки без потерь."""

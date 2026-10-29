@@ -77,6 +77,23 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.assertEqual(sum("больше недоступна" not in response_text(item) for item in responses), 1)
         self.assertEqual(self.name(), "Выбрано")
 
+    def test_enable_disable_choices_are_bound_to_the_current_pending_input(self):
+        """Кнопка выбора выполняет точную команду и не действует повторно."""
+        disable = self.processor(replace(self.event, text="/disable"))
+        self.assertEqual(tuple(action.command for action in disable.suggested_actions),
+                         ("/disable selected",))
+        self.assertEqual(len(disable.bound_actions), 1)
+        button = disable.bound_actions[0]
+        self.processor.select_action(self.event, button.token)
+        self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
+
+        enable = self.processor(replace(self.event, text="/enable"))
+        self.assertEqual(tuple(action.command for action in enable.suggested_actions),
+                         ("/enable selected",))
+        self.assertEqual(len(enable.bound_actions), 1)
+        self.processor.select_action(self.event, enable.bound_actions[0].token)
+        self.assertIn("/selected", response_text(self.processor(replace(self.event, text="/help"))))
+
     def test_sibling_action_is_consumed_but_other_response_survives(self):
         response = IncomingResponse(text_content("Выбор"), suggested_actions=(
             ReplyAction("Один", "/name Один"), ReplyAction("Два", "/name Два")))

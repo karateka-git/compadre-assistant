@@ -59,6 +59,7 @@ class CommandMenu:
 
     items: tuple[CommandSuggestion, ...] = ()
     pending_input_label: str | None = None  # Тип ожидаемого значения поверх базового режима.
+    pending_choices: tuple[str, ...] = ()  # Временные текстовые значения для каналов с клавиатурой.
 
 
 @dataclass(frozen=True, slots=True)

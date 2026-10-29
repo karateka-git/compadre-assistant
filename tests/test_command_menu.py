@@ -75,6 +75,25 @@ class CommandMenuTest(unittest.TestCase):
         fixture.dispatcher = fixture.build()
         self.assertNotIn("/ask", self.commands())
 
+    def test_enable_disable_publish_temporary_value_choices(self):
+        """Клавиатура VK получает только допустимые ID текущего ожидания."""
+        fixture = self.fixture
+        fixture.preferences.rows[(23, "obsidian")] = False
+        fixture.preferences.rows[(23, "other")] = False
+        fixture.send("/enable")
+        self.assertEqual(self.menu().pending_choices, ("obsidian", "other"))
+        self.assertEqual(self.menu(chat="other").pending_choices, ())
+        fixture.send("obsidian")
+        self.assertEqual(self.menu().pending_choices, ())
+        self.assertTrue(fixture.preferences.rows[(23, "obsidian")])
+
+        fixture.send("/disable")
+        self.assertIn("obsidian", self.menu().pending_choices)
+        self.assertIn("ask", self.menu().pending_choices)
+        fixture.send("obsidian")
+        self.assertEqual(self.menu().pending_choices, ())
+        self.assertFalse(fixture.preferences.rows[(23, "obsidian")])
+
     def test_active_mode_is_subject_commands_exit_and_effective_ask(self):
         """Меню режима не копирует общие указатели справки или другие входы."""
         fixture = self.fixture
