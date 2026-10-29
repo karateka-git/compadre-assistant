@@ -11,9 +11,9 @@ from compadre_assistant.core.presentation.incoming.ports import (
 class ObsidianCommand(StrEnum):
     """Перечисляет команды, принадлежащие возможности Obsidian."""
 
-    GITHUB_STATUS = "/github_status"
-    GITHUB_SYNC = "/github_sync"
-    GITHUB_DISCONNECT = "/github_disconnect"
+    GITHUB_STATUS = "/vault_status"
+    GITHUB_SYNC = "/vault_sync"
+    GITHUB_DISCONNECT = "/vault_disconnect"
     REANALYZE = "/reanalyze"
 
 
@@ -54,7 +54,7 @@ def help_sections() -> tuple[HelpSection, ...]:
         )),
         HelpSection("Статьи", (
             CapabilityCommand(ObsidianCommand.REANALYZE.value,
-                              (CommandParameter("ID статьи", "<ID статьи>", False),),
+                              (CommandParameter("ID статьи", "<article_id>", False),),
                               "выполнить анализ статьи повторно"),
         )),
     )
@@ -64,7 +64,7 @@ def obsidian_descriptor() -> CapabilityDescriptor:
     """Объявляет полный каталог Obsidian без сборки внешних зависимостей."""
     return CapabilityDescriptor(
         "obsidian",
-        CapabilityCommand("/obsidian", (CommandParameter("текст или URL", "<текст или URL>", False),),
+        CapabilityCommand("/obsidian", (CommandParameter("текст или URL", "<text or URL>", False),),
                           "работа со статьями и Obsidian vault"),
         CapabilityHelp(
             sections=help_sections(),

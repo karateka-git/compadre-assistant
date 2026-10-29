@@ -406,7 +406,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
         self.assertIn("Изменение записано в GitHub прямым commit", reply)
         self.assertIn("поисковый индекс ещё не обновлён", reply)
-        self.assertIn("/github_sync", reply)
+        self.assertIn("/vault_sync", reply)
 
     def test_format_profile_status_preserves_general_text(self) -> None:
         """Общий статус профиля не требует модели vault."""

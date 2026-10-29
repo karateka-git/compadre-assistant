@@ -553,7 +553,7 @@ class OperationScopesTest(unittest.TestCase):
         self.assertNotIn("secret-replacement", response_text(other))
         self.assertFalse(other.actions)
         self.prepare("https://example.com/b", VK)
-        conflict = self.process("/github_disconnect", VK)
+        conflict = self.process("/vault_disconnect", VK)
         self.assertIn("Конфигурация vault", response_text(conflict))
         self.assertNotIn("secret-replacement", response_text(conflict))
         self.assertEqual(conflict.actions, ())
@@ -561,7 +561,7 @@ class OperationScopesTest(unittest.TestCase):
     def test_configuration_decision_checks_ttl_version_and_shared_write_lease(self):
         """Занятый ресурс и неверная версия сохраняют адресное ожидание конфигурации."""
         self.process("/obsidian")
-        response = self.process("/github_disconnect")
+        response = self.process("/vault_disconnect")
         with connect_database(self.path) as connection:
             repository = SQLiteVaultActionConfirmationRepository(connection)
             now = datetime.now(UTC)

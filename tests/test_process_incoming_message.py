@@ -987,9 +987,9 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             obsidian_confirmation_service=FakeConfirmationService(None),
         )
 
-        requested = use_case.execute(_telegram_message("/github_disconnect"))
+        requested = use_case.execute(_telegram_message("/vault_disconnect"))
         cancelled = use_case.execute(_telegram_message("нет"))
-        use_case.execute(_telegram_message("/github_disconnect"))
+        use_case.execute(_telegram_message("/vault_disconnect"))
         confirmed = use_case.execute(_telegram_message("да"))
 
         self.assertEqual(
@@ -1014,7 +1014,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             vault_selection_manager=FakeVaultSelectionManager(),
         )
 
-        result = use_case.execute(_telegram_message("/github_disconnect"))
+        result = use_case.execute(_telegram_message("/vault_disconnect"))
 
         self.assertEqual(
             result.type,
@@ -1241,7 +1241,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.type, IncomingMessageResultType.START_UNREGISTERED)
 
     def test_execute_link_requests_rebind_confirmation_for_bound_identity(self) -> None:
-        """`/link <код>` для привязанного канала просит подтвердить перепривязку."""
+        """`/link <code>` для привязанного канала просит подтвердить перепривязку."""
         identity_service = FakeRebindIdentityService()
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),

@@ -578,10 +578,13 @@ def _create_vk_menu_update_handler(
         items = update.menu.items
         if len(items) > 50:
             raise ValueError("VK keyboard supports at most 50 buttons")
+        # Два столбца сохраняют читаемость длинных команд в клиенте VK;
+        # при росте каталога расширяем ряд, чтобы не превысить 10 строк API.
+        columns = max(2, (len(items) + 9) // 10)
         rows: list[list[dict[str, object]]] = []
-        for start in range(0, len(items), 5):
+        for start in range(0, len(items), columns):
             row: list[dict[str, object]] = []
-            for item in items[start:start + 5]:
+            for item in items[start:start + columns]:
                 label = item.command
                 if not label or len(label) > 40:
                     raise ValueError("VK text button command must contain 1-40 characters")

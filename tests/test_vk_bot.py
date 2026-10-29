@@ -620,11 +620,19 @@ class VkBotTest(unittest.TestCase):
         ))))
         keyboard = __import__("json").loads(client.keyboards[0])
         self.assertLessEqual(len(keyboard["buttons"]), 10)
-        self.assertTrue(all(len(row) <= 5 for row in keyboard["buttons"]))
+        self.assertTrue(all(len(row) <= 2 for row in keyboard["buttons"]))
         self.assertEqual(
             [button["action"]["label"] for row in keyboard["buttons"] for button in row],
             commands,
         )
+
+        many_commands = CommandMenu(tuple(
+            CommandSuggestion(f"/command_{index}", f"Команда {index}") for index in range(50)
+        ))
+        publish(CommandMenuUpdate(ReplyAddress("vk", "22"), many_commands))
+        many_keyboard = __import__("json").loads(client.keyboards[-1])
+        self.assertEqual(len(many_keyboard["buttons"]), 10)
+        self.assertTrue(all(len(row) == 5 for row in many_keyboard["buttons"]))
 
         oversized = CommandMenu(tuple(
             CommandSuggestion(f"/c{index}", f"Команда {index}") for index in range(51)

@@ -110,7 +110,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 self.assertIn("Код привязки", response_text(self.process("/link_code", **options)))
                 help_text = response_text(self.process("/help", **options))
                 self.assertIn("/register", help_text)
-                self.assertNotIn("/github_status", help_text)
+                self.assertNotIn("/vault_status", help_text)
                 self.assertNotIn("/obsidian", help_text)
                 self.assertIn("недоступна на сервере", response_text(self.process("/obsidian https://example.com/article", **options)))
                 factory.assert_not_called()

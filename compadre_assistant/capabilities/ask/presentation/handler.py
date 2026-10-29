@@ -18,7 +18,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
     """Выполняет один вопрос без установки длительного режима чата."""
 
     descriptor = CapabilityDescriptor(
-        "ask", CapabilityCommand("/ask", (CommandParameter("вопрос", "<вопрос>", False),),
+        "ask", CapabilityCommand("/ask", (CommandParameter("вопрос", "<question>", False),),
                                  "один вопрос модели без истории"),
         persistent_mode=False,
         enabled_by_default=True,
@@ -58,10 +58,10 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         try:
             response = IncomingResponse(text_content(self._question.execute(arguments, on_request=notify)))
         except EmptyQuestionError as error:
-            response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <вопрос>.'), error)
+            response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <question>.'), error)
         except QuestionTooLongError as error:
             retry_content = compose_content(
-                str(error), " Повтори ", code_span("/ask <вопрос>"),
+                str(error), " Повтори ", code_span("/ask <question>"),
                 " с допустимым вопросом.",
             )
             if context.pending_inputs is not None:
@@ -119,7 +119,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         return CapabilityResult(
             IncomingResponse(compose_content(
                 "Ask не является режимом чата. Чтобы задать один вопрос, вызови ",
-                code_span("/ask <вопрос>"),
+                code_span("/ask <question>"),
                 ". Текущий режим не изменится.",
             )),
             CapabilityMode.COMPLETE,

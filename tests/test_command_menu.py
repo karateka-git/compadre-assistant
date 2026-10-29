@@ -79,7 +79,7 @@ class CommandMenuTest(unittest.TestCase):
         """Меню режима не копирует общие указатели справки или другие входы."""
         fixture = self.fixture
         fixture.modes.save(ChatMode(fixture.key, "obsidian"))
-        self.assertEqual(self.commands(), ("/github_status", "/github_sync", "/github_disconnect", "/reanalyze", "/exit", "/ask"))
+        self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/exit", "/ask"))
         self.assertEqual(fixture.modes.get(fixture.key).capability_id, "obsidian")
         fixture.send("/ask")
         self.assertIn("/cancel", self.commands())

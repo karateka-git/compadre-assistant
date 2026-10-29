@@ -48,7 +48,7 @@ def format_contextual_help(
         line("Доступные действия:")
         command("/register", "создать профиль")
         command("/link", "ввести код привязки к существующему профилю")
-        parts.append(compose_content("\nЕсли код уже есть, можно сразу отправить ", code_span("/link <код>"), "."))
+        parts.append(compose_content("\nЕсли код уже есть, можно сразу отправить ", code_span("/link <code>"), "."))
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:

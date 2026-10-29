@@ -66,7 +66,7 @@ class ReplySuggestionsTest(unittest.TestCase):
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"), "вопрос",
         ).response
         self.assertEqual(response.suggested_actions, ())
-        self.assertIn("/ask <вопрос>", content_text(response.content))
+        self.assertIn("/ask <question>", content_text(response.content))
         self.assertNotIn("вызови /ask", content_text(response.content))
 
     def test_obsidian_vault_offers_status_only_when_available(self) -> None:
@@ -79,8 +79,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         context = HandlerContext(AppUser(23, "Имя"))
         response = handler.enter(context, _event("/obsidian"), "").response
         self.assertEqual(response.suggested_actions,
-                         (ReplyAction("Проверить состояние vault", "/github_status"),))
-        self._assert_command_visible_in_channels(response, "/github_status")
+                         (ReplyAction("Проверить состояние vault", "/vault_status"),))
+        self._assert_command_visible_in_channels(response, "/vault_status")
         self.assertEqual(response.actions, ())
 
         handler = ObsidianMessageHandler(article_url_use_case=Mock(),

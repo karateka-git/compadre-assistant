@@ -252,7 +252,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.register()
         self.say("/enable obsidian")
         self.say("/obsidian")
-        self.say("/github_disconnect")
+        self.say("/vault_disconnect")
         choices = self.send("/confirm")
         self.assertEqual(len(choices.actions), 2)
         self.say("/cancel")
@@ -260,7 +260,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("нет")
         self.assertFalse(self.manager.disconnect_pending)
         self.assertIsNotNone(self.manager.selected)
-        self.say("/github_disconnect")
+        self.say("/vault_disconnect")
         command = self.send("/confirm").actions[0].command
         self.say("/exit")
         self.say(command)
@@ -294,7 +294,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.register(**address)
         self.say("/enable obsidian", **address)
         self.say("/obsidian", **address)
-        response = self.send("/github_disconnect", **address)
+        response = self.send("/vault_disconnect", **address)
         self.assertTrue(response.bound_actions)
         old_button = response.bound_actions[0]
         cancel = next(action.command for action in response.actions if action.command.endswith(" no"))
@@ -307,7 +307,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertFalse(self.manager.disconnect_pending)
         self.assertIsNotNone(self.manager.selected)
 
-        fresh = self.send("/github_disconnect", **address)
+        fresh = self.send("/vault_disconnect", **address)
         cancel_button = fresh.bound_actions[1]
         self.processor.select_action(event, cancel_button.token)
         self.assertFalse(self.manager.disconnect_pending)

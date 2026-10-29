@@ -43,7 +43,7 @@ class ChatCommand(StrEnum):
     CONFIRM = (
         "/confirm",
         CommandSection.BASIC,
-        "<модуль> <операция> <id> <версия> <yes|no>",
+        "<module> <operation> <id> <version> <yes|no>",
         "подтвердить конкретное действие",
     )
     START = (
@@ -73,7 +73,7 @@ class ChatCommand(StrEnum):
     NAME = (
         "/name",
         CommandSection.BASIC,
-        "<имя>",
+        "<name>",
         "изменить имя или название профиля",
     )
     STATUS = (
@@ -109,7 +109,7 @@ class ChatCommand(StrEnum):
     LINK = (
         "/link",
         CommandSection.CHANNEL_LINKING,
-        "<код>",
+        "<code>",
         "привязать канал по полученному коду",
     )
 

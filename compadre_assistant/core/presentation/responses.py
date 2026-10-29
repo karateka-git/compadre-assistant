@@ -29,7 +29,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
                     'Compadre Assistant запущен.\nЭтот канал пока не зарегистрирован.\nОтправь ',
                     code_span('/register'),
                     ', чтобы создать нового пользователя, или ',
-                    code_span('/link <код>'),
+                    code_span('/link <code>'),
                     ', чтобы привязать этот канал к уже существующему пользователю.\nВсе команды: ',
                     code_span('/help'),
                     '.',
@@ -65,7 +65,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             return (
                 compose_content(
                     'Сейчас нет действия, которое нужно подтвердить.\nСначала отправь действие, требующее подтверждения, или ',
-                    code_span('/link <код>'),
+                    code_span('/link <code>'),
                     '.',
                 )
             )
@@ -86,14 +86,14 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
                 )
             )
         case IncomingMessageResultType.LINK_COMMAND_INVALID:
-            return compose_content('Пришли команду в формате ', code_span('/link <код>'), '.')
+            return compose_content('Пришли команду в формате ', code_span('/link <code>'), '.')
         case IncomingMessageResultType.LINKED:
             return compose_content('Готово, я привязал этот канал к твоему пользователю.')
         case IncomingMessageResultType.LINK_ALREADY_BOUND:
             return compose_content('Этот канал уже привязан к пользователю.')
         case IncomingMessageResultType.LINK_CODE_INVALID:
             return compose_content(
-                'Код привязки не принят. Повтори /link <код> с действующим кодом. Если истёк сам код, получи новый через ',
+                'Код привязки не принят. Повтори /link <code> с действующим кодом. Если истёк сам код, получи новый через ',
                 code_span('/link_code'),
                 ' в уже привязанном канале; код действует 10 минут.',
             )
@@ -123,7 +123,7 @@ def _format_unknown_identity_response() -> MessageContent:
             'Я пока не знаю этот канал.\nОтправь ',
             code_span('/register'),
             ', чтобы создать нового пользователя, или ',
-            code_span('/link <код>'),
+            code_span('/link <code>'),
             ', чтобы привязать этот канал к уже существующему пользователю.',
         )
     )

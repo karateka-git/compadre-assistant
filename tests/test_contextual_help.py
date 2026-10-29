@@ -64,7 +64,7 @@ class ContextualHelpTest(unittest.TestCase):
         """До профиля доступны два действия, а регистрация заменяет их вводом имени."""
         self.identity.resolve.return_value = None
         text = self.send()
-        for command in ("/register", "/link", "/link <код>"):
+        for command in ("/register", "/link", "/link <code>"):
             self.assertIn(command, text)
         for command in ("/status", "/name", "/ask", "/obsidian", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
@@ -84,7 +84,7 @@ class ContextualHelpTest(unittest.TestCase):
         text = self.send()
         for command in ("/name", "/capabilities", "/link_code", "/obsidian", "/ask", "/other"):
             self.assertIn(command, text)
-        for command in ("/github_sync", "/reanalyze", "/cancel", "/confirm"):
+        for command in ("/vault_sync", "/reanalyze", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
         self.assertIn("одноразовый", text)
         self.assertFalse(self.other.entries)
@@ -93,7 +93,7 @@ class ContextualHelpTest(unittest.TestCase):
         """Активный каталог не расширяет общую справку; скрытый вход остаётся рабочим."""
         self.modes.save(ChatMode(self.key, "obsidian"))
         text = self.send()
-        for command in ("/github_sync", "/reanalyze", "/exit", "/status", "/capabilities", "/link_code", "/help", "/ask"):
+        for command in ("/vault_sync", "/reanalyze", "/exit", "/status", "/capabilities", "/link_code", "/help", "/ask"):
             self.assertIn(command, text)
         for command in ("/name", "/register", "/enable", "/other", "/confirm", "/cancel"):
             self.assertNotIn(command, text)
@@ -116,7 +116,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIn("лично выключена" if reason == "personal" else "недоступна на сервере", text)
                 self.assertIn("/exit", text)
                 self.assertIn("/ask", text)
-                self.assertNotIn("/github_sync", text)
+                self.assertNotIn("/vault_sync", text)
                 self.assertNotIn("/obsidian", text)
                 self.assertIn("/name", text)
 
@@ -148,7 +148,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.send("/ask")
         text = self.send()
         self.assertIn("Ожидается вопрос для Ask", text)
-        self.assertIn("/github_sync", text)
+        self.assertIn("/vault_sync", text)
         self.assertIn("/cancel", text)
         self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")
         self.identity.resolve.return_value = None

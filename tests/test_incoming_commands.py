@@ -73,7 +73,7 @@ class IncomingCommandsTest(unittest.TestCase):
         self.assertEqual([section.title for section in sections], ["Obsidian vault", "Статьи"])
         self.assertEqual(
             [command.name for section in sections for command in section.commands],
-            ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze"],
+            ["/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze"],
         )
 
 

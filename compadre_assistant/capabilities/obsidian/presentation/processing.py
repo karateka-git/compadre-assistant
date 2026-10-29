@@ -205,7 +205,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
         lines = [
             "Режим Obsidian включён.",
             "Пришли ссылку на статью для анализа или ссылку на GitHub repository, чтобы подключить либо заменить хранилище заметок (vault). После ссылки на repository можно указать папку vault.",
-            "Команды: /github_status — показать состояние vault; /github_sync — проверить GitHub и обновить локальную копию; /github_disconnect — отключить vault после подтверждения; /reanalyze <ID статьи> — повторить анализ.",
+            "Команды: /vault_status — показать состояние vault; /vault_sync — проверить GitHub и обновить локальную копию; /vault_disconnect — отключить vault после подтверждения; /reanalyze <article_id> — повторить анализ.",
             "Чтобы выйти из режима, вызови /exit.",
         ]
         if self._vault_selection_manager is None:
@@ -247,7 +247,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                 )
                 lines.append(_present_result(result).content)
         suggested_actions = (
-            (ReplyAction("Проверить состояние vault", "/github_status"),)
+            (ReplyAction("Проверить состояние vault", "/vault_status"),)
             if vault is not None and self._vault_sync_manager is not None and not actions else ()
         )
         return CapabilityResult(IncomingResponse(
@@ -544,7 +544,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                 or parts[5].lower() not in {"yes", "no"}
             ):
                 return _operation_message(
-                    "Используй /confirm obsidian <proposal|replace|disconnect> <id> <версия> <yes|no>.",
+                    "Используй /confirm obsidian <proposal|replace|disconnect> <id> <version> <yes|no>.",
                     app_user,
                 )
             operation, operation_id, version = parts[2], int(parts[3]), int(parts[4])

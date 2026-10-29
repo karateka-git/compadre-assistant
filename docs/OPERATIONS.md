@@ -414,7 +414,7 @@ OpenAI SDK сохраняет штатный `max_retries=2`: один логи�
 наличии. API keys, тексты chunks, compact query и vector values не логируются.
 
 Каждый успешный embedding batch сохраняется в SQLite до следующего запроса.
-После сбоя или перезапуска `/github_sync` продолжает только недостающую работу;
+После сбоя или перезапуска `/vault_sync` продолжает только недостающую работу;
 частичные vectors не доступны semantic search до публикации полного marker.
 Истечение или смена владельца sync lease останавливает запросы и запись,
 сохраняя прежние checkpoints для следующей синхронизации.
@@ -519,14 +519,14 @@ PEM и `.knowledge-catcher.yml` приведены в [GITHUB_APP.md](GITHUB_APP
 замены vault. Ручная проверка запускается в любом связанном канале:
 
 ```text
-/github_sync
+/vault_sync
 ```
 
 Текущее подключение, количество локальных Markdown-заметок, instruction-файлов
 и timestamps:
 
 ```text
-/github_status
+/vault_status
 ```
 
 Одновременно один vault синхронизирует только один процесс; второй Telegram/VK
@@ -564,7 +564,7 @@ lease обрабатывается так же. Ошибка GitHub остаёт
 Отключение активного vault:
 
 ```text
-/github_disconnect
+/vault_disconnect
 ```
 
 Команда не удаляет данные сразу: в SQLite создаётся подтверждение с TTL 10

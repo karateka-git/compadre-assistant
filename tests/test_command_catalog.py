@@ -87,12 +87,12 @@ class CommandCatalogTest(unittest.TestCase):
         """Отключённая сборка сохраняет полный каталог без создания клиентов."""
         obsidian = obsidian_descriptor()
         ask = AskCapability.descriptor
-        self.assertEqual(ask.entry.parameters, (CommandParameter("вопрос", "<вопрос>", False),))
+        self.assertEqual(ask.entry.parameters, (CommandParameter("вопрос", "<question>", False),))
         self.assertEqual(obsidian.entry.parameters[0].name, "текст или URL")
         commands = [command for section in obsidian.help.sections for command in section.commands]
         self.assertEqual([command.name for command in commands],
-                         ["/github_status", "/github_sync", "/github_disconnect", "/reanalyze"])
-        self.assertEqual(commands[-1].parameters, (CommandParameter("ID статьи", "<ID статьи>", False),))
+                         ["/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze"])
+        self.assertEqual(commands[-1].parameters, (CommandParameter("ID статьи", "<article_id>", False),))
         disabled = CapabilityRegistry(disabled_capabilities=(ask, obsidian))
         self.assertEqual(disabled.disabled_by_command("/obsidian URL"), obsidian)
         self.assertFalse(any(item.effective for item in disabled.for_user(()).access))
