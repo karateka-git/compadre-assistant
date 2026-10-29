@@ -573,25 +573,17 @@ def _create_vk_menu_update_handler(
             return
 
         items = update.menu.items
-        choices = update.menu.pending_choices
         if len(items) > 50:
             raise ValueError("VK keyboard supports at most 50 buttons")
-        # Временный выбор не должен вытеснять команды или срывать обновление
-        # клавиатуры, если публичный ID длиннее лимита VK.
-        valid_choices = tuple(value for value in choices if 1 <= len(value) <= 40)
-        visible_choices = valid_choices[:50 - len(items)]
-        if len(visible_choices) != len(choices):
-            logger.warning("VK pending keyboard choices omitted: limit or invalid label")
-        buttons: list[dict[str, object]] = [
-            {"action": {"type": "text", "label": value}, "color": "primary"}
-            for value in visible_choices
-        ]
-        for item in items:
-            label = item.command
-            if not label or len(label) > 40:
-                raise ValueError("VK text button command must contain 1-40 characters")
-            buttons.append({"action": {"type": "text", "label": label}, "color": "secondary"})
-        rows = [buttons[start:start + 5] for start in range(0, len(buttons), 5)]
+        rows: list[list[dict[str, object]]] = []
+        for start in range(0, len(items), 5):
+            row: list[dict[str, object]] = []
+            for item in items[start:start + 5]:
+                label = item.command
+                if not label or len(label) > 40:
+                    raise ValueError("VK text button command must contain 1-40 characters")
+                row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+            rows.append(row)
         keyboard = json.dumps(
             {"one_time": False, "inline": False, "buttons": rows},
             ensure_ascii=False,

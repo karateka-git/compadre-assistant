@@ -72,12 +72,4 @@ def build_command_menu(
         label = {"register_name": "имя или название профиля", "link_code": "код привязки",
                  "profile_name": "имя", "enable": "ID возможности для включения",
                  "disable": "ID возможности для выключения"}.get(pending.input_kind, label)
-    choices: tuple[str, ...] = ()
-    if pending is not None and pending.owner_id == "core" and personal is not None:
-        if pending.input_kind == "enable":
-            choices = tuple(entry.descriptor.capability_id for entry in personal.access
-                            if entry.server_available and not entry.user_enabled)
-        elif pending.input_kind == "disable":
-            choices = tuple(entry.descriptor.capability_id for entry in personal.access
-                            if entry.user_enabled)
-    return CommandMenu(tuple(items), label, choices)
+    return CommandMenu(tuple(items), label)
