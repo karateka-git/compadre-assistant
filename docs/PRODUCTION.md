@@ -1,8 +1,8 @@
 # Production VPS
 
 Здесь находятся доступ, ограничения и **последний документированный снимок** VPS.
-Он проверен 21.10.2026 и не доказывает состояние сервера сегодня. Перед любой
-работой повторно проверьте факты на VPS. Установка, диагностика, backup и
+Он зафиксирован 30.10.2026 и не доказывает состояние сервера сегодня. Перед
+любой работой повторно проверьте факты на VPS. Установка, диагностика, backup и
 восстановление описаны в [OPERATIONS.md](OPERATIONS.md), допуск версии — в
 [RELEASES.md](RELEASES.md).
 
@@ -22,32 +22,24 @@
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142
 ```
 
-## Последний проверенный снимок — 21.10.2026
+## Последний проверенный снимок — 30.10.2026
 
 | Область | Результат проверки |
 | --- | --- |
-| Версия | `v2.0.0`, SHA `0d21ef0172ecf8024bd6c1583a8046fda798aec3`, чистый detached HEAD; [GitHub Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v2.0.0). |
-| Каналы | `tg_assistant` и `vk_assistant` на image ID `sha256:db9ef5fd808474349ee4f182de7febe1df9d647635d948574be0d3fcf86e938e`, оба `healthy`, restart count 0, policy `unless-stopped`. В 13:36 UTC container ID, PID и `StartedAt` обоих совпали со снимком до личных переключений. Пользователь подтвердил живые сценарии Telegram/VK, второго профиля и долгого Ask; тексты и timestamps ответов независимо не наблюдались. |
-| Контроллер | Отдельный snapshot из проверенного SHA `38bc8411e17d717e954e554f890d599eddd96b96` (`release/2.0`); архив `scripts/` и `deploy/` побайтно сверен с Git, SHA-256 `dcec561a81f6de071946a8d095788a4e87d741fe80bc040a8db939a9f6c0ffc8`. Прежний snapshot сохранён в `/usr/local/lib/compadre-assistant-deploy.previous-v1.0.4-38bc841`. После `sudo deploy-prod v2.0.0`: `stage=success`, `last_good.version=v2.0.0`, marker отсутствует. |
-| Данные | Рабочая SQLite: `integrity_check=ok`, `foreign_key_check` пуст, миграции `0001_initial_schema.sql` и `0002_user_capability_preferences.sql`. |
-| Backup | Проверенная копия перед `0002`: `/var/lib/compadre-assistant-deploy/backups/v2.0.0-0d21ef0172ecf8024bd6c1583a8046fda798aec3.db`, права `0600`, `integrity_check=ok`, только `0001`; ночной timer `active/enabled`. Копии лежат на том же диске VPS. |
-| systemd | `obs-chat-bot.service` активна; после установки release и обновления контроллера marker отсутствует. |
+| Версия и допуск | `v3.0.1`, SHA `4d58c9c09259f8f9b1578a467b20c5e6055a6bc2`; [GitHub Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v3.0.1). `release-full` завершился успешно для точного SHA, [run 41000609812](https://github.com/karateka-git/compadre-assistant/actions/runs/41000609812). |
+| Каналы | `tg_assistant` и `vk_assistant` — `healthy`, restart count 0; polling обоих каналов работает. Пользователь подтвердил `/help` и меню в личных диалогах Telegram и VK. |
+| Инцидент и восстановление | Предыдущий `v3.0.0` перешёл в `degraded` после таймаута Docker healthcheck в 5 секунд. Выполнено ручное восстановление вперёд на `v3.0.1`; это recovery-процедура, а не обычный `deploy-prod`. |
+| Данные | Рабочая SQLite: `integrity_check=ok`, `foreign_key_check` пуст, применены `0001_initial_schema.sql`–`0004_private_chat_address_lookup.sql`. |
+| Backup | Проверены и сохранены целыми backup до миграции и backup, созданный для recovery. |
+| systemd | `obs-chat-bot.service` и `obs-chat-bot-backup.timer` — `active/enabled`. |
 
-Проверка выполнена по Git, controller state, Docker Compose, systemd и
-SQLite на VPS после установки 21.10.2026. До установки старый контроллер
-остановил попытку `v2.0.0` на `failed_preflight` из-за новой `0002`, не меняя
-БД и каналы. Исправление прошло [полный CI релизной линии](https://github.com/karateka-git/compadre-assistant/actions/runs/39601345018), после чего контроллер обновлён отдельно и повторная установка завершилась успешно. Порядок установки и возврата — в [OPERATIONS.md](OPERATIONS.md).
-
-Read-only повторная проверка 21.10.2026 в 13:36 UTC сохранила `stage=success`,
-чистый SHA checkout, обе миграции, `integrity_check=ok`, отсутствие ошибок
-foreign keys и marker, активные unit и backup timer. Пользователь сообщил
-«Проверил всё перечисленное» о живой проверке личного выбора, связанных
-каналов, второго профиля и долгого Ask; позже подтвердил сохранение режима
-после повторного включения Obsidian. Доступность прежней статьи не проверял.
-Это пользовательское свидетельство;
-наблюдаемые на VPS факты о процессах приведены выше. Тексты сообщений и
-временные метки порядка Ask/disable не получены, поэтому они не входят в
-независимую техническую проверку.
+Снимок 30.10.2026 отражает проверенное состояние после ручного восстановления
+и отдельно пользовательское подтверждение `/help` и меню в обоих личных
+каналах. Инцидент `v3.0.0` не означает откат БД или восстановление старой
+копии: результатом стало продвижение вперёд на `v3.0.1`, при этом обе проверенные
+резервные копии сохранены. Технические команды и условия повторной проверки —
+в [OPERATIONS.md](OPERATIONS.md); обычный допуск и `deploy-prod` описаны в
+[RELEASES.md](RELEASES.md).
 
 ## Базовые команды
 
