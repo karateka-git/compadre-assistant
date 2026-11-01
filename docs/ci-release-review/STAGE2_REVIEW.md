@@ -1,8 +1,9 @@
 # Интеграционная проверка этапа 2
 
 На 01.11.2026 локальная интеграционная проверка шагов 2.1–2.5 пройдена;
-**критерий всего этапа 2 ещё не выполнен**. Новый CI run, выпуск и установка
-с этими метриками не наблюдались. Этот отчёт дополняет [план](PLAN.md#2-оставить-постоянные-метрики-и-короткий-отчёт),
+**критерий всего этапа 2 ещё не выполнен**. Новый PR run подтвердил bootstrap
+`unavailable`; полноценный отчёт PR, новый выпуск и установка с метриками
+ещё не подтверждены. Этот отчёт дополняет [план](PLAN.md#2-оставить-постоянные-метрики-и-короткий-отчёт),
 [описание CI](STAGE2_CI.md), [измерения deploy](STAGE2_DEPLOY.md) и
 [границы метрик Codex](STAGE2_CODEX.md). Допуск определяется
 [RELEASES.md](../RELEASES.md); порядок действий — [OPERATIONS.md](../OPERATIONS.md).
@@ -11,7 +12,7 @@
 
 | Область | Результат и граница доказательства |
 | --- | --- |
-| Workflow YAML | Четыре изменённых workflow разобраны PyYAML 6.0.3. `ci-metrics` зависит от всех проверочных jobs, использует `always()`, read-only permissions и отдельный artifact для run/attempt. Обёртки долгих команд сохраняют ids и deadlines проверок. GitHub ещё не исполнял новую редакцию. |
+| Workflow YAML | Четыре изменённых workflow разобраны PyYAML 6.0.3. `ci-metrics` зависит от всех проверочных jobs, использует `always()`, read-only permissions и отдельный artifact для run/attempt. Обёртки долгих команд сохраняют ids и deadlines проверок. Живой результат PR bootstrap приведён ниже; остальные новые workflow этим запуском не подтверждены. |
 | Идентичность CI | Collector сверяет repository, workflow, SHA, run/attempt; читает endpoint конкретной попытки. Для PR head SHA, merge checkout и job SHA сохранены отдельно. Чужая попытка или SHA обычного run отвергаются. |
 | Отказ и rerun | Failed suite сохраняет измерения с результатом failure; skipped suite имеет отдельный тип, отсутствующие времена — unknown. Перенесённые jobs отмечены и не увеличивают время текущей попытки. Ошибка текущего API даёт безопасную причину и failure, отказ истории сравнения сохраняет текущий отчёт. |
 | Секреты | В новых отчётах нет stderr, env, SQL, содержимого SQLite, текстов исключений deploy или тела ответа GitHub. PR collector исполняется из base SHA без сохранённых checkout credentials; token получает только шаг сбора. Это проверка добавленного пути, а не аудит всего прежнего CI. |
@@ -30,8 +31,8 @@
 
 Результат: **133 tests, OK, skipped=2**. Пропущены платформенные проверки
 Linux `flock` и systemd. Тесты не выполняли реальный deploy, VPS, GitHub writes
-или публикацию. Парсинг YAML не заменяет исполнение GitHub Actions; новый
-bootstrap shell в runner ещё не проверен.
+или публикацию. Парсинг YAML не заменяет исполнение GitHub Actions;
+последующая проверка bootstrap shell в runner описана отдельно ниже.
 
 После шага 2.5 выполнен дополнительный targeted suite той же командой с
 наборами `tests.test_ci_watch`, `tests.test_ci_metrics`,
@@ -40,6 +41,24 @@ bootstrap shell в runner ещё не проверен.
 `tests.test_create_release_branch`: **85 tests, OK**, без skip. Прежний
 deploy-код на этом шаге не менялся. Новые тесты запускают безвредные локальные
 Python subprocess, не вызывая Docker, сеть или production-команды.
+
+## Живая проверка PR bootstrap
+
+01.11.2026 draft [PR #59](https://github.com/karateka-git/compadre-assistant/pull/59)
+с head SHA `7a01407a563ceee339f47a8f6f15ed98bba75a11` получил успешный
+[PR fast run 41315349925/1](https://github.com/karateka-git/compadre-assistant/actions/runs/41315349925/attempts/1).
+В artifact `ci-metrics-41315349925-1` проверен файл
+`ci-metrics-unavailable.json`: `result=unavailable`,
+`reason=collector_missing_in_base`, идентификатор run/attempt, head SHA
+и SHA доверенной базы. Это подтверждает выполнение bootstrap на runner
+и сохранение явной причины отсутствия измерений без красного job.
+
+В base SHA этой попытки collector отсутствует. Поэтому успешный run и
+artifact **не подтверждают полноценный PR metrics report**: сбор длительностей
+jobs/steps и сравнение истории новым PR workflow ещё не проверены. Нужен
+следующий PR run с collector в доверенном base SHA. Эта попытка также не
+доказывает предупреждение о долгой команде, Linux cancellation, полный
+`main-full`/`release-full`, публикацию Release или deploy.
 
 ## Исправления по итогам проверки
 
@@ -62,10 +81,10 @@ Python subprocess, не вызывая Docker, сеть или production-ком
 
 ## Что остаётся до завершения этапа
 
-1. После разрешённой доставки изменения проверить новый `pr-fast`, полный
+1. Проверить полноценный отчёт следующего `pr-fast`, полный
    `main-full`/`release-full`, skipped и отказный CI-сценарий. Сверить SHA,
    run/attempt, перенесённые jobs rerun, Summary и скачиваемый artifact.
-   Первый PR со старой базой подтвердит только состояние unavailable;
+   PR #59 со старой базой подтвердил только состояние unavailable;
    для полного отчёта PR нужен следующий run с collector в base SHA.
 2. На новом GitHub run подтвердить видимость предупреждения долгой команды
    до её завершения, сохранение failure/success и корректную отмену Linux

@@ -46,6 +46,16 @@ endpoint attempt и поля job `run_id/run_attempt`, а оба SHA сохра�
 `checkout_sha` берётся из `GITHUB_SHA` события (тестовый merge PR), а не из
 checkout коллектора. Для main/release равенство SHA job/run обязательно.
 Skipped reusable job в живом API называется `main-full`, без `/ full-suite`.
-Эти замеры не включают время нового отчётного job. Публикация Summary/artifact
-самим новым workflow ещё требует первого реального запуска после слияния;
-локальные проверки не заменяют эксплуатационную приёмку.
+Эти замеры не включают время нового отчётного job. Полноценный отчёт новым
+workflow ещё требует живой проверки; локальные тесты не заменяют
+эксплуатационную приёмку.
+
+01.11.2026 новый [PR fast run 41315349925/1](https://github.com/karateka-git/compadre-assistant/actions/runs/41315349925/attempts/1)
+для draft [PR #59](https://github.com/karateka-git/compadre-assistant/pull/59),
+head SHA `7a01407a563ceee339f47a8f6f15ed98bba75a11`, завершился успешно.
+Artifact `ci-metrics-41315349925-1` содержит проверенный
+`ci-metrics-unavailable.json` с `result=unavailable`,
+`reason=collector_missing_in_base`, run/attempt, head SHA и base SHA.
+Подтверждён bootstrap при отсутствии collector в доверенной базе.
+Полный PR metrics report остаётся непроверенным до запуска с collector
+в base SHA; остальные границы проверки — в [STAGE2_REVIEW.md](STAGE2_REVIEW.md#живая-проверка-pr-bootstrap).
