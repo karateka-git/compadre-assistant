@@ -49,18 +49,18 @@ jobs:
         run: python -m scripts.check_hotfix_pairs links "$PR_NUMBER" "$PR_BASE"
 
       - name: Install runtime dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m scripts.ci_watch dependencies -- python -m pip install -r requirements.txt
 
       - name: Fixed unit subset
         run: |
-          python -m unittest discover -s tests -p 'test_config.py'
-          python -m unittest discover -s tests -p 'test_capability_composition.py'
-          python -m unittest discover -s tests -p 'test_migration_runner.py'
+          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_config.py'
+          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_capability_composition.py'
+          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_migration_runner.py'
 
       - name: Validate Compose with synthetic environment
         run: |
           cp .env.example .env
-          docker compose --env-file .env.example config --quiet
+          python -m scripts.ci_watch compose -- docker compose --env-file .env.example config --quiet
 
   hotfix-deps:
     name: hotfix-deps
@@ -84,3 +84,64 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BASE: ${{ github.event.pull_request.base.ref }}
         run: python -m scripts.check_hotfix_pairs deps "$PR_NUMBER" "$PR_BASE"
+
+  ci-metrics:
+    name: ci-metrics
+    needs: [pr-fast, hotfix-deps]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout metrics collector
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Check trusted collector availability
+        id: collector
+        shell: bash
+        env:
+          METRICS_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          METRICS_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -f scripts/ci_metrics.py ]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          else
+            mkdir -p ci-metrics
+            printf '%s\n' '## CI metrics' '' 'Метрики недоступны: collector ещё отсутствует в доверенном base SHA. Это не успешный сбор и не допуск релиза.' > ci-metrics/ci-metrics.md
+            printf '\nRun: %s/%s; head SHA: %s; base SHA: %s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$METRICS_HEAD_SHA" "$METRICS_BASE_SHA" >> ci-metrics/ci-metrics.md
+            printf '{"result":"unavailable","reason":"collector_missing_in_base","run_id":"%s","attempt":"%s","sha":"%s","collector_sha":"%s"}\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$METRICS_HEAD_SHA" "$METRICS_BASE_SHA" > ci-metrics/ci-metrics-unavailable.json
+            cat ci-metrics/ci-metrics.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Collect CI metrics
+        if: steps.collector.outputs.available == 'true'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CI_WORKFLOW: pr-fast.yml
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python -m scripts.ci_metrics --output ci-metrics
+      - name: Preserve collection failure
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          mkdir -p ci-metrics
+          if [ ! -f ci-metrics/ci-metrics.md ]; then
+            printf '%s\n' '## CI metrics' '' 'Сбор метрик не завершён: проверьте checkout, Python и шаг сбора. Допуск релиза не меняется.' > ci-metrics/ci-metrics.md
+            printf '%s\n' '{"error":"collector did not produce a report"}' > ci-metrics/ci-metrics-error.json
+            cat ci-metrics/ci-metrics.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload CI metrics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-metrics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ci-metrics/
+          if-no-files-found: error
+          retention-days: 90
