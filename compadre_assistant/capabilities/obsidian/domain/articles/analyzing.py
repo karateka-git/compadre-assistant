@@ -85,6 +85,8 @@ class AnalyzeArticleUseCase:
                 error=error,
             )
             raise error
+        if article.status is ArticleStatus.UNKNOWN:
+            raise AnalyzeArticleError("Article status is unknown to this version")
         existing = self._analysis_result_repository.get_latest_for_article(article.id)
         if existing is not None and not command.force:
             return AnalyzeArticleResult(

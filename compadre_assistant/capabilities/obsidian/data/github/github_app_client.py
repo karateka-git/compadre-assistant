@@ -230,13 +230,15 @@ class HttpxGitHubAppClient(
             },
         )
         access_token = payload.get("access_token")
+        error = payload.get("error")
+        if error is not None and isinstance(access_token, str) and access_token.strip():
+            raise GitHubGatewayError("GitHub Device Flow returned an ambiguous response")
         if isinstance(access_token, str) and access_token.strip():
             return GitHubDevicePollResult(
                 status=GitHubDevicePollStatus.AUTHORIZED,
                 access_token=GitHubUserAccessToken(access_token),
             )
 
-        error = payload.get("error")
         statuses = {
             "authorization_pending": GitHubDevicePollStatus.PENDING,
             "slow_down": GitHubDevicePollStatus.SLOW_DOWN,
@@ -245,6 +247,8 @@ class HttpxGitHubAppClient(
         }
         if isinstance(error, str) and error in statuses:
             return GitHubDevicePollResult(status=statuses[error])
+        if isinstance(error, str) and error.strip():
+            return GitHubDevicePollResult(status=GitHubDevicePollStatus.UNKNOWN)
         raise GitHubGatewayError("GitHub Device Flow returned an unknown response")
 
     def list_installation_ids(

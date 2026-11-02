@@ -32,6 +32,7 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.markdown import (
     normalize_updated_markdown,
 )
 from compadre_assistant.capabilities.obsidian.domain.articles.analysis import ArticleAnalysisResult
+from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
 from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
     ObsidianProposal,
     ObsidianProposalAction,
@@ -144,6 +145,8 @@ class PrepareObsidianReviewUseCase:
         article = self._article_repository.get_by_id(command.article_id)
         if article is None or article.id is None or article.app_user_id != command.app_user_id:
             raise PrepareObsidianReviewError("Article not found in requested user scope")
+        if article.status is ArticleStatus.UNKNOWN:
+            raise PrepareObsidianReviewError("Article status is unknown to this version")
         analysis = command.analysis
         if analysis.id is None:
             raise PrepareObsidianReviewError("Article analysis must be saved")
@@ -191,6 +194,8 @@ class PrepareObsidianReviewUseCase:
                 note_catalog=tuple((note.path, note.title) for note in notes),
             )
         )
+        if plan.action is ObsidianProposalAction.UNKNOWN:
+            raise PrepareObsidianReviewError("Review action is unknown to this version")
 
         target_note = notes_by_path.get(plan.target_path or "")
         if plan.action is ObsidianProposalAction.ADD and target_note is not None:

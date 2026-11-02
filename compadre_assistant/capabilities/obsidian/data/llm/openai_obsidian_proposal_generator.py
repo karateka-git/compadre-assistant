@@ -59,7 +59,15 @@ class OpenAIObsidianProposalGenerator(ObsidianProposalGenerator):
         )
         try:
             payload = json.loads(_strip_json_fence(response))
-            action = ObsidianProposalAction(str(payload["action"]).strip().lower())
+            raw_action = payload["action"]
+            if not isinstance(raw_action, str) or not raw_action.strip():
+                raise ValueError("Invalid action field")
+            action_value = raw_action.strip().lower()
+            action = (
+                ObsidianProposalAction(action_value)
+                if action_value in ObsidianProposalAction._value2member_map_
+                else ObsidianProposalAction.UNKNOWN
+            )
             reasoning = str(payload["reasoning"]).strip()
             raw_path = payload.get("target_path")
             target_path = str(raw_path).strip() if raw_path is not None else None

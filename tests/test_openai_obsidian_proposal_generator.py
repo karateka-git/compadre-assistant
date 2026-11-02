@@ -63,6 +63,17 @@ class OpenAIObsidianProposalGeneratorTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "invalid Obsidian review plan"):
             generator.plan(_planning_context())
 
+    def test_unknown_action_is_a_non_executable_plan(self) -> None:
+        """Новое строковое действие LLM не считается повреждённым JSON или add."""
+        generator = _generator(FakeClient([
+            '{"action":"merge","reasoning":"Новый сценарий","target_path":"Tech/A.md"}'
+        ]))
+
+        plan = generator.plan(_planning_context())
+
+        self.assertIs(plan.action, ObsidianProposalAction.UNKNOWN)
+        self.assertEqual(plan.target_path, "Tech/A.md")
+
 
 class FakeClient:
     """Имитирует последовательные ответы Chat Completions SDK."""

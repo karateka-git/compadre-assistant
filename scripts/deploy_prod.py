@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from scripts import deploy_prepare as prep
+from scripts import deploy_metrics as metrics
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
@@ -557,6 +558,7 @@ def _state(host: Host, value: dict[str, Any], stage: str, **changes: Any) -> Non
     value.update(changes)
     value["stage"] = stage
     prep.write_state(host.state_dir, host.checkout, value)
+    metrics.update(stage=stage)
     print(f"deploy-prod stage={stage}", flush=True)
 
 
@@ -610,6 +612,7 @@ def _prepare_candidate(
     """Готовит candidate без остановки каналов и восстанавливает checkout при ошибке."""
     try:
         selected = host.select_emergency(version) if emergency else host.select(version)
+        metrics.update(sha=selected.sha, run_id=selected.run_id, run_attempt=selected.run_attempt)
         if selected.kind != ("emergency" if emergency else "ordinary"):
             raise DeployError("Тип выбранного Release не соответствует команде")
         if selected.sha == old_sha:
@@ -617,7 +620,8 @@ def _prepare_candidate(
         host.fetch(selected)
         _same_selection(host, selected)
         prep.require_clean_checkout(host.checkout, selected.sha)
-        tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
+        with metrics.stage("build"):
+            tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
         prep.check_candidate_image(candidate_id, selected.sha)
         database = host.checkout / "data/app.db"
         prep.require_disk_space(host.state_dir, database)
@@ -650,6 +654,10 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
         raise DeployError("Degraded state требует ручного восстановления")
     if stage in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
         return
+    candidate = state.get("candidate")
+    if isinstance(candidate, dict):
+        metrics.update(sha=candidate.get("sha"), run_id=candidate.get("run_id"),
+                       run_attempt=candidate.get("run_attempt"))
     if stage in ("preparing", "ready") and not (host.state_dir / "deploy-in-progress").exists():
         old_sha = state.get("old_sha")
         old_id = state.get("old_image_id")
@@ -698,14 +706,18 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
         host.marker(True)
         host.timer_suspend()
         host.restart_policy("no")
-        host.stop_both()
+        with metrics.stage("recovery.stop_both"):
+            host.stop_both()
         host.set_runtime(old_tag, old)
         host.start_both(old_tag, old)
-        host.verify_both(old, None)
+        with metrics.stage("recovery.verify_both_1"):
+            host.verify_both(old, None)
         host.restart_policy("unless-stopped")
         host.marker(False)
         host.activate_unit()
-        host.verify_both(old, None)
+        with metrics.stage("recovery.verify_both_2"):
+            host.verify_both(old, None)
+        metrics.available()
         host.timer_restore(state["timer_before"])
         host.restore_checkout(old_sha)
         cooldown = ({"retry_after": (datetime.now(timezone.utc) + COOLDOWN).isoformat()}
@@ -721,13 +733,18 @@ def _degrade(host: Host, state: dict[str, Any], reason: str) -> None:
     for action in (lambda: host.marker(True), host.timer_suspend,
                    lambda: host.restart_policy("no"), host.stop_both):
         try:
-            action()
+            if action == host.stop_both:
+                with metrics.stage("degraded.stop_both"):
+                    action()
+            else:
+                action()
         except Exception:
             # Следующую защиту пробуем и при частичном отказе предыдущей.
             continue
     _state(host, state, "degraded", error=reason)
 
 
+@metrics.tracked
 def deploy(host: Host, version: str, *, emergency: bool = False,
            reason: str | None = None) -> None:
     """Развёртывает названный Release или возвращает оба канала на старый образ.
@@ -742,6 +759,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         DeployError: Допуск, переключение или проверка завершились отказом.
     """
     _version(version)
+    metrics.update(version=version, kind="emergency" if emergency else "ordinary")
     if emergency:
         if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 1000 or "\n" in reason or "\r" in reason:
             raise DeployError("Для аварийного выпуска нужна однострочная причина")
@@ -763,6 +781,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             if last_good.get("kind", "ordinary") != ("emergency" if emergency else "ordinary"):
                 raise DeployError("Тип установленного Release не соответствует команде")
             host.verify_installed(last_good)
+            metrics.update(stage="already_installed", sha=last_good.get("sha"),
+                           run_id=last_good.get("ci_run_id"), run_attempt=last_good.get("ci_run_attempt"))
             print("deploy-prod stage=already_installed", flush=True)
             return
         if isinstance(last_good, dict) and _version(version) <= _version(str(last_good.get("version"))):
@@ -834,27 +854,33 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             _state(host, state, "critical")
             host.timer_suspend()
             host.restart_policy("no")
-            host.stop_both()
+            with metrics.stage("deploy.stop_both"):
+                host.stop_both()
             _state(host, state, "writers_stopped")
             backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
-            prep.backup_sqlite(database, backup)
-            prep.validate_schema(backup, before)
+            with metrics.stage("backup"):
+                prep.backup_sqlite(database, backup)
+                prep.validate_schema(backup, before)
             _state(host, state, "backup_verified", backup_id=str(backup))
             # Стадия фиксируется до мигратора: прерывание после неё запрещает
             # автоматический запуск старого кода при новом миграционном наборе.
             _state(host, state, "migration_started", migration_attempted=True)
-            host.migrate(candidate_id)
-            prep.validate_schema(database, expected)
+            with metrics.stage("migrations"):
+                host.migrate(candidate_id)
+                prep.validate_schema(database, expected)
             _state(host, state, "schema_verified")
             host.set_runtime(tag, candidate_id)
             _state(host, state, "candidate_pinned")
             host.start_both(tag, candidate_id)
             _state(host, state, "candidate_started")
-            host.verify_both(candidate_id, selected.sha)
+            with metrics.stage("deploy.verify_both_1"):
+                host.verify_both(candidate_id, selected.sha)
             host.restart_policy("unless-stopped")
             host.marker(False)
             host.activate_unit()
-            host.verify_both(candidate_id, selected.sha)
+            with metrics.stage("deploy.verify_both_2"):
+                host.verify_both(candidate_id, selected.sha)
+            metrics.available()
             host.timer_restore(state["timer_before"])
             _state(host, state, "success", last_good={
                 "version": version, "sha": selected.sha, "image_id": candidate_id,
@@ -881,6 +907,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             raise DeployError(f"Выпуск не установлен: {type(error).__name__}") from error
 
 
+@metrics.tracked
 def verify_pinned(host: Host) -> None:
     """Проверяет stop/start и recovery обоих каналов на текущем закреплённом образе.
 
@@ -905,6 +932,7 @@ def verify_pinned(host: Host) -> None:
             old_id = _current_image(host)
             old_sha = host.run("git", "rev-parse", "HEAD")
             prep.require_clean_checkout(host.checkout, old_sha)
+            metrics.update(sha=old_sha)
             old_tag = prep.pinned_tag(old_sha)
             host.installed(old_id, old_sha)
             host.require_no_duplicate_polling()
@@ -923,15 +951,19 @@ def verify_pinned(host: Host) -> None:
             _state(host, state, "critical")
             host.timer_suspend()
             host.restart_policy("no")
-            host.stop_both()
+            with metrics.stage("pin.stop_both"):
+                host.stop_both()
             _state(host, state, "writers_stopped")
             host.set_runtime(old_tag, old_id)
             host.start_both(old_tag, old_id)
-            host.verify_both(old_id, None)
+            with metrics.stage("pin.verify_both_1"):
+                host.verify_both(old_id, None)
             host.restart_policy("unless-stopped")
             host.marker(False)
             host.activate_unit()
-            host.verify_both(old_id, None)
+            with metrics.stage("pin.verify_both_2"):
+                host.verify_both(old_id, None)
+            metrics.available()
             host.timer_restore(state["timer_before"])
             _state(host, state, "pinned_verified", error=None)
         except Exception as error:

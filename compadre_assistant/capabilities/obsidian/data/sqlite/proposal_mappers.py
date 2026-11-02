@@ -99,6 +99,16 @@ def proposal_from_dto(dto: ObsidianProposalDto) -> ObsidianProposal:
     """
     if dto.created_at is None or dto.updated_at is None:
         raise ValueError("Saved proposal must contain timestamps")
+    action = (
+        ObsidianProposalAction(dto.action)
+        if dto.action in ObsidianProposalAction._value2member_map_
+        else ObsidianProposalAction.UNKNOWN
+    )
+    status = (
+        ObsidianProposalStatus(dto.status)
+        if dto.status in ObsidianProposalStatus._value2member_map_
+        else ObsidianProposalStatus.UNKNOWN
+    )
     return ObsidianProposal(
         id=dto.id,
         origin=PendingOrigin(dto.origin_channel, dto.origin_chat_id),
@@ -110,14 +120,14 @@ def proposal_from_dto(dto: ObsidianProposalDto) -> ObsidianProposal:
         article_id=dto.article_id,
         analysis_id=dto.analysis_id,
         vault_id=dto.vault_id,
-        action=ObsidianProposalAction(dto.action),
+        action=action,
         reasoning=dto.reasoning,
         target_path=dto.target_path,
         proposed_markdown=dto.proposed_markdown,
         base_commit_sha=dto.base_commit_sha,
         base_tree_sha=dto.base_tree_sha,
         target_blob_sha=dto.target_blob_sha,
-        status=ObsidianProposalStatus(dto.status),
+        status=status,
         applied_commit_sha=dto.applied_commit_sha,
         created_at=_parse_timestamp(dto.created_at),
         updated_at=_parse_timestamp(dto.updated_at),

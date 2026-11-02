@@ -72,6 +72,8 @@ class SQLiteArticleRepository(ArticleRepository):
         """
         if article.id is not None:
             raise ValueError("A new article must not have an id")
+        if article.status is ArticleStatus.UNKNOWN:
+            raise ValueError("unknown article status cannot be saved")
 
         dto = article_dto_from_article(article)
 
@@ -208,6 +210,8 @@ class SQLiteArticleRepository(ArticleRepository):
         Returns:
             Обновлённая статья или `None`, если статья не найдена.
         """
+        if status is ArticleStatus.UNKNOWN:
+            raise ValueError("unknown article status cannot be saved")
         with self._connection:
             cursor = self._connection.execute(
                 """
@@ -248,6 +252,8 @@ class SQLiteArticleRepository(ArticleRepository):
             raise ValueError("cleaned_text must not be empty")
         if not text_hash.strip():
             raise ValueError("text_hash must not be empty")
+        if status is ArticleStatus.UNKNOWN:
+            raise ValueError("unknown article status cannot be saved")
 
         with self._connection:
             cursor = self._connection.execute(

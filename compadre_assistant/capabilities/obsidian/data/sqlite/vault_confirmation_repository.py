@@ -11,6 +11,7 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.ports import VaultAc
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     VaultActionConfirmation,
     VaultConfirmationAction,
+    VaultConfirmationStatus,
     ObsidianVault,
 )
 from compadre_assistant.capabilities.obsidian.data.sqlite.vault_mappers import (
@@ -51,7 +52,7 @@ class SQLiteVaultActionConfirmationRepository(VaultActionConfirmationRepository)
         if (
             confirmation.id is not None
             or confirmation.version != 1
-            or confirmation.status != "pending"
+            or confirmation.status is not VaultConfirmationStatus.PENDING
         ):
             raise ValueError("new configuration operation must be pending without id")
         dto = vault_confirmation_dto_from_domain(confirmation)
@@ -130,6 +131,11 @@ class SQLiteVaultActionConfirmationRepository(VaultActionConfirmationRepository)
             VaultResourceBusyError: Внешняя запись удерживает lock vault.
             PendingOperationError: Ожидание или конфигурация уже изменились.
         """
+        if (
+            confirmation.action is VaultConfirmationAction.UNKNOWN
+            or confirmation.status is not VaultConfirmationStatus.PENDING
+        ):
+            raise PendingOperationError("Неизвестное действие или состояние vault.")
         with vault_process_lock(
             self._connection, confirmation.base_vault_id, blocking=False,
         ) as locked:
@@ -156,6 +162,11 @@ class SQLiteVaultActionConfirmationRepository(VaultActionConfirmationRepository)
             PendingOperationError: Ожидание или исходная конфигурация уже изменились.
             VaultResourceBusyError: Sync/write lease ещё занят.
         """
+        if (
+            confirmation.action is VaultConfirmationAction.UNKNOWN
+            or confirmation.status is not VaultConfirmationStatus.PENDING
+        ):
+            raise PendingOperationError("Неизвестное действие или состояние vault.")
         with self._connection:
             # Write lock берётся до чтения vault/lease, чтобы sync не вклинился в решение.
             cursor = self._connection.execute(

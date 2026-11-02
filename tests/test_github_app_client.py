@@ -67,6 +67,23 @@ class FakeBinaryResponse:
 
 
 class GitHubAppClientTest(unittest.TestCase):
+    def test_unknown_device_error_maps_to_unknown(self) -> None:
+        """Неизвестный OAuth error остаётся отдельным статусом без token."""
+        with patch(
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
+            return_value=FakeResponse({"error": "future_device_state"}),
+        ):
+            result = _client().poll_device_token("device-code")
+        self.assertIs(result.status, GitHubDevicePollStatus.UNKNOWN)
+        self.assertIsNone(result.access_token)
+
+        with patch(
+            "compadre_assistant.capabilities.obsidian.data.github.github_app_client.urlopen",
+            return_value=FakeResponse({"error": "future_device_state", "access_token": "secret"}),
+        ):
+            with self.assertRaises(GitHubGatewayError):
+                _client().poll_device_token("device-code")
+
     def test_inspect_target_reads_head_vault_tree_blob_and_markdown(self) -> None:
         """Pre-commit проверка возвращает snapshot vault и фактический target."""
         encoded = base64.b64encode("# Current".encode()).decode()

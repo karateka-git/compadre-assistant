@@ -47,6 +47,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             raise ValueError("new proposal must not contain id")
         if proposal.status is not ObsidianProposalStatus.PENDING:
             raise ValueError("new proposal must be pending")
+        if proposal.action is ObsidianProposalAction.UNKNOWN:
+            raise ValueError("unknown proposal action cannot be saved")
         dto = proposal_dto_from_domain(proposal)
         try:
             with self._connection:
@@ -107,7 +109,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         rows = self._connection.execute(
             f"""SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals
             WHERE app_user_id = ? AND origin_channel = ? AND origin_chat_id = ?
-              AND status IN ('pending', 'executing') ORDER BY id""",
+              AND status IN ('pending', 'executing')
+              AND action IN ('add', 'update', 'skip') ORDER BY id""",
             (app_user_id, origin.channel, origin.chat_id),
         ).fetchall()
         return tuple(_proposal_from_row(row) for row in rows)
@@ -126,7 +129,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
         """Находит активный цикл статьи для dedup, без смены исходного чата."""
         row = self._connection.execute(
             f"""SELECT {PROPOSAL_COLUMNS} FROM obsidian_proposals
-            WHERE app_user_id = ? AND article_id = ? AND status IN ('pending', 'executing')""",
+            WHERE app_user_id = ? AND article_id = ?
+              AND status NOT IN ('cancelled', 'conflict', 'applied')""",
             (app_user_id, article_id),
         ).fetchone()
         return _proposal_from_row(row) if row is not None else None
@@ -163,7 +167,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
                 SET status = 'executing', version = version + 1, execution_expires_at = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ? AND app_user_id = ? AND origin_channel = ? AND origin_chat_id = ?
-                    AND version = ? AND (status = 'pending' OR
+                    AND version = ? AND action IN ('add', 'update', 'skip')
+                    AND (status = 'pending' OR
                       (status = 'executing' AND execution_expires_at <= ?))""",
                 (
                     _format_timestamp(expires_at),
@@ -184,7 +189,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             cursor = self._connection.execute(
                 """UPDATE obsidian_proposals SET status = 'pending', version = version + 1,
                     execution_expires_at = NULL, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?""",
+                WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?
+                    AND action IN ('add', 'update', 'skip')""",
                 (proposal.id, proposal.app_user_id, proposal.version),
             )
         return self.get_by_id(proposal.id or 0, proposal.app_user_id) if cursor.rowcount else None
@@ -258,10 +264,17 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
                 """
                 SELECT action, article_id, vault_id FROM obsidian_proposals
                 WHERE id = ? AND app_user_id = ? AND status = 'executing' AND version = ?
+                    AND action IN ('add', 'update', 'skip')
                 """,
                 (proposal_id, app_user_id, version),
             ).fetchone()
             if pending is None:
+                return None
+            if pending["action"] not in {
+                ObsidianProposalAction.ADD.value,
+                ObsidianProposalAction.UPDATE.value,
+                ObsidianProposalAction.SKIP.value,
+            }:
                 return None
             action = ObsidianProposalAction(pending["action"])
             if action is ObsidianProposalAction.SKIP:
@@ -364,7 +377,8 @@ class SQLiteObsidianProposalRepository(ObsidianProposalRepository):
             cursor = self._connection.execute(
                 """UPDATE obsidian_proposals SET status = ?, version = version + 1,
                     execution_expires_at = NULL, completed_at = ?, updated_at = CURRENT_TIMESTAMP
-                WHERE id = ? AND app_user_id = ? AND status = ? AND version = ?""" + address_clause,
+                WHERE id = ? AND app_user_id = ? AND status = ? AND version = ?
+                    AND action IN ('add', 'update', 'skip')""" + address_clause,
                 params,
             )
         return self._get_by_id(proposal_id) if cursor.rowcount else None

@@ -19,7 +19,10 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.vault_configuration 
 )
 from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import VaultSyncStatus, VaultSyncWarningReason
 from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
-from compadre_assistant.capabilities.obsidian.domain.reviews.entities import ObsidianProposalAction
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
+    ObsidianProposalAction,
+    ObsidianProposalStatus,
+)
 
 
 _ARTICLE_STATUS_LABELS: dict[ArticleStatus, str] = {
@@ -31,6 +34,7 @@ _ARTICLE_STATUS_LABELS: dict[ArticleStatus, str] = {
     ArticleStatus.NEEDS_OBSIDIAN_REVIEW: "ждет разбора для Obsidian",
     ArticleStatus.REVIEWED: "разобрана",
     ArticleStatus.FAILED: "ошибка обработки",
+    ArticleStatus.UNKNOWN: "статус неизвестен текущей версии",
 }
 
 
@@ -363,6 +367,9 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
             proposal = _confirmation_proposal(result)
             if proposal is None:
                 return compose_content('Предложение применено.')
+            if (proposal.action is ObsidianProposalAction.UNKNOWN
+                    or proposal.status is ObsidianProposalStatus.UNKNOWN):
+                return compose_content('Итог этой статьи недоступен текущей версии. Данные не изменены.')
             if proposal.action is ObsidianProposalAction.SKIP:
                 return compose_content('Рассмотрение завершено. Хранилище не изменено.')
             response = (
@@ -400,6 +407,9 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
             proposal = _confirmation_proposal(result)
             if proposal is None:
                 return compose_content('Эта статья уже рассмотрена.')
+            if (proposal.action is ObsidianProposalAction.UNKNOWN
+                    or proposal.status is ObsidianProposalStatus.UNKNOWN):
+                return compose_content('Итог этой статьи недоступен текущей версии. Данные не изменены.')
             analysis = (
                 compose_content('Сохранённый анализ:\n', str(result.analysis_result.analysis.result_text), '\n\n')
                 if result.analysis_result is not None
@@ -486,6 +496,9 @@ def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
     if review is None:
         return compose_content('Предложение для Obsidian подготовлено, но сводка недоступна.')
     proposal = review.proposal
+    if (proposal.action is ObsidianProposalAction.UNKNOWN
+            or proposal.status is ObsidianProposalStatus.UNKNOWN):
+        return compose_content('Предложение этой статьи недоступно текущей версии. Данные не изменены.')
     if proposal.action is ObsidianProposalAction.SKIP:
         return (
             compose_content(
