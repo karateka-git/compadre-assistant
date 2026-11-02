@@ -12,6 +12,16 @@ class VaultConfirmationAction(StrEnum):
 
     REPLACE = "replace"  # Заменить активный vault предложенным подключением.
     DISCONNECT = "disconnect"  # Удалить активный vault и локальный каталог.
+    UNKNOWN = "unknown"  # Неизвестное действие будущей схемы не исполняется.
+
+
+class VaultConfirmationStatus(StrEnum):
+    """Описывает состояние адресного подтверждения vault."""
+
+    PENDING = "pending"  # Ожидает решения пользователя.
+    APPLIED = "applied"  # Изменение конфигурации выполнено.
+    CANCELLED = "cancelled"  # Ожидание отменено.
+    UNKNOWN = "unknown"  # Состояние будущей схемы не изменяется.
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +186,7 @@ class VaultActionConfirmation:
     base_vault_id: int
     id: int | None = None
     version: int = 1
-    status: str = "pending"  # Решение ещё не захвачено или уже завершено.
+    status: VaultConfirmationStatus = VaultConfirmationStatus.PENDING
     replacement: ObsidianVault | None = None
     created_at: datetime | None = None
 
@@ -193,6 +203,10 @@ class VaultActionConfirmation:
             raise ValueError("app_user_id must be positive")
         if not isinstance(self.action, VaultConfirmationAction):
             raise TypeError("action must be a VaultConfirmationAction")
+        if not isinstance(self.status, VaultConfirmationStatus):
+            raise TypeError("status must be a VaultConfirmationStatus")
+        if self.action is VaultConfirmationAction.UNKNOWN or self.status is VaultConfirmationStatus.UNKNOWN:
+            return
         if self.action is VaultConfirmationAction.REPLACE:
             if self.replacement is None:
                 raise ValueError("replacement is required for replace action")

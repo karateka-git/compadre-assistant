@@ -73,6 +73,11 @@ def article_from_dto(dto: ArticleDto) -> Article:
     if dto.updated_at is None:
         raise ValueError("Saved article DTO must contain updated_at")
 
+    status = (
+        ArticleStatus(dto.status)
+        if dto.status in ArticleStatus._value2member_map_
+        else ArticleStatus.UNKNOWN
+    )
     return Article(
         id=dto.id,
         source_url=dto.source_url,
@@ -81,7 +86,7 @@ def article_from_dto(dto: ArticleDto) -> Article:
         title=dto.title,
         cleaned_text=dto.cleaned_text,
         text_hash=dto.text_hash,
-        status=ArticleStatus(dto.status),
+        status=status,
         created_at=_parse_utc_timestamp(dto.created_at),
         updated_at=_parse_utc_timestamp(dto.updated_at),
     )

@@ -81,6 +81,10 @@ class FakeArticleUrlUseCase:
     def __init__(self) -> None:
         self.commands: list[ProcessArticleUrlCommand] = []
 
+    def get_saved_for_url(self, source_url: str, app_user_id: int) -> Article | None:
+        """У тестового URL нет сохранённой статьи."""
+        return None
+
     def execute(self, command: ProcessArticleUrlCommand) -> ProcessArticleUrlResult:
         """Возвращает успешный результат обработки статьи."""
         self.commands.append(command)
@@ -666,6 +670,30 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(article_use_case.commands[0].incoming_message_id, 1)
         self.assertEqual(message_repository.messages[0].app_user_id, 1)
         self.assertEqual(message_repository.links, [(1, 7)])
+
+    def test_unknown_saved_article_stops_before_sync_and_message_save(self) -> None:
+        """Неизвестный статус статьи останавливает вход до внешнего preflight."""
+        article_use_case = FakeArticleUrlUseCase()
+        article_use_case.get_saved_for_url = lambda url, user: Article(
+            id=7, app_user_id=user, source_url=url, normalized_url=url, status=ArticleStatus.UNKNOWN
+        )
+        messages = FakeIncomingMessageRepository()
+        sync = FakeVaultSyncManager()
+        use_case = _make_use_case(
+            article_url_use_case=article_use_case,
+            incoming_message_repository=messages,
+            vault_sync_manager=sync,
+        )
+
+        result = use_case.execute(IncomingEvent(
+            channel="vk", chat_id="chat-1", message_id="msg-1",
+            text="https://example.com/article",
+        ))
+
+        self.assertIn("неизвестен текущей версии", result.text_override)
+        self.assertEqual(sync.auto_calls, [])
+        self.assertEqual(article_use_case.commands, [])
+        self.assertEqual(messages.messages, [])
 
     def test_execute_prepares_obsidian_review_after_analysis(self) -> None:
         """Обычный URL-flow подключает 10.9 сразу после LLM-анализа."""

@@ -18,6 +18,7 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultActionConfirmation,
     VaultConfirmationAction,
+    VaultConfirmationStatus,
     VaultInstruction,
     VaultNote,
     VaultSyncLease,
@@ -219,7 +220,7 @@ def vault_confirmation_dto_from_domain(
         origin_chat_id=confirmation.origin.chat_id,
         base_vault_id=confirmation.base_vault_id,
         version=confirmation.version,
-        status=confirmation.status,
+        status=confirmation.status.value,
         action=confirmation.action.value,
         installation_id=replacement.installation_id if replacement else None,
         repository_id=replacement.repository_id if replacement else None,
@@ -262,17 +263,29 @@ def vault_confirmation_from_dto(
     """Преобразует DTO подтверждения в доменную модель."""
     if dto.created_at is None:
         raise ValueError("Saved vault confirmation DTO must contain created_at")
-    action = VaultConfirmationAction(dto.action)
+    action = (
+        VaultConfirmationAction(dto.action)
+        if dto.action in VaultConfirmationAction._value2member_map_
+        else VaultConfirmationAction.UNKNOWN
+    )
+    status = (
+        VaultConfirmationStatus(dto.status)
+        if dto.status in VaultConfirmationStatus._value2member_map_
+        else VaultConfirmationStatus.UNKNOWN
+    )
     replacement = None
-    if action is VaultConfirmationAction.REPLACE:
-        required_values = (
-            dto.installation_id,
-            dto.repository_id,
-            dto.owner,
-            dto.repository,
-            dto.branch,
-            dto.root_path,
-        )
+    required_values = (
+        dto.installation_id,
+        dto.repository_id,
+        dto.owner,
+        dto.repository,
+        dto.branch,
+        dto.root_path,
+    )
+    if action is VaultConfirmationAction.REPLACE or (
+        action is VaultConfirmationAction.UNKNOWN
+        and all(value is not None for value in required_values)
+    ):
         if any(value is None for value in required_values):
             raise ValueError("Replace confirmation DTO is incomplete")
         replacement = ObsidianVault(
@@ -290,7 +303,7 @@ def vault_confirmation_from_dto(
         origin=PendingOrigin(dto.origin_channel, dto.origin_chat_id),
         base_vault_id=dto.base_vault_id,
         version=dto.version,
-        status=dto.status,
+        status=status,
         action=action,
         replacement=replacement,
         expires_at=parse_utc_timestamp(dto.expires_at),

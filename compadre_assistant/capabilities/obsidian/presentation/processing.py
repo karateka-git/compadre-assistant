@@ -81,6 +81,10 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.vault_sync import (
 )
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.capabilities.obsidian.domain.articles.statuses import ArticleStatus
+from compadre_assistant.capabilities.obsidian.domain.reviews.entities import (
+    ObsidianProposalAction,
+    ObsidianProposalStatus,
+)
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import ObsidianVault
 
 
@@ -595,11 +599,38 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             vault_disconnect=result,
         )
 
+    def _unavailable_article_url(self, url: str, user: AppUser) -> ObsidianMessageResult | None:
+        """Останавливает неизвестный цикл статьи до sync, записи и захвата lease."""
+        article = self._article_url_use_case.get_saved_for_url(url, user.id)
+        if article is None:
+            return None
+        if article.status is ArticleStatus.UNKNOWN:
+            return _operation_message(
+                "Статус этой статьи неизвестен текущей версии. Данные не изменены.", user
+            )
+        service = self._obsidian_confirmation_service
+        if service is None or article.id is None:
+            return None
+        proposal = service.get_active_for_article(app_user_id=user.id, article_id=article.id)
+        if proposal is None and article.status is ArticleStatus.REVIEWED:
+            proposal = service.get_latest_applied(app_user_id=user.id, article_id=article.id)
+        if proposal is not None and (
+            proposal.action is ObsidianProposalAction.UNKNOWN
+            or proposal.status is ObsidianProposalStatus.UNKNOWN
+        ):
+            return _operation_message(
+                "Предложение этой статьи недоступно текущей версии. Данные не изменены.", user
+            )
+        return None
+
     def _process_article_url(
         self, incoming_message: ArticleIncomingMessage, app_user_result: AppUser
     ) -> ObsidianMessageResult:
         """Резервирует один URL на весь fetch/analysis/review между TG/VK."""
         url = extract_first_supported_url(incoming_message.text)
+        unavailable = self._unavailable_article_url(url, app_user_result) if url else None
+        if unavailable is not None:
+            return unavailable
         if url is None or self._article_flow_lease_repository is None:
             return self._run_article_url(incoming_message, app_user_result)
         try:
@@ -637,6 +668,10 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             )
             _log_result(result)
             return result
+
+        unavailable = self._unavailable_article_url(url, app_user_result)
+        if unavailable is not None:
+            return unavailable
 
         auto_sync_result = self._auto_sync_vault(app_user_result)
         if isinstance(auto_sync_result, ObsidianMessageResult):
@@ -702,6 +737,14 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                 app_user_id=app_user_result.id, article_id=article_result.article.id
             )
             if active is not None:
+                if (
+                    active.action is ObsidianProposalAction.UNKNOWN
+                    or active.status is ObsidianProposalStatus.UNKNOWN
+                ):
+                    return _operation_message(
+                        "Предложение этой статьи недоступно текущей версии. Данные не изменены.",
+                        app_user_result,
+                    )
                 origin = PendingOrigin(incoming_message.channel, incoming_message.chat_id)
                 if active.origin != origin:
                     return _operation_message(
@@ -733,6 +776,11 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
                 article_id=article_result.article.id,
             )
             if applied is not None:
+                if applied.action is ObsidianProposalAction.UNKNOWN:
+                    return _operation_message(
+                        "Итог этой статьи недоступен текущей версии. Данные не изменены.",
+                        app_user_result,
+                    )
                 saved_analysis = (
                     self._article_analysis_use_case.execute(
                         AnalyzeArticleCommand(
@@ -1250,6 +1298,11 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
         article = self._article_url_use_case.get_saved_for_user(int(arguments), app_user.id)
         if article is None:
             return _operation_message("Статья недоступна в этом профиле.", app_user)
+        if article.status is ArticleStatus.UNKNOWN:
+            return _operation_message(
+                "Статус этой статьи неизвестен текущей версии. Данные не изменены.",
+                app_user,
+            )
         if self._obsidian_confirmation_service is not None:
             active = self._obsidian_confirmation_service.get_active_for_article(
                 app_user_id=app_user.id, article_id=article.id or 0
@@ -1292,6 +1345,12 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             return ObsidianMessageResult(
                 type=ObsidianResultType.REANALYZE_COMMAND_INVALID,
                 app_user=app_user,
+            )
+        article = self._article_url_use_case.get_saved_for_user(int(arguments), app_user.id)
+        if article is not None and article.status is ArticleStatus.UNKNOWN:
+            return _operation_message(
+                "Статус этой статьи неизвестен текущей версии. Данные не изменены.",
+                app_user,
             )
         if self._article_analysis_use_case is None:
             return ObsidianMessageResult(
@@ -1472,7 +1531,8 @@ def _present_result(result: ObsidianMessageResult) -> IncomingResponse:
         if result.review_result
         else (result.obsidian_confirmation.proposal if result.obsidian_confirmation else None)
     )
-    if proposal is not None and proposal.status.value == "pending":
+    if (proposal is not None and proposal.status is ObsidianProposalStatus.PENDING
+            and proposal.action is not ObsidianProposalAction.UNKNOWN):
         actions = _operation_actions("proposal", proposal.id or 0, proposal.version)
     if result.pending_operation is not None:
         pending = result.pending_operation

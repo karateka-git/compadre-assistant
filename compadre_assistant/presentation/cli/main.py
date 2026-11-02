@@ -37,6 +37,7 @@ from compadre_assistant.core.data.config import (
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import MigrationError, apply_migrations
+from compadre_assistant.core.data.sqlite.runtime_schema import prepare_runtime_schema
 from compadre_assistant.presentation.telegram.bot import TelegramBotError, run_telegram_bot
 from compadre_assistant.presentation.vk.bot import VkBotError, run_vk_bot
 
@@ -227,7 +228,7 @@ def run_migrations_command(
         logger.error("Migration configuration error: %s", error)
         return 2
     logger.info("Migration database: %s", path.resolve())
-    return 0 if initialize_database(path, logger) else 1
+    return 0 if initialize_database(path, logger, migrate_only=True) else 1
 
 
 def configure_debug_logging(enabled: bool) -> None:
@@ -474,19 +475,22 @@ def check_database(database_path: Path, logger: logging.Logger) -> bool:
     return True
 
 
-def initialize_database(database_path: Path, logger: logging.Logger) -> bool:
-    """Открывает рабочую базу и применяет ожидающие миграции.
+def initialize_database(
+    database_path: Path, logger: logging.Logger, *, migrate_only: bool = False,
+) -> bool:
+    """Готовит рабочую схему по строгому либо аттестованному runtime-контракту.
 
     Args:
         database_path: Путь к рабочему файлу SQLite.
         logger: Logger для диагностических сообщений.
+        migrate_only: Применять строгие миграции, игнорируя runtime-допуск.
 
     Returns:
         `True`, если база готова к работе.
     """
     try:
         with connect_database(database_path) as connection:
-            applied = apply_migrations(connection)
+            applied = apply_migrations(connection) if migrate_only else prepare_runtime_schema(connection)
     except (MigrationError, OSError, sqlite3.Error) as error:
         logger.error("Database initialization failed: %s", error)
         return False
@@ -578,7 +582,7 @@ def run_process_url_command(
     """
     try:
         with connect_database(database_path) as connection:
-            apply_migrations(connection)
+            prepare_runtime_schema(connection)
             result = process_url_for_cli(connection, source_url, use_case_factory)
     except (MigrationError, OSError, sqlite3.Error) as error:
         logger.error("Could not prepare article pipeline: %s", error)

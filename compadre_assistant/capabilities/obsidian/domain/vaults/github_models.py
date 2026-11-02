@@ -73,6 +73,7 @@ class GitHubDevicePollStatus(StrEnum):
     SLOW_DOWN = "slow_down"  # GitHub требует увеличить interval polling.
     EXPIRED = "expired"  # Device code больше не действует.
     DENIED = "denied"  # Пользователь явно отклонил авторизацию.
+    UNKNOWN = "unknown"  # Неизвестный ответ API завершает попытку без token.
 
 
 @dataclass(frozen=True, slots=True)

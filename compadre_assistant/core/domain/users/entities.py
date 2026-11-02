@@ -2,9 +2,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 
 
 MAX_DISPLAY_NAME_LENGTH = 80
+
+
+class IdentityRebindStatus(StrEnum):
+    """Описывает жизненный цикл перепривязки identity."""
+
+    PENDING = "pending"  # Ожидает адресного решения.
+    APPLIED = "applied"  # Identity перенесена в целевой профиль.
+    CANCELLED = "cancelled"  # Ожидание отменено.
+    UNKNOWN = "unknown"  # Неизвестный статус будущей схемы не исполняется.
 
 
 def is_private_chat_address(channel: str, external_user_id: str | None, external_chat_id: str) -> bool:
@@ -109,14 +119,14 @@ class IdentityRebindConfirmation:
     token_hash: str
     expires_at: datetime
     version: int = 1
-    status: str = "pending"  # Решение ещё не выполнено либо уже завершено.
+    status: IdentityRebindStatus = IdentityRebindStatus.PENDING
 
     def __post_init__(self) -> None:
         if min(self.id, self.source_app_user_id, self.target_app_user_id, self.version) <= 0:
             raise ValueError("identity confirmation IDs and version must be positive")
         if self.source_app_user_id == self.target_app_user_id:
             raise ValueError("identity transfer requires a different target profile")
-        if self.status not in {"pending", "applied", "cancelled"}:
-            raise ValueError("invalid identity confirmation status")
+        if not isinstance(self.status, IdentityRebindStatus):
+            raise TypeError("status must be an IdentityRebindStatus")
         if not all(value.strip() for value in (self.channel, self.external_user_id, self.chat_id, self.token_hash)):
             raise ValueError("identity confirmation must contain origin and token hash")

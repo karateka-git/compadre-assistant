@@ -296,6 +296,30 @@ class GitHubConnectionCoordinatorTest(unittest.TestCase):
             [GitHubConnectionCompletion(GitHubConnectionCompletionStatus.DENIED)],
         )
 
+    def test_unknown_device_status_stops_polling_without_token_write(self) -> None:
+        """Незнакомый статус завершает попытку за один poll без сохранения."""
+        clock = FakeClock()
+        writer = FakeWriter()
+        gateway = FakeGateway([GitHubDevicePollStatus.UNKNOWN])
+        completions: list[GitHubConnectionCompletion] = []
+        notified = Event()
+
+        def notify(completion: GitHubConnectionCompletion) -> None:
+            completions.append(completion)
+            notified.set()
+
+        coordinator = GitHubConnectionCoordinator(
+            gateway=gateway, account_writer=writer, state_store=FakeStateStore(),
+            installation_url="https://github.com/apps/example/installations/new",
+            clock=clock, sleeper=clock.sleep,
+        )
+        coordinator.start(42, PendingOrigin("telegram", "chat"), notify)
+        self.assertTrue(notified.wait(timeout=1))
+        self.assertEqual(completions[0].status, GitHubConnectionCompletionStatus.FAILED)
+        self.assertEqual(len(gateway.device_codes), 1)
+        self.assertEqual(gateway.tokens, [])
+        self.assertEqual(writer.calls, [])
+
     def test_authorized_without_installations_notifies_user(self) -> None:
         """Успешный OAuth без installation получает отдельный понятный итог."""
         clock = FakeClock()

@@ -20,6 +20,7 @@ from compadre_assistant.capabilities.obsidian.domain.vaults.entities import (
     ObsidianVault,
     VaultActionConfirmation,
     VaultConfirmationAction,
+    VaultConfirmationStatus,
 )
 
 
@@ -282,7 +283,17 @@ class GitHubVaultSelectionService(VaultSelectionManager):
     def get_pending(self, app_user_id: int, origin: PendingOrigin) -> VaultActionConfirmation | None:
         """Читает актуальное ожидание только для исходного чата."""
         pending = self._confirmation_repository.find_active(app_user_id=app_user_id, now=self._clock())
-        return pending if pending is not None and pending.origin == origin else None
+        return (
+            pending
+            if pending is not None
+            and pending.origin == origin
+            and pending.status is VaultConfirmationStatus.PENDING
+            and pending.action in {
+                VaultConfirmationAction.REPLACE,
+                VaultConfirmationAction.DISCONNECT,
+            }
+            else None
+        )
 
     def request_disconnect(self, app_user_id: int, origin: PendingOrigin) -> VaultDisconnectResult:
         """Резервирует конфигурацию vault для подтверждаемого отключения."""
@@ -333,7 +344,12 @@ class GitHubVaultSelectionService(VaultSelectionManager):
         pending = self._confirmation_repository.get_by_id(confirmation_id, app_user_id)
         if pending is None or pending.origin != origin:
             raise PendingOperationError("Заверши действие в исходном чате; операция здесь недоступна.")
-        if pending.version != version or pending.action is not action:
+        if (
+            pending.version != version
+            or pending.action is not action
+            or pending.action is VaultConfirmationAction.UNKNOWN
+            or pending.status is not VaultConfirmationStatus.PENDING
+        ):
             raise PendingOperationError(
                 "Действие устарело. Войди снова в /obsidian для актуального ожидания."
             )

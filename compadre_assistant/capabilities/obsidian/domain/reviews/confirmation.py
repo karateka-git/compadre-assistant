@@ -110,6 +110,8 @@ class ObsidianProposalConfirmationService:
             return ObsidianConfirmationResult(ObsidianConfirmationStatus.FOREIGN_ORIGIN)
         if pending.version != version:
             return ObsidianConfirmationResult(ObsidianConfirmationStatus.STALE)
+        if pending.action is ObsidianProposalAction.UNKNOWN:
+            return ObsidianConfirmationResult(ObsidianConfirmationStatus.NO_PENDING)
         if pending.status not in {ObsidianProposalStatus.PENDING, ObsidianProposalStatus.EXECUTING}:
             return ObsidianConfirmationResult(ObsidianConfirmationStatus.NO_PENDING)
         if (

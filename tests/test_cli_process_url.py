@@ -69,6 +69,10 @@ class FakeProcessArticleUrlUseCase:
         self._error = error
         self._article_id = article_id
 
+    def get_saved_for_url(self, source_url: str, app_user_id: int) -> Article | None:
+        """Возвращает отсутствие сохранённого цикла для нового тестового URL."""
+        return None
+
     def execute(self, command: ProcessArticleUrlCommand) -> ProcessArticleUrlResult:
         """Возвращает успешный результат или выбрасывает заданную ошибку."""
         self.commands.append(command)

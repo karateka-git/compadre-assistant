@@ -97,6 +97,22 @@ class ProcessArticleUrlUseCase:
         article = self._article_repository.get_by_id(article_id)
         return article if article is not None and article.app_user_id == app_user_id else None
 
+    def get_saved_for_url(self, source_url: str, app_user_id: int) -> Article | None:
+        """Читает статью для проверки доступности до внешних эффектов.
+
+        Args:
+            source_url: URL из входящего сообщения.
+            app_user_id: Владелец статьи.
+
+        Returns:
+            Сохранённая статья либо `None` для нового или некорректного URL.
+        """
+        try:
+            normalized_url = normalize_article_url(source_url)
+        except ValueError:
+            return None
+        return self._article_repository.find_by_normalized_url(normalized_url, app_user_id)
+
     def execute(self, command: ProcessArticleUrlCommand) -> ProcessArticleUrlResult:
         """Выполняет pipeline обработки URL.
 
@@ -129,6 +145,8 @@ class ProcessArticleUrlUseCase:
             normalized_url,
             command.app_user_id,
         )
+        if existing is not None and existing.status is ArticleStatus.UNKNOWN:
+            raise ProcessArticleUrlError("Article status is unknown to this version")
         if (
             existing is not None
             and not command.force_reprocess

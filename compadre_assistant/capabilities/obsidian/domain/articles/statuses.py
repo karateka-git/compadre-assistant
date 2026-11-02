@@ -22,3 +22,5 @@ class ArticleStatus(StrEnum):
     REVIEWED = "reviewed"
     # Обработка остановлена из-за ошибки на одном из этапов.
     FAILED = "failed"
+    # Значение будущей схемы, смысл которого этой версии неизвестен.
+    UNKNOWN = "unknown"

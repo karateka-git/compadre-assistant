@@ -15,6 +15,7 @@ class ObsidianProposalAction(StrEnum):
     ADD = "add"  # Создать новую Markdown-заметку.
     UPDATE = "update"  # Заменить содержимое существующей Markdown-заметки.
     SKIP = "skip"  # Не переносить материал статьи в vault.
+    UNKNOWN = "unknown"  # Действие будущей версии не исполняется.
 
 
 class ObsidianProposalStatus(StrEnum):
@@ -25,6 +26,7 @@ class ObsidianProposalStatus(StrEnum):
     CANCELLED = "cancelled"  # Пользователь ответил `нет`.
     CONFLICT = "conflict"  # Исходный GitHub snapshot изменился.
     APPLIED = "applied"  # Изменение или подтверждённый skip завершены.
+    UNKNOWN = "unknown"  # Жизненный цикл будущей версии не меняется.
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +42,8 @@ class ObsidianReviewPlan:
             raise TypeError("action must be an ObsidianProposalAction")
         if not self.reasoning.strip():
             raise ValueError("reasoning must not be empty")
+        if self.action is ObsidianProposalAction.UNKNOWN:
+            return
         if self.action is ObsidianProposalAction.SKIP:
             if self.target_path is not None:
                 raise ValueError("skip plan must not have target_path")
@@ -95,6 +99,8 @@ class ObsidianProposal:
             raise ValueError("reasoning must not be empty")
         if not self.base_commit_sha.strip() or not self.base_tree_sha.strip():
             raise ValueError("proposal source SHAs must not be empty")
+        if self.action is ObsidianProposalAction.UNKNOWN or self.status is ObsidianProposalStatus.UNKNOWN:
+            return
         if self.action is ObsidianProposalAction.SKIP:
             if any(
                 value is not None

@@ -14,6 +14,7 @@ from compadre_assistant.core.domain.users.entities import (
     ExternalIdentity,
     IncomingIdentity,
     IdentityRebindConfirmation,
+    IdentityRebindStatus,
 )
 
 
@@ -60,6 +61,11 @@ def link_token_owner_from_dto(dto: IdentityLinkTokenDto) -> int:
 
 def rebind_confirmation_from_dto(dto: IdentityRebindConfirmationDto) -> IdentityRebindConfirmation:
     """Восстанавливает адресную операцию ядра из отдельной модели хранения."""
+    status = (
+        IdentityRebindStatus(dto.status)
+        if dto.status in IdentityRebindStatus._value2member_map_
+        else IdentityRebindStatus.UNKNOWN
+    )
     return IdentityRebindConfirmation(
         id=dto.id,
         source_app_user_id=dto.source_app_user_id,
@@ -70,5 +76,5 @@ def rebind_confirmation_from_dto(dto: IdentityRebindConfirmationDto) -> Identity
         token_hash=dto.token_hash,
         expires_at=datetime.fromisoformat(dto.expires_at),
         version=dto.version,
-        status=dto.status,
+        status=status,
     )

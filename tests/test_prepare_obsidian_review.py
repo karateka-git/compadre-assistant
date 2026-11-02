@@ -7,6 +7,7 @@ from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigi
 
 from dataclasses import replace
 import unittest
+from unittest.mock import Mock
 
 from compadre_assistant.capabilities.obsidian.domain.articles.stages import ProcessingStage
 from compadre_assistant.capabilities.obsidian.domain.reviews.proposal import (
@@ -299,6 +300,47 @@ class PrepareObsidianReviewTests(unittest.TestCase):
 
         self.assertEqual(repository.article.status, ArticleStatus.ANALYZED)
         self.assertEqual(recorder.records[0]["error_type"], "RuntimeError")
+
+    def test_unknown_article_status_stops_before_search_and_generation(self) -> None:
+        """Новый статус статьи не расходует поиск и LLM и не меняет статью."""
+        article = replace(self.article, status=ArticleStatus.UNKNOWN)
+        repository = ArticleRepositoryFake(article)
+        search = RecordingSearch()
+        generator = Mock()
+        use_case = self._use_case(
+            article_repository=repository, search=search, generator=generator,
+        )
+
+        with self.assertRaises(PrepareObsidianReviewError):
+            use_case.execute(self._command())
+
+        self.assertIs(repository.article, article)
+        self.assertEqual(search.calls, 0)
+        generator.plan.assert_not_called()
+        generator.write_markdown.assert_not_called()
+
+    def test_unknown_llm_action_stops_before_markdown_and_save(self) -> None:
+        """Неизвестный plan не превращается в add/update при подготовке."""
+        repository = ArticleRepositoryFake(self.article)
+        generator = RecordingGenerator(plan=ObsidianReviewPlan(
+            action=ObsidianProposalAction.UNKNOWN, reasoning="Новый сценарий",
+            target_path="Tech/A.md",
+        ))
+        proposal_repository = Mock()
+        use_case = PrepareObsidianReviewUseCase(
+            article_repository=repository,
+            vault_repository=VaultRepositoryFake(self.vault),
+            instruction_repository=InstructionRepositoryFake(self.instructions),
+            note_repository=NoteRepositoryFake([]), search=RecordingSearch(),
+            generator=generator, proposal_repository=proposal_repository,
+        )
+
+        with self.assertRaises(PrepareObsidianReviewError):
+            use_case.execute(self._command())
+
+        self.assertIs(repository.article, self.article)
+        self.assertIsNone(generator.writing_context)
+        proposal_repository.save_pending.assert_not_called()
 
     def _command(self) -> PrepareObsidianReviewCommand:
         return PrepareObsidianReviewCommand(

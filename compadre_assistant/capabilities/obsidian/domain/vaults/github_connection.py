@@ -252,6 +252,11 @@ class GitHubConnectionCoordinator(GitHubConnectionStarter):
                     return
                 if result.status is GitHubDevicePollStatus.EXPIRED:
                     break
+                if result.status is GitHubDevicePollStatus.UNKNOWN:
+                    completion = GitHubConnectionCompletion(
+                        GitHubConnectionCompletionStatus.FAILED
+                    )
+                    return
 
             LOGGER.info(
                 "GitHub Device Flow expired for app_user_id=%s",
