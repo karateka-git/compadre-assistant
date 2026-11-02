@@ -1,7 +1,7 @@
 # Production VPS
 
 Здесь находятся доступ, ограничения и **последний документированный снимок** VPS.
-Он зафиксирован 30.10.2026 и не доказывает состояние сервера сегодня. Перед
+Он зафиксирован 02.11.2026 и не доказывает состояние сервера сегодня. Перед
 любой работой повторно проверьте факты на VPS. Установка, диагностика, backup и
 восстановление описаны в [OPERATIONS.md](OPERATIONS.md), допуск версии — в
 [RELEASES.md](RELEASES.md).
@@ -22,7 +22,27 @@
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142
 ```
 
-## Последний проверенный снимок — 30.10.2026, 04:33:27 UTC
+## Последний проверенный снимок — 02.11.2026, 11:28:58 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Версия и допуск | `v3.1.0`, SHA `dd71c2ba42a0744b5b654cedcf73009ce8879058`; [GitHub Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v3.1.0), immutable. Полный `main-full` точного SHA: [41436078724/1](https://github.com/karateka-git/compadre-assistant/actions/runs/41436078724/attempts/1), success. |
+| Установка | Обычный `deploy-prod v3.1.0` завершился success в 11:28:22 UTC. Marker отсутствует, checkout чистый detached HEAD; `last_good` содержит v3.1.0 и точные SHA/image ID/CI. |
+| Контроллер | Отдельный snapshot обновлён до `dd71c2ba42a0744b5b654cedcf73009ce8879058`: 38 файлов сверены по Git-байтам/SHA256 до и после замены. Прежний сохранён в `/usr/local/lib/compadre-assistant-deploy.saved-38bc841-20261102`. |
+| Каналы и образы | Оба healthy, restarts 0, policy unless-stopped; image ID `sha256:334eeaef6bb4d067ca7fe92dc092ae34362f7f559b8e0f7409351b078402c1b8`, OCI revision совпадает с SHA. Polling signals обоих каналов подтверждены без traceback/conflict в проверенном окне; дублей нет. |
+| Проверки запуска | Обе `verify_both` success: 27.780 с и 27.742 с. Затем независимая проверка pin/systemd/health/duplicates прошла. |
+| Рабочая БД | Integrity ok, FK violations 0, журнал `0001`–`0004`; новых SQL не было. |
+| Backup установки | `/var/lib/compadre-assistant-deploy/backups/v3.1.0-dd71c2ba42a0744b5b654cedcf73009ce8879058.db`, mode 0600, integrity ok/FK 0, схема `0001`–`0004`. Старые backup не удалялись. |
+| Systemd | Service и backup timer active/enabled; backup service inactive, Result=success. |
+| Метрики | Полная команда 129.977 с, простой по контроллеру 89.938 с, downtime_open=false; приватный файл `metrics-ec26b90e5eff4ef38b424578051ac3ee.json` в каталоге состояния. |
+| Пользовательская приёмка | Живые ответы Telegram/VK после v3.1.0 ещё не подтверждены пользователем. Healthy и polling не заменяют эту проверку. |
+
+Независимый осмотр начат 02.11.2026 в 11:28:58 UTC и завершён около 11:29 UTC.
+Базовая версия стала установленной целью следующего обновления; совместимость
+с будущей схемой и новый recovery ещё не доказаны. Подробности выпуска и
+метрик — в [записи 4.5](ci-release-review/STAGE4_RELEASE.md).
+
+## Исторический снимок — 30.10.2026, 04:33:27 UTC
 
 | Область | Результат проверки |
 | --- | --- |
