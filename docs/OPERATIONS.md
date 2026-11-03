@@ -331,6 +331,14 @@ PR выпускаемой линии и связанный main PR, если о�
 marker и rollback действуют как обычно. Настоящий аварийный выпуск на VPS
 пока не испытан.
 
+В подготовленном [controller шага 5.5](ci-release-review/STAGE5_PREDEPLOY.md)
+emergency не обходит `repository-compatibility`: нужны успешные steps этого
+job и доверенное evidence точного run/attempt, совпадающие с установленной
+базой. Ошибка API, pin/evidence или предварительной SQLite-копии даёт отказ
+до marker/остановки. Перед будущей установкой snapshot надо отдельно
+подготовить внешние `compatibility-policy.sha` и `github-read-token` по
+указанному контракту; на VPS эти изменения ещё не применялись.
+
 ## Локальный запуск и проверка
 
 Порядок подготовки среды, пересоздания только development-БД, запуска Docker

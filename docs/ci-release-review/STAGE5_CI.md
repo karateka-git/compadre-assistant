@@ -79,7 +79,8 @@ repo/workflow/head SHA, полные jobs/steps, имя/ID/срок и digest ar
 только потому, что он написан внутри artifact, или принять artifact другого
 rerun. Проверка Git bytes workflow нужна также снаружи candidate job: кандидат,
 удаливший весь verifier, не должен получить доверие по похожим именам steps.
-Эта доставка/проверка до остановки ботов **ещё не реализована**.
+Эта доставка/проверка до остановки ботов локально реализована в
+[шаге 5.5](STAGE5_PREDEPLOY.md); живой GitHub artifact и VPS ещё не проверялись.
 
 Pin и GitHub provenance защищают от подмены источника проверки и случайного
 смешивания exports. Произвольный враждебный Python в candidate migrations,

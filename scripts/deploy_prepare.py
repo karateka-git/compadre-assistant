@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from typing import Iterator, Mapping
 
 
@@ -173,11 +174,21 @@ def _integrity(connection: sqlite3.Connection) -> None:
         raise PreparationError("SQLite integrity_check завершился ошибкой")
 
 
-def backup_sqlite(source: Path, destination: Path) -> Path:
+def backup_sqlite(source: Path, destination: Path, *, timeout: float = 60) -> Path:
     """Создаёт отдельную SQLite API копию без перезаписи и проверяет её.
 
-    Вызывающий контроллер обязан предварительно остановить обоих writers,
-    приостановить ночной backup timer и проверить свободное место.
+    Для окончательного backup контроллер предварительно останавливает writers
+    и таймер. Предварительная predeploy-копия допускает работающих writers:
+    SQLite online backup сохраняет согласованный снимок, но не фиксирует
+    границу приёма сообщений. Контроллер проверяет свободное место.
+
+    Args:
+        source: Существующая исходная SQLite.
+        destination: Новый приватный файл копии.
+        timeout: Предельное время online backup в секундах.
+
+    Returns:
+        Путь к целостной копии.
 
     Raises:
         PreparationError: Исходная БД отсутствует, копия существует или повреждена.
@@ -188,9 +199,16 @@ def backup_sqlite(source: Path, destination: Path) -> Path:
     fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     os.close(fd)
     try:
+        deadline = time.monotonic() + timeout
+
+        def progress(status: int, remaining: int, total: int) -> None:
+            """Прерывает бесконечное повторение backup при активных writers."""
+            if time.monotonic() >= deadline:
+                raise PreparationError("Истекло время SQLite online backup")
+
         with closing(sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)) as original:
             with closing(sqlite3.connect(destination)) as copy:
-                original.backup(copy)
+                original.backup(copy, pages=256, progress=progress)
                 _integrity(copy)
         with destination.open("rb+") as file:
             os.fsync(file.fileno())

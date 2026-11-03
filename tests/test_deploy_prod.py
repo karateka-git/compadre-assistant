@@ -52,6 +52,14 @@ class FakeHost(prod.Host):
         self.actions: list[str] = []
         self.fail_candidate = False
         self.replace_on_activate = False
+        prep.write_state(self.state_dir, self.checkout, {
+            "stage": "success", "last_good": {"version": "v1.0.0", "sha": OLD_SHA,
+                "image_id": OLD_IMAGE, "tag": prep.pinned_tag(OLD_SHA)}})
+
+    def predeploy(self, selected, candidate_id, before, expected, good, old_sha, old_id):
+        """Отделяет fake state machine от сетевой и SQLite проверки evidence."""
+        self.require_baseline(good, old_sha, old_id)
+        self.actions.append("predeploy")
 
     def run(self, *args: str, env: dict[str, str] | None = None) -> str:
         """Возвращает только нужный фиктивный Git HEAD."""
@@ -100,11 +108,13 @@ class FakeHost(prod.Host):
     def image(self, reference: str) -> dict:
         """Возвращает два неизменяемых fake image ID."""
         image_id = NEW_IMAGE if reference in (NEW_IMAGE, prep.pinned_tag(NEW_SHA)) else OLD_IMAGE
-        return {"Id": image_id, "Config": {"Labels": {prep.OCI_REVISION: NEW_SHA}}}
+        sha = NEW_SHA if image_id == NEW_IMAGE else OLD_SHA
+        return {"Id": image_id, "Config": {"Labels": {prep.OCI_REVISION: sha}}}
 
     def containers(self) -> dict:
         """Представляет два канала на одном текущем образе."""
         return {name: {"Id": name, "Image": self.current_image,
+                       "Config": {"Labels": {prep.OCI_REVISION: OLD_SHA if self.current_image == OLD_IMAGE else NEW_SHA}},
                        "State": {"Running": self.running, "Health": {"Status": "healthy"}},
                        "RestartCount": 0,
                        "HostConfig": {"RestartPolicy": {"Name": self.policy}}}
@@ -479,13 +489,52 @@ class DeployProdTests(unittest.TestCase):
             patch.object(prep, "require_disk_space"),
         )
 
+    def test_predeploy_failure_never_stops_either_route(self) -> None:
+        """API/evidence/copy отказ закрывает обычный и аварийный выпуск до marker."""
+        for emergency in (False, True):
+            with self.subTest(emergency=emergency), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                patches = self._patches()
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patch.object(
+                    host, "predeploy", side_effect=ValueError("missing evidence"),
+                ), self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.1.0", emergency=emergency, reason="срочно" if emergency else None)
+                self.assertNotIn("marker_on", host.actions)
+                self.assertNotIn("stop_both", host.actions)
+                self.assertTrue(host.running)
+                self.assertEqual(host.head, OLD_SHA)
+
+    def test_last_good_and_final_runtime_drift_fail_before_marker(self) -> None:
+        """Недостоверная база и смена runtime после долгой проверки не входят в critical."""
+        for fault in ("last_good", "image", "revision", "pin"):
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                if fault == "last_good":
+                    prep.write_state(host.state_dir, host.checkout, {"stage": "success"})
+                else:
+                    def drift():
+                        """Меняет runtime после predeploy, при сохранении ready."""
+                        if fault == "image":
+                            host.current_image = NEW_IMAGE
+                        elif fault == "pin":
+                            host.pin = prep.pinned_tag(NEW_SHA)
+                        else:
+                            host.image = lambda ref: {"Id": OLD_IMAGE, "Config": {"Labels": {prep.OCI_REVISION: NEW_SHA}}}
+                        return host.timer_state.copy()
+                    host.timer_snapshot = drift
+                patches = self._patches()
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], self.assertRaises(prod.DeployError):
+                    prod.deploy(host, "v1.1.0")
+                self.assertNotIn("marker_on", host.actions)
+                self.assertNotIn("stop_both", host.actions)
+
     def test_success_then_same_version_does_not_recreate(self) -> None:
         """Успех фиксируется после двух каналов, повтор не вызывает stop/up."""
         with TemporaryDirectory() as temporary:
             host = FakeHost(Path(temporary))
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                prod.deploy(host, "v1.0.0")
+                prod.deploy(host, "v1.1.0")
                 state = prep.read_state(host.state_dir, host.checkout)
                 self.assertEqual(state["stage"], "success")
                 self.assertEqual(state["last_good"]["image_id"], NEW_IMAGE)
@@ -495,7 +544,7 @@ class DeployProdTests(unittest.TestCase):
                 self.assertLess(host.actions.index("compose_critical"), host.actions.index("start_both"))
                 self.assertLess(host.actions.index("verify_both"), host.actions.index("unit_active"))
                 before = host.actions.copy()
-                prod.deploy(host, "v1.0.0")
+                prod.deploy(host, "v1.1.0")
                 self.assertEqual(host.actions, before)
 
     def test_emergency_success_records_decision_and_rejects_normal_retry(self) -> None:
@@ -504,7 +553,7 @@ class DeployProdTests(unittest.TestCase):
             host = FakeHost(Path(temporary))
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                prod.deploy(host, "v1.0.0", emergency=True, reason="срочное восстановление")
+                prod.deploy(host, "v1.1.0", emergency=True, reason="срочное восстановление")
                 state = prep.read_state(host.state_dir, host.checkout)
                 decision = state["deployment"]
                 self.assertEqual((decision["initiator"], decision["reason"], decision["sha"],
@@ -515,7 +564,7 @@ class DeployProdTests(unittest.TestCase):
                 self.assertEqual(host.current_image, NEW_IMAGE)
                 before = host.actions.copy()
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
                 self.assertEqual(host.actions, before)
 
     def test_emergency_selector_failure_precedes_stop(self) -> None:
@@ -527,7 +576,7 @@ class DeployProdTests(unittest.TestCase):
                 host, "select_emergency", side_effect=prod.DeployError("API недоступен"),
             ):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
+                    prod.deploy(host, "v1.1.0", emergency=True, reason="срочно")
             self.assertNotIn("stop_both", host.actions)
             self.assertEqual(host.head, OLD_SHA)
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
@@ -537,7 +586,7 @@ class DeployProdTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             host = FakeHost(Path(temporary))
             with self.assertRaises(prod.DeployError):
-                prod.deploy(host, "v1.0.0", emergency=True, reason=" ")
+                prod.deploy(host, "v1.1.0", emergency=True, reason=" ")
             self.assertEqual(host.actions, [])
 
     def test_emergency_backup_and_migration_faults_keep_audit(self) -> None:
@@ -552,7 +601,7 @@ class DeployProdTests(unittest.TestCase):
                     side_effect=prod.DeployError(fault),
                 ), patch.object(host, "start_both", wraps=host.start_both) as start:
                     with self.assertRaises(prod.DeployError):
-                        prod.deploy(host, "v1.0.0", emergency=True, reason="срочное восстановление")
+                        prod.deploy(host, "v1.1.0", emergency=True, reason="срочное восстановление")
                 state = prep.read_state(host.state_dir, host.checkout)
                 self.assertEqual(state["stage"], "rolled_back")
                 decision = state["deployment"]
@@ -582,7 +631,7 @@ class DeployProdTests(unittest.TestCase):
                 host, "verify_both", side_effect=prod.DeployError("Каналы не подтверждены"),
             ):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0", emergency=True, reason="восстановить каналы")
+                    prod.deploy(host, "v1.1.0", emergency=True, reason="восстановить каналы")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "degraded")
             self.assertEqual(state["deployment"]["reason"], "восстановить каналы")
@@ -594,7 +643,7 @@ class DeployProdTests(unittest.TestCase):
             self.assertEqual(host.timer_state, {"enabled": False, "active": False})
             before = host.actions.copy()
             with patches[0], self.assertRaisesRegex(prod.DeployError, "Degraded"):
-                prod.deploy(host, "v1.0.0", emergency=True, reason="повтор")
+                prod.deploy(host, "v1.1.0", emergency=True, reason="повтор")
             self.assertEqual(host.actions, before)
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["deployment"],
                              state["deployment"])
@@ -608,7 +657,7 @@ class DeployProdTests(unittest.TestCase):
             migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                prod.deploy(host, "v1.0.0", emergency=True, reason="срочно")
+                prod.deploy(host, "v1.1.0", emergency=True, reason="срочно")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "success")
             self.assertEqual(state["deployment"]["reason"], "срочно")
@@ -626,7 +675,7 @@ class DeployProdTests(unittest.TestCase):
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "rolled_back")
             self.assertEqual(host.current_image, OLD_IMAGE)
@@ -644,7 +693,7 @@ class DeployProdTests(unittest.TestCase):
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "rolled_back")
             self.assertEqual(host.current_image, OLD_IMAGE)
@@ -659,7 +708,7 @@ class DeployProdTests(unittest.TestCase):
             migration.write_text("CREATE TABLE new_table (id INTEGER);", encoding="utf-8")
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                prod.deploy(host, "v1.0.0")
+                prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "success")
             self.assertEqual(state["schema_before"], ["0001_initial_schema.sql"])
@@ -680,7 +729,7 @@ class DeployProdTests(unittest.TestCase):
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             self.assertNotIn("stop_both", host.actions)
             self.assertNotIn("migrate", host.actions)
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
@@ -696,7 +745,7 @@ class DeployProdTests(unittest.TestCase):
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
                 with self.assertRaisesRegex(prod.DeployError, "degraded"):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "degraded")
             self.assertTrue(Path(state["backup_id"]).is_file())
@@ -716,7 +765,7 @@ class DeployProdTests(unittest.TestCase):
                 prep, "backup_sqlite", side_effect=prod.DeployError("backup"),
             ):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "rolled_back")
             self.assertFalse(state["migration_attempted"])
@@ -735,7 +784,7 @@ class DeployProdTests(unittest.TestCase):
                 host, "migrate", side_effect=prod.DeployError("partial SQL"),
             ):
                 with self.assertRaisesRegex(prod.DeployError, "degraded"):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "degraded")
             self.assertTrue(state["migration_attempted"])
@@ -758,7 +807,7 @@ class DeployProdTests(unittest.TestCase):
             })
             with patch.object(prep, "deploy_lock", return_value=nullcontext()):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "degraded")
             self.assertFalse(host.running)
@@ -839,24 +888,24 @@ class DeployProdTests(unittest.TestCase):
                 prep, "build_pinned_image", side_effect=SystemExit(77),
             ), patches[4], patches[5]:
                 with self.assertRaises(SystemExit):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "preparing")
             self.assertEqual(state["old_sha"], OLD_SHA)
             self.assertEqual(host.head, NEW_SHA)
             with patch.object(prep, "deploy_lock", return_value=nullcontext()):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "failed_preflight")
-            self.assertEqual(state["failed_version"], "v1.0.0")
+            self.assertEqual(state["failed_version"], "v1.1.0")
             self.assertEqual(host.head, OLD_SHA)
             self.assertTrue(host.running)
             self.assertNotIn("stop_both", host.actions)
             before = host.actions.copy()
             with patch.object(prep, "deploy_lock", return_value=nullcontext()):
                 with self.assertRaisesRegex(prod.DeployError, "временно закрыт"):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             self.assertEqual(host.actions, before)
 
     def test_failed_checkout_restore_keeps_recovery_manifest(self) -> None:
@@ -873,7 +922,7 @@ class DeployProdTests(unittest.TestCase):
                     None if host.head == sha else (_ for _ in ()).throw(prod.DeployError("HEAD"))
                 )
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             state = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(state["stage"], "preparing")
             self.assertEqual(state["old_sha"], OLD_SHA)
@@ -891,7 +940,7 @@ class DeployProdTests(unittest.TestCase):
                     side_effect=prod.DeployError(fault),
                 ):
                     with self.assertRaises(prod.DeployError):
-                        prod.deploy(host, "v1.0.0")
+                        prod.deploy(host, "v1.1.0")
                 self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
                 self.assertEqual(host.current_image, OLD_IMAGE)
                 self.assertEqual(host.timer_state, {"enabled": True, "active": True})
@@ -917,7 +966,7 @@ class DeployProdTests(unittest.TestCase):
                 prep, "write_state", side_effect=flaky_write,
             ):
                 with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, "v1.0.0")
+                    prod.deploy(host, "v1.1.0")
             self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "rolled_back")
             self.assertEqual(host.current_image, OLD_IMAGE)
             self.assertTrue(host.running)
@@ -971,7 +1020,7 @@ class DeployProdTests(unittest.TestCase):
             host.timer_state = {"enabled": False, "active": False}
             patches = self._patches()
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
-                prod.deploy(host, "v1.0.0")
+                prod.deploy(host, "v1.1.0")
             self.assertEqual(host.timer_state, {"enabled": False, "active": False})
 
     def test_duplicate_polling_detected_without_logging_token(self) -> None:

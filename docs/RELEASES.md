@@ -68,7 +68,9 @@ reviewed policy commit во внешней repository variable `COMPATIBILITY_PO
 без неё CI отказывает. Baseline, 107 операций, artifact и границы локальной
 проверки описаны в [шаге 5.4](ci-release-review/STAGE5_CI.md). Исторический CI
 установленной v3.1.0 сохраняет допуск по точному SHA; это не разрешает новые
-схемы. Predeploy-проверка artifact и installed SHA ещё не реализована.
+схемы. Локально реализована [predeploy-проверка](ci-release-review/STAGE5_PREDEPLOY.md)
+artifact, installed SHA/pin и предварительной SQLite-копии; её установка на VPS
+и приёмка с настоящим CI artifact ещё не выполнены.
 
 Для обычного выпуска допуск сверяет репозиторий, workflow (`main-full.yml` при создании линии, `release-full.yml` для PATCH), ref, полный SHA, run/attempt и обязательные jobs/steps. `pending`, `skipped`, `failure` и сбой GitHub API закрывают допуск. Проверка другого SHA, даже более позднего в той же линии, не подходит.
 
@@ -126,6 +128,12 @@ reviewed policy commit во внешней repository variable `COMPATIBILITY_PO
 `scripts/publish_emergency_release.py` принимает причину и список PR. Он сохраняет проверки ветки, SHA, merge PR, SemVer, защищённого тега и Release, но допускает отсутствующий либо неуспешный полный CI. В Release записываются состояние `pr-fast` на момент merge, обход ruleset, состояние полного CI и непроверенные проверки. PATCH по-прежнему требует подтверждённого основания в `main`; другие линии независимы.
 
 Сервер принимает такой Release только с `--emergency` и `--reason`. Он повторно читает GitHub, различает тип Release и сохраняет проверки SHA, тега, ветки, backup, миграций, здоровья и rollback. Обычный `deploy-prod` аварийный Release отвергает.
+
+Подготовленный controller шага 5.5 также требует успешный compatibility job и
+проверенное evidence точной пары installed/candidate даже в emergency.
+Обход остальных ошибок полного CI не отменяет этот gate: отсутствие evidence
+закрывает установку до остановки каналов. Это новый локально проверенный
+контракт; действующий snapshot VPS пока не обновлён.
 
 GitHub API не доказывает исходный текст изменяемых release notes. Поэтому перед аварийным запуском нужна внешняя запись утверждённого решения и текста. Реальный аварийный Release и переключение VPS пока не испытывались; подтверждены изолированные сценарии. Практический порядок находится в [OPERATIONS.md](OPERATIONS.md).
 

@@ -21,6 +21,7 @@ from typing import Any
 
 from scripts import deploy_prepare as prep
 from scripts import deploy_metrics as metrics
+from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
@@ -552,6 +553,78 @@ class Host:
                  image_id, "-m", "compadre_assistant", "--migrate", "--database-path",
                  "/app/data/app.db")
 
+    def require_baseline(self, good: dict[str, Any], old_sha: str, old_id: str) -> None:
+        """Сверяет last_good, внешний pin и OCI revision обоих работающих каналов."""
+        if (not isinstance(good, dict) or good.get("sha") != old_sha
+                or good.get("image_id") != old_id or good.get("tag") != prep.pinned_tag(old_sha)):
+            raise DeployError("last_good не соответствует установленной базе")
+        self.installed(old_id, old_sha)
+        if (_current_image(self) != old_id or self.runtime_tag() != good["tag"]
+                or self.image(good["tag"])["Id"] != old_id):
+            raise DeployError("Работающие контейнеры сменили базовый image ID")
+        for item in (self.image(old_id), *self.containers().values()):
+            if (item.get("Config", {}).get("Labels") or {}).get(prep.OCI_REVISION) != old_sha:
+                raise DeployError("OCI revision установленной базы не подтверждён")
+
+    def predeploy(self, selected: SelectedRelease, candidate_id: str, before: list[str],
+                  expected: list[str], good: dict[str, Any], old_sha: str, old_id: str) -> None:
+        """Проверяет доверенное evidence и приватную online-копию под deploy lock.
+
+        Args:
+            selected: Проверенный Release и его точный CI run/attempt.
+            candidate_id: Локально собранный неизменяемый ID кандидата.
+            before: Исходный журнал SQLite.
+            expected: Журнал candidate migrations.
+            good: Сохранённый last_good до подготовки.
+            old_sha: Фактический исходный SHA checkout.
+            old_id: Фактический исходный ID обоих каналов.
+
+        Raises:
+            DeployError: Локальная база или пробная миграция не подтверждены.
+            ValueError: Evidence либо внешний policy pin не подтверждены.
+        """
+        from tempfile import TemporaryDirectory
+
+        self.require_baseline(good, old_sha, old_id)
+        pin_path = self.state_dir / "compatibility-policy.sha"
+        policy_sha = compatibility.private_text(pin_path)
+        token = compatibility.private_text(self.state_dir / "github-read-token")
+        api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
+        evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
+        with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
+            directory = Path(temporary)
+            os.chmod(directory, 0o700)
+            compatibility.verify_copy(self.checkout / "data/app.db", directory,
+                                      before, expected, evidence["schema_fingerprint"],
+                                      lambda work: self.migrate_copy(candidate_id, work))
+        # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
+        if (compatibility.private_text(pin_path) != policy_sha
+                or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
+            raise DeployError("Evidence или policy изменились во время predeploy")
+        self.require_baseline(good, old_sha, old_id)
+
+    def migrate_copy(self, image_id: str, directory: Path) -> None:
+        """Запускает candidate CLI только с временной копией, без сети и secrets."""
+        import uuid
+
+        name = "compadre-predeploy-" + uuid.uuid4().hex
+        command = ["docker", "run", "--rm", "--name", name, "--network", "none",
+                   "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                   "--memory", "512m", "--pids-limit", "128", "--cpus", "1",
+                   "--tmpfs", "/tmp:rw,nosuid,nodev", "-v", f"{directory}:/app/data:rw",
+                   "--entrypoint", "python", image_id, "-m", "compadre_assistant",
+                   "--migrate", "--database-path", "/app/data/app.db"]
+        environment = {"PATH": "/usr/bin:/bin", "DOCKER_HOST": "unix:///var/run/docker.sock"}
+        try:
+            result = subprocess.run(command, env=environment, capture_output=True, timeout=180,
+                                    check=False)
+            if result.returncode:
+                raise DeployError("Предварительная миграция завершилась отказом")
+        finally:
+            # Timeout клиента сам по себе не останавливает Docker-контейнер.
+            subprocess.run(["docker", "rm", "-f", name], env=environment,
+                           capture_output=True, timeout=30, check=False)
+
 
 def _state(host: Host, value: dict[str, Any], stage: str, **changes: Any) -> None:
     """Записывает стадию атомарно и печатает только безопасное событие журнала."""
@@ -607,7 +680,7 @@ def _same_selection(host: Host, selected: SelectedRelease) -> None:
 
 def _prepare_candidate(
     host: Host, version: str, old_sha: str, old_id: str, old_tag: str,
-    *, emergency: bool = False,
+    *, emergency: bool = False, last_good: dict[str, Any] | None = None,
 ) -> tuple[SelectedRelease, str, str, list[str], list[str]]:
     """Готовит candidate без остановки каналов и восстанавливает checkout при ошибке."""
     try:
@@ -630,6 +703,7 @@ def _prepare_candidate(
         prep.validate_schema(database, before)
         if expected[:len(before)] != before:
             raise DeployError("Применённые миграции не являются префиксом candidate")
+        host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
         _same_selection(host, selected)
         prep.require_exact_tag(host.checkout, selected.version, selected.sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
@@ -808,7 +882,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         _state(host, state, "preparing")
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
-                host, version, old_sha, old_id, old_tag, emergency=emergency,
+                host, version, old_sha, old_id, old_tag, emergency=emergency, last_good=last_good,
             )
         except Exception as error:
             try:
@@ -849,6 +923,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             raise DeployError("Не удалось сохранить состояние подготовки") from error
         critical = False
         try:
+            host.require_baseline(last_good, old_sha, old_id)
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -900,6 +975,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 except Exception as rollback_error:
                     raise DeployError("Выпуск и автоматический возврат не прошли; degraded state") from rollback_error
             else:
+                host.restore_checkout(old_sha)
                 _state(host, state, "failed_preflight", error=type(error).__name__)
             state["failed_version"] = version
             state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
