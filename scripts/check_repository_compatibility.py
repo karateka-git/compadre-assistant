@@ -15,7 +15,8 @@ from tempfile import TemporaryDirectory
 
 MIGRATIONS = "compadre_assistant/core/data/sqlite/migrations"
 WORKER = Path(__file__).with_name("repository_compatibility_worker.py")
-# Это наблюдённый набор 5.1, а не обязательная полная матрица допуска 5.4.
+COMPATIBILITY_TESTS = Path(__file__).with_name("repository_compatibility_cases.py")
+# Старые tests 5.1 дополняются внешними cases 5.3; доверенный manifest относится к 5.4.
 BEHAVIOR_MODULES = (
     "analysis_result_repository", "article_user_isolation", "incoming_message_repository",
     "processing_error_recorder", "user_identity_repository", "capability_preference_repository",
@@ -189,7 +190,7 @@ def run_worker(python: Path, checkout: Path, mode: str, output: Path,
 
 
 def main() -> int:
-    """Выполняет механизм шага 5.2; JSON не является доверенным CI admission."""
+    """Выполняет локальный набор 5.2–5.3 без доверенного CI admission."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--previous-sha", required=True)
@@ -200,11 +201,13 @@ def main() -> int:
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    report = {"scope": "step-5.2-mechanism-not-admission", "previous_sha": args.previous_sha,
+    report = {"scope": "step-5.3-local-mechanism-not-admission", "previous_sha": args.previous_sha,
               "candidate_sha": args.candidate_sha, "passed": False,
               "candidate_migrations_data_integrity": {"passed": False, "status": "not_run"},
               "old_repository_behavior": {"passed": False, "status": "not_run"},
-              "harness": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (Path(__file__), WORKER)}}
+              "candidate_verified_previous_updates": {"passed": False, "status": "not_run"},
+              "harness": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                          for p in (Path(__file__), WORKER, COMPATIBILITY_TESTS)}}
     try:
         with TemporaryDirectory(prefix="repository-compatibility-") as temporary:
             root = Path(temporary).resolve()
@@ -229,7 +232,12 @@ def main() -> int:
                     ["--database", str(database), "--previous-sql", str(old_sql)], args.timeout)
             report["old_repository_behavior"] = run_worker(
                 old_python, previous, "behavior", output,
-                ["--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]], args.timeout)
+                [*(["--database", str(database)] if report["candidate_migrations_data_integrity"]["passed"] else []),
+                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()),
+                 "--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]], args.timeout)
+            if report["old_repository_behavior"]["passed"] and report["candidate_migrations_data_integrity"]["passed"]:
+                report["candidate_verified_previous_updates"] = run_worker(
+                    new_python, candidate, "verify", output, ["--database", str(database)], args.timeout)
             actual_previous, actual_candidate = snapshot(previous), snapshot(candidate)
             report["source_changes"] = {
                 label: [name for name in sorted(before.keys() | after.keys()) if before.get(name) != after.get(name)]
@@ -239,12 +247,13 @@ def main() -> int:
             if any(report["source_changes"].values()):
                 raise ValueError("checkout bytes changed during worker execution")
             report["source_verification"] = "passed"
-            report["passed"] = all(report[key]["passed"] for key in (
-                "candidate_migrations_data_integrity", "old_repository_behavior"))
+            report["passed"] = all(report.get(key, {}).get("passed") is True for key in (
+                "candidate_migrations_data_integrity", "old_repository_behavior",
+                "candidate_verified_previous_updates"))
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"Step 5.2 mechanism passed={report['passed']}; report: {output / 'report.json'}")
+    print(f"Step 5.3 local mechanism passed={report['passed']}; report: {output / 'report.json'}")
     return 0 if report["passed"] else 1
 
 
