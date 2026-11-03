@@ -611,17 +611,38 @@ class Host:
                 raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
 
-    def migrate_copy(self, image_id: str, directory: Path) -> None:
-        """Запускает candidate CLI только с временной копией, без сети и secrets."""
+    def require_snapshot_quiescence(self) -> None:
+        """Проверяет остановку известных production writers и backup под marker."""
+        if ((self.state_dir / "deploy-in-progress").read_text(encoding="utf-8") != "critical\n"
+                or any(self.unit_state(unit) != "inactive" for unit in (SERVICE, TIMER, BACKUP_SERVICE))
+                or self.unit_enabled(TIMER)
+                or any(item["State"].get("Running") is not False
+                       or item["HostConfig"]["RestartPolicy"]["Name"] != "no"
+                       for item in self.containers().values())):
+            raise DeployError("Остановка writers и backup для окончательного снимка не подтверждена")
+
+    def migrate_copy(self, image_id: str, directory: Path, *, basename: str = "app.db") -> None:
+        """Запускает candidate CLI только с временной копией, без сети и secrets.
+
+        Args:
+            image_id: Проверенный неизменяемый ID локального образа.
+            directory: Приватный каталог единственной writable копии.
+            basename: Имя SQLite-копии в каталоге.
+
+        Raises:
+            DeployError: Некорректное имя копии либо отказ мигратора.
+        """
         import uuid
 
+        if basename != "app.db" and re.fullmatch(r"app-[0-9a-f]{32}\.db", basename) is None:
+            raise DeployError("Некорректное имя SQLite-копии")
         name = "compadre-predeploy-" + uuid.uuid4().hex
         command = ["docker", "run", "--rm", "--name", name, "--network", "none",
                    "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                    "--memory", "512m", "--pids-limit", "128", "--cpus", "1",
                    "--tmpfs", "/tmp:rw,nosuid,nodev", "-v", f"{directory}:/app/data:rw",
                    "--entrypoint", "python", image_id, "-m", "compadre_assistant",
-                   "--migrate", "--database-path", "/app/data/app.db"]
+                   "--migrate", "--database-path", f"/app/data/{basename}"]
         environment = {"PATH": "/usr/bin:/bin", "DOCKER_HOST": "unix:///var/run/docker.sock"}
         try:
             result = subprocess.run(command, env=environment, capture_output=True, timeout=180,

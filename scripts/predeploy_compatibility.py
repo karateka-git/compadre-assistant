@@ -258,11 +258,38 @@ def verify_copy(source: Path, directory: Path, before: list[str], expected: list
         candidate = prep.backup_sqlite(original, work / "app.db")
     with check("SAFE_COPY_MIGRATION"):
         migrate(work)
+    verify_migrated_copy(original, candidate, expected, fingerprint)
+
+
+def open_copy_readonly(path: Path) -> sqlite3.Connection:
+    """Открывает существующую SQLite-копию в режиме чтения."""
+    return sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+
+
+def require_copy_foreign_keys(connection: sqlite3.Connection) -> None:
+    """Отклоняет SQLite-копию с нарушенными внешними ключами."""
+    if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
+        raise PredeployError("SAFE_COPY_FOREIGN_KEYS")
+
+
+def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
+                         fingerprint: str) -> None:
+    """Сравнивает отдельную SQLite-копию с исходным снимком и CI evidence.
+
+    Args:
+        original: Проверенный снимок старого поколения.
+        candidate: Копия после завершённой изолированной миграции.
+        expected: Точный ожидаемый журнал candidate.
+        fingerprint: Ожидаемый fingerprint схемы из CI evidence.
+
+    Raises:
+        PredeployError: Журнал, integrity, связи, схема или данные не совпали.
+    """
     with check("SAFE_COPY_CANDIDATE_SCHEMA"):
         prep.validate_schema(candidate, expected)
-    with closing(sqlite3.connect(original)) as old, closing(sqlite3.connect(candidate)) as new:
-        if new.execute("PRAGMA foreign_key_check").fetchall() or old.execute("PRAGMA foreign_key_check").fetchall():
-            raise PredeployError("SAFE_COPY_FOREIGN_KEYS")
+    with closing(open_copy_readonly(original)) as old, closing(open_copy_readonly(candidate)) as new:
+        require_copy_foreign_keys(old)
+        require_copy_foreign_keys(new)
         if schema_fingerprint(new) != fingerprint:
             raise PredeployError("SAFE_COPY_FINGERPRINT")
         # Общие поля сравниваются как мультимножество: порядок строк не имеет смысла,
