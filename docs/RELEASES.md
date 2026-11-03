@@ -71,6 +71,9 @@ reviewed policy commit во внешней repository variable `COMPATIBILITY_PO
 схемы. Локально реализована [predeploy-проверка](ci-release-review/STAGE5_PREDEPLOY.md)
 artifact, installed SHA/pin и предварительной SQLite-копии; её установка на VPS
 и приёмка с настоящим CI artifact ещё не выполнены.
+[Независимая локальная проверка 5.6](ci-release-review/STAGE5_REVIEW.md)
+подтвердила отказ до marker/stop и сохранение безопасного кода причины;
+она не заменяет живой CI и Linux/VPS приёмку.
 
 Для обычного выпуска допуск сверяет репозиторий, workflow (`main-full.yml` при создании линии, `release-full.yml` для PATCH), ref, полный SHA, run/attempt и обязательные jobs/steps. `pending`, `skipped`, `failure` и сбой GitHub API закрывают допуск. Проверка другого SHA, даже более позднего в той же линии, не подходит.
 

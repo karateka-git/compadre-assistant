@@ -61,6 +61,11 @@ COOLDOWN = timedelta(hours=1)
 class DeployError(RuntimeError):
     """Обозначает контролируемый отказ выпуска без вывода секретов."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        """Сохраняет сообщение контроллера и необязательный статический SAFE-код."""
+        super().__init__(message)
+        self.code = code
+
 
 def _command(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> str:
     """Выполняет команду и возвращает stdout, скрывая потенциальный stderr."""
@@ -557,14 +562,15 @@ class Host:
         """Сверяет last_good, внешний pin и OCI revision обоих работающих каналов."""
         if (not isinstance(good, dict) or good.get("sha") != old_sha
                 or good.get("image_id") != old_id or good.get("tag") != prep.pinned_tag(old_sha)):
-            raise DeployError("last_good не соответствует установленной базе")
-        self.installed(old_id, old_sha)
+            raise compatibility.PredeployError("SAFE_INSTALLED_LAST_GOOD")
+        with compatibility.check("SAFE_INSTALLED_RUNTIME"):
+            self.installed(old_id, old_sha)
         if (_current_image(self) != old_id or self.runtime_tag() != good["tag"]
                 or self.image(good["tag"])["Id"] != old_id):
-            raise DeployError("Работающие контейнеры сменили базовый image ID")
+            raise compatibility.PredeployError("SAFE_INSTALLED_IMAGE")
         for item in (self.image(old_id), *self.containers().values()):
             if (item.get("Config", {}).get("Labels") or {}).get(prep.OCI_REVISION) != old_sha:
-                raise DeployError("OCI revision установленной базы не подтверждён")
+                raise compatibility.PredeployError("SAFE_INSTALLED_REVISION")
 
     def predeploy(self, selected: SelectedRelease, candidate_id: str, before: list[str],
                   expected: list[str], good: dict[str, Any], old_sha: str, old_id: str) -> None:
@@ -580,8 +586,8 @@ class Host:
             old_id: Фактический исходный ID обоих каналов.
 
         Raises:
-            DeployError: Локальная база или пробная миграция не подтверждены.
-            ValueError: Evidence либо внешний policy pin не подтверждены.
+            compatibility.PredeployError: База, evidence или копия не подтверждены;
+                исключение содержит только безопасный код проверки.
         """
         from tempfile import TemporaryDirectory
 
@@ -590,7 +596,8 @@ class Host:
         policy_sha = compatibility.private_text(pin_path)
         token = compatibility.private_text(self.state_dir / "github-read-token")
         api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
-        evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
+        with compatibility.check("SAFE_EVIDENCE_READ"):
+            evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
         with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
             directory = Path(temporary)
             os.chmod(directory, 0o700)
@@ -598,9 +605,10 @@ class Host:
                                       before, expected, evidence["schema_fingerprint"],
                                       lambda work: self.migrate_copy(candidate_id, work))
         # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
-        if (compatibility.private_text(pin_path) != policy_sha
-                or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
-            raise DeployError("Evidence или policy изменились во время predeploy")
+        with compatibility.check("SAFE_EVIDENCE_RECHECK"):
+            if (compatibility.private_text(pin_path) != policy_sha
+                    or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
+                raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
 
     def migrate_copy(self, image_id: str, directory: Path) -> None:
@@ -678,6 +686,12 @@ def _same_selection(host: Host, selected: SelectedRelease) -> None:
         raise DeployError("Release, tag или CI изменились после выбора")
 
 
+def _error_reason(error: Exception) -> str:
+    if isinstance(error, (DeployError, compatibility.PredeployError)) and error.code:
+        return error.code
+    return type(error).__name__
+
+
 def _prepare_candidate(
     host: Host, version: str, old_sha: str, old_id: str, old_tag: str,
     *, emergency: bool = False, last_good: dict[str, Any] | None = None,
@@ -695,15 +709,19 @@ def _prepare_candidate(
         prep.require_clean_checkout(host.checkout, selected.sha)
         with metrics.stage("build"):
             tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
-        prep.check_candidate_image(candidate_id, selected.sha)
+        with compatibility.check("SAFE_CANDIDATE_IMAGE"):
+            prep.check_candidate_image(candidate_id, selected.sha)
         database = host.checkout / "data/app.db"
         prep.require_disk_space(host.state_dir, database)
-        before = _applied_names(database)
-        expected = _schema_names(host.checkout)
-        prep.validate_schema(database, before)
+        with compatibility.check("SAFE_SOURCE_SCHEMA"):
+            before = _applied_names(database)
+            prep.validate_schema(database, before)
+        with compatibility.check("SAFE_CANDIDATE_MANIFEST"):
+            expected = _schema_names(host.checkout)
         if expected[:len(before)] != before:
-            raise DeployError("Применённые миграции не являются префиксом candidate")
-        host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
+            raise compatibility.PredeployError("SAFE_SCHEMA_PREFIX")
+        with compatibility.check("SAFE_PREDEPLOY_IO"):
+            host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
         _same_selection(host, selected)
         prep.require_exact_tag(host.checkout, selected.version, selected.sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
@@ -714,10 +732,15 @@ def _prepare_candidate(
             raise DeployError("Работающий старый image ID изменился перед остановкой")
         return selected, tag, candidate_id, before, expected
     except Exception as error:
+        if isinstance(error, compatibility.PredeployError):
+            metrics.update(predeploy_reason=error.code)
         try:
             host.restore_checkout(old_sha)
         except Exception as restore_error:
-            raise DeployError("Подготовка не удалась и checkout не возвращён; нужен ручной разбор") from restore_error
+            raise DeployError(f"Подготовка не удалась и checkout не возвращён; "
+                              f"нужен ручной разбор: {_error_reason(error)}") from restore_error
+        if isinstance(error, compatibility.PredeployError):
+            raise DeployError(f"Подготовка не удалась: {error.code}", code=error.code) from error
         raise DeployError(f"Подготовка не удалась: {type(error).__name__}") from error
 
 
@@ -872,7 +895,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             host.installed(old_id, old_sha)
             host.require_no_duplicate_polling()
         except Exception as error:
-            _state(host, state, "failed_preflight", error=type(error).__name__)
+            _state(host, state, "failed_preflight", error=_error_reason(error))
             raise DeployError("Исходное состояние production не прошло preflight") from error
         state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
                      failed_version=version)
@@ -889,9 +912,10 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 prep.require_clean_checkout(host.checkout, old_sha)
             except Exception:
                 # Не теряем rollback manifest при неудачном возврате checkout.
-                _state(host, state, "preparing", error=type(error).__name__)
-                raise DeployError("Checkout не возвращён после подготовки; нужен recovery") from error
-            _state(host, state, "failed_preflight", error=type(error).__name__,
+                _state(host, state, "preparing", error=_error_reason(error))
+                raise DeployError(f"Checkout не возвращён после подготовки; "
+                                  f"нужен recovery: {_error_reason(error)}") from error
+            _state(host, state, "failed_preflight", error=_error_reason(error),
                    failed_version=version,
                    retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
@@ -919,11 +943,12 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
-            _state(host, state, "failed_preflight", error=type(error).__name__)
+            _state(host, state, "failed_preflight", error=_error_reason(error))
             raise DeployError("Не удалось сохранить состояние подготовки") from error
         critical = False
         try:
-            host.require_baseline(last_good, old_sha, old_id)
+            with compatibility.check("SAFE_INSTALLED_RUNTIME"):
+                host.require_baseline(last_good, old_sha, old_id)
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -966,20 +991,23 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         except Exception as error:
             if critical:
                 try:
-                    _state(host, state, "rollback_started", error=type(error).__name__)
+                    _state(host, state, "rollback_started", error=_error_reason(error))
                 except Exception:
                     # Потеря записи state не отменяет обязательный возврат каналов.
-                    state.update(stage="rollback_started", error=type(error).__name__)
+                    state.update(stage="rollback_started", error=_error_reason(error))
                 try:
                     _recover(host, state)
                 except Exception as rollback_error:
                     raise DeployError("Выпуск и автоматический возврат не прошли; degraded state") from rollback_error
             else:
                 host.restore_checkout(old_sha)
-                _state(host, state, "failed_preflight", error=type(error).__name__)
+                _state(host, state, "failed_preflight", error=_error_reason(error))
             state["failed_version"] = version
             state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
             prep.write_state(host.state_dir, host.checkout, state)
+            if isinstance(error, compatibility.PredeployError):
+                metrics.update(predeploy_reason=error.code)
+                raise DeployError(f"Выпуск не установлен: {error.code}", code=error.code) from error
             raise DeployError(f"Выпуск не установлен: {type(error).__name__}") from error
 
 

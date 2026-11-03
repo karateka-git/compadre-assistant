@@ -1,7 +1,7 @@
 """Проверяет provenance artifact и online SQLite-copy без сети и production."""
 
 import base64
-from contextlib import closing
+from contextlib import closing, ExitStack, redirect_stderr
 from copy import deepcopy
 from dataclasses import replace
 import hashlib
@@ -11,6 +11,8 @@ from pathlib import Path
 import sqlite3
 import shutil
 import subprocess
+import sys
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -22,6 +24,7 @@ from scripts.repository_compatibility_contract import load_policy
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
 from tests.test_deploy_prod import FakeHost, OLD_SHA, OLD_IMAGE, NEW_IMAGE
+from tests import test_deploy_prod as deploy_tests
 from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
 
 
@@ -237,9 +240,9 @@ class CopyTests(unittest.TestCase):
         """Upgrade работает только на копии, DML loss/FK/incomplete migration дают отказ."""
         mutations = {"ok": "ALTER TABLE records ADD COLUMN extra TEXT;",
                      "drop_unused": "ALTER TABLE records DROP COLUMN unused;",
-                     "lost": "DELETE FROM records;",
+                     "lost": "DELETE FROM records WHERE id=2;",
                      "changed": "UPDATE records SET value='changed';",
-                     "table": "DROP TABLE records;",
+                     "table": "DELETE FROM child; DROP TABLE records;",
                      "foreign": "INSERT INTO child VALUES (2, 999);",
                      "journal": "SELECT 1;", "fingerprint": "SELECT 1;"}
         for kind, sql in mutations.items():
@@ -279,7 +282,10 @@ class CopyTests(unittest.TestCase):
                     if kind in ("ok", "drop_unused"):
                         gate.verify_copy(*arguments)
                     else:
-                        with self.assertRaises((ValueError, gate.prep.PreparationError)):
+                        codes = {"lost": "SAFE_COPY_DATA_LOSS", "changed": "SAFE_COPY_DATA_LOSS",
+                                 "table": "SAFE_COPY_TABLE_LOSS", "foreign": "SAFE_COPY_FOREIGN_KEYS",
+                                 "journal": "SAFE_COPY_CANDIDATE_SCHEMA", "fingerprint": "SAFE_COPY_FINGERPRINT"}
+                        with self.assertRaisesRegex(gate.PredeployError, codes[kind]):
                             gate.verify_copy(*arguments)
                     self.assertEqual(live.execute("SELECT value FROM records ORDER BY id").fetchall(),
                                      [("private live row",), ("WAL row",)])
@@ -319,7 +325,7 @@ class HostPredeployTests(unittest.TestCase):
                                  ["0001_initial_schema.sql"], ["0001_initial_schema.sql"],
                                  good, OLD_SHA, OLD_IMAGE)
                     if revoked:
-                        with self.assertRaises(prod.DeployError):
+                        with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_CHANGED"):
                             prod.Host.predeploy(*arguments)
                     else:
                         prod.Host.predeploy(*arguments)
@@ -345,3 +351,97 @@ class HostPredeployTests(unittest.TestCase):
             self.assertEqual(command[command.index("--network") + 1], "none")
             self.assertEqual(set(run.call_args_list[0].kwargs["env"]), {"PATH", "DOCKER_HOST"})
             self.assertEqual(run.call_args_list[1].args[0][:3], ["docker", "rm", "-f"])
+
+
+class AdmissionBoundaryTests(unittest.TestCase):
+    """Связывает настоящий evidence verifier с state machine и безопасной диагностикой."""
+
+    def test_evidence_failures_reach_operator_and_report_before_stop(self):
+        """Mismatch SHA, missing test, digest и API outage сохраняют точный код."""
+        faults = {"baseline": "SAFE_INSTALLED_PREVIOUS_SHA",
+                  "missing_test": "SAFE_TEST_MANIFEST", "digest": "SAFE_ARTIFACT_DIGEST",
+                  "api": "SAFE_EVIDENCE_READ"}
+        for fault, code in faults.items():
+            for emergency in (False, True):
+                with self.subTest(fault=fault, emergency=emergency), TemporaryDirectory() as temporary:
+                    host = FakeHost(Path(temporary))
+                    api = ArtifactAPI()
+                    if fault != "baseline":
+                        api.policy["previous_sha"] = OLD_SHA
+                        api.trusted["repository_compatibility_policy.json"] = json.dumps(api.policy).encode()
+                        api.evidence["policy_files"] = {name: hashlib.sha256(data).hexdigest()
+                                                       for name, data in api.trusted.items()}
+                        api.evidence["previous_sha"] = OLD_SHA
+                        api.report["previous_sha"] = OLD_SHA
+                    if fault == "missing_test":
+                        api.report["old_repository_behavior"]["old_tests"]["test_ids"].pop()
+                    api.pack()
+                    if fault == "digest":
+                        api.artifact["digest"] = "sha256:" + "0" * 64
+                    if emergency:
+                        api.selected = replace(api.selected, kind="emergency")
+                    real_predeploy = prod.Host.predeploy
+                    stderr = io.StringIO()
+                    with ExitStack() as stack:
+                        for patcher in deploy_tests.DeployProdTests()._patches():
+                            stack.enter_context(patcher)
+                        stack.enter_context(patch.object(host, "select", return_value=api.selected))
+                        stack.enter_context(patch.object(host, "select_emergency", return_value=api.selected))
+                        stack.enter_context(patch.object(host, "predeploy", side_effect=lambda *args:
+                                                        real_predeploy(host, *args)))
+                        stack.enter_context(patch.object(gate, "private_text", return_value=POLICY_SHA))
+                        stack.enter_context(patch.object(gate, "EvidenceAPI", return_value=api))
+                        if fault == "api":
+                            stack.enter_context(patch.object(api, "get", side_effect=OSError("secret token/private row")))
+                        with self.assertRaises(prod.DeployError) as failure:
+                            prod.deploy(host, "v3.2.0", emergency=emergency,
+                                        reason="fixture" if emergency else None)
+                    argv = ["deploy-prod", "v3.2.0"]
+                    with patch.object(prod, "os", SimpleNamespace(name="posix", geteuid=lambda: 0)), \
+                            patch.object(prod, "Host", return_value=host), \
+                            patch.object(prod, "deploy", side_effect=failure.exception), \
+                            patch.object(sys, "argv", argv), redirect_stderr(stderr):
+                        with self.assertRaises(SystemExit) as stopped:
+                            prod.main()
+                        self.assertEqual(stopped.exception.code, 1)
+                    state = prod.prep.read_state(host.state_dir, host.checkout)
+                    self.assertEqual(state["stage"], "failed_preflight")
+                    self.assertEqual(state["error"], code)
+                    report = json.loads(next(host.state_dir.glob("metrics-*.json")).read_text())
+                    self.assertEqual(report["predeploy_reason"], code)
+                    self.assertIn(code, stderr.getvalue())
+                    self.assertNotIn("secret token/private row", stderr.getvalue() + json.dumps(report))
+                    self.assertNotIn("marker_on", host.actions)
+                    self.assertNotIn("stop_both", host.actions)
+                    self.assertTrue(host.running)
+                    self.assertEqual(host.head, OLD_SHA)
+
+    def test_preparation_schema_and_image_checks_have_safe_codes(self):
+        """Ранние проверки до evidence сохраняют код вместо generic DeployError."""
+        faults = {"prefix": "SAFE_SCHEMA_PREFIX", "source": "SAFE_SOURCE_SCHEMA",
+                  "image": "SAFE_CANDIDATE_IMAGE", "manifest": "SAFE_CANDIDATE_MANIFEST"}
+        for fault, code in faults.items():
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                with ExitStack() as stack:
+                    for patcher in deploy_tests.DeployProdTests()._patches():
+                        stack.enter_context(patcher)
+                    if fault == "prefix":
+                        stack.enter_context(patch.object(prod, "_schema_names", return_value=["0001_other.sql"]))
+                    elif fault == "manifest":
+                        stack.enter_context(patch.object(prod, "_schema_names", side_effect=OSError("secret")))
+                    else:
+                        method = "validate_schema" if fault == "source" else "check_candidate_image"
+                        stack.enter_context(patch.object(prod.prep, method, side_effect=ValueError("secret")))
+                    with self.assertRaises(prod.DeployError) as failure:
+                        prod.deploy(host, "v1.1.0")
+                self.assertEqual(failure.exception.code, code)
+                self.assertIn(code, str(failure.exception))
+                self.assertNotIn("secret", str(failure.exception))
+                state = prod.prep.read_state(host.state_dir, host.checkout)
+                self.assertEqual(state["error"], code)
+                report = json.loads(next(host.state_dir.glob("metrics-*.json")).read_text())
+                self.assertEqual(report["predeploy_reason"], code)
+                self.assertNotIn("marker_on", host.actions)
+                self.assertNotIn("stop_both", host.actions)
+                self.assertEqual(host.head, OLD_SHA)

@@ -208,6 +208,19 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         result = run_worker(Path(sys.executable), self.checkout, "behavior", output,
                             [*extra, "--test-modules", *modules], 180)
         self.assertEqual(snapshot(self.checkout), expected)
+        self.assertEqual(
+            {path: digest for path, digest in expected.items() if not path.endswith('.sql')},
+            {path: digest for path, digest in self.original.items() if not path.endswith('.sql')},
+        )
+        failed_ids = (result.get("old_tests", {}).get("errors", [])
+                      + result.get("old_tests", {}).get("failures", []))
+        if failed_ids:
+            log = (output / "behavior.log").read_text(encoding="utf-8", errors="replace")
+            self.assertIn("Traceback (most recent call last)", log)
+            for test_id in failed_ids:
+                self.assertIn(test_id.rsplit(".", 1)[1], log)
+            saved = json.loads((output / "behavior.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["old_tests"]["errors"], result["old_tests"]["errors"])
         return result
 
     def test_compatible_addition_and_unused_column_removal_pass_full_matrix(self) -> None:
@@ -227,6 +240,14 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
                 result = self._run(name, sql, full=True)
                 self.assertTrue(result["passed"], result.get("error", result.get("old_tests")))
                 verify_tests(result["old_tests"], self.policy["test_ids"])
+
+    def test_changed_read_value_fails_old_assertions(self) -> None:
+        """Успешный INSERT не оправдывает изменённое значение при прежнем чтении."""
+        result = self._run("read_value", "CREATE TRIGGER corrupt_read AFTER INSERT ON app_users "
+                           "BEGIN UPDATE app_users SET display_name='changed' WHERE id=NEW.id; END;")
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["old_tests"]["failures"])
+        self.assertGreater(result["candidate_schema_observations"], 0)
 
     def test_breaking_writes_fail_without_schema_diff(self) -> None:
         """DROP/RENAME, CHECK, trigger и NOT NULL ломают настоящие прежние записи."""

@@ -339,6 +339,48 @@ job и доверенное evidence точного run/attempt, совпада�
 подготовить внешние `compatibility-policy.sha` и `github-read-token` по
 указанному контракту; на VPS эти изменения ещё не применялись.
 
+### Разобрать отказ predeploy по SAFE-коду
+
+Подготовленный controller записывает статический `SAFE_*` в stderr и поле
+`error` состояния `failed_preflight`; приватный `metrics-*.json` сохраняет
+его в `predeploy_reason`. Поле `reason` метрик по-прежнему обозначает тип
+исключения. Код не включает token, HTTP body, SQL или строки БД. При ошибке
+возврата checkout сохранённый `predeploy_reason` объясняет первичный отказ,
+а сообщение контроллера требует отдельно разобрать recovery. На VPS этот
+новый контракт ещё не установлен.
+
+| Код | Проверка и дальнейшее действие |
+| --- | --- |
+| `SAFE_SOURCE_SCHEMA`, `SAFE_CANDIDATE_MANIFEST`, `SAFE_SCHEMA_PREFIX`, `SAFE_CANDIDATE_IMAGE` | Проверить исходный журнал/integrity, manifest SQL кандидата, точный префикс применённых миграций и revision собранного образа до evidence. |
+| `SAFE_CONFIG_READ`, `SAFE_CONFIG_PERMISSIONS`, `SAFE_CONFIG_EMPTY` | Проверить наличие и root:root/0600 внешнего pin/token, непустое значение; не выводить token. |
+| `SAFE_POLICY_PIN`, `SAFE_POLICY_CONTENT` | Проверить полный SHA внешнего reviewed pin и полноту policy. |
+| `SAFE_POLICY_BLOB_MISSING`, `SAFE_POLICY_BLOB_DIGEST` | Получить заново точные Git blobs; проверить доступ API и закреплённый commit. |
+| `SAFE_CI_PROVENANCE`, `SAFE_CI_ATTEMPT`, `SAFE_CI_JOB_MISSING`, `SAFE_CI_JOB_FAILED` | Проверить точный run/attempt, repo/ref/SHA и все обязательные steps; исправить CI и rerun. |
+| `SAFE_INSTALLED_PREVIOUS_SHA`, `SAFE_BASELINE_RELEASE` | Сопоставить installed SHA с reviewed baseline и immutable Release/tag; новый baseline требует review policy. |
+| `SAFE_INSTALLED_LAST_GOOD`, `SAFE_INSTALLED_RUNTIME`, `SAFE_INSTALLED_IMAGE`, `SAFE_INSTALLED_REVISION` | Проверить last_good, systemd/pin, оба контейнера и OCI revision; не продолжать установку при drift. |
+| `SAFE_WORKFLOW_BYTES` | Сверить три workflow с внешним policy commit; изменение требует нового reviewed pin. |
+| `SAFE_ARTIFACT_MISSING`, `SAFE_ARTIFACT_METADATA`, `SAFE_ARTIFACT_DIGEST` | Проверить уникальность artifact, run/head SHA, срок хранения и SHA256 ZIP из GitHub metadata; при истечении нужен новый CI run/attempt. |
+| `SAFE_ARTIFACT_REDIRECT`, `SAFE_ARTIFACT_SIZE`, `SAFE_ARTIFACT_EXPANDED_SIZE`, `SAFE_ARTIFACT_MEMBER`, `SAFE_ARTIFACT_FORMAT` | Проверить HTTPS download, лимит 64 MiB, структуру ZIP и JSON; повреждённый artifact не принимать. |
+| `SAFE_EVIDENCE_IDENTITY`, `SAFE_CANDIDATE_SHA` | Сверить точную пару SHA, policy, run/attempt, результаты и внутренние хеши. |
+| `SAFE_TEST_MANIFEST`, `SAFE_REPORT_CONTRACT` | В artifact проверить полноту 173 IDs, результаты, sources/imports и fingerprints; агрегат `passed=true` недостаточен. |
+| `SAFE_EVIDENCE_READ`, `SAFE_EVIDENCE_RECHECK`, `SAFE_EVIDENCE_CHANGED` | Проверить доступ GitHub и доступность metadata; при повторной проверке evidence/pin должны остаться теми же. |
+| `SAFE_COPY_BACKUP`, `SAFE_COPY_SOURCE_SCHEMA` | Проверить online backup и исходный журнал/integrity на приватной копии. |
+| `SAFE_COPY_MIGRATION`, `SAFE_COPY_CANDIDATE_SCHEMA` | Проверить candidate CLI, timeout и точный журнал/integrity мигрированной копии. |
+| `SAFE_COPY_FOREIGN_KEYS`, `SAFE_COPY_FINGERPRINT` | Разобрать FK либо несовпадение схемы копии с CI, не изменяя live-БД. |
+| `SAFE_COPY_TABLE_LOSS`, `SAFE_COPY_DATA_LOSS` | Разобрать потерю таблицы/общих колонок либо изменение мультимножества исходных строк. |
+| `SAFE_PREDEPLOY_IO` | Прочая ошибка внешней операции predeploy (например, временный каталог); проверить приватное хранилище и окружение. |
+
+Если tests действительно запускались, в CI artifact
+`repository-compatibility-<run>-<attempt>` файлы `behavior.json`/`candidate.json`
+содержат failed/error test IDs, а соответствующие `.log` — traceback unittest.
+Upload выполняется с `always()`, когда файлы уже созданы. При отказе pin,
+checkout, API, установки dependencies или импорта до tests имя упавшего test
+может отсутствовать; при отказе до создания output может отсутствовать и
+artifact. Predeploy не исполняет эти tests повторно и не публикует traceback
+candidate migration на production-копии: он сообщает только безопасный код.
+После исправления причины повторно проверить допуск точной пары; не создавать
+marker и не останавливать каналы вручную для обхода отказа.
+
 ## Локальный запуск и проверка
 
 Порядок подготовки среды, пересоздания только development-БД, запуска Docker
