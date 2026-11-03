@@ -1,0 +1,826 @@
+{
+  "version": 1,
+  "repository": "karateka-git/compadre-assistant",
+  "previous_sha": "dd71c2ba42a0744b5b654cedcf73009ce8879058",
+  "release_tag": "v3.1.0",
+  "release_id": 431378458,
+  "matrix": [
+    {
+      "class": "SQLiteArticleAnalysisResultRepository",
+      "method": "save",
+      "test_id": "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_save_creates_analysis_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/analysis_result_repository.py"
+    },
+    {
+      "class": "SQLiteArticleAnalysisResultRepository",
+      "method": "get_by_id",
+      "test_id": "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_get_by_id_returns_saved_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/analysis_result_repository.py"
+    },
+    {
+      "class": "SQLiteArticleAnalysisResultRepository",
+      "method": "get_latest_for_article",
+      "test_id": "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_get_latest_for_article_returns_newest_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/analysis_result_repository.py"
+    },
+    {
+      "class": "SQLiteArticleFlowLeaseRepository",
+      "method": "acquire",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_flow_lease_owner_expiry_and_release",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_flow_lease_repository.py"
+    },
+    {
+      "class": "SQLiteArticleFlowLeaseRepository",
+      "method": "release",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_flow_lease_owner_expiry_and_release",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_flow_lease_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "create",
+      "test_id": "tests.test_article_user_isolation.ArticleUserIsolationTest.test_same_normalized_url_can_be_saved_for_different_users",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "get_by_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_get_update_status_content_and_not_found",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "find_by_normalized_url",
+      "test_id": "tests.test_article_user_isolation.ArticleUserIsolationTest.test_same_normalized_url_can_be_saved_for_different_users",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "find_by_text_hash",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_text_hash_is_scoped_to_owner",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "update_status",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_get_update_status_content_and_not_found",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteArticleRepository",
+      "method": "update_content",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_get_update_status_content_and_not_found",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/article_repository.py"
+    },
+    {
+      "class": "SQLiteGitHubConnectionStateStore",
+      "method": "acquire_attempt",
+      "test_id": "tests.test_github_connection_state_store.GitHubConnectionStateStoreTest.test_connection_attempt_is_shared",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_connection_state_store.py"
+    },
+    {
+      "class": "SQLiteGitHubConnectionStateStore",
+      "method": "has_active_attempt",
+      "test_id": "tests.test_github_connection_state_store.GitHubConnectionStateStoreTest.test_connection_attempt_is_shared",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_connection_state_store.py"
+    },
+    {
+      "class": "SQLiteGitHubConnectionStateStore",
+      "method": "release_attempt",
+      "test_id": "tests.test_github_connection_state_store.GitHubConnectionStateStoreTest.test_connection_attempt_is_shared",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_connection_state_store.py"
+    },
+    {
+      "class": "SQLiteGitHubInstallationRepository",
+      "method": "replace_for_user",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_installation_diff_preserves_or_cascades_active_vault",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_installation_repository.py"
+    },
+    {
+      "class": "SQLiteGitHubInstallationRepository",
+      "method": "list_for_user",
+      "test_id": "tests.test_github_installation_writer.GitHubInstallationWriterTest.test_writer_opens_fresh_connection_and_persists_only_ids",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_installation_repository.py"
+    },
+    {
+      "class": "SQLiteGitHubInstallationRepository",
+      "method": "contains",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_installation_contains_and_delete_cascade",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_installation_repository.py"
+    },
+    {
+      "class": "SQLiteGitHubInstallationRepository",
+      "method": "delete_for_user",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_installation_contains_and_delete_cascade",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_installation_repository.py"
+    },
+    {
+      "class": "SQLiteGitHubAccountAccessWriter",
+      "method": "replace_for_user",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_account_writer_rolls_back_account_and_installations",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_installation_writer.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSelectionManager",
+      "method": "get_selected",
+      "test_id": "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_sqlite_manager_selects_vault_after_request_connection_is_closed",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_selection_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSelectionManager",
+      "method": "select",
+      "test_id": "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_sqlite_manager_selects_vault_after_request_connection_is_closed",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_selection_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSelectionManager",
+      "method": "get_pending",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_selection_manager_pending_disconnect_and_decide",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_selection_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSelectionManager",
+      "method": "request_disconnect",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_selection_manager_pending_disconnect_and_decide",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_selection_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSelectionManager",
+      "method": "decide",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_selection_manager_pending_disconnect_and_decide",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_selection_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSyncManager",
+      "method": "sync",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_sync_manager_persists_check_and_skips_fresh_vault",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_sync_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSyncManager",
+      "method": "sync_if_stale",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_sync_manager_persists_check_and_skips_fresh_vault",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_sync_manager.py"
+    },
+    {
+      "class": "SQLiteGitHubVaultSyncManager",
+      "method": "get_status",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_sync_manager_persists_check_and_skips_fresh_vault",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/github_vault_sync_manager.py"
+    },
+    {
+      "class": "SQLiteIncomingMessageRepository",
+      "method": "save",
+      "test_id": "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_save_returns_existing_message_for_duplicate_external_id",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/incoming_message_repository.py"
+    },
+    {
+      "class": "SQLiteIncomingMessageRepository",
+      "method": "link_to_article",
+      "test_id": "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_link_to_article_updates_saved_message",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/incoming_message_repository.py"
+    },
+    {
+      "class": "SQLiteIncomingMessageRepository",
+      "method": "get_by_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_incoming_message_indirect_reads_and_fk_rejection",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/incoming_message_repository.py"
+    },
+    {
+      "class": "SQLiteIncomingMessageRepository",
+      "method": "find_by_external_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_incoming_message_indirect_reads_and_fk_rejection",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/incoming_message_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "save_pending",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "list_pending",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "get_by_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "get_active_for_article",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "claim",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "release_claim",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "get_latest_applied_for_article",
+      "test_id": "tests.test_obsidian_proposal_repository.SQLiteObsidianProposalRepositoryTests.test_applied_history_survives_vault_replacement",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "mark_cancelled",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "mark_conflict",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianProposalRepository",
+      "method": "complete_applied",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_complete_applied_rolls_back_intermediate_writes",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_proposal_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "create_if_absent",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_create_if_absent_and_get_by_id_scope",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "replace",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_replacing_vault_removes_previous_notes",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "get_by_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_create_if_absent_and_get_by_id_scope",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "get_for_user",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_sync_state_update_is_scoped_by_user",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "update_sync_state",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_sync_state_update_is_scoped_by_user",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteObsidianVaultRepository",
+      "method": "delete_for_user",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_delete_for_user_cascades_notes_and_preserves_other_owner",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/obsidian_vault_repository.py"
+    },
+    {
+      "class": "SQLiteProcessingErrorRecorder",
+      "method": "record",
+      "test_id": "tests.test_processing_error_recorder.SQLiteProcessingErrorRecorderTest.test_record_saves_processing_error",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/processing_error_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "get_state",
+      "test_id": "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_invalidation_hides_stale_generation",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "list_for_note",
+      "test_id": "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_note_replacement_preserves_unchanged_chunk_identity",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "list_for_vault",
+      "test_id": "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_full_rebuild_saves_chunks_and_current_signature",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "invalidate",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "list_stale_note_ids",
+      "test_id": "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_missing_global_marker_reconciles_only_dirty_note",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "mark_note_current",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "replace_for_note",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "delete_for_notes",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_delete_for_notes_removes_only_selected_note",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "replace_for_vault",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultChunkIndexRepository",
+      "method": "mark_current",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_chunk_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultActionConfirmationRepository",
+      "method": "save",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_confirmation_direct_save_read_decide_cas",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_confirmation_repository.py"
+    },
+    {
+      "class": "SQLiteVaultActionConfirmationRepository",
+      "method": "find_active",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_confirmation_persists_replacement_and_disconnect_with_ttl",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_confirmation_repository.py"
+    },
+    {
+      "class": "SQLiteVaultActionConfirmationRepository",
+      "method": "get_by_id",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_confirmation_direct_save_read_decide_cas",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_confirmation_repository.py"
+    },
+    {
+      "class": "SQLiteVaultActionConfirmationRepository",
+      "method": "decide",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_confirmation_direct_save_read_decide_cas",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_confirmation_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "get_state",
+      "test_id": "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_initial_index_stores_float32_blob_and_profile",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "list_for_vault",
+      "test_id": "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_initial_index_stores_float32_blob_and_profile",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "list_metadata_for_vault",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_embedding_metadata_invalidate_and_generation_postconditions",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "invalidate",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_embedding_metadata_invalidate_and_generation_postconditions",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "save_batch",
+      "test_id": "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_batch_rejects_changed_source_and_rolls_back_all_items",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultEmbeddingIndexRepository",
+      "method": "complete_generation",
+      "test_id": "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_finalization_rejects_missing_stale_and_mixed_vectors",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_embedding_index_repository.py"
+    },
+    {
+      "class": "SQLiteVaultFullTextSearchRepository",
+      "method": "search",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_instruction_list_note_delete_and_fts_no_stale_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_full_text_search_repository.py"
+    },
+    {
+      "class": "SQLiteVaultInstructionRepository",
+      "method": "replace_for_vault",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_instruction_replace_preserves_order_and_isolates_vault",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_instruction_repository.py"
+    },
+    {
+      "class": "SQLiteVaultInstructionRepository",
+      "method": "list_for_vault",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_instruction_list_note_delete_and_fts_no_stale_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_instruction_repository.py"
+    },
+    {
+      "class": "SQLiteVaultNoteRepository",
+      "method": "upsert",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_note_upsert_replaces_markdown_and_ordered_metadata",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_note_repository.py"
+    },
+    {
+      "class": "SQLiteVaultNoteRepository",
+      "method": "get_by_path",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_note_queries_and_foreign_keys_enforce_user_isolation",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_note_repository.py"
+    },
+    {
+      "class": "SQLiteVaultNoteRepository",
+      "method": "list_for_vault",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_replacing_vault_removes_previous_notes",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_note_repository.py"
+    },
+    {
+      "class": "SQLiteVaultNoteRepository",
+      "method": "delete_paths",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_instruction_list_note_delete_and_fts_no_stale_result",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_note_repository.py"
+    },
+    {
+      "class": "SQLiteVaultSyncLeaseRepository",
+      "method": "acquire",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_lease_blocks_second_connection_until_expiration",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_sync_lease_repository.py"
+    },
+    {
+      "class": "SQLiteVaultSyncLeaseRepository",
+      "method": "get",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_lease_get_exclusive_owner_and_expiry",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_sync_lease_repository.py"
+    },
+    {
+      "class": "SQLiteVaultSyncLeaseRepository",
+      "method": "release",
+      "test_id": "tests.test_vault_repositories.VaultRepositoriesTest.test_lease_blocks_second_connection_until_expiration",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_sync_lease_repository.py"
+    },
+    {
+      "class": "SQLiteVaultSyncLeaseRepository",
+      "method": "run_exclusive",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_lease_get_exclusive_owner_and_expiry",
+      "source": "compadre_assistant/capabilities/obsidian/data/sqlite/vault_sync_lease_repository.py"
+    },
+    {
+      "class": "SQLiteUserCapabilityPreferenceRepository",
+      "method": "get_for_user",
+      "test_id": "tests.test_capability_preference_repository.CapabilityPreferenceRepositoryTest.test_concurrent_distinct_ids_and_new_connection",
+      "source": "compadre_assistant/core/data/sqlite/capability_preference_repository.py"
+    },
+    {
+      "class": "SQLiteUserCapabilityPreferenceRepository",
+      "method": "upsert",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chat_mode_save_and_preference_upsert_preserve_loser",
+      "source": "compadre_assistant/core/data/sqlite/capability_preference_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "get",
+      "test_id": "tests.test_chat_modes.ChatModesTest.test_modes_are_isolated_by_user_channel_and_chat",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "get_state",
+      "test_id": "tests.test_chat_modes.ChatModesTest.test_only_one_connection_can_replace_the_same_revision",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "replace_if_revision",
+      "test_id": "tests.test_chat_modes.ChatModesTest.test_only_one_connection_can_replace_the_same_revision",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "save",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_chat_mode_save_and_preference_upsert_preserve_loser",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "activate_if_absent",
+      "test_id": "tests.test_chat_modes.ChatModesTest.test_concurrent_first_selection_does_not_replace_winner",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteChatModeRepository",
+      "method": "clear",
+      "test_id": "tests.test_chat_modes.ChatModesTest.test_clear_leaves_profile_and_other_chat",
+      "source": "compadre_assistant/core/data/sqlite/chat_mode_repository.py"
+    },
+    {
+      "class": "SQLiteAppUserRepository",
+      "method": "create",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_user_create_delete_and_identity_count_cascade",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteAppUserRepository",
+      "method": "get_by_id",
+      "test_id": "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_confirm_rebind_moves_channel_and_deletes_empty_previous_user",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteAppUserRepository",
+      "method": "update_display_name",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_user_create_delete_and_identity_count_cascade",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteAppUserRepository",
+      "method": "delete",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_user_create_delete_and_identity_count_cascade",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "find_private_chat",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "has_chat_address",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "list_all_private_chats",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "list_for_user",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "find",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "create",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "reassign",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "count_for_user",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteExternalIdentityRepository",
+      "method": "touch",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityLinkTokenRepository",
+      "method": "create",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityLinkTokenRepository",
+      "method": "find_active",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityLifecycleRepository",
+      "method": "register_with_name",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_lifecycle_register_link_and_token_consumption",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityLifecycleRepository",
+      "method": "link",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_lifecycle_register_link_and_token_consumption",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityRebindConfirmationRepository",
+      "method": "save",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_rebind_save_find_decide_cas_and_owner",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityRebindConfirmationRepository",
+      "method": "find",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_rebind_save_find_decide_cas_and_owner",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    },
+    {
+      "class": "SQLiteIdentityRebindConfirmationRepository",
+      "method": "decide",
+      "test_id": "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_rebind_save_find_decide_cas_and_owner",
+      "source": "compadre_assistant/core/data/sqlite/user_identity_repository.py"
+    }
+  ],
+  "test_ids": [
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_account_writer_rolls_back_account_and_installations",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_flow_lease_owner_expiry_and_release",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_get_update_status_content_and_not_found",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_article_text_hash_is_scoped_to_owner",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_candidate_check_rejects_unknown_proposal_status",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_chat_mode_save_and_preference_upsert_preserve_loser",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_delete_for_notes_removes_only_selected_note",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_chunk_index_replace_mark_invalidate_and_rollback",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_embedding_metadata_invalidate_and_generation_postconditions",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_external_identity_direct_reads_reassign_touch_and_token",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_lifecycle_register_link_and_token_consumption",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_identity_rebind_save_find_decide_cas_and_owner",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_incoming_message_indirect_reads_and_fk_rejection",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_installation_contains_and_delete_cascade",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_instruction_list_note_delete_and_fts_no_stale_result",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_complete_applied_rolls_back_intermediate_writes",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_proposal_pending_claim_release_cas_and_terminal_reads",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_selection_manager_pending_disconnect_and_decide",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_sync_manager_no_vault_and_status",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_sync_manager_persists_check_and_skips_fresh_vault",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_unknown_article_status_on_real_unconstrained_column",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_user_create_delete_and_identity_count_cascade",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_confirmation_direct_save_read_decide_cas",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_create_if_absent_and_get_by_id_scope",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_delete_for_user_cascades_notes_and_preserves_other_owner",
+    "repository_compatibility_cases.RepositoryCompatibilityCases.test_vault_lease_get_exclusive_owner_and_expiry",
+    "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_get_by_id_returns_saved_result",
+    "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_get_latest_for_article_returns_newest_result",
+    "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_get_latest_for_article_returns_none_without_results",
+    "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_save_creates_analysis_result",
+    "tests.test_analysis_result_repository.SQLiteArticleAnalysisResultRepositoryTest.test_save_rejects_already_saved_result",
+    "tests.test_article_user_isolation.ArticleUserIsolationTest.test_same_normalized_url_can_be_saved_for_different_users",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_composition_loads_obsidian_profile_only_when_enabled",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_composition_rejects_unknown_or_duplicate_enabled_ids",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_device_flow_completion_uses_fresh_connection_after_exit",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_device_flow_finishes_after_disable_without_closing_runtime",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_disabled_obsidian_preserves_article_and_mode_without_building_entry",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_failed_process_registration_closes_runtime_clients",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_no_mode_and_exit_do_not_run_article_or_llm_after_restart",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_obsidian_argument_reports_missing_github_provider",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_obsidian_commands_toggle_access_without_erasing_saved_mode",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_parallel_events_do_not_share_obsidian_connection",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_process_chunker_is_reused_for_separate_obsidian_operations",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_process_registry_reuses_handler_and_scopes_only_obsidian_events",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_processor_closes_only_owned_process_clients",
+    "tests.test_capability_composition.CapabilityCompositionTest.test_rename_keeps_profile_without_mode",
+    "tests.test_capability_composition.ObsidianEntryStateTest.test_enter_refreshes_vault_and_pending_actions_without_executing_them",
+    "tests.test_capability_composition.ObsidianEntryStateTest.test_enter_reports_pending_review_without_confirmation",
+    "tests.test_capability_preference_repository.CapabilityPreferenceRepositoryTest.test_concurrent_distinct_ids_and_new_connection",
+    "tests.test_capability_preference_repository.CapabilityPreferenceRepositoryTest.test_same_id_last_commit_and_write_error",
+    "tests.test_chat_modes.ChatModesTest.test_clear_leaves_profile_and_other_chat",
+    "tests.test_chat_modes.ChatModesTest.test_composition_root_requires_explicit_entry_without_general_message_journal",
+    "tests.test_chat_modes.ChatModesTest.test_concurrent_first_selection_does_not_replace_winner",
+    "tests.test_chat_modes.ChatModesTest.test_dispatcher_restores_mode_without_parsing_subject_text",
+    "tests.test_chat_modes.ChatModesTest.test_late_complete_cannot_clear_new_mode_on_other_connection",
+    "tests.test_chat_modes.ChatModesTest.test_late_enter_cannot_restore_mode_after_exit_on_other_connection",
+    "tests.test_chat_modes.ChatModesTest.test_mode_survives_new_connection",
+    "tests.test_chat_modes.ChatModesTest.test_modes_are_isolated_by_user_channel_and_chat",
+    "tests.test_chat_modes.ChatModesTest.test_only_one_connection_can_replace_the_same_revision",
+    "tests.test_chat_modes.ChatModesTest.test_unavailable_mode_is_preserved_and_common_help_still_works",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_batch_rejects_changed_source_and_rolls_back_all_items",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_finalization_rejects_missing_stale_and_mixed_vectors",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_incomplete_or_dimension_changing_stream_retains_valid_checkpoint",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_lease_loss_after_last_checkpoint_prevents_marker",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_lost_or_expired_lease_blocks_checkpoint_and_marker",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_new_dimension_checkpoints_survive_failure_and_restart",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_resume_after_reopening_database_only_requests_missing_chunks",
+    "tests.test_embedding_checkpoints.EmbeddingCheckpointsTest.test_storage_error_stops_requests_without_becoming_provider_error",
+    "tests.test_github_connection_state_store.GitHubConnectionStateStoreTest.test_connection_attempt_is_shared",
+    "tests.test_github_connection_state_store.GitHubConnectionStateStoreTest.test_expired_attempt_can_be_restarted_after_process_loss",
+    "tests.test_github_installation_writer.GitHubInstallationWriterTest.test_writer_opens_fresh_connection_and_persists_only_ids",
+    "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_link_to_article_returns_none_for_missing_message",
+    "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_link_to_article_updates_saved_message",
+    "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_save_creates_incoming_message",
+    "tests.test_incoming_message_repository.SQLiteIncomingMessageRepositoryTest.test_save_returns_existing_message_for_duplicate_external_id",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_delivery_and_enumeration_errors_preserve_text_and_other_updates",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_enumeration_rejects_blank_ambiguous_and_deleted_addresses",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_link_and_rebind_refresh_both_owners_without_leaking_preferences",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_preference_updates_other_mode_and_clears_only_invalid_pending",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_rebind_during_menu_read_discards_previous_owner_menu",
+    "tests.test_linked_chat_menus.LinkedChatMenusTest.test_stale_enumeration_does_not_restore_or_publish_old_address",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_ambiguous_address_blocks_point_lookup_and_origin_fallback",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_background_runner_checks_without_message",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_confirmation_change_reconciles_without_message",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_foreign_origin_in_known_chat_cannot_publish_owner_menu",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_group_origin_does_not_publish_menu",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_incomplete_confirmation_snapshot_defers_delivery",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_parallel_reconciliation_does_not_duplicate_delivery",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_pending_address_snapshot_is_safe_during_concurrent_updates",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_periodic_pass_enumerates_globally_once",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_reconciliation_does_not_touch_saved_identity",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_removed_between_enumeration_and_read_is_not_published",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_removed_or_ambiguous_address_is_not_republished",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_retry_uses_latest_menu_after_delivery_failure",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_server_availability_changes_on_reconfigured_startup",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_startup_keeps_profiles_separate",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_startup_recovery_and_unchanged_dedup",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_stored_group_addresses_are_excluded_from_both_identity_lists",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_synthetic_event_uses_current_identity_for_known_chat",
+    "tests.test_menu_reconciliation.MenuReconciliationTest.test_ttl_expires_without_message",
+    "tests.test_obsidian_proposal_repository.SQLiteObsidianProposalRepositoryTests.test_add_completion_updates_note_vault_article_and_history",
+    "tests.test_obsidian_proposal_repository.SQLiteObsidianProposalRepositoryTests.test_applied_history_survives_vault_replacement",
+    "tests.test_obsidian_proposal_repository.SQLiteObsidianProposalRepositoryTests.test_only_one_active_cycle_is_allowed_per_article",
+    "tests.test_obsidian_proposal_repository.SQLiteObsidianProposalRepositoryTests.test_skip_clears_source_text_without_creating_github_result",
+    "tests.test_operation_scopes.OperationScopesTest.test_concurrent_confirmations_keep_remote_write_sequential",
+    "tests.test_operation_scopes.OperationScopesTest.test_configuration_decision_checks_ttl_version_and_shared_write_lease",
+    "tests.test_operation_scopes.OperationScopesTest.test_configuration_pending_is_local_and_replace_disconnect_are_exclusive",
+    "tests.test_operation_scopes.OperationScopesTest.test_different_article_runs_while_other_chat_is_fetching",
+    "tests.test_operation_scopes.OperationScopesTest.test_duplicate_normalized_article_reuses_proposal_and_origin",
+    "tests.test_operation_scopes.OperationScopesTest.test_exit_preserves_pending_and_profile_commands_remain_available",
+    "tests.test_operation_scopes.OperationScopesTest.test_expired_lease_taken_during_preflight_blocks_remote_commit",
+    "tests.test_operation_scopes.OperationScopesTest.test_force_reanalysis_preserves_existing_pending_and_its_origin",
+    "tests.test_operation_scopes.OperationScopesTest.test_foreign_owner_or_chat_cannot_inspect_or_cancel_pending",
+    "tests.test_operation_scopes.OperationScopesTest.test_identity_confirmation_does_not_intercept_obsidian_yes",
+    "tests.test_operation_scopes.OperationScopesTest.test_lease_busy_keeps_both_proposals_then_stale_sha_conflicts",
+    "tests.test_operation_scopes.OperationScopesTest.test_remote_commit_holds_fence_during_delayed_http_call",
+    "tests.test_operation_scopes.OperationScopesTest.test_repeat_confirmation_and_atomic_claim_do_not_write_twice",
+    "tests.test_operation_scopes.OperationScopesTest.test_simultaneous_same_url_is_reserved_for_one_full_flow",
+    "tests.test_operation_scopes.OperationScopesTest.test_superseded_identity_operation_never_confirms_new_request",
+    "tests.test_operation_scopes.OperationScopesTest.test_tg_vk_and_same_channel_chats_prepare_independent_articles",
+    "tests.test_operation_scopes.OperationScopesTest.test_two_local_proposals_require_id_and_do_not_consider_remote_pending",
+    "tests.test_operation_scopes.OperationScopesTest.test_unknown_command_does_not_treat_its_argument_as_article_url",
+    "tests.test_processing_error_recorder.SQLiteProcessingErrorRecorderTest.test_record_links_error_to_incoming_message",
+    "tests.test_processing_error_recorder.SQLiteProcessingErrorRecorderTest.test_record_saves_processing_error",
+    "tests.test_telegram_flow_smoke.TelegramFlowSmokeTest.test_telegram_flow_saves_message_article_and_analysis",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_concurrent_identity_claim_preserves_unconsumed_code",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_concurrent_register_returns_existing_profile_without_orphan",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_confirm_rebind_moves_channel_and_deletes_empty_previous_user",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_failure_after_identity_insert_rolls_back_both_records",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_invalid_registration_name_creates_no_records",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_link_code_binds_second_channel_to_same_user",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_link_rolls_back_code_when_identity_insert_violates_unique",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_register_creates_user_and_resolves_same_identity",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_register_rolls_back_profile_when_identity_insert_violates_unique",
+    "tests.test_user_identity_repository.SQLiteUserIdentityRepositoryTest.test_two_connections_cannot_consume_same_code",
+    "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_chunks_are_isolated_by_user_and_vault",
+    "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_full_rebuild_saves_chunks_and_current_signature",
+    "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_invalidation_hides_stale_generation",
+    "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_missing_global_marker_reconciles_only_dirty_note",
+    "tests.test_vault_chunk_index_repository.VaultChunkIndexRepositoryTest.test_note_replacement_preserves_unchanged_chunk_identity",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_changed_chunk_only_is_embedded_again",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_float32_mapper_rejects_wrong_blob_length",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_initial_index_stores_float32_blob_and_profile",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_provider_failure_leaves_generation_invalid",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_query_model_change_reuses_document_vectors",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_second_index_does_not_request_unchanged_chunks",
+    "tests.test_vault_embedding_index_repository.VaultEmbeddingIndexRepositoryTest.test_sqlite_embeddings_participate_in_hybrid_retrieval",
+    "tests.test_vault_full_text_search.VaultFullTextSearchTest.test_bm25_prefers_title_over_chunk_text",
+    "tests.test_vault_full_text_search.VaultFullTextSearchTest.test_metadata_and_chunk_changes_refresh_fts_without_stale_rows",
+    "tests.test_vault_full_text_search.VaultFullTextSearchTest.test_query_is_plain_text_not_raw_fts_syntax",
+    "tests.test_vault_full_text_search.VaultFullTextSearchTest.test_search_indexes_title_path_tags_headings_and_chunk_text",
+    "tests.test_vault_full_text_search.VaultFullTextSearchTest.test_search_rejects_stale_generation_and_isolates_users",
+    "tests.test_vault_lease_fencing.VaultLeaseFencingTest.test_delayed_sync_fetch_cannot_publish_after_takeover",
+    "tests.test_vault_lease_fencing.VaultLeaseFencingTest.test_process_crash_releases_vault_lock_without_deleting_file",
+    "tests.test_vault_lease_fencing.VaultLeaseFencingTest.test_takeover_fences_all_local_publications",
+    "tests.test_vault_lease_fencing.VaultLeaseFencingTest.test_write_renews_lease_before_expiration",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_confirmation_persists_replacement_and_disconnect_with_ttl",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_installation_diff_preserves_or_cascades_active_vault",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_instruction_replace_preserves_order_and_isolates_vault",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_lease_blocks_second_connection_until_expiration",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_note_queries_and_foreign_keys_enforce_user_isolation",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_note_upsert_replaces_markdown_and_ordered_metadata",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_replacing_vault_removes_previous_notes",
+    "tests.test_vault_repositories.VaultRepositoriesTest.test_sync_state_update_is_scoped_by_user",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_confirm_replacement_atomically_switches_active_vault",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_different_vault_waits_for_confirmation_and_can_be_cancelled",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_disconnect_can_be_cancelled_and_requires_active_vault",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_disconnect_requires_confirmation_and_preserves_user_data",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_repository_url_and_vault_path_reject_unsafe_values",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_select_distinguishes_repository_and_path_failures",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_select_finds_repository_in_installations_and_saves_vault",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_select_same_vault_does_not_replace_saved_row",
+    "tests.test_vault_selection.GitHubVaultSelectionServiceTest.test_sqlite_manager_selects_vault_after_request_connection_is_closed"
+  ]
+}

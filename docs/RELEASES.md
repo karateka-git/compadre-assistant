@@ -62,6 +62,14 @@ flowchart TD
 
 `full-suite` проверяет точный checkout, все unittest, три автономных smoke, свежую и предыдущую SQLite-схему, сборку образа и healthcheck. CI работает с тестовыми данными. Он не подтверждает реальные ответы ботов, systemd или production SQLite.
 
+Подготовленный SQLite gate дополнительно требует `repository-compatibility`
+для точной previous/candidate пары. Перед первым запуском нужно закрепить
+reviewed policy commit во внешней repository variable `COMPATIBILITY_POLICY_SHA`;
+без неё CI отказывает. Baseline, 107 операций, artifact и границы локальной
+проверки описаны в [шаге 5.4](ci-release-review/STAGE5_CI.md). Исторический CI
+установленной v3.1.0 сохраняет допуск по точному SHA; это не разрешает новые
+схемы. Predeploy-проверка artifact и installed SHA ещё не реализована.
+
 Для обычного выпуска допуск сверяет репозиторий, workflow (`main-full.yml` при создании линии, `release-full.yml` для PATCH), ref, полный SHA, run/attempt и обязательные jobs/steps. `pending`, `skipped`, `failure` и сбой GitHub API закрывают допуск. Проверка другого SHA, даже более позднего в той же линии, не подходит.
 
 ## 3. Создать релизную линию и выбрать версию

@@ -98,11 +98,14 @@ def run_tests(modules: list[str], external_tests: Path | None = None) -> dict:
 
     test_ids = list(ids(suite))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
-    return {"passed": result.wasSuccessful() and result.testsRun > 0 and not result.skipped,
+    return {"passed": result.wasSuccessful() and result.testsRun == len(test_ids) > 0
+            and len(set(test_ids)) == len(test_ids) and not result.skipped and not result.expectedFailures,
             "tests_run": result.testsRun, "test_ids": test_ids,
             "failures": [test.id() for test, _ in result.failures],
             "errors": [test.id() for test, _ in result.errors],
-            "skips": [(test.id(), reason) for test, reason in result.skipped]}
+            "skips": [(test.id(), reason) for test, reason in result.skipped],
+            "expected_failures": [test.id() for test, _ in result.expectedFailures],
+            "unexpected_successes": [test.id() for test in result.unexpectedSuccesses]}
 
 
 def seed_database(database: Path) -> dict:
