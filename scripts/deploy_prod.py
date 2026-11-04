@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 from scripts import deploy_prepare as prep
+from scripts import deploy_database_switch as database_switch
 from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
@@ -116,7 +117,7 @@ class Host:
     def run(self, *args: str, env: dict[str, str] | None = None) -> str:
         """Запускает системную команду из production checkout."""
         controlled = os.environ.copy()
-        for key in ("COMPOSE_FILE", "ASSISTANT_IMAGE", "DOCKER_CONTEXT", "GIT_SSH_COMMAND"):
+        for key in ("COMPOSE_FILE", "ASSISTANT_IMAGE", "ASSISTANT_DATABASE_PATH", "DOCKER_CONTEXT", "GIT_SSH_COMMAND"):
             controlled.pop(key, None)
         controlled["DOCKER_HOST"] = "unix:///var/run/docker.sock"
         if env is not None:
@@ -389,14 +390,30 @@ class Host:
         if self.run("systemctl", "is-active", SERVICE) != "active":
             raise DeployError("Основной systemd service не active")
 
+    def selected_database(self) -> Path:
+        """Разрешает рабочий путь из selector; отсутствие v2 сохраняет legacy путь."""
+        state = prep.read_state(self.state_dir, self.checkout) or {}
+        if "protocol_version" in state or (self.state_dir / "active-db.json").exists():
+            side = database_switch.read_selected(self, state)
+            return Path(state[side]["host_path"])
+        return self.checkout / "data/app.db"
+
     def runtime_tag(self) -> str:
-        """Читает строго две ожидаемые строки внешнего runtime.env."""
+        """Читает legacy pin либо строго сверяет производный pin выбранной SQLite."""
         value = (self.state_dir / "runtime.env").read_text(encoding="utf-8")
         lines = value.splitlines()
         expected_file = (
             f"COMPOSE_FILE={self.checkout / 'docker-compose.yml'}:"
             f"{self.state_dir / 'pinned-compose.yml'}"
         )
+        if (self.state_dir / "active-db.json").exists():
+            state = prep.read_state(self.state_dir, self.checkout) or {}
+            side = database_switch.read_selected(self, state)
+            tag = lines[0].removeprefix("ASSISTANT_IMAGE=") if lines else ""
+            env = self.database_env(tag, state[side]["container_path"])
+            if lines != [f"{key}={value}" for key, value in env.items()]:
+                raise DeployError("runtime.env не соответствует selector")
+            return tag
         if len(lines) != 2 or lines[1] != expected_file or not lines[0].startswith("ASSISTANT_IMAGE="):
             raise DeployError("runtime.env имеет неверный формат")
         return lines[0].split("=", 1)[1]
@@ -409,6 +426,94 @@ class Host:
                  f"COMPOSE_FILE={self.checkout / 'docker-compose.yml'}:"
                  f"{self.state_dir / 'pinned-compose.yml'}\n")
         _atomic_text(self.state_dir / "runtime.env", value)
+
+    def require_switch_rollout(self) -> None:
+        """Закрывает эксплуатационный v2 до реализации recovery и установки snapshot."""
+        raise DeployError("SQLite protocol v2 закрыт до шагов 6.4 и 6.5")
+
+    def database_env(self, tag: str, database_path: str) -> dict[str, str]:
+        """Формирует отдельный Compose override для обоих выбранных поколений."""
+        if re.fullmatch(r"/app/data/app(?:-[0-9a-f]{32})?\.db", database_path) is None:
+            raise DeployError("Некорректный runtime путь SQLite")
+        env = self.compose_env(tag, critical=True)
+        env["COMPOSE_FILE"] += ":" + str(self.state_dir / "database-compose.yml")
+        env["ASSISTANT_DATABASE_PATH"] = database_path
+        return env
+
+    def set_database_runtime(self, tag: str, expected_id: str, database_path: str) -> None:
+        """Закрепляет образ и DATABASE_PATH в производном runtime.env под marker."""
+        self.require_snapshot_quiescence()
+        if self.image(tag)["Id"] != expected_id:
+            raise DeployError("Candidate pin изменился")
+        override = (SOURCE_ROOT / "deploy/database-compose.yml").read_text(encoding="utf-8")
+        _atomic_text(self.state_dir / "database-compose.yml", override)
+        env = self.database_env(tag, database_path)
+        _atomic_text(self.state_dir / "runtime.env", "".join(f"{key}={value}\n" for key, value in env.items()))
+        if (self.state_dir / "runtime.env").read_text(encoding="utf-8") != "".join(
+                f"{key}={value}\n" for key, value in env.items()):
+            raise DeployError("Runtime pin не сохранён")
+
+    def require_database_containers(self, ids: dict[str, str], expected_id: str,
+                                    database_path: str) -> None:
+        """Проверяет оба ещё не запущенных контейнера и единственный data bind."""
+        self.require_snapshot_quiescence()
+        found = self.containers()
+        if (set(found) != set(prep.CHANNELS) or set(ids) != set(prep.CHANNELS)
+                or len(set(ids.values())) != len(prep.CHANNELS)):
+            raise DeployError("Неполный набор созданных контейнеров")
+        for name, item in found.items():
+            paths = [entry for entry in item["Config"].get("Env", []) if entry.startswith("DATABASE_PATH=")]
+            mounts = item.get("Mounts", [])
+            data_mounts = [mount for mount in mounts if mount.get("Destination") == "/app/data"]
+            if (item["Id"] != ids[name] or item.get("Image") != expected_id
+                    or item["State"].get("Status") != "created"
+                    or item.get("RestartCount") != 0
+                    or paths != ["DATABASE_PATH=" + database_path]
+                    or len(data_mounts) != 1
+                    or data_mounts[0].get("Type") != "bind"
+                    or data_mounts[0].get("Source") != str(self.checkout / "data")
+                    or data_mounts[0].get("RW") is not True
+                    or any(mount.get("Destination", "").startswith("/app/data/") for mount in mounts)
+                    or any(mount.get("Source") == str(self.checkout / "data")
+                           and mount.get("Destination") != "/app/data" for mount in mounts)):
+                raise DeployError("Созданный runtime не соответствует выбранной SQLite")
+        self.require_no_duplicate_polling()
+
+    def prepare_database_containers(self, tag: str, expected_id: str,
+                                    database_path: str) -> dict[str, str]:
+        """Создаёт оба канала без start и проверяет фактические mount/env/image."""
+        self.require_snapshot_quiescence()
+        if self.image(tag)["Id"] != expected_id:
+            raise DeployError("Candidate pin изменился перед create")
+        env = self.database_env(tag, database_path)
+        config = json.loads(self.run("docker", "compose", "config", "--format", "json", env=env))
+        for name in prep.CHANNELS:
+            service = config["services"][name]
+            if (service.get("image") != tag or service.get("pull_policy") != "never"
+                    or str(service.get("restart")) != "no"
+                    or service.get("environment", {}).get("DATABASE_PATH") != database_path):
+                raise DeployError("Compose не закрепляет выбранную SQLite")
+        self.run("docker", "compose", "create", "--no-build", "--pull", "never",
+                 "--force-recreate", *prep.CHANNELS, env=env)
+        ids = {name: item["Id"] for name, item in self.containers().items()}
+        self.require_database_containers(ids, expected_id, database_path)
+        return ids
+
+    def start_database_containers(self, ids: dict[str, str], expected_id: str,
+                                  database_path: str) -> None:
+        """Запускает только проверенные ID после повторного чтения durable admission."""
+        durable = prep.read_state(self.state_dir, self.checkout)
+        if (not durable or durable.get("admission_may_have_started") is not True
+                or durable.get("prepared_containers") != ids
+                or database_switch.read_selected(self, durable) != "new"
+                or durable["new"]["container_path"] != database_path
+                or durable["candidate"]["image_id"] != expected_id
+                or durable.get("admission") != {"transition_id": durable["transition_id"],
+                    "generation_id": durable["new"]["generation_id"],
+                    "image_id": expected_id, "sha": durable["candidate"]["sha"]}):
+            raise DeployError("Запуск без durable admission запрещён")
+        self.require_database_containers(ids, expected_id, database_path)
+        self.run("docker", "start", *(ids[name] for name in prep.CHANNELS))
 
     def marker(self, enabled: bool) -> None:
         """Сохраняет reboot marker до завершения проверенного перехода."""
@@ -482,8 +587,12 @@ class Host:
     def stop_both(self) -> None:
         """Останавливает unit и оба Compose writers, затем проверяет отсутствие работающих."""
         self.run("systemctl", "stop", SERVICE)
-        self.run("docker", "compose", "stop", *prep.CHANNELS,
-                 env=self.compose_env(self.runtime_tag()))
+        if (self.state_dir / "active-db.json").exists():
+            # При повреждённом selector остановка не должна зависеть от его чтения.
+            self.run("docker", "stop", *(item["Id"] for item in self.containers().values()))
+        else:
+            self.run("docker", "compose", "stop", *prep.CHANNELS,
+                     env=self.compose_env(self.runtime_tag()))
         if any(item["State"]["Running"] for item in self.containers().values()):
             raise DeployError("Один из writers продолжает работать")
 
@@ -601,7 +710,7 @@ class Host:
         with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
             directory = Path(temporary)
             os.chmod(directory, 0o700)
-            compatibility.verify_copy(self.checkout / "data/app.db", directory,
+            compatibility.verify_copy(self.selected_database(), directory,
                                       before, expected, evidence["schema_fingerprint"],
                                       lambda work: self.migrate_copy(candidate_id, work))
         # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
@@ -610,6 +719,7 @@ class Host:
                     or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
                 raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
+        self.compatibility_evidence = evidence
 
     def require_snapshot_quiescence(self) -> None:
         """Проверяет остановку известных production writers и backup под marker."""
@@ -732,7 +842,7 @@ def _prepare_candidate(
             tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
         with compatibility.check("SAFE_CANDIDATE_IMAGE"):
             prep.check_candidate_image(candidate_id, selected.sha)
-        database = host.checkout / "data/app.db"
+        database = host.selected_database()
         prep.require_disk_space(host.state_dir, database)
         with compatibility.check("SAFE_SOURCE_SCHEMA"):
             before = _applied_names(database)
@@ -768,6 +878,16 @@ def _prepare_candidate(
 def _recover(host: Host, state: dict[str, Any]) -> None:
     """Возвращает проверенный старый код, если схема не менялась; иначе закрывает запуск."""
     stage = state.get("stage")
+    if "protocol_version" in state or (host.state_dir / "active-db.json").exists():
+        if state.get("protocol_version") != database_switch.PROTOCOL_VERSION or stage not in ("success", "rolled_back"):
+            _degrade(host, state, "SQLite v2 требует recovery шага 6.4")
+            raise DeployError("Legacy recovery не может выбирать SQLite v2")
+        try:
+            database_switch.read_selected(host, state)
+        except Exception as error:
+            _degrade(host, state, "SQLite selector или state повреждены")
+            raise DeployError("Выбор SQLite не доказан") from error
+        return
     if stage == "degraded":
         raise DeployError("Degraded state требует ручного восстановления")
     if stage in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
@@ -889,7 +1009,10 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
     with prep.deploy_lock(host.state_dir, host.checkout):
         state = prep.read_state(host.state_dir, host.checkout) or {}
         previous_stage = state.get("stage")
+        switch_state = state.copy() if "protocol_version" in state else None
         _recover(host, state)
+        if switch_state is not None:
+            host.require_switch_rollout()
         if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
             raise DeployError("Незавершённый предыдущий выпуск обработан; проверьте состояние перед новым запуском")
         if state.get("stage") == "degraded":
@@ -940,7 +1063,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                    failed_version=version,
                    retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
-        database = host.checkout / "data/app.db"
+        database = host.selected_database()
         if emergency:
             state["deployment"].update({
                 "sha": selected.sha, "release_id": selected.release_id,
@@ -961,6 +1084,19 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
                 "deployment": state.get("deployment"),
             }
+            if switch_state is not None:
+                import uuid
+
+                # Selector ещё принадлежит завершённому переходу; проверка
+                # предшествует публикации нового transition ID в state.
+                with compatibility.check("SAFE_INSTALLED_RUNTIME"):
+                    host.require_baseline(last_good, old_sha, old_id)
+                side = database_switch.read_selected(host, switch_state)
+                state.update(protocol_version=database_switch.PROTOCOL_VERSION,
+                             transition_id=uuid.uuid4().hex, old=switch_state[side],
+                             controller_sha=compatibility.private_text(host.state_dir / "controller.sha"),
+                             admission_may_have_started=False,
+                             compatibility_evidence=host.compatibility_evidence)
             _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
@@ -968,8 +1104,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             raise DeployError("Не удалось сохранить состояние подготовки") from error
         critical = False
         try:
-            with compatibility.check("SAFE_INSTALLED_RUNTIME"):
-                host.require_baseline(last_good, old_sha, old_id)
+            if switch_state is None:
+                with compatibility.check("SAFE_INSTALLED_RUNTIME"):
+                    host.require_baseline(last_good, old_sha, old_id)
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -978,22 +1115,33 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             with metrics.stage("deploy.stop_both"):
                 host.stop_both()
             _state(host, state, "writers_stopped")
-            backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
-            with metrics.stage("backup"):
-                prep.backup_sqlite(database, backup)
-                prep.validate_schema(backup, before)
-            _state(host, state, "backup_verified", backup_id=str(backup))
-            # Стадия фиксируется до мигратора: прерывание после неё запрещает
-            # автоматический запуск старого кода при новом миграционном наборе.
-            _state(host, state, "migration_started", migration_attempted=True)
-            with metrics.stage("migrations"):
-                host.migrate(candidate_id)
-                prep.validate_schema(database, expected)
-            _state(host, state, "schema_verified")
-            host.set_runtime(tag, candidate_id)
-            _state(host, state, "candidate_pinned")
-            host.start_both(tag, candidate_id)
-            _state(host, state, "candidate_started")
+            if switch_state is not None:
+                _atomic_text(host.state_dir / "active-db.json",
+                             json.dumps(database_switch.selector(state, "old")) + "\n")
+                database_switch.transition(
+                    host, state, lambda stage, **changes: _state(host, state, stage, **changes), _atomic_text,
+                )
+                backup = Path(state["snapshot"]["path"])
+                # Backup/systemd ещё не понимают selector. Не снимать marker и
+                # не возобновлять timer до отдельной интеграции шага 6.5.
+                raise DeployError("SQLite v2 завершил запуск; финализация закрыта до 6.4/6.5")
+            else:
+                backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
+                with metrics.stage("backup"):
+                    prep.backup_sqlite(database, backup)
+                    prep.validate_schema(backup, before)
+                _state(host, state, "backup_verified", backup_id=str(backup))
+                # Стадия фиксируется до мигратора: прерывание после неё запрещает
+                # автоматический запуск старого кода при новом миграционном наборе.
+                _state(host, state, "migration_started", migration_attempted=True)
+                with metrics.stage("migrations"):
+                    host.migrate(candidate_id)
+                    prep.validate_schema(database, expected)
+                _state(host, state, "schema_verified")
+                host.set_runtime(tag, candidate_id)
+                _state(host, state, "candidate_pinned")
+                host.start_both(tag, candidate_id)
+                _state(host, state, "candidate_started")
             with metrics.stage("deploy.verify_both_1"):
                 host.verify_both(candidate_id, selected.sha)
             host.restart_policy("unless-stopped")
@@ -1049,6 +1197,8 @@ def verify_pinned(host: Host) -> None:
         state = prep.read_state(host.state_dir, host.checkout) or {}
         previous_stage = state.get("stage")
         _recover(host, state)
+        if "protocol_version" in state:
+            host.require_switch_rollout()
         if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
             raise DeployError("Предыдущий переход обработан; проверьте состояние перед повтором")
         if state.get("stage") == "degraded":

@@ -1,0 +1,7 @@
+services:
+  tg_assistant:
+    environment:
+      DATABASE_PATH: ${ASSISTANT_DATABASE_PATH:?selected database is required}
+  vk_assistant:
+    environment:
+      DATABASE_PATH: ${ASSISTANT_DATABASE_PATH:?selected database is required}
