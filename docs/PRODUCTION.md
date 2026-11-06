@@ -22,7 +22,7 @@
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142
 ```
 
-## Последний проверенный снимок — 06.11.2026, после 19:10:29 UTC
+## Последний проверенный снимок — 06.11.2026, после 20:10:39 UTC
 
 Штатный `deploy-prod v3.2.0` завершился `degraded` при возврате основного
 systemd unit. **Оба канала остановлены**; это открытый инцидент, а не
@@ -36,13 +36,14 @@ systemd unit. **Оба канала остановлены**; это откры�
 | SQLite | Selector указывает на новое поколение. Прежняя и новая БД имеют `integrity_check=ok`, FK 0, миграции 1–4 и одинаковые fingerprint и logical digest; строковые данные не выводились. |
 | Каналы | Оба candidate контейнера `exited`, restart policy `no`; иных channel ID не обнаружено. Старые боты не запущены. |
 | systemd и backup | Основной service `failed`; backup timer `inactive`. |
-| Контроллер | Отдельным подготовительным действием установлен snapshot `38be03d75293cbf516456fe45ead9bc17fedcc8d` и exact main/backup selector units с `python3 -P`; [протокол установки](ci-release-review/STAGE7_7_RECOVERY_PREP.md). Новый `require_infrastructure` прошёл. Recovery CLI и боты ещё не запускались. |
+| Контроллер | Отдельным подготовительным действием установлен snapshot `aeeb73c557face466ce411b8c22a4aad04750861`; exact main/backup selector units с `python3 -P` сохранены. [Протокол установки](ci-release-review/STAGE7_7_AUTH_INSTALL.md) подтверждает `require_infrastructure`, неизменность state/SQLite и остановку каналов. Recovery CLI и боты ещё не запускались. |
 
 Повторный read-only допуск к recovery выявил [публичный лимит GitHub API в
 Release selector](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md#дополнительный-отказ-допуска-после-установки-snapshot).
-Исправление прошло [отдельный CI и private Linux проверку](ci-release-review/STAGE7_7_AUTH_FIX.md),
-но ещё не установлено на production. До установки и отдельной проверки
-новый recovery не запускать.
+Исправление прошло [отдельный CI и private Linux проверку](ci-release-review/STAGE7_7_AUTH_FIX.md)
+и [установлено отдельным подготовительным действием](ci-release-review/STAGE7_7_AUTH_INSTALL.md).
+До свежего допуска и отдельного решения о запуске recovery состояние остаётся
+`degraded` с остановленными каналами.
 
 Перед любым действием повторно прочитать фактический state, selector, marker,
 контейнеры и timer на VPS: эта запись не является разрешением на recovery.
