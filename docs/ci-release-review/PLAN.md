@@ -440,6 +440,11 @@ job. Разобраны non-root selector fixtures и worker tests вне venv;
 дополнительных tests OK локально. Нужен полный CI нового точного merge SHA;
 останавливать ботов и продолжать Linux harness до допуска нельзя.
 
+Следующий run `42243898274/1` для `62e029a0532e901a18aae1aebb38e95dc3f59254`
+сократил отказы до одного ERROR из 1132 tests: backup fixture selector имел
+0644. Подготовлена отдельная тестовая правка на atomic 0600 writer; 5 tests
+backup/selector model OK локально. Требуется новый полный CI итогового SHA.
+
 Шаг 7.3 остаётся незавершённым. Боты не останавливались; production и Docker
 не менялись. Итоговый commit/SHA, полный CI и compatibility artifact, точный
 image/OCI, повторная проверка snapshot и private Linux harness/broker остаются
