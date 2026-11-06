@@ -40,7 +40,9 @@ systemd unit. **Оба канала остановлены**; это откры�
 
 Повторный read-only допуск к recovery выявил [публичный лимит GitHub API в
 Release selector](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md#дополнительный-отказ-допуска-после-установки-snapshot).
-До исправления и отдельной проверки новый recovery не запускать.
+Исправление прошло [отдельный CI и private Linux проверку](ci-release-review/STAGE7_7_AUTH_FIX.md),
+но ещё не установлено на production. До установки и отдельной проверки
+новый recovery не запускать.
 
 Перед любым действием повторно прочитать фактический state, selector, marker,
 контейнеры и timer на VPS: эта запись не является разрешением на recovery.
