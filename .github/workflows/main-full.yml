@@ -33,6 +33,7 @@ jobs:
         id: decide
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
         run: python -m scripts.full_ci_controller main
 
   full-suite:

@@ -60,8 +60,11 @@ backup service inactive; Telegram и VK — прежние точные IDs и o
 оба **healthy**, restarts=0. Production SQLite повторно проверена:
 integrity ok, FK0, schema 1–4, WAL0. Выпуск и backup не запускались.
 
-**Gate не пройден.** Нужно узкое исправление обработки scalar D-Bus `b`,
+**Gate не пройден.** Требуются узкое исправление обработки scalar D-Bus `b`,
 поведенческий тест с настоящей формой `data:true`, новый review/CI и новый
-exact candidate/snapshot. Опубликованный immutable `v3.2.0` и его SHA нельзя
-исправить на месте; дальнейший релиз требует нового имени и допуска. До
-этого units/token/policy и настоящий `deploy-prod` не устанавливать повторно.
+exact controller snapshot. Опубликованный immutable runtime `v3.2.0` и его
+SHA нельзя исправить на месте, но отдельный controller может иметь более
+новый SHA без повторной публикации runtime. Продолжение и отдельный CI baseline
+описаны в [исправлении controller](STAGE7_7_CONTROLLER_FIX.md) и
+[протоколе базы CI](STAGE7_7_CI_BASELINE.md). До нового допуска units/token/policy
+и настоящий `deploy-prod` не устанавливать повторно.
