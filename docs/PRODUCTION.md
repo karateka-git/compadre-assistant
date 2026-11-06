@@ -22,30 +22,30 @@
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142
 ```
 
-## Последний проверенный снимок — 06.11.2026, после 19:10:29 UTC
+## Последний проверенный снимок — 06.11.2026, после 20:17:13 UTC
 
 Штатный `deploy-prod v3.2.0` завершился `degraded` при возврате основного
-systemd unit. **Оба канала остановлены**; это открытый инцидент, а не
-установленный v3.2.0. Причина, точные ID и [план проверки восстановления](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md)
-зафиксированы отдельно. До проверенного восстановления нельзя снимать marker,
-переключать selector, запускать старый controller или повторять обычный deploy.
+systemd unit. Затем отдельная root-only команда [восстановления вперёд](ci-release-review/STAGE7_7_RECOVERY.md)
+завершила тот же выпуск на выбранной новой SQLite. Причина исходного отказа
+и точные ID сохранены в [протоколе инцидента](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md).
 
 | Область | Последнее наблюдение |
 | --- | --- |
-| Durable state | `degraded`, прежняя граница `finalization_intent`, admission=true; marker сохранён. |
-| SQLite | Selector указывает на новое поколение. Прежняя и новая БД имеют `integrity_check=ok`, FK 0, миграции 1–4 и одинаковые fingerprint и logical digest; строковые данные не выводились. |
-| Каналы | Оба candidate контейнера `exited`, restart policy `no`; иных channel ID не обнаружено. Старые боты не запущены. |
-| systemd и backup | Основной service `failed`; backup timer `inactive`. |
-| Контроллер | Отдельным подготовительным действием установлен snapshot `38be03d75293cbf516456fe45ead9bc17fedcc8d` и exact main/backup selector units с `python3 -P`; [протокол установки](ci-release-review/STAGE7_7_RECOVERY_PREP.md). Новый `require_infrastructure` прошёл. Recovery CLI и боты ещё не запускались. |
+| Durable state | `success`, `last_good=v3.2.0` на SHA `cabc0e24d28947123868db8a60f6b55095feb63e`; marker отсутствует. |
+| SQLite | Selector указывает на новое поколение. Прежняя и новая БД имеют `integrity_check=ok`, FK 0, совпадающие fingerprint и logical digest до и после recovery; строковые данные не выводились. |
+| Каналы | Те же candidate TG/VK ID `running` и `healthy`, restarts 0, restart policy `no`; polling signals обоих каналов подтверждены в ограниченном окне. Старые боты не запущены. |
+| systemd и backup | Основной service и backup timer `active/enabled`; backup service `inactive`. Final snapshot backup цел, root/0400. |
+| Контроллер | Установлен snapshot `aeeb73c557face466ce411b8c22a4aad04750861`; exact main/backup selector units с `python3 -P`. `require_infrastructure` прошёл. |
 
 Повторный read-only допуск к recovery выявил [публичный лимит GitHub API в
 Release selector](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md#дополнительный-отказ-допуска-после-установки-snapshot).
 Исправление прошло [отдельный CI и private Linux проверку](ci-release-review/STAGE7_7_AUTH_FIX.md),
-но ещё не установлено на production. До установки и отдельной проверки
-новый recovery не запускать.
+затем [установлено](ci-release-review/STAGE7_7_AUTH_INSTALL.md) до единственного
+запуска recovery. Его результат проверен независимо. Живые ответы Telegram/VK
+после восстановления ещё требуют пользовательской приёмки.
 
-Перед любым действием повторно прочитать фактический state, selector, marker,
-контейнеры и timer на VPS: эта запись не является разрешением на recovery.
+Перед дальнейшими действиями повторно прочитать фактический state, selector,
+marker, контейнеры и timer на VPS: эта запись не является новым допуском.
 
 ## Исторический снимок — 02.11.2026, 11:28:58 UTC
 
