@@ -39,6 +39,8 @@ def admission_jobs(sha: str) -> list[dict]:
          "conclusion": "success", "steps": steps(("Checkout exact main commit", "Decide full run"))},
         {"name": "main-full / full-suite", "head_sha": sha, "status": "completed",
          "conclusion": "success", "steps": steps(admission.FULL_STEPS)},
+        {"name": "main-full / repository-compatibility", "head_sha": sha, "status": "completed",
+         "conclusion": "success", "steps": steps(admission.COMPATIBILITY_STEPS)},
     ]
 
 
@@ -114,6 +116,17 @@ class FullCiControllerTests(unittest.TestCase):
         """Ожидающая попытка без steps требует дождаться результата или rerun."""
         run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "queued"}
         api = FakeGitHub(runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]})
+        self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
+
+    def test_failed_compatibility_requires_rerun_even_when_suite_was_skipped(self) -> None:
+        """Отказ обязательного dependency job уже является полной попыткой."""
+        api = FakeGitHub(
+            runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [
+                {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "completed"}]},
+            jobs={"/actions/runs/1/jobs": [
+                {"name": "main-full / full-suite", "conclusion": "skipped"},
+                {"name": "main-full / repository-compatibility", "conclusion": "failure"}]},
+        )
         self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 
     def test_failed_full_job_without_steps_blocks_new_dispatch(self) -> None:

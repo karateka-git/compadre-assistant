@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 # Только полный успех всех обязательных проверок может создать success.
-CHECKS = ("checkout", "unit", "smokes", "migrations", "candidate")
+CHECKS = ("compatibility", "checkout", "unit", "smokes", "migrations", "candidate")
 
 
 def main() -> None:
@@ -22,6 +22,7 @@ def main() -> None:
         "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF", ""),
         "run_id": os.environ.get("GITHUB_RUN_ID", ""),
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
+        "compatibility_artifact_digest": os.environ.get("COMPATIBILITY_ARTIFACT_DIGEST", ""),
         "checks": checks,
         "result": "success" if all(value == "success" for value in checks.values()) else "failure",
     }

@@ -23,14 +23,17 @@ class IntegratedApi(api_tests.FakeApi):
 
     def get(self, path, **parameters):
         """Сверяет новые refs без сетевого соединения."""
-        if path == "/git/ref/heads/release/1.0":
-            return {"ref": "refs/heads/release/1.0", "object": {"type": "commit", "sha": api_tests.SHA}}
+        if path == "/git/ref/heads/release/1.1":
+            return {"ref": "refs/heads/release/1.1", "object": {"type": "commit", "sha": api_tests.SHA}}
         if path == f"/compare/{api_tests.SHA}...{api_tests.SHA}":
             return {"status": "identical", "base_commit": {"sha": api_tests.SHA},
                     "head_commit": {"sha": api_tests.SHA}}
-        value = super().get(path, **parameters)
-        if path == "/releases/tags/v1.0.0":
-            return dict(value, name="v1.0.0")
+        if path == "/git/ref/tags/v1.1.0":
+            return {"ref": "refs/tags/v1.1.0", "object": {"type": "commit", "sha": api_tests.SHA}}
+        value = super().get("/releases/tags/v1.0.0" if path == "/releases/tags/v1.1.0" else path,
+                            **parameters)
+        if path == "/releases/tags/v1.1.0":
+            return dict(value, tag_name="v1.1.0", name="v1.1.0")
         return value
 
 
@@ -190,8 +193,9 @@ class EmergencyEndToEndTests(unittest.TestCase):
             self._git(repository, "checkout", "main")
             self._git(repository, "merge", "--no-ff", "topic", "-m", "Слияние PR")
             candidate = self._git(repository, "rev-parse", "HEAD")
-            self._git(repository, "branch", "release/1.0")
+            self._git(repository, "branch", "release/1.1")
             api = IntegratedApi()
+            api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-15T00:00:00Z"}]
             prior = Path.cwd()
             os.chdir(repository)
             try:
@@ -201,13 +205,13 @@ class EmergencyEndToEndTests(unittest.TestCase):
                      patch.object(api_tests, "OLD", old), \
                      patch.object(publish, "tag_commit", return_value=candidate), \
                      patch.object(select, "repository_from_origin", return_value=select.EXPECTED_REPOSITORY):
-                    prepared = publish.prepare(api, "v1.0.0", candidate, "initial",
+                    prepared = publish.prepare(api, "v1.1.0", candidate, "minor",
                                                "сбой production", "Исправление", (11,))
                     self.assertEqual(prepared.full.state, "pending")
                     publish.publish(api, prepared)
                     with self.assertRaises(select.DeploySelectionError):
-                        select.select_release(api, "v1.0.0")
-                    selected = select.select_emergency_release(api, "v1.0.0")
+                        select.select_release(api, "v1.1.0")
+                    selected = select.select_emergency_release(api, "v1.1.0")
                     self.assertEqual((selected.sha, selected.published_ci_state),
                                      (candidate, "pending"))
                     with patch.object(host_tests, "NEW_SHA", candidate), \
@@ -217,7 +221,7 @@ class EmergencyEndToEndTests(unittest.TestCase):
                         with ExitStack() as stack:
                             for item in patches:
                                 stack.enter_context(item)
-                            prod.deploy(host, "v1.0.0", emergency=True, reason="восстановить каналы")
+                            prod.deploy(host, "v1.1.0", emergency=True, reason="восстановить каналы")
                             state = prep.read_state(host.state_dir, host.checkout)
                             self.assertEqual(state["stage"], "success")
                             self.assertEqual(state["deployment"]["published_reason"], "сбой production")
@@ -233,7 +237,7 @@ class EmergencyEndToEndTests(unittest.TestCase):
                                                     "Итог отсутствует:")):
                         api.posts[-1][1]["body"] = forged
                         with self.assertRaises(select.DeploySelectionError):
-                            select.select_emergency_release(api, "v1.0.0")
+                            select.select_emergency_release(api, "v1.1.0")
                     api.posts[-1][1]["body"] = original
                     reads = 0
                     original_get = api.get
@@ -241,7 +245,7 @@ class EmergencyEndToEndTests(unittest.TestCase):
                     def racing_get(path: str, **parameters):
                         nonlocal reads
                         result = original_get(path, **parameters)
-                        if path == "/releases/tags/v1.0.0":
+                        if path == "/releases/tags/v1.1.0":
                             reads += 1
                             if reads > 1:
                                 return dict(result, body="Изменено во время допуска")
@@ -249,10 +253,10 @@ class EmergencyEndToEndTests(unittest.TestCase):
 
                     with patch.object(api, "get", side_effect=racing_get), \
                          self.assertRaises(select.DeploySelectionError):
-                        select.select_emergency_release(api, "v1.0.0")
+                        select.select_emergency_release(api, "v1.1.0")
                     api.fail_api = True
                     with self.assertRaises(publish.ControllerError):
-                        select.select_emergency_release(api, "v1.0.0")
+                        select.select_emergency_release(api, "v1.1.0")
             finally:
                 os.chdir(prior)
 

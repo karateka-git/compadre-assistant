@@ -60,6 +60,25 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual((result.sha, result.run_id, result.run_attempt), (SHA_D, 1, 1))
         self.assertEqual(self.api.requested_jobs, ["/actions/runs/1/attempts/1/jobs"])
 
+    def test_only_pinned_installed_release_keeps_historical_contract(self) -> None:
+        """Старый run v3.1.0 не требует нового job; новый SHA не получает исключение."""
+        self.api.jobs = self.api.jobs[:2]
+        self.api.jobs[1]["steps"] = [step for step in self.api.jobs[1]["steps"]
+                                     if step["name"] != "Require repository compatibility evidence"]
+        self.assertIsNone(self.select())
+        self.api.runs[0]["head_sha"] = admission.LEGACY_FULL_SHA
+        for job in self.api.jobs:
+            job["head_sha"] = admission.LEGACY_FULL_SHA
+        self.assertIsNotNone(admission.select_successful_run(
+            self.api, "owner/repo", admission.MAIN_WORKFLOW, admission.LEGACY_FULL_SHA, "main"))
+
+    def test_missing_or_skipped_compatibility_job_is_denied(self) -> None:
+        """Зелёный прежний full-suite не заменяет обязательный новый набор."""
+        self.api.jobs[2]["conclusion"] = "skipped"
+        self.assertIsNone(self.select())
+        self.api.jobs.pop()
+        self.assertIsNone(self.select())
+
     def test_github_run_path_without_ref_is_accepted(self) -> None:
         """GitHub может вернуть только путь файла workflow без @ref."""
         self.api.runs[0]["path"] = ".github/workflows/main-full.yml"
@@ -74,6 +93,7 @@ class AdmissionTests(unittest.TestCase):
         self.api.jobs[0]["name"] = "release-full-controller"
         self.api.jobs[0]["steps"][0]["name"] = "Checkout exact release commit"
         self.api.jobs[1]["name"] = "release-full / full-suite"
+        self.api.jobs[2]["name"] = "release-full / repository-compatibility"
         self.assertIsNotNone(admission.select_successful_run(
             self.api, "owner/repo", admission.RELEASE_WORKFLOW, SHA_D, "release/1.2"))
         self.assertIsNone(admission.select_successful_run(

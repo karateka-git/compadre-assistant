@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from typing import Iterator, Mapping
 
 
@@ -173,11 +174,21 @@ def _integrity(connection: sqlite3.Connection) -> None:
         raise PreparationError("SQLite integrity_check завершился ошибкой")
 
 
-def backup_sqlite(source: Path, destination: Path) -> Path:
+def backup_sqlite(source: Path, destination: Path, *, timeout: float = 60) -> Path:
     """Создаёт отдельную SQLite API копию без перезаписи и проверяет её.
 
-    Вызывающий контроллер обязан предварительно остановить обоих writers,
-    приостановить ночной backup timer и проверить свободное место.
+    Для окончательного backup контроллер предварительно останавливает writers
+    и таймер. Предварительная predeploy-копия допускает работающих writers:
+    SQLite online backup сохраняет согласованный снимок, но не фиксирует
+    границу приёма сообщений. Контроллер проверяет свободное место.
+
+    Args:
+        source: Существующая исходная SQLite.
+        destination: Новый приватный файл копии.
+        timeout: Предельное время online backup в секундах.
+
+    Returns:
+        Путь к целостной копии.
 
     Raises:
         PreparationError: Исходная БД отсутствует, копия существует или повреждена.
@@ -188,9 +199,16 @@ def backup_sqlite(source: Path, destination: Path) -> Path:
     fd = os.open(destination, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
     os.close(fd)
     try:
+        deadline = time.monotonic() + timeout
+
+        def progress(status: int, remaining: int, total: int) -> None:
+            """Прерывает бесконечное повторение backup при активных writers."""
+            if time.monotonic() >= deadline:
+                raise PreparationError("Истекло время SQLite online backup")
+
         with closing(sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)) as original:
             with closing(sqlite3.connect(destination)) as copy:
-                original.backup(copy)
+                original.backup(copy, pages=256, progress=progress)
                 _integrity(copy)
         with destination.open("rb+") as file:
             os.fsync(file.fileno())
@@ -237,12 +255,36 @@ def write_state(state_dir: Path, checkout: Path, state: Mapping[str, object]) ->
         Path(temporary).unlink(missing_ok=True)
 
 
+def parse_state_object(payload: str) -> dict:
+    """Разбирает JSON state/selector без неоднозначных повторных ключей.
+
+    Args:
+        payload: Содержимое приватного файла, не предназначенное для журнала.
+
+    Returns:
+        JSON object с уникальными ключами во всех вложенных объектах.
+
+    Raises:
+        PreparationError: Корень не object или ключ повторяется.
+        ValueError: JSON повреждён.
+    """
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise PreparationError("Неоднозначные ключи сохранённого состояния")
+            value[key] = item
+        return value
+
+    value = json.loads(payload, object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise PreparationError("Некорректное сохранённое состояние выпуска")
+    return value
+
+
 def read_state(state_dir: Path, checkout: Path) -> dict[str, object] | None:
     """Читает последнее атомарно записанное состояние или возвращает None."""
     path = require_external_state_dir(state_dir, checkout) / "state.json"
     if not path.exists():
         return None
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise PreparationError("Некорректное сохранённое состояние выпуска")
-    return value
+    return parse_state_object(path.read_text(encoding="utf-8"))

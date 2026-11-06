@@ -34,7 +34,7 @@ class DeployMetricsTests(unittest.TestCase):
 
     def test_success_records_each_reached_stage_and_identity(self) -> None:
         """Отчёт связывает точный SHA/attempt с обоими фактическими verify."""
-        prod.deploy(self.host, "v1.0.0")
+        prod.deploy(self.host, "v1.1.0")
         report = self.report()
         self.assertEqual((report["sha"], report["run_id"], report["run_attempt"]), (NEW_SHA, 8, 1))
         self.assertEqual((report["stage"], report["result"]), ("success", "success"))
@@ -54,7 +54,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Пропущенный verify отсутствует, возврат имеет два отдельных измерения."""
         self.host.fail_candidate = True
         with self.assertRaises(prod.DeployError):
-            prod.deploy(self.host, "v1.0.0")
+            prod.deploy(self.host, "v1.1.0")
         report = self.report()
         self.assertEqual((report["stage"], report["result"]), ("rolled_back", "failure"))
         stages = {item["stage"]: item for item in report["stages"]}
@@ -67,7 +67,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Отказ до stop сохраняется без текста исключения и ложного простоя."""
         with patch.object(prep, "build_pinned_image", side_effect=RuntimeError("SECRET token")):
             with self.assertRaises(RuntimeError):
-                prod.deploy(self.host, "v1.0.0")
+                prod.deploy(self.host, "v1.1.0")
         report = self.report()
         self.assertEqual(report["stage"], "failed_preflight")
         self.assertEqual(report["stages"][0]["reason"], "RuntimeError")
@@ -78,7 +78,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Неуспех обоих verify не выдаёт восстановление доступности за факт."""
         with patch.object(self.host, "verify_both", side_effect=prod.DeployError("failure")):
             with self.assertRaises(prod.DeployError):
-                prod.deploy(self.host, "v1.0.0")
+                prod.deploy(self.host, "v1.1.0")
         report = self.report()
         self.assertEqual(report["stage"], "degraded")
         self.assertTrue(report["downtime_open"])
@@ -88,7 +88,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Неудачный backup остаётся в истории даже после успешного возврата."""
         with patch.object(prep, "backup_sqlite", side_effect=OSError("SECRET path")):
             with self.assertRaises(prod.DeployError):
-                prod.deploy(self.host, "v1.0.0")
+                prod.deploy(self.host, "v1.1.0")
         stages = {item["stage"]: item for item in self.report()["stages"]}
         self.assertEqual(stages["backup"]["reason"], "OSError")
         self.assertNotIn("migrations", stages)
@@ -98,7 +98,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Ошибка мигратора фиксируется без ложных candidate verify."""
         with patch.object(self.host, "migrate", side_effect=RuntimeError("SECRET SQL")):
             with self.assertRaises(prod.DeployError):
-                prod.deploy(self.host, "v1.0.0")
+                prod.deploy(self.host, "v1.1.0")
         stages = {item["stage"]: item for item in self.report()["stages"]}
         self.assertEqual(stages["migrations"]["reason"], "RuntimeError")
         self.assertNotIn("deploy.verify_both_1", stages)
@@ -108,7 +108,7 @@ class DeployMetricsTests(unittest.TestCase):
         """Смена image при activate обнаруживается именно вторым verify."""
         self.host.replace_on_activate = True
         with self.assertRaises(prod.DeployError):
-            prod.deploy(self.host, "v1.0.0")
+            prod.deploy(self.host, "v1.1.0")
         stages = {item["stage"]: item for item in self.report()["stages"]}
         self.assertEqual(stages["deploy.verify_both_1"]["result"], "success")
         self.assertEqual(stages["deploy.verify_both_2"]["result"], "failure")
@@ -116,7 +116,7 @@ class DeployMetricsTests(unittest.TestCase):
     def test_report_write_failure_never_triggers_rollback(self) -> None:
         """Отказ диска телеметрии не отменяет успешную установку."""
         with patch.object(prod, "_atomic_text", side_effect=OSError("full")):
-            prod.deploy(self.host, "v1.0.0")
+            prod.deploy(self.host, "v1.1.0")
         self.assertEqual(prep.read_state(self.host.state_dir, self.host.checkout)["stage"], "success")
         self.assertEqual(self.host.actions.count("stop_both"), 1)
 
@@ -142,7 +142,7 @@ class DeployMetricsTests(unittest.TestCase):
         with patch.object(metrics, "WARNING_SECONDS", 0.01), patch.object(metrics, "_emit", emit), patch.object(
             prep, "build_pinned_image", side_effect=build,
         ):
-            prod.deploy(self.host, "v1.0.0")
+            prod.deploy(self.host, "v1.1.0")
         self.assertEqual(self.report()["result"], "success")
         self.assertEqual(self.host.actions.count("stop_both"), 1)
 

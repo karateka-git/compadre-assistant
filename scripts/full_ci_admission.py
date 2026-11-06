@@ -12,10 +12,19 @@ RELEASE_WORKFLOW = "release-full.yml"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 RELEASE_BRANCH_PATTERN = re.compile(r"release/(\d+)\.(\d+)\Z")
 FULL_STEPS = frozenset({
+    "Require repository compatibility evidence",
     "Checkout exact candidate", "Verify candidate commit", "Setup Python",
     "Install runtime dependencies", "Run full unittest suite",
     "Run three autonomous smoke checks", "Check fresh and previous SQLite schemas",
     "Build and healthcheck candidate image", "Publish check manifest",
+})
+# Уже установленная v3.1.0 сохраняет исторический допуск до нового контракта.
+# Исключение по точному SHA нельзя расширить input/ref кандидата.
+LEGACY_FULL_SHA = "dd71c2ba42a0744b5b654cedcf73009ce8879058"
+COMPATIBILITY_STEPS = frozenset({
+    "Validate external policy pin", "Checkout trusted compatibility policy",
+    "Checkout compatibility candidate", "Setup compatibility Python",
+    "Check exact repository compatibility pair", "Upload repository compatibility evidence",
 })
 
 
@@ -71,8 +80,11 @@ def _names_and_steps(jobs: list[object], workflow: str, sha: str) -> bool:
             "Checkout exact main commit" if workflow == MAIN_WORKFLOW
             else "Checkout exact release commit", "Decide full run",
         },
-        f"{caller} / full-suite": FULL_STEPS,
+        f"{caller} / full-suite": FULL_STEPS if sha != LEGACY_FULL_SHA else
+        FULL_STEPS - {"Require repository compatibility evidence"},
     }
+    if sha != LEGACY_FULL_SHA:
+        required[f"{caller} / repository-compatibility"] = COMPATIBILITY_STEPS
     seen: set[str] = set()
     for raw_job in jobs:
         job = _object(raw_job, "job")

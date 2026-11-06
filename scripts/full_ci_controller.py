@@ -114,8 +114,8 @@ def prior_full_attempt(api: GitHub, workflow: str, sha: str, branch: str) -> boo
         if run.get("status") != "completed":
             return True
         jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs", filter="latest")
-        if any((job.get("name") == "full-suite" or
-                job.get("name", "").endswith(" / full-suite"))
+        if any((job.get("name") in {"full-suite", "repository-compatibility"} or
+                job.get("name", "").endswith((" / full-suite", " / repository-compatibility")))
                and job.get("conclusion") != "skipped"
                for job in jobs):
             return True

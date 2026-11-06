@@ -80,6 +80,20 @@ class DeployPrepareTests(unittest.TestCase):
             with self.assertRaises(prepare.PreparationError):
                 prepare.validate_schema(database, ["0001_initial_schema.sql", "0002_extra.sql"])
 
+    def test_online_backup_timeout_removes_incomplete_copy(self) -> None:
+        """Истечение времени оставляет исходные данные и удаляет неполную копию."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, destination = root / "live.db", root / "copy.db"
+            with closing(sqlite3.connect(source)) as connection:
+                connection.execute("CREATE TABLE sample(value TEXT)")
+                connection.execute("INSERT INTO sample VALUES ('kept')")
+                connection.commit()
+                with self.assertRaises(prepare.PreparationError):
+                    prepare.backup_sqlite(source, destination, timeout=0)
+                self.assertFalse(destination.exists())
+                self.assertEqual(connection.execute("SELECT value FROM sample").fetchall(), [("kept",)])
+
     def test_build_rejects_wrong_revision_label(self) -> None:
         """Сборка не принимает образ с подменённым OCI revision."""
         image = {"Id": "sha256:" + "b" * 64, "Config": {"Labels": {prepare.OCI_REVISION: "c" * 40}}}

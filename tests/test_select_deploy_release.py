@@ -52,6 +52,7 @@ class FakeApi:
             self.jobs[0]["name"] = "release-full-controller"
             self.jobs[0]["steps"][0]["name"] = "Checkout exact release commit"
             self.jobs[1]["name"] = "release-full / full-suite"
+            self.jobs[2]["name"] = "release-full / repository-compatibility"
         self.rules = [{"id": 7, "target": "tag", "enforcement": "active"}]
         self.rule = {
             "target": "tag", "enforcement": "active", "bypass_actors": [],

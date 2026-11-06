@@ -62,6 +62,19 @@ flowchart TD
 
 `full-suite` проверяет точный checkout, все unittest, три автономных smoke, свежую и предыдущую SQLite-схему, сборку образа и healthcheck. CI работает с тестовыми данными. Он не подтверждает реальные ответы ботов, systemd или production SQLite.
 
+Подготовленный SQLite gate дополнительно требует `repository-compatibility`
+для точной previous/candidate пары. Перед первым запуском нужно закрепить
+reviewed policy commit во внешней repository variable `COMPATIBILITY_POLICY_SHA`;
+без неё CI отказывает. Baseline, 107 операций, artifact и границы локальной
+проверки описаны в [шаге 5.4](ci-release-review/STAGE5_CI.md). Исторический CI
+установленной v3.1.0 сохраняет допуск по точному SHA; это не разрешает новые
+схемы. Локально реализована [predeploy-проверка](ci-release-review/STAGE5_PREDEPLOY.md)
+artifact, installed SHA/pin и предварительной SQLite-копии; её установка на VPS
+и приёмка с настоящим CI artifact ещё не выполнены.
+[Независимая локальная проверка 5.6](ci-release-review/STAGE5_REVIEW.md)
+подтвердила отказ до marker/stop и сохранение безопасного кода причины;
+она не заменяет живой CI и Linux/VPS приёмку.
+
 Для обычного выпуска допуск сверяет репозиторий, workflow (`main-full.yml` при создании линии, `release-full.yml` для PATCH), ref, полный SHA, run/attempt и обязательные jobs/steps. `pending`, `skipped`, `failure` и сбой GitHub API закрывают допуск. Проверка другого SHA, даже более позднего в той же линии, не подходит.
 
 ## 3. Создать релизную линию и выбрать версию
@@ -96,6 +109,23 @@ flowchart TD
 
 Обычный `deploy-prod vX.Y.Z` принимает опубликованный GitHub Release с полным допуском точного SHA релизной ветки. Он отдельно проверяет Release и состояние VPS, закрепляет образ, делает backup, останавливает оба канала, при необходимости применяет миграции и проверяет запуск обоих каналов. Перед эксплуатационным действием следуйте [OPERATIONS.md](OPERATIONS.md) и проверьте актуальное состояние по [PRODUCTION.md](PRODUCTION.md).
 
+Controller устанавливается отдельным автономным snapshot из проверенного
+commit; его SHA и digest не заменяют SHA/CI приложения. Подготовлены сборка,
+проверка Git-байтов/изолированных imports и selector-aware backup
+([шаг 6.5](ci-release-review/STAGE6_CONTROLLER_SNAPSHOT.md)). Это локальные
+результаты: snapshot на VPS не установлен, полный CI этого изменения ещё не
+получен. Boot/finalization и доставка schema admission локально дополнены;
+SQLite v2 остаётся закрыт до Linux/systemd/backup приёмки и согласованного окна
+без ручных writers. Администратор VPS сохраняет доступ к Docker и `data` как
+доверенный оператор. Два обнаруженных stopped legacy writer с writable data bind
+удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
+перед rollout требуется свежий inventory. Сам архив не разрешает новый deploy.
+В кандидате [7.3](ci-release-review/STAGE7_3_PREFLIGHT.md) безусловный rollout
+отказ заменён проверкой установленного snapshot, selector/backup effective
+units и guards. Перед marker/stop отдельно повторяются точная Release/CI пара,
+artifact, policy pin и image/OCI. Production допуск пока не получен; новые
+drop-ins и snapshot остаются отдельной установкой 7.7 после испытаний на копии.
+
 ## Исправления поддерживаемых линий
 
 Владелец выбирает затронутые линии. `main` и каждая выбранная `release/X.Y` получают отдельный PR, если исправления ещё нет в `main`. Все PR группы указывают взаимные **полные URL** в `Hotfix-Links:` своих описаний.
@@ -118,6 +148,12 @@ flowchart TD
 `scripts/publish_emergency_release.py` принимает причину и список PR. Он сохраняет проверки ветки, SHA, merge PR, SemVer, защищённого тега и Release, но допускает отсутствующий либо неуспешный полный CI. В Release записываются состояние `pr-fast` на момент merge, обход ruleset, состояние полного CI и непроверенные проверки. PATCH по-прежнему требует подтверждённого основания в `main`; другие линии независимы.
 
 Сервер принимает такой Release только с `--emergency` и `--reason`. Он повторно читает GitHub, различает тип Release и сохраняет проверки SHA, тега, ветки, backup, миграций, здоровья и rollback. Обычный `deploy-prod` аварийный Release отвергает.
+
+Подготовленный controller шага 5.5 также требует успешный compatibility job и
+проверенное evidence точной пары installed/candidate даже в emergency.
+Обход остальных ошибок полного CI не отменяет этот gate: отсутствие evidence
+закрывает установку до остановки каналов. Это новый локально проверенный
+контракт; действующий snapshot VPS пока не обновлён.
 
 GitHub API не доказывает исходный текст изменяемых release notes. Поэтому перед аварийным запуском нужна внешняя запись утверждённого решения и текста. Реальный аварийный Release и переключение VPS пока не испытывались; подтверждены изолированные сценарии. Практический порядок находится в [OPERATIONS.md](OPERATIONS.md).
 
