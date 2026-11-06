@@ -39,7 +39,7 @@ class DeployBackupTests(unittest.TestCase):
                          switch_intent={"from": "legacy", "to": generation},
                          admission={"transition_id": "e" * 32, "generation_id": generation,
                                     "image_id": IMAGE, "sha": SHA})
-            (host.state_dir / "active-db.json").write_text(json.dumps(switch.selector(state, "new")), encoding="utf-8")
+            prod._atomic_text(host.state_dir / "active-db.json", json.dumps(switch.selector(state, "new")))
         prep.write_state(host.state_dir, host.checkout, state)
         return host, state
 

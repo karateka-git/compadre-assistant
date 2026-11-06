@@ -157,3 +157,14 @@ Windows не объявляется его заменой. Требуются re
 и новый успешный полный CI точной пары; прежний compatibility artifact для
 `14c8306...` не переносится на новые байты. Исполнитель commit/push не делал.
 Остановка ботов и исполнение migration broker остаются заблокированы.
+
+Следующий [полный run 42243898274/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42243898274)
+для `62e029a0532e901a18aae1aebb38e95dc3f59254` выполнил 1132 tests с одним
+ERROR: backup v2 fixture создавал selector через `write_text`, то есть с mode
+0644 на Linux. Root uid/gid уже моделировались через SwitchHost; оставался
+реальный небезопасный mode файла. Fixture переведён на настоящий
+`prod._atomic_text`, который пишет 0600 и fsync. Runtime guard и модель uid/gid
+не менялись. Локально явным проектным Python выполнены
+`tests.test_deploy_backup tests.test_deploy_fixture_paths` — 5 tests OK,
+0.477 с. Нужен новый exact-SHA полный CI; этот run допуска не даёт.
+Черновой `stage7_3_harness.py` пока не проверен и не входит в этот CI fix.
