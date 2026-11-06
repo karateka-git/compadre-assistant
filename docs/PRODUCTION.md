@@ -36,7 +36,7 @@ systemd unit. **Оба канала остановлены**; это откры�
 | SQLite | Selector указывает на новое поколение. Прежняя и новая БД имеют `integrity_check=ok`, FK 0, миграции 1–4 и одинаковые fingerprint и logical digest; строковые данные не выводились. |
 | Каналы | Оба candidate контейнера `exited`, restart policy `no`; иных channel ID не обнаружено. Старые боты не запущены. |
 | systemd и backup | Основной service `failed`; backup timer `inactive`. |
-| Контроллер | Установленный snapshot `09f15a5b3c01ec73d02379b918104e8cf697b4b2` сохранён. Причина отказа — импорт helper из release checkout при `python3 -m` без `-P`. Исправление ещё не установлено. |
+| Контроллер | Отдельным подготовительным действием установлен snapshot `38be03d75293cbf516456fe45ead9bc17fedcc8d` и exact main/backup selector units с `python3 -P`; [протокол установки](ci-release-review/STAGE7_7_RECOVERY_PREP.md). Новый `require_infrastructure` прошёл. Recovery CLI и боты ещё не запускались. |
 
 Перед любым действием повторно прочитать фактический state, selector, marker,
 контейнеры и timer на VPS: эта запись не является разрешением на recovery.
