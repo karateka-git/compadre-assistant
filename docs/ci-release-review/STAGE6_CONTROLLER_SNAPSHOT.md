@@ -225,3 +225,21 @@ reboot/power loss и оба runtime images остаются непроверен
 Read-only production inventory не является такими испытаниями. Полный CI
 и VPS установка не выполнялись. На этой безопасной точке 6.5 заканчивается
 текущий проход; 6.6 и этап 7 не начинались. Rollout gate остаётся безусловным.
+
+## Окончательный локальный snapshot после продолжения 6.5
+
+Источник controller: `27c1da95ad12acfa6b37847515dd1cdae0401f2b`.
+Архив создан после этого commit из его Git blobs:
+`C:\Users\compadre\.codex\worktrees\ci-release-review-plan\controller-artifacts\controller-27c1da95ad12acfa6b37847515dd1cdae0401f2b.tar`.
+
+SHA256: `7d1e87d17a96dac0a88a8ec3683b6ef0c470a1260a80ef308f5a9de9d965164b`.
+Проверены все 60 файлов, manifest, синтаксис и изолированные imports
+`deploy_prod`, `controller_snapshot`, `deploy_backup`, `deploy_runtime`,
+`deploy_schema_admission`. Staging — соседний `staging-27c1da9`.
+Этот snapshot заменяет первый архив `4c7e6d4` в роли материала текущей 6.5.
+Архив и staging находятся только локально. Для production после merge и полного
+CI нужен новый архив точного проверенного SHA и отдельная установка/приёмка.
+
+Tracked рабочая копия после commits чистая; исходные untracked
+`recovery-tests.log`, `scripts/check_image_compatibility.py`,
+`scripts/compatibility_probe.py` сохранены. Git push не выполнялся.
