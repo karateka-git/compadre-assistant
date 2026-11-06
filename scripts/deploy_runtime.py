@@ -193,9 +193,12 @@ def finalize(host: Host, state: dict, record, outcome: str) -> None:
         if state.get("boot") != boot:
             raise DeployError("Повтор финализации изменил intent")
     else:
-        expected = "candidate_started" if outcome == "success" else "recovery_verified"
-        if state.get("stage") != expected:
+        expected = ({"candidate_started", "forward_recovery_verified"} if outcome == "success"
+                    else {"recovery_verified"})
+        if state.get("stage") not in expected:
             raise DeployError("Финализация требует проверенный runtime")
+        if state.get("stage") == "forward_recovery_verified" and state.get("forward_recovery") != boot:
+            raise DeployError("Forward recovery не имеет точного durable intent")
         record("finalization_intent", boot=boot)
     verify(host, state, require_running=True, allow_marker=True)
     host.marker(False)

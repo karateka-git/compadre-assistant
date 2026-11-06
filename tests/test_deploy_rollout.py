@@ -40,7 +40,7 @@ class RolloutTests(unittest.TestCase):
     def test_infrastructure_and_each_fail_closed_boundary(self):
         """Проверяет реальный gate; только внешние filesystem/systemd ответы моделируются."""
         info = SimpleNamespace(st_mode=0o100644, st_uid=0, st_gid=0, st_nlink=1)
-        for mutation in (None, "file", "reload", "backup", "guard", "snapshot", "writers", "boot"):
+        for mutation in (None, "file", "reload", "backup", "unsafe_backup", "guard", "snapshot", "writers", "boot"):
             host = self._host()
             original = host.run.side_effect
 
@@ -49,6 +49,11 @@ class RolloutTests(unittest.TestCase):
                     return "yes"
                 if mutation == "backup" and args[-1] == "ExecStartEx":
                     return json.dumps({"type": "a(sasasttttuii)", "data": []})
+                if mutation == "unsafe_backup" and args[-1] == "ExecStartEx":
+                    unsafe = [part for part in prod.SELECTOR_EXEC[:-2] + ["scripts.deploy_backup"]
+                              if part != "-P"]
+                    return json.dumps({"type": "a(sasasttttuii)", "data": [[unsafe[0], unsafe,
+                                       prod.PINNED_EXEC_FLAGS, 0, 0, 0, 0, 0, 0, 0]]})
                 if mutation == "guard" and args[-1] == "Conditions":
                     return json.dumps({"type": "a(sbbsi)", "data": []})
                 return original(*args)
