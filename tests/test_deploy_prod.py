@@ -209,6 +209,91 @@ class FakeHost(prod.Host):
             connection.commit()
 
 
+class ReleaseAuthenticationTests(unittest.TestCase):
+    """Проверяет выбор API для Release без вывода private token."""
+
+    def _host(self, root: Path) -> prod.Host:
+        """Создаёт внешний state отдельно от тестового checkout."""
+        checkout = root / "checkout"
+        state = root / "state"
+        checkout.mkdir()
+        state.mkdir()
+        return prod.Host(checkout, state)
+
+    def test_private_token_used_for_normal_emergency_and_repeated_select(self) -> None:
+        """Оба selector и повтор recovery получают authenticated API."""
+        with TemporaryDirectory() as temporary:
+            host = self._host(Path(temporary))
+            (host.state_dir / "github-read-token").write_text("placeholder", encoding="utf-8")
+            with patch.object(prod.compatibility, "private_text", return_value="private-token") as read, patch.object(
+                    prod, "GitHub", side_effect=lambda repository, token, **kwargs:
+                    SimpleNamespace(repository=repository, token=token, kwargs=kwargs)) as github, patch.object(
+                    prod, "select_release", side_effect=lambda api, version: (api.token, version)) as normal, patch.object(
+                    prod, "select_emergency_release", side_effect=lambda api, version: (api.token, version)) as emergency:
+                self.assertEqual(host.select("v3.2.0"), ("private-token", "v3.2.0"))
+                self.assertEqual(host.select("v3.2.0"), ("private-token", "v3.2.0"))
+                self.assertEqual(host.select_emergency("v3.2.1"), ("private-token", "v3.2.1"))
+            self.assertEqual(read.call_count, 3)
+            self.assertEqual(github.call_count, 3)
+            self.assertTrue(all(call.args[1] == "private-token" and not call.kwargs
+                                for call in github.call_args_list))
+            self.assertEqual(normal.call_count, 2)
+            emergency.assert_called_once()
+
+    def test_legacy_without_token_uses_public_api_but_v2_fails_closed(self) -> None:
+        """Анонимный selector остаётся только для состояния до SQLite v2."""
+        with TemporaryDirectory() as temporary:
+            host = self._host(Path(temporary))
+            with patch.object(prod, "GitHub", return_value=object()) as github, patch.object(
+                    prod, "select_release", return_value="legacy"):
+                self.assertEqual(host.select("v3.1.0"), "legacy")
+                github.assert_called_once_with(prod.EXPECTED_REPOSITORY, "", allow_anonymous=True)
+            (host.state_dir / "active-db.json").write_text("{}", encoding="utf-8")
+            with patch.object(prod, "GitHub") as github:
+                with self.assertRaises(prod.DeployError):
+                    host.select("v3.2.0")
+                github.assert_not_called()
+            (host.state_dir / "active-db.json").unlink()
+            prep.write_state(host.state_dir, host.checkout, {"protocol_version": 2, "stage": "degraded"})
+            with patch.object(prod, "GitHub") as github:
+                with self.assertRaises(prod.DeployError):
+                    host.select("v3.2.0")
+                github.assert_not_called()
+
+    def test_malformed_existing_token_never_falls_back_to_anonymous(self) -> None:
+        """Повреждённый private token закрывает обычный и аварийный путь."""
+        with TemporaryDirectory() as temporary:
+            host = self._host(Path(temporary))
+            (host.state_dir / "github-read-token").write_text("placeholder", encoding="utf-8")
+            with patch.object(prod.compatibility, "private_text", side_effect=prod.compatibility.PredeployError(
+                    "SAFE_CONFIG_PERMISSIONS")), patch.object(prod, "GitHub") as github:
+                with self.assertRaises(prod.compatibility.PredeployError):
+                    host.select("v3.2.0")
+                with self.assertRaises(prod.compatibility.PredeployError):
+                    host.select_emergency("v3.2.1")
+                github.assert_not_called()
+
+    def test_anonymous_403_does_not_affect_two_authenticated_selects(self) -> None:
+        """Синтетический public 403 не ломает два чтения с private token."""
+        with TemporaryDirectory() as temporary:
+            host = self._host(Path(temporary))
+
+            def api(repository: str, token: str, *, allow_anonymous: bool = False):
+                """Имитирует исчерпанный публичный лимит без передачи token наружу."""
+                if not token:
+                    raise prod.DeployError("public API 403")
+                return SimpleNamespace(token=token)
+
+            with patch.object(prod, "GitHub", side_effect=api), patch.object(
+                    prod, "select_release", side_effect=lambda client, version: version):
+                with self.assertRaisesRegex(prod.DeployError, "403"):
+                    host.select("v3.1.0")
+                (host.state_dir / "github-read-token").write_text("placeholder", encoding="utf-8")
+                with patch.object(prod.compatibility, "private_text", return_value="private-token"):
+                    self.assertEqual(host.select("v3.2.0"), "v3.2.0")
+                    self.assertEqual(host.select("v3.2.0"), "v3.2.0")
+
+
 class SystemdBootTests(unittest.TestCase):
     """Проверяет effective unit с фактическим порядком production drop-in."""
 

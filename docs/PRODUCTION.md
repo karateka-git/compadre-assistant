@@ -38,6 +38,10 @@ systemd unit. **Оба канала остановлены**; это откры�
 | systemd и backup | Основной service `failed`; backup timer `inactive`. |
 | Контроллер | Отдельным подготовительным действием установлен snapshot `38be03d75293cbf516456fe45ead9bc17fedcc8d` и exact main/backup selector units с `python3 -P`; [протокол установки](ci-release-review/STAGE7_7_RECOVERY_PREP.md). Новый `require_infrastructure` прошёл. Recovery CLI и боты ещё не запускались. |
 
+Повторный read-only допуск к recovery выявил [публичный лимит GitHub API в
+Release selector](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md#дополнительный-отказ-допуска-после-установки-snapshot).
+До исправления и отдельной проверки новый recovery не запускать.
+
 Перед любым действием повторно прочитать фактический state, selector, marker,
 контейнеры и timer на VPS: эта запись не является разрешением на recovery.
 

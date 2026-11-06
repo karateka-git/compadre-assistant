@@ -68,8 +68,29 @@ fake start, использование тех же ID, selector NEW, чтени�
 evidence, реального health/polling и systemd в репетиции была изолирована;
 перед production recovery их нужно подтвердить отдельно.
 
-На последнем VPS осмотре production по-прежнему `degraded`, marker присутствует,
-backup timer выключен, оба candidate ID остановлены, установленный controller
-остаётся `09f15a5b3c01ec73d02379b918104e8cf697b4b2`. Следующий шаг —
-отдельная проверка и установка нового controller snapshot и exact selector
-units под lock; затем свежий допуск и согласованный forward recovery.
+На осмотре перед установкой production оставался `degraded`, marker
+присутствовал, backup timer был выключен, оба candidate ID остановлены, а
+controller указывал на `09f15a5b3c01ec73d02379b918104e8cf697b4b2`.
+Отдельная установка нового snapshot и units затем записана в
+[протоколе подготовки](STAGE7_7_RECOVERY_PREP.md).
+
+## Дополнительный отказ допуска после установки snapshot
+
+После [установки нового controller snapshot](STAGE7_7_RECOVERY_PREP.md)
+первый read-only recovery admission под существующим lock прошёл exact Release,
+CI и SQLite. Повторный admission отказал до запуска recovery: `Host.select()`
+выбирал публичный GitHub API, хотя root-private `github-read-token` уже был
+установлен. Публичный endpoint `/actions/workflows/main-full.yml` вернул
+HTTP 403 `rate limit exceeded`. Отдельный read-only вызов того же endpoint
+с установленным token прошёл; значение token не выводилось. Первый отказ
+дополнительного локального сравнения logical SHA объяснялся только способом
+сериализации `iterdump`: с завершающим LF обе SQLite дали прежний digest
+`49103ef442d3119678762c39c9707c555a10f7670a4d4cb7218a581c05ca50c1`.
+Изменения данных не обнаружены.
+
+Готовится узкое исправление обычного и аварийного Release selector: при
+наличии private token оба пути используют authenticated API; повреждённый
+файл либо v2 state без token закрывают допуск. Анонимный fallback остаётся
+только для прежнего legacy state без selector/token. До нового PR, полного CI,
+проверенного snapshot и отдельной установки recovery CLI **не запускался**;
+production остаётся `degraded` с marker и остановленными каналами.

@@ -146,7 +146,7 @@ class Host:
         previous = Path.cwd()
         try:
             os.chdir(self.checkout)
-            return select_release(GitHub(EXPECTED_REPOSITORY, "", allow_anonymous=True), version)
+            return select_release(self.release_api(), version)
         finally:
             os.chdir(previous)
 
@@ -155,9 +155,31 @@ class Host:
         previous = Path.cwd()
         try:
             os.chdir(self.checkout)
-            return select_emergency_release(GitHub(EXPECTED_REPOSITORY, "", allow_anonymous=True), version)
+            return select_emergency_release(self.release_api(), version)
         finally:
             os.chdir(previous)
+
+    def release_api(self) -> GitHub:
+        """Выбирает закрытый read-only token либо прежний legacy public path.
+
+        При наличии файла даже повреждённый token закрывает допуск. После
+        появления SQLite selector анонимный fallback больше не разрешён.
+
+        Returns:
+            GitHub API для проверки Release и точного CI run.
+
+        Raises:
+            DeployError: SQLite v2 не имеет обязательного private token.
+            PredeployError: Файл token не является root-owned 0600 или пуст.
+        """
+        path = self.state_dir / "github-read-token"
+        if os.path.lexists(path):
+            return GitHub(EXPECTED_REPOSITORY, compatibility.private_text(path))
+        state = prep.read_state(self.state_dir, self.checkout)
+        if os.path.lexists(self.state_dir / "active-db.json") or (
+                state is not None and "protocol_version" in state):
+            raise DeployError("SQLite v2 требует private GitHub read token")
+        return GitHub(EXPECTED_REPOSITORY, "", allow_anonymous=True)
 
     def initiator(self) -> str:
         """Возвращает подтверждённого sudo инициатора серверной команды."""
