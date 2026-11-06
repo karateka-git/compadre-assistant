@@ -103,6 +103,35 @@ ancestor/descendant bind, readonly/separate bind и неизвестный inven
    условий. Локальный архив, зелёные unit tests и исторический снимок VPS
    не являются доказательством установленного controller или Linux-приёмки.
 
+### Получить отсутствующий контракт Linux-стенда
+
+В repository есть только drop-ins, нет базовых `obs-chat-bot.service` и
+`obs-chat-bot-backup.service`. Перед продолжением интеграции нужны безопасные
+read-only наблюдения effective `Type`, `RemainAfterExit`, `KillMode`, `Restart`,
+`TimeoutStartUSec`, `TimeoutStopUSec`, `User`/`Group`, lifecycle команд и
+зависимостей обоих units; затем фиксация reviewed boot/shutdown контракта
+в repository. Не публиковать Environment/credentials и полные команды, если
+они содержат секреты. Дополнительно нужны owner/mode/ACL каталога `data`,
+файлов credentials, Docker socket и группы операторов, inventory других
+systemd/cron/host CLI и Docker writers. На VPS это отдельное действие по
+PRODUCTION; в этом шаге доступа к серверу не было.
+
+Причина зависимости конкретна: controller удерживает эксклюзивный deploy lock
+во время `systemctl start`. Новый boot helper с тем же lock не сможет
+завершиться, а helper без lock оставляет гонку запуска writer относительно
+stop/snapshot. Нужна отдельная durable finalization state machine с
+согласованным выходом из lock и повтором после прерывания. Предполагать
+семантику отсутствующих base units нельзя. Recovery старого образа на новой
+схеме также требует реализации доставки проверенных admission/context
+`runtime_schema` в readonly mount, а не только проверки CI evidence.
+
+Это оставшиеся задачи реализации 6.5, а не уже доказанные свойства 6.4 или
+сценарии, которые можно закрыть зелёным fake transport test. На автономном
+Linux-стенде можно разработать и проверить новый базовый unit/операционный
+контракт; его перенос на VPS затем требует отдельной проверки совместимости
+с существующей установкой. Наличие только Windows workspace не подтверждает
+Linux права, systemd stop/start или исключение ручных writers.
+
 ## Локальные проверки
 
 Используется `C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe`
@@ -113,3 +142,28 @@ project dependencies и imports. Итог целевого прогона, то�
 snapshot/integration/backup tests и существующие deploy/switch/recovery,
 prepare/final snapshot/predeploy compatibility. Полный набор приложения не
 запускался. `git diff --check` не обнаружил whitespace ошибок.
+
+Финальный повтор после commit controller: те же 98 tests, `OK`, 2 Linux-only
+skips, 53.665 с. Отдельно `tests.test_migration_runner`,
+`tests.test_runtime_schema`, `tests.test_deploy_metrics`: 28 tests, `OK`,
+2.882 с. Всего 126 целевых tests и 2 пропуска. Повторить из worktree:
+
+```powershell
+& 'C:/Users/compadre/Documents/obsChatBot/.venv/Scripts/python.exe' -B -m unittest tests.test_controller_snapshot tests.test_controller_integration tests.test_deploy_backup tests.test_deploy_database_switch tests.test_deploy_database_recovery tests.test_deploy_prod tests.test_deploy_prepare tests.test_deploy_final_snapshot tests.test_predeploy_compatibility
+& 'C:/Users/compadre/Documents/obsChatBot/.venv/Scripts/python.exe' -B -m unittest tests.test_migration_runner tests.test_runtime_schema tests.test_deploy_metrics
+```
+
+## Подготовленный локальный архив
+
+Архив создан из окончательного commit локальной подготовки контроллера
+`4c7e6d43d6f1a63846f05f2599d97567cf2ce594`, после его commit. Источник
+Git-байтов и manifest относится именно к этому SHA, а не к будущему merge
+или Release. Файл находится вне checkout:
+`C:\Users\compadre\.codex\worktrees\ci-release-review-plan\controller-artifacts\controller-4c7e6d43d6f1a63846f05f2599d97567cf2ce594.tar`.
+
+SHA256: `9c5ab1a84474f897cc3d1a654837feb48e46e339fae962e90b494208e94e6032`.
+`unpack` проверил все 57 файлов, синтаксис и изолированные imports настоящего
+snapshot, включая `deploy_prod`, `controller_snapshot`, `deploy_backup`.
+Staging: соседний `staging-4c7e6d4`; оба результата локальные, не установлены
+на VPS. Документационные commits после этого SHA не меняют байты controller;
+если изменится код, архив надо собрать заново из окончательного commit.
