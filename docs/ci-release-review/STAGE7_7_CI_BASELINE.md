@@ -52,5 +52,37 @@ snapshot и проверить на закрытом Linux. До отдельн�
 До PR из закреплённого worktree запущены 63 теста контроллера CI,
 policy contract, predeploy и публикации через проектный venv: **OK**.
 Проверка подтверждает, что оба caller обращаются к Contents API с exact
-внешним pin. `git diff --check` успешен. Это локальные результаты; полный
-CI exact merge SHA и Linux snapshot будут записаны после получения.
+внешним pin. `git diff --check` успешен.
+
+PR [#67](https://github.com/karateka-git/compadre-assistant/pull/67) прошёл
+`pr-fast` и слит merge commit
+`09f15a5b3c01ec73d02379b918104e8cf697b4b2`. В этом commit policy
+содержит v3.1.0/`dd71c2ba42a0744b5b654cedcf73009ce8879058`/Release ID
+`431378458` и обе новые workflow версии. Repository variable затем
+переведена на exact SHA этого reviewed commit; readback совпал. Production
+external pin для runtime v3.2.0 не менялся.
+
+Ручной [main-full 42273239857/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42273239857)
+завершился **success** на exact SHA `09f15a5b3c01ec73d02379b918104e8cf697b4b2`:
+controller, `repository-compatibility`, `full-suite` и `ci-metrics` успешны.
+Compatibility artifact ID `13533115438`, digest
+`sha256:c5e8cd1f17d4a3dc57b703c4edc0da77d586e10847939933dd4caa5381e1d6a2`;
+на момент проверки `expired=false`. Это CI evidence для будущей пары с
+установленной v3.1.0, а не новое evidence ранее опубликованного runtime
+v3.2.0. После изменения production `last_good` CI baseline потребуется
+ротировать по [порядку](../OPERATIONS.md#закрепить-базу-полного-ci-после-установки).
+
+Из exact merge SHA локально собран archive SHA256
+`65a024d790a189344be06b4f5a33432b212dcab280b00a3ac72b0bcfce6d1dd3`:
+63 файла, manifest и Git-байты проверены. На VPS архив размещён **только**
+в закрытом каталоге
+`/var/lib/compadre-assistant-stage7-20261106/controller-09f15a5-proof`.
+Linux staging имеет `root:root`/0700, archive `root:root`/0600;
+`controller_snapshot unpack` и `verify --require-root` подтвердили 63 файла,
+права и изолированные imports. Код из private snapshot прочитал реальное
+скалярное D-Bus свойство `RemainAfterExit` как `true`. Установленный
+production `controller.sha` остался `cabc0e24d28947123868db8a60f6b55095feb63e`,
+основной service и backup timer active, marker отсутствует. Production
+Telegram и VK сохранили `healthy` и `restarts=0`. Production
+controller/units/token/policy/runtime/БД не переключались; `deploy-prod`
+не запускался. Для установки нового snapshot требуется отдельный review.

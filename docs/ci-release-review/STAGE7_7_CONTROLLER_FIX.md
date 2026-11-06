@@ -39,3 +39,9 @@ private Linux проверка реальной формы `RemainAfterExit`. Т
 заменить установленный controller snapshot по отдельному review. Release
 runtime v3.2.0, его CI и compatibility artifact относятся к прежней паре
 `v3.1.0` → `cabc0e2`; SHA контроллера может быть новее и фиксируется отдельно.
+
+Первый controller fix слит как `6576fddd482fbb0ce427ad594e9bf4e37bf9b849`,
+но его полный CI отказал из-за прежнего выбора последнего опубликованного
+Release. Исправление выбора базы и успешный новый CI/snapshot зафиксированы
+в [протоколе CI baseline](STAGE7_7_CI_BASELINE.md). Runtime Release v3.2.0
+сохранил исходный SHA и прежнее exact-pair evidence.
