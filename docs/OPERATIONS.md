@@ -307,6 +307,40 @@ python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --not
 Для реальных ответов Telegram/VK требуется пользовательская проверка.
 Результат доступен в серверном журнале; внешних уведомлений сейчас нет.
 
+### Закрепить базу полного CI после установки
+
+Только после успешного `deploy-prod` и независимой проверки `last_good`,
+рабочей БД и обоих каналов обновить базу следующего полного CI. Публикация
+Release без установки на VPS не меняет базу: например, при опубликованной
+v3.2.0 и установленной v3.1.0 внешний CI pin всё ещё должен указывать на
+reviewed policy с v3.1.0. `main-full` и `release-full` читают именно её
+`previous_sha`, `release_tag` и `release_id`, проверяют immutable Release и
+прямой tag. `full-suite` повторно проверяет ту же policy и точную пару.
+
+После установки нового выпуска сверить на VPS установленный SHA и Release ID
+без вывода данных БД. В отдельном PR обновить только baseline поля
+`scripts/repository_compatibility_policy.json` до этого SHA/tag/ID; проверить
+матрицу старого repository API, `pr-fast` и merge commit. Затем установить
+repository variable на **полный SHA reviewed merge commit**, проверить её
+значение и запустить ручной полный `main-full` для текущего SHA `main`.
+Для существующей release-линии проверить `release-full` точного нового SHA.
+Новый CI pin не заменяет отдельный production `compatibility-policy.sha`:
+тот остаётся закреплён за evidence пары, с которой текущий выпуск был
+установлен. До подтверждённого нового CI нельзя считать зелёный run другой
+пары допуском; при несовпадении pin и `last_good` predeploy закрывается.
+
+```powershell
+gh variable set COMPATIBILITY_POLICY_SHA --repo karateka-git/compadre-assistant --body <полный-SHA-reviewed-merge>
+gh variable list --repo karateka-git/compadre-assistant --json name,value
+gh workflow run main-full.yml --repo karateka-git/compadre-assistant --ref main
+```
+
+Перед каждым Git-действием проверить чистоту worktree; для push получить
+согласие пользователя и после push перечитать `AGENTS.md`. При неуспешной
+проверке policy/Release или любого обязательного job оставить выпуск закрытым
+и разбирать конкретный run/attempt, не подменяя baseline последним
+опубликованным Release.
+
 ### Проверить живое переключение двух каналов
 
 После технически успешной установки проверить живые ответы отдельно: статус

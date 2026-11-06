@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
+import base64
+import binascii
 import json
 import os
 import re
@@ -12,13 +13,13 @@ import sys
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from scripts.ci_repository_compatibility import verify_baseline
 from scripts.full_ci_admission import (
     AdmissionError, MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN, RELEASE_WORKFLOW,
     SHA_PATTERN, select_successful_run,
 )
 
 
-BOOTSTRAP_PRODUCTION_SHA = "ac2ac981ba628a881b483238a4eaf191a644de6a"
 VERSION_PATTERN = re.compile(r"v(\d+)\.(\d+)\.(\d+)\Z")
 
 
@@ -32,16 +33,6 @@ def git(*arguments: str) -> str:
     if result.returncode:
         raise ControllerError(f"git {' '.join(arguments)}: {result.stderr.strip()}")
     return result.stdout.strip()
-
-
-def is_ancestor(older: str, newer: str) -> bool:
-    """Проверяет достижимость commit без обращения к изменяемому имени ref."""
-    result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", older, newer], capture_output=True,
-    )
-    if result.returncode not in (0, 1):
-        raise ControllerError("Не удалось проверить родство commit в Git")
-    return result.returncode == 0
 
 
 class GitHub:
@@ -175,50 +166,44 @@ def tag_commit(api: GitHub, tag: str) -> str:
     raise ControllerError(f"Тег {tag} не указывает на commit")
 
 
-def previous_release_sha(api: GitHub, candidate: str, branch: str) -> str:
-    """Выбирает последний опубликованный выпуск линии или bootstrap.
+def previous_release_sha(api: GitHub, branch: str) -> str:
+    """Читает прежний выпуск из внешне закреплённой CI policy.
 
     Args:
         api: Читающий GitHub API клиент.
-        candidate: Проверяемый полный SHA.
         branch: Имя main либо release/X.Y.
 
     Returns:
-        SHA предыдущего опубликованного выпуска.
+        SHA выпуска, закреплённого в policy для установленной production базы.
 
     Raises:
-        ControllerError: Выпуск или тег неоднозначны, либо bootstrap недостижим.
+        ControllerError: Pin, policy или immutable Release/tag недействительны.
     """
-    match = RELEASE_BRANCH_PATTERN.fullmatch(branch)
-    if branch != "main" and not match:
+    if branch != "main" and not RELEASE_BRANCH_PATTERN.fullmatch(branch):
         raise ControllerError(f"Недопустимая ветка: {branch}")
-    versions: list[tuple[tuple[int, int, int], datetime, str]] = []
-    for release in api.pages("/releases"):
-        if release.get("draft") or release.get("prerelease"):
-            continue
-        version = VERSION_PATTERN.fullmatch(release.get("tag_name", ""))
-        if not version or not release.get("published_at"):
-            raise ControllerError("Опубликован выпуск без однозначной SemVer-версии")
-        parts = tuple(map(int, version.groups()))
-        published = datetime.fromisoformat(release["published_at"].replace("Z", "+00:00"))
-        versions.append((parts, published, release["tag_name"]))
-    if len({version for version, _, _ in versions}) != len(versions):
-        raise ControllerError("Повторяющиеся номера опубликованных выпусков")
-    if not versions:
-        if is_ancestor(BOOTSTRAP_PRODUCTION_SHA, candidate):
-            return BOOTSTRAP_PRODUCTION_SHA
-        raise ControllerError("Bootstrap production SHA не является предком candidate")
-    relevant = [entry for entry in versions if entry[0][:2] == tuple(map(int, match.groups()))] if match else versions
-    # Для новой релизной линии схема берётся от последнего глобального выпуска.
-    choices = relevant or versions
-    latest = max(entry[1] for entry in choices)
-    matches = [entry for entry in choices if entry[1] == latest]
-    if len(matches) != 1:
-        raise ControllerError("Неоднозначное время последнего опубликованного выпуска")
-    _, _, tag = matches[0]
-    # PATCH поддерживаемой линии может жить в соседней Git-ветке. Совместимость
-    # её схемы с candidate доказывает строгий prefix/content тест full-suite.
-    return tag_commit(api, tag)
+    pin = os.environ.get("COMPATIBILITY_POLICY_SHA", "")
+    if not SHA_PATTERN.fullmatch(pin):
+        raise ControllerError("Не задан точный внешний SHA CI policy")
+    response = api.get("/contents/scripts/repository_compatibility_policy.json", ref=pin)
+    if (not isinstance(response, dict) or response.get("encoding") != "base64"
+            or not isinstance(response.get("content"), str)):
+        raise ControllerError("Некорректный ответ GitHub Contents для CI policy")
+    try:
+        content = base64.b64decode("".join(response["content"].split()), validate=True)
+        policy = json.loads(content)
+    except (ValueError, TypeError, binascii.Error) as error:
+        raise ControllerError("Недействительные байты CI policy") from error
+    if (not isinstance(policy, dict) or policy.get("version") != 1
+            or policy.get("repository") != api.repository
+            or not SHA_PATTERN.fullmatch(policy.get("previous_sha", ""))
+            or not VERSION_PATTERN.fullmatch(policy.get("release_tag", ""))
+            or type(policy.get("release_id")) is not int or policy["release_id"] <= 0):
+        raise ControllerError("CI policy не задаёт допустимую production базу")
+    previous = policy["previous_sha"]
+    tag = quote(policy["release_tag"], safe="")
+    verify_baseline(policy, api.get(f"/releases/tags/{tag}"),
+                    api.get(f"/git/ref/tags/{tag}"), previous)
+    return previous
 
 
 def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict[str, str]:
@@ -254,7 +239,7 @@ def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict
             raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный rerun")
     else:
         raise ControllerError(f"Неизвестный режим: {mode}")
-    previous = previous_release_sha(api, sha, branch)
+    previous = previous_release_sha(api, branch)
     return {"run-full": "true", "previous-release-sha": previous}
 
 

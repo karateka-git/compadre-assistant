@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -47,13 +49,22 @@ def admission_jobs(sha: str) -> list[dict]:
 class FakeGitHub:
     """Отдаёт предсказуемые ответы для сценариев контроллера."""
 
-    def __init__(self, releases=None, runs=None, jobs=None, prs=None) -> None:
+    def __init__(self, releases=None, runs=None, jobs=None, prs=None, policy=None,
+                 release=None, reference=None, content=None) -> None:
         """Сохраняет наборы ответов REST API для теста."""
         self.releases = releases or []
         self.runs = runs or {}
         self.jobs = jobs or {}
         self.prs = prs or {}
         self.repository = "owner/repo"
+        self.policy = policy if policy is not None else {
+            "version": 1, "repository": self.repository, "previous_sha": SHA_B,
+            "release_tag": "v3.1.0", "release_id": 10,
+        }
+        self.release = release
+        self.reference = reference
+        self.content = content
+        self.contents_refs = []
 
     def pages(self, path, key=None, **parameters):
         """Возвращает одну подготовленную страницу API."""
@@ -76,7 +87,16 @@ class FakeGitHub:
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": SHA_D}}
         if path.startswith("/git/ref/tags/"):
-            return {"object": {"type": "commit", "sha": SHA_B}}
+            return self.reference if self.reference is not None else {
+                "object": {"type": "commit", "sha": SHA_B}}
+        if path == "/contents/scripts/repository_compatibility_policy.json":
+            self.contents_refs.append(parameters.get("ref"))
+            return self.content if self.content is not None else {"encoding": "base64", "content": base64.b64encode(
+                json.dumps(self.policy).encode()).decode()}
+        if path.startswith("/releases/tags/"):
+            return self.release if self.release is not None else {
+                "id": 10, "tag_name": "v3.1.0", "immutable": True,
+                "draft": False, "prerelease": False, "published_at": "2026-11-02T00:00:00Z"}
         raise AssertionError(path)
 
 
@@ -170,54 +190,63 @@ class FullCiControllerTests(unittest.TestCase):
         }] for sha in (SHA_D, SHA_C, SHA_B)}
         self.assertEqual(controller.merged_since_last_success(FakeGitHub(prs=prs), SHA_D), (3, SHA_A))
 
-    @patch.object(controller, "is_ancestor", side_effect=AssertionError("ancestry is irrelevant"))
-    def test_sibling_release_is_valid_migration_base(self, _ancestor) -> None:
-        """Опубликованный PATCH из соседней линии выбирается по тегу."""
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
+    def test_published_but_not_installed_uses_pinned_baseline_in_both_lines(self) -> None:
+        """Публикация v3.2.0 не меняет базу установленной v3.1.0."""
         api = FakeGitHub(releases=[{
-            "tag_name": "v1.0.1", "draft": False, "prerelease": False,
-            "published_at": "2026-10-14T00:00:00Z",
+            "tag_name": "v3.2.0", "draft": False, "prerelease": False,
+            "published_at": "2026-11-06T00:00:00Z",
         }])
-        self.assertEqual(controller.previous_release_sha(api, SHA_D, "main"), SHA_B)
+        self.assertEqual(controller.previous_release_sha(api, "main"), SHA_B)
+        self.assertEqual(controller.previous_release_sha(api, "release/3.3"), SHA_B)
+        self.assertEqual(api.contents_refs, [SHA_A, SHA_A])
 
-    @patch.object(controller, "is_ancestor", side_effect=AssertionError("ancestry is irrelevant"))
-    def test_new_release_line_uses_latest_global_publication(self, _ancestor) -> None:
-        """Новая линия сравнивается с последним опубликованным выпуском."""
-        api = FakeGitHub(releases=[
-            {"tag_name": "v1.1.0", "draft": False, "prerelease": False,
-             "published_at": "2026-10-13T00:00:00Z"},
-            {"tag_name": "v1.0.2", "draft": False, "prerelease": False,
-             "published_at": "2026-10-14T00:00:00Z"},
-        ])
-        with patch.object(controller, "tag_commit", return_value=SHA_B) as tag:
-            self.assertEqual(controller.previous_release_sha(api, SHA_D, "release/2.0"), SHA_B)
-        tag.assert_called_once_with(api, "v1.0.2")
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A,
+                            "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.object(controller, "git", return_value=SHA_D)
+    @patch.object(controller, "merged_since_last_success", return_value=(3, SHA_A))
+    @patch.object(controller, "prior_full_attempt", return_value=False)
+    @patch.object(controller, "full_success", return_value=False)
+    def test_decide_uses_pinned_previous_for_main_and_release(
+        self, _success, _attempt, _merged, _git,
+    ) -> None:
+        """Оба caller передают full-suite базу внешней policy."""
+        api = FakeGitHub(releases=[{"tag_name": "v3.2.0"}])
+        for mode, branch in (("main", "main"), ("release", "release/3.3")):
+            with self.subTest(mode=mode):
+                self.assertEqual(controller.decide(api, mode, SHA_D, branch, False),
+                                 {"run-full": "true", "previous-release-sha": SHA_B})
 
-    @patch.object(controller, "is_ancestor", return_value=True)
-    def test_latest_published_backport_takes_precedence(self, _ancestor) -> None:
-        """Поздний PATCH старой линии не скрывается большей SemVer-версией."""
-        api = FakeGitHub(releases=[
-            {"tag_name": "v2.0.0", "draft": False, "prerelease": False,
-             "published_at": "2026-10-13T00:00:00Z"},
-            {"tag_name": "v1.0.2", "draft": False, "prerelease": False,
-             "published_at": "2026-10-14T00:00:00Z"},
-        ])
-        with patch.object(controller, "tag_commit", return_value=SHA_B) as tag:
-            self.assertEqual(controller.previous_release_sha(api, SHA_D, "main"), SHA_B)
-        tag.assert_called_once_with(api, "v1.0.2")
+    def test_missing_or_invalid_external_pin_fails_closed(self) -> None:
+        """Без внешнего полного SHA кандидат не может выбрать свою policy."""
+        for pin in ("", "bad", SHA_A.upper()):
+            with self.subTest(pin=pin), patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": pin}):
+                with self.assertRaisesRegex(controller.ControllerError, "внешний SHA"):
+                    controller.previous_release_sha(FakeGitHub(), "main")
 
-    @patch.object(controller, "is_ancestor", return_value=True)
-    def test_bootstrap_used_before_first_published_release(self, _ancestor) -> None:
-        """До v1.0.0 используется зафиксированный production commit."""
-        self.assertEqual(
-            controller.previous_release_sha(FakeGitHub(), SHA_D, "main"),
-            controller.BOOTSTRAP_PRODUCTION_SHA,
-        )
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
+    def test_wrong_repository_release_or_tag_fails_closed(self) -> None:
+        """Доверенный pin не разрешает чужую базу и mutable Release/tag."""
+        for change in ({"repository": "other/repo"}, {"release_id": 11},
+                       {"release_tag": "v3.2.0"}, {"previous_sha": SHA_C}):
+            with self.subTest(change=change):
+                api = FakeGitHub(policy={**FakeGitHub().policy, **change})
+                with self.assertRaises((controller.ControllerError, ValueError)):
+                    controller.previous_release_sha(api, "main")
+        for api in (FakeGitHub(release={**FakeGitHub().get("/releases/tags/v3.1.0"),
+                                        "immutable": False}),
+                    FakeGitHub(reference={"object": {"type": "tag", "sha": SHA_B}})):
+            with self.assertRaisesRegex(ValueError, "pinned immutable"):
+                controller.previous_release_sha(api, "release/3.3")
 
-    @patch.object(controller, "is_ancestor", return_value=False)
-    def test_bootstrap_still_requires_ancestry(self, _ancestor) -> None:
-        """До первого выпуска прежняя production точка должна быть предком."""
-        with self.assertRaises(controller.ControllerError):
-            controller.previous_release_sha(FakeGitHub(), SHA_D, "main")
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
+    def test_corrupt_external_policy_bytes_fail_closed(self) -> None:
+        """Пустой или повреждённый ответ Contents не заменяется локальным JSON."""
+        for content in ({"encoding": "none", "content": ""},
+                        {"encoding": "base64", "content": "%%%"}):
+            with self.subTest(content=content):
+                with self.assertRaises(controller.ControllerError):
+                    controller.previous_release_sha(FakeGitHub(content=content), "main")
 
     def test_sibling_schema_prefix_mismatch_fails_closed(self) -> None:
         """Несовпадающие имена и SQL соседней линии останавливают набор."""

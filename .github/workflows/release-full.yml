@@ -32,6 +32,7 @@ jobs:
         id: decide
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
           BRANCH_CREATED: ${{ github.event.created }}
         run: python -m scripts.full_ci_controller release
 
