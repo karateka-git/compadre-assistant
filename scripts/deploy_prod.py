@@ -446,8 +446,46 @@ class Host:
         _atomic_text(self.state_dir / "runtime.env", value)
 
     def require_switch_rollout(self) -> None:
-        """Закрывает v2 до Linux-приёмки boot, backup и исключения сторонних CLI."""
-        raise DeployError("SQLite protocol v2: rollout закрыт до приёмки runtime/backup и fencing writers")
+        """Разрешает v2 только при проверенном snapshot и загруженных unit guards.
+
+        Raises:
+            DeployError: Инфраструктурные условия rollout не подтверждены.
+        """
+        from scripts import deploy_rollout
+
+        try:
+            deploy_rollout.require_infrastructure(self)
+        except Exception as error:
+            raise DeployError("SQLite protocol v2: rollout закрыт; инфраструктура не подтверждена") from error
+
+    def require_switch_candidate(self, state: dict) -> None:
+        """Повторяет точный CI/image/pair допуск перед marker и остановкой writers.
+
+        Args:
+            state: Подготовленный переход с результатом миграции online-копии.
+
+        Raises:
+            DeployError: Release, evidence, controller либо image изменились.
+        """
+        from dataclasses import fields
+
+        self.require_switch_rollout()
+        candidate = state["candidate"]
+        selected = SelectedRelease(**{field.name: candidate[field.name] for field in fields(SelectedRelease)})
+        _same_selection(self, selected)
+        self.require_baseline(state["last_good"], state["old_sha"], state["old_image_id"])
+        prep.check_candidate_image(candidate["image_id"], candidate["sha"])
+        if self.image(candidate["tag"])["Id"] != candidate["image_id"]:
+            raise DeployError("Candidate tag изменился перед остановкой")
+        policy_path = self.state_dir / "compatibility-policy.sha"
+        policy = compatibility.private_text(policy_path)
+        token = compatibility.private_text(self.state_dir / "github-read-token")
+        evidence = compatibility.verify_evidence(
+            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != state["compatibility_evidence"]
+                or compatibility.private_text(policy_path) != policy
+                or self.controller_sha() != state["controller_sha"]):
+            raise DeployError("Допуск candidate изменился перед остановкой")
 
     def uses_selector_runtime(self) -> bool:
         """Определяет отдельно установленный selector-aware systemd boot path."""
@@ -1425,6 +1463,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             if switch_state is None:
                 with compatibility.check("SAFE_INSTALLED_RUNTIME"):
                     host.require_baseline(last_good, old_sha, old_id)
+            if switch_state is not None or initial_switch:
+                host.require_switch_candidate(state)
             critical = True
             host.marker(True)
             _state(host, state, "critical")

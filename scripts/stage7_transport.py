@@ -2,7 +2,8 @@
 
 Устанавливать guard в отдельном процессе до исполнения проверяемого controller.
 Guard нельзя снять; это защита от случайного обращения доверенного Python-кода,
-а не sandbox для вредоносного native-кода. Реальный мигратор здесь не разрешён.
+а не sandbox для вредоносного native-кода. Реальный мигратор выполняется только
+отдельным broker scripts.stage7_migration вне этого guard.
 """
 
 from __future__ import annotations
@@ -185,7 +186,8 @@ def migration_command(private_root: Path, database: Path, image_id: str) -> tupl
            or item.is_symlink() or not item.is_file() or item.stat().st_nlink != 1
            for item in path.parent.iterdir()):
         raise IsolationError("STAGE7_MIGRATION_MOUNT")
-    return ("docker", "run", "--rm", "--network", "none", "--read-only",
+    return ("docker", "run", "--rm", "--pull", "never", "--network", "none", "--read-only",
+            "--ipc", "none", "--pids-limit", "128", "--log-driver", "none",
             "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
             "--tmpfs", "/tmp:rw,nosuid,nodev", "--mount",
             f"type=bind,src={path.parent},dst=/app/data", "--entrypoint", "python",

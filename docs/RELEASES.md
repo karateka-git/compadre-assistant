@@ -120,6 +120,11 @@ SQLite v2 остаётся закрыт до Linux/systemd/backup приёмки
 доверенный оператор. Два обнаруженных stopped legacy writer с writable data bind
 удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
 перед rollout требуется свежий inventory. Сам архив не разрешает новый deploy.
+В кандидате [7.3](ci-release-review/STAGE7_3_PREFLIGHT.md) безусловный rollout
+отказ заменён проверкой установленного snapshot, selector/backup effective
+units и guards. Перед marker/stop отдельно повторяются точная Release/CI пара,
+artifact, policy pin и image/OCI. Production допуск пока не получен; новые
+drop-ins и snapshot остаются отдельной установкой 7.7 после испытаний на копии.
 
 ## Исправления поддерживаемых линий
 

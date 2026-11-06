@@ -324,7 +324,7 @@ class DatabaseSwitchTests(unittest.TestCase):
                     item["State"]["Running"] = False
 
             with ExitStack() as stack:
-                for name in ("require_switch_rollout", "installed", "require_baseline",
+                for name in ("require_switch_rollout", "require_switch_candidate", "installed", "require_baseline",
                              "timer_suspend", "restart_policy", "restore_checkout"):
                     stack.enter_context(patch.object(host, name))
                 stack.enter_context(patch.object(host, "run", side_effect=run))
@@ -354,6 +354,38 @@ class DatabaseSwitchTests(unittest.TestCase):
                 host.require_switch_rollout()
             with self.assertRaises(ValueError):
                 switch.register_initial(host, state, record, prod._atomic_text)
+
+    def test_final_candidate_refusal_does_not_stop_or_publish_marker(self):
+        """Поздний отказ допуска сохраняет пару без marker/stop и без новой миграции."""
+        with TemporaryDirectory() as temporary:
+            host, state, record, _ = self._setup(Path(temporary))
+            record("success")
+            host.marker(False)
+            host.compatibility_evidence = state["compatibility_evidence"]
+            selected = SelectedRelease("karateka-git/compadre-assistant", "v1.2.3",
+                                       "release/1.2", SHA, 5, "main-full.yml", 8, 1)
+            original = (host.checkout / "data/app.db").read_bytes()
+            with ExitStack() as stack:
+                for name in ("require_switch_rollout", "installed", "require_baseline", "restore_checkout"):
+                    stack.enter_context(patch.object(host, name))
+                stack.enter_context(patch.object(host, "run", return_value="a" * 40))
+                stop = stack.enter_context(patch.object(host, "stop_both"))
+                marker = stack.enter_context(patch.object(host, "marker"))
+                stack.enter_context(patch.object(host, "require_switch_candidate", side_effect=prod.DeployError("revoked")))
+                stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": True, "active": True}))
+                stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
+                stack.enter_context(patch.object(prep, "require_clean_checkout"))
+                stack.enter_context(patch.object(prod, "_current_image", return_value=IMAGE))
+                stack.enter_context(patch.object(prod, "_prepare_candidate", return_value=(
+                    selected, prep.pinned_tag(SHA), IMAGE, MANIFEST, MANIFEST)))
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, selected.version)
+            stop.assert_not_called()
+            marker.assert_not_called()
+            self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+            self.assertEqual(original, (host.checkout / "data/app.db").read_bytes())
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
+            self.assertFalse(any(command[0] == "migrate" for command in host.commands))
 
     @unittest.skipUnless(shutil.which("docker"), "Нужен Docker Compose CLI")
     def test_real_compose_requires_same_selected_path_for_both_channels(self):

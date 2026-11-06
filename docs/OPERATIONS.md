@@ -228,10 +228,20 @@ runtime pin, копирует SQLite API и проверяет integrity/FK. О�
 тот же `deploy.lock` до конца backup и отвергает marker даже при прямом CLI.
 Для будущей установки подготовлен `deploy/obs-chat-bot-backup-selector.conf`:
 он заменяет только `ExecStart` backup service; timer и marker guards остаются.
+В проверяемом gate 7.3 целевое имя этого шаблона —
+`/etc/systemd/system/obs-chat-bot-backup.service.d/zz-deploy-selector.conf`,
+после `90-deploy-guard.conf`. До первого production v2 deploy в 7.7 отдельно
+установить оба selector drop-in (основной — `zz-deploy-pinned.conf`), guards
+и snapshot, затем проверить effective units. Gate не устанавливает их сам.
+Локальная подготовка и оставшиеся блокеры записаны в
+[шаге 7.3](ci-release-review/STAGE7_3_PREFLIGHT.md).
 После отдельного допуска нужны `daemon-reload`, `systemd-analyze verify`,
 проверка effective ExecStart, timer и копии выбранной БД с новой записью.
 
-**Rollout v2 остаётся закрыт.** Новые drop-ins ещё не установлены. Локально
+**Production rollout v2 остаётся закрыт.** Новые drop-ins ещё не установлены.
+В кандидате безусловный отказ заменён проверкой snapshot, точных файлов и
+effective units/guards, отсутствия известных сторонних writers; перед marker
+повторяется exact-pair CI/image admission. Ручного CLI/env обхода нет. Локально
 реализованы `finalization_intent` → `runtime_adopted` → `success`/`rolled_back`,
 guarded boot и readonly schema admission/context. Будущий
 `deploy/obs-chat-bot-selector.conf` заменяет прямой `compose up` helper-командой:
