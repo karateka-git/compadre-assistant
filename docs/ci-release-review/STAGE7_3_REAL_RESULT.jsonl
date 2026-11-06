@@ -1,0 +1,5 @@
+{"phase": "final-prestop", "baseline_utc": "2026-11-06T16:24:48.455255+00:00", "pins_verified": true, "manual_writers": false, "allowed_db_holder_processes": 0}
+{"phase": "single-stop", "utc_start": "2026-11-06T16:24:48.651857+00:00", "utc_stopped": "2026-11-06T16:25:00.991970+00:00"}
+{"phase": "case-failed-restoring", "error_type": "ValueError", "code": "BOOTSTRAP_STOP_TRANSITION"}
+{"phase": "recovery-live-readonly", "integrity": "ok", "fk_count": 0, "schema_versions": [1, 2, 3, 4]}
+{"case_success": false, "healthy": true, "original_ids": true, "phase": "restored-after-case-failure", "polling_signals": true, "service": "active", "utc_restored": "2026-11-06T16:25:20.886614+00:00", "utc_start": "2026-11-06T16:24:48.651857+00:00"}

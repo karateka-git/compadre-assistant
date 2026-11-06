@@ -1,0 +1,48 @@
+{
+  "checked_utc": "2026-11-06T17:43:45.8182552Z",
+  "run": {
+    "conclusion": "success",
+    "event": "workflow_dispatch",
+    "head_sha": "cabc0e24d28947123868db8a60f6b55095feb63e",
+    "html_url": "https://github.com/karateka-git/compadre-assistant/actions/runs/42249037867",
+    "id": 42249037867,
+    "run_attempt": 1,
+    "status": "completed"
+  },
+  "jobs": [
+    {
+      "conclusion": "success",
+      "name": "main-full-controller",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "main-full / repository-compatibility",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "main-full / full-suite",
+      "status": "completed"
+    },
+    {
+      "conclusion": "success",
+      "name": "ci-metrics",
+      "status": "completed"
+    }
+  ],
+  "artifact": {
+    "digest": "sha256:87a5ab53bcd8b7f57a2012c279872e9252c74ebfc33ddc0f3fbd0099b2e77c6c",
+    "expired": false,
+    "id": 13519278785,
+    "name": "repository-compatibility-42249037867-1",
+    "workflow_run": {
+      "head_branch": "main",
+      "head_repository_id": 1269089612,
+      "head_sha": "cabc0e24d28947123868db8a60f6b55095feb63e",
+      "id": 42249037867,
+      "repository_id": 1269089612
+    }
+  },
+  "scope": "fresh metadata recheck for 7.6; no release admission or artifact-byte reverification"
+}
