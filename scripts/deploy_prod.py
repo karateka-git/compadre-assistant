@@ -304,6 +304,30 @@ class Host:
             raise DeployError("Не удалось проверить effective systemd unit")
         return value["data"]
 
+    def systemd_bool_property(self, interface: str, name: str) -> bool:
+        """Читает скалярное булево effective свойство unit из D-Bus.
+
+        Args:
+            interface: D-Bus интерфейс unit или service.
+            name: Имя проверяемого свойства.
+
+        Returns:
+            Строгое булево значение свойства с сигнатурой ``b``.
+
+        Raises:
+            DeployError: Ответ отсутствует, повреждён или имеет другую форму.
+        """
+        try:
+            value = json.loads(self.run("busctl", "--json=short", "get-property",
+                                        "org.freedesktop.systemd1", SERVICE_DBUS_PATH,
+                                        interface, name))
+        except ValueError as exc:
+            raise DeployError("Не удалось разобрать effective systemd unit") from exc
+        if (not isinstance(value, dict) or value.get("type") != "b" or
+                type(value.get("data")) is not bool):
+            raise DeployError("Не удалось проверить effective systemd unit")
+        return value["data"]
+
     def require_systemd_boot(self, runtime: Path) -> None:
         """Проверяет порядок drop-in и фактические команду, env и marker guard.
 
@@ -335,7 +359,7 @@ class Host:
             for name, expected_value in (("Type", "oneshot"), ("KillMode", "control-group"), ("Restart", "no")):
                 if self.systemd_text_property(service_interface, name) != expected_value:
                     raise DeployError("Lifecycle selector unit не совпадает с проверенным контрактом")
-            if self.systemd_property(service_interface, "RemainAfterExit", "b") != [True]:
+            if self.systemd_bool_property(service_interface, "RemainAfterExit") is not True:
                 raise DeployError("Selector unit должен сохранять oneshot active state")
         environment = self.systemd_property("org.freedesktop.systemd1.Service", "EnvironmentFiles",
                                             "a(sb)")
