@@ -243,8 +243,9 @@ guarded boot и readonly schema admission/context. Будущий
 с теми же credentials. Это эксплуатационное правило для доверенного оператора,
 а не техническая защита от него. Проверка writable Docker mounts перед
 снимком/recovery обнаруживает известные контейнеры, но не блокирует создание
-writer после осмотра. Два прежних stopped контейнера с writable mount нужно
-отдельно разобрать до rollout. Установка
+writer после осмотра. Два прежних stopped контейнера с writable mount
+удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
+перед rollout заново проверить полный inventory. Установка
 snapshot сама по себе gate не снимает; следующие проверки и read-only факты
 VPS — в рабочем протоколе. Marker/timer вручную не менять. `verify-pinned`
 для v2 только проверяет durable boot и работающую пару; legacy stop/start

@@ -117,8 +117,9 @@ commit; его SHA и digest не заменяют SHA/CI приложения. 
 получен. Boot/finalization и доставка schema admission локально дополнены;
 SQLite v2 остаётся закрыт до Linux/systemd/backup приёмки и согласованного окна
 без ручных writers. Администратор VPS сохраняет доступ к Docker и `data` как
-доверенный оператор. Read-only осмотр выявил два stopped legacy writer с writable
-data bind; их нужно разобрать до rollout. Сам архив не разрешает новый deploy.
+доверенный оператор. Два обнаруженных stopped legacy writer с writable data bind
+удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
+перед rollout требуется свежий inventory. Сам архив не разрешает новый deploy.
 
 ## Исправления поддерживаемых линий
 
