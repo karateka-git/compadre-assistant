@@ -16,6 +16,48 @@ FORWARD_STAGES = frozenset({"forward_recovery_intent", "forward_recovery_verifie
                             "finalization_intent", "runtime_adopted"})
 
 
+def _close_failed_retry(host: prod.Host, state: dict) -> bool:
+    """При любом отказе повтора закрывает guards и известные channel writers.
+
+    Docker stop по inventory дополняет Compose stop: selector или runtime.env
+    могли стать нечитаемыми уже после частичного запуска точных ID.
+
+    Args:
+        host: Production transport с известными Compose labels каналов.
+        state: Последнее прочитанное durable состояние; не подменяется.
+
+    Returns:
+        True только если marker, timer, state и остановка известных ID доказаны.
+    """
+    try:
+        prod._degrade(host, state, "Forward recovery не подтверждён")
+    except Exception:
+        pass
+    try:
+        for item in host.recovery_inventory().values():
+            for command in (("docker", "update", "--restart=no", item["Id"]),
+                            ("docker", "stop", item["Id"])):
+                try:
+                    host.run(*command)
+                except Exception:
+                    # Следующий ID и независимую защиту проверяем даже после отказа Docker.
+                    continue
+    except Exception:
+        pass
+    try:
+        durable = prep.read_state(host.state_dir, host.checkout)
+        inventory = host.recovery_inventory()
+        return (durable is not None and durable.get("stage") == "degraded"
+                and (host.state_dir / "deploy-in-progress").read_text(encoding="utf-8") == "critical\n"
+                and not host.unit_enabled(prod.TIMER) and not host.unit_active(prod.TIMER)
+                and host.unit_state(prod.TIMER) == "inactive"
+                and all(not item["State"]["Running"] and
+                        item["HostConfig"]["RestartPolicy"]["Name"] == "no"
+                        for item in inventory.values()))
+    except Exception:
+        return False
+
+
 def _require_exact_candidate(host: prod.Host, state: dict) -> dict:
     """Сверяет границу, выбранную SQLite и прежние ID перед любой записью.
 
@@ -73,22 +115,24 @@ def recover(host: prod.Host) -> None:
         state = prep.read_state(host.state_dir, host.checkout)
         if not state:
             raise prod.DeployError("Отсутствует durable state для forward recovery")
-        host.require_switch_rollout()
-        boot = _require_exact_candidate(host, state)
-        marker = host.state_dir / "deploy-in-progress"
-        if (state["stage"] in ("degraded", "forward_recovery_intent", "forward_recovery_verified")
-                and marker.read_text(encoding="utf-8") != "critical\n"):
-            raise prod.DeployError("Forward recovery без критического marker запрещён")
-        if (state["stage"] != "runtime_adopted" and
-                (host.unit_enabled(prod.TIMER) or host.unit_active(prod.TIMER) or
-                 host.unit_state(prod.BACKUP_SERVICE) != "inactive")):
-            raise prod.DeployError("Backup не остановлен до forward recovery")
-        if state["stage"] == "runtime_adopted" and host.timer_snapshot() not in (
-                {"enabled": False, "active": False}, state["timer_before"]):
-            raise prod.DeployError("Backup timer изменился вне финализации")
-        if host.unit_state(prod.SERVICE) not in ("failed", "inactive", "active"):
-            raise prod.DeployError("Неоднозначное состояние основного unit")
+        if state.get("stage") not in FORWARD_STAGES | {"degraded"}:
+            raise prod.DeployError("Текущая стадия не допускает forward recovery")
         try:
+            host.require_switch_rollout()
+            boot = _require_exact_candidate(host, state)
+            marker = host.state_dir / "deploy-in-progress"
+            if (state["stage"] in ("degraded", "forward_recovery_intent", "forward_recovery_verified")
+                    and marker.read_text(encoding="utf-8") != "critical\n"):
+                raise prod.DeployError("Forward recovery без критического marker запрещён")
+            if (state["stage"] != "runtime_adopted" and
+                    (host.unit_enabled(prod.TIMER) or host.unit_active(prod.TIMER) or
+                     host.unit_state(prod.BACKUP_SERVICE) != "inactive")):
+                raise prod.DeployError("Backup не остановлен до forward recovery")
+            if state["stage"] == "runtime_adopted" and host.timer_snapshot() not in (
+                    {"enabled": False, "active": False}, state["timer_before"]):
+                raise prod.DeployError("Backup timer изменился вне финализации")
+            if host.unit_state(prod.SERVICE) not in ("failed", "inactive", "active"):
+                raise prod.DeployError("Неоднозначное состояние основного unit")
             if state["stage"] == "degraded":
                 if host.unit_state(prod.SERVICE) == "failed":
                     host.run("systemctl", "reset-failed", prod.SERVICE)
@@ -116,8 +160,9 @@ def recover(host: prod.Host) -> None:
                 prod._state(host, state, "forward_recovery_verified")
             host.finalize_database(state, "success")
         except Exception as error:
-            prod._degrade(host, state, "Forward recovery не подтверждён")
-            raise prod.DeployError("Forward recovery не подтверждён; guards сохранены") from error
+            if _close_failed_retry(host, state):
+                raise prod.DeployError("Forward recovery не подтверждён; writers остановлены и guards подтверждены") from error
+            raise prod.DeployError("Forward recovery не подтверждён; остановка writers или guards не доказаны") from error
 
 
 def main() -> None:
