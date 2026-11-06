@@ -237,10 +237,14 @@ guarded boot и readonly schema admission/context. Будущий
 `deploy/obs-chat-bot-selector.conf` заменяет прямой `compose up` helper-командой:
 при занятом lock она только принимает уже работающую точную пару; при свободном
 запускает существующие durable ID без create/up. Docker restart остаётся `no`.
-Нужны Linux-проверка oneshot/PartOf/reboot, прав и backup, а также исключение host CLI,
-ручного `docker run/compose run`, другого mount/daemon и polling с теми же
-credentials. Проверка writable Docker mounts перед снимком/recovery обнаруживает
-известные контейнеры, но не блокирует создание writer после осмотра. Установка
+Нужны Linux-проверка oneshot/PartOf/reboot, прав и backup. Администратор VPS
+сохраняет доступ к Docker и `data`; во время согласованного окна выпуска он не
+запускает ручной SQLite CLI, `docker run/compose run` и другой writer или polling
+с теми же credentials. Это эксплуатационное правило для доверенного оператора,
+а не техническая защита от него. Проверка writable Docker mounts перед
+снимком/recovery обнаруживает известные контейнеры, но не блокирует создание
+writer после осмотра. Два прежних stopped контейнера с writable mount нужно
+отдельно разобрать до rollout. Установка
 snapshot сама по себе gate не снимает; следующие проверки и read-only факты
 VPS — в рабочем протоколе. Marker/timer вручную не менять. `verify-pinned`
 для v2 только проверяет durable boot и работающую пару; legacy stop/start
