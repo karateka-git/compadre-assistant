@@ -365,6 +365,42 @@ class SystemdBootTests(unittest.TestCase):
                 with self.assertRaises(prod.DeployError):
                     host.require_systemd_boot(unit["runtime"])
 
+    def test_selector_requires_scalar_true_remain_after_exit(self) -> None:
+        """Selector принимает реальную D-Bus форму `b`, закрывая ложные ответы."""
+        replies = (
+            ({"type": "b", "data": True}, True),
+            ({"type": "b", "data": False}, False),
+            ({"type": "b", "data": [True]}, False),
+            ({"type": "s", "data": True}, False),
+            ({"type": "b", "data": 1}, False),
+            ({"type": "b", "data": "true"}, False),
+            ({"type": "b"}, False),
+        )
+        for remain, accepted in replies:
+            with self.subTest(remain=remain), TemporaryDirectory() as temporary:
+                host, unit = self._host(Path(temporary), legacy=False)
+                unit["pinned"].write_bytes(
+                    (prod.SOURCE_ROOT / "deploy/obs-chat-bot-selector.conf").read_bytes())
+                for name, command in (("ExecStartEx", prod.SELECTOR_EXEC),
+                                      ("ExecStopEx", prod.SELECTOR_STOP)):
+                    unit["replies"][name] = {"type": "a(sasasttttuii)",
+                                             "data": [[command[0], command,
+                                                       prod.PINNED_EXEC_FLAGS, 0, 0, 0, 0, 0, 0, 0]]}
+                unit["replies"].update({
+                    "Type": {"type": "s", "data": "oneshot"},
+                    "KillMode": {"type": "s", "data": "control-group"},
+                    "Restart": {"type": "s", "data": "no"},
+                    "RemainAfterExit": remain,
+                })
+                with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                        prod, "CHANNELS_DROPIN", unit["channels"],
+                ), patch.object(prod, "PINNED_DROPIN", unit["pinned"]):
+                    if accepted:
+                        host.require_systemd_boot(unit["runtime"])
+                    else:
+                        with self.assertRaises(prod.DeployError):
+                            host.require_systemd_boot(unit["runtime"])
+
     def test_effective_command_environment_and_condition_are_required(self) -> None:
         """Каждое обязательное свойство systemd проверяется независимо."""
         for property_name, changed in (

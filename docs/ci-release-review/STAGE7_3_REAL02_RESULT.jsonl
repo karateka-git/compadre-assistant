@@ -1,0 +1,7 @@
+{"phase": "real02-final-prestop", "baseline_utc": "2026-11-06T16:54:22.299968+00:00", "pins_verified": true, "manual_db_holders": 0, "stable_units_sha256": "15b1aa84d6ab2ae19f29a9db997b6a46e54619ec6c2ceab8c9cc8485092d6847"}
+{"phase": "real02-single-stop", "utc_start": "2026-11-06T16:54:22.496546+00:00", "utc_stopped": "2026-11-06T16:54:33.476972+00:00"}
+{"phase": "real02-stop-attestation", "stopped": true, "root": "/var/lib/compadre-assistant-stage7-20261106/controller-proof-cabc0e2-real02"}
+{"phase": "real02-case-failed-restoring", "error_type": "ValueError", "code": "HARNESS_CHILD_PIPE"}
+{"phase": "real02-recovery-live-readonly", "integrity": "ok", "fk_count": 0, "schema_versions": [1, 2, 3, 4]}
+{"case_success": false, "healthy": true, "original_ids": true, "phase": "real02-restored-after-failure", "polling_signals": true, "service": "active", "utc_restored": "2026-11-06T16:54:53.493398+00:00", "utc_start": "2026-11-06T16:54:22.496546+00:00"}
+{"phase":"real02-readonly-root-cause","child_error":"HARNESS_SOURCE","requests_received":0,"requests_completed":0,"private_marker":false,"result_exists":false,"case_source_main_unchanged":true,"case_source_wal_bytes":0,"case_source_shm_bytes":32768,"controller_log_sha256":"8ee0190c26956a0e2ffb457639ffa503ad5c1f8c01f24ff4d4552995766de9cb","restored_baseline_utc":"2026-11-06T16:55:52.528467+00:00","service":"active"}

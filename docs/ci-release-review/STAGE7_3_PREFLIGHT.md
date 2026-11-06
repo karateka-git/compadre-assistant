@@ -184,3 +184,31 @@ ORDER BY pinned trusted worker; общий compact SQL digest и policy не м�
 утверждения «Docker не менялся» выше относятся к раннему локальному подэтапу:
 теперь выполнен только private build, без runtime/migration контейнеров.
 Боты не останавливались, production state/units/controller/БД не менялись.
+
+Повтор для исправленного exact SHA `cabc0e24d28947123868db8a60f6b55095feb63e`
+успешен: manual full CI `42249037867/1`, native verifier/snapshot 63 files,
+exact image/OCI, Linux synthetic с совпадающим CI/runtime fingerprint.
+[Новые receipts и граница review](STAGE7_3_NATIVE_PROOF.md#повторить-доказательства-исправленного-кандидата).
+Реальный closed-copy migration broker не запускался; боты работают. Следующее
+действие — review родителем до единственного окна остановки, шаг 7.3 открыт.
+
+Перед stop подготовлен и успешно выполнен только `prepare()` нового закрытого
+bootstrap: [код, staging hashes, stop и recovery sequence](STAGE7_3_STOP_REVIEW.md).
+Harness real receipt связан с exact reviewed native CI/image/synthetic bytes;
+самозаявленный full_ci_success не допускает запуск. Подготовленный real01 root
+содержит main copy без sidecars, настоящий case не начат. Исходные fixture
+WAL0/SHM сохранены и проверяются по exact metadata; live контур неизменен.
+
+Первое разрешённое окно real01 завершено recovery после отказа stop
+attestation; realcase не стартовал. Старые service/IDs/image/health/polling
+восстановлены, интервал stopattempt→verifiedrecovery32.235с. Исправлены private
+bootstrap dynamic systemctl hash и /proc scan; 8 testsOK, native read-only
+baseline успешен. [Причина, evidence и условие нового review](STAGE7_3_STOP_REVIEW.md#разобрать-первое-окно).
+Второй stop требует отдельного go после нового staging.
+
+Real03 прошёл actual closed-copy case17:04:37UTC и bounded proof17:05:49UTC;
+родитель независимо сверил hashes result/state/selector и serviceinactive/
+timeractive. [Шаг7.3 завершён; результат и caveats](STAGE7_3_RESULT.md).
+Текущее maintenance окно остаётся открытым для7.4–7.5, боты OFF. Два image
+CLI/RPC прогона не означают новыеSQL (schema1–4); polling/start нового runtime
+и production units/controller установка остаются непроверенными до7.7.
