@@ -445,10 +445,19 @@ job. Разобраны non-root selector fixtures и worker tests вне venv;
 0644. Подготовлена отдельная тестовая правка на atomic 0600 writer; 5 tests
 backup/selector model OK локально. Требуется новый полный CI итогового SHA.
 
-Шаг 7.3 остаётся незавершённым. Боты не останавливались; production и Docker
-не менялись. Итоговый commit/SHA, полный CI и compatibility artifact, точный
-image/OCI, повторная проверка snapshot и private Linux harness/broker остаются
-блокерами единственного окна 7.3–7.6. Установку production drop-ins выполнять
+Полный CI `42245216949/1` для `595d1432ea4c39e1356f3f35dcb9c74530fa6b17`
+успешен; native Linux verifier, exact snapshot и private image build проверены.
+Однако Linux synthetic boundary выявил несовпадение CI/runtime schema
+fingerprint и закрыл дальнейший допуск. Подготовлено узкое runtime исправление
+под pinned worker, без изменения trusted policy и общего SQL digest;
+36 целевых tests OK. [Native proof и новый блокер](STAGE7_3_NATIVE_PROOF.md)
+содержат точные receipts и обязательный повтор доказательств нового merge SHA.
+
+Шаг 7.3 остаётся незавершённым. Боты не останавливались; production
+state/units/controller/БД не менялись. Docker изменён только private build/cache/tag,
+без runtime/migration контейнеров. Новый commit/SHA, полный CI и compatibility
+artifact, image/OCI, snapshot и private Linux harness/broker остаются блокерами
+единственного окна 7.3–7.6. Установку production drop-ins выполнять
 отдельно в 7.7 до реального v2 deploy; модель 7.3 этого не подтверждает.
 
 ### 8. Завершить приёмку и перенести правила

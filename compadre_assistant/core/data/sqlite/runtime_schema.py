@@ -95,12 +95,15 @@ def schema_fingerprint(connection: sqlite3.Connection) -> str:
     """Хеширует все записи sqlite_schema без rootpage и пользовательских данных.
 
     Включает внутренние индексы, sqlite_sequence, статистические и FTS-объекты;
-    SQL сохраняется дословно. Вызывающий удерживает согласованную транзакцию.
+    SQL сохраняется дословно. Порядок полей, строк и JSON-кодирование совпадают
+    с закреплённым compatibility worker. Вызывающий удерживает транзакцию.
     """
-    rows = [list(row) for row in connection.execute(
-        "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name, tbl_name"
+    rows = [tuple(row) for row in connection.execute(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"
     )]
-    return _digest(rows)
+    # Пробелы стандартного JSON входят в опубликованный CI fingerprint;
+    # общий compact _digest сохраняет отдельный контракт хеша SQL-миграций.
+    return hashlib.sha256(json.dumps(rows).encode("utf-8")).hexdigest()
 
 
 def _digest(value: object) -> str:

@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,46 @@ from compadre_assistant.core.data.sqlite.runtime_schema import (
 )
 from compadre_assistant.presentation.cli.main import initialize_database, main, run_process_url_command
 from compadre_assistant.core.data.config import AppConfig
+from scripts.repository_compatibility_worker import assert_database
+
+
+class SchemaFingerprintContractTest(unittest.TestCase):
+    """Сверяет runtime с независимым CI worker на настоящей migrated SQLite."""
+
+    def test_worker_and_runtime_include_all_schema_objects(self) -> None:
+        """Оба хеша учитывают DDL, внутренние объекты и Unicode, но не строки."""
+        with TemporaryDirectory() as temporary, closing(sqlite3.connect(Path(temporary) / "app.db")) as db:
+            apply_migrations(db)
+            names = [row[0] for row in db.execute("SELECT name FROM schema_migrations ORDER BY version")]
+            db.executescript('''
+                CREATE TABLE "проверка" (id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT UNIQUE);
+                CREATE INDEX proof_index ON "проверка" (value, id);
+                CREATE VIEW proof_view AS SELECT value FROM "проверка";
+                CREATE TRIGGER proof_trigger AFTER INSERT ON "проверка"
+                    BEGIN UPDATE "проверка" SET value = NEW.value WHERE id = NEW.id; END;
+                INSERT INTO "проверка" (value) VALUES ('сохранить');
+                ANALYZE;
+            ''')
+            objects = {row[0] for row in db.execute("SELECT name FROM sqlite_schema")}
+            self.assertTrue({"sqlite_sequence", "sqlite_stat1", "sqlite_autoindex_проверка_1",
+                             "proof_index", "proof_view", "proof_trigger"} <= objects)
+            original = schema_fingerprint(db)
+            self.assertEqual(original, assert_database(db, names))
+            db.execute('INSERT INTO "проверка" (value) VALUES (?)', ("другая строка",))
+            self.assertEqual(original, schema_fingerprint(db))
+            self.assertEqual(original, assert_database(db, names))
+            db.execute("DROP INDEX proof_index")
+            self.assertNotEqual(original, schema_fingerprint(db))
+            self.assertEqual(schema_fingerprint(db), assert_database(db, names))
+            self.assertEqual(db.execute('SELECT value FROM "проверка" ORDER BY id').fetchall(),
+                             [("сохранить",), ("другая строка",)])
+
+    def test_migration_sql_digest_retains_compact_contract(self) -> None:
+        """Исправление схемы не меняет независимый hash точных байтов миграций."""
+        rows = [[int(path.name[:4]), path.name, hashlib.sha256(path.read_bytes()).hexdigest()]
+                for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
+        expected = hashlib.sha256(json.dumps(rows, ensure_ascii=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        self.assertEqual(migration_sql_fingerprint(), expected)
 
 
 class RuntimeSchemaTest(unittest.TestCase):

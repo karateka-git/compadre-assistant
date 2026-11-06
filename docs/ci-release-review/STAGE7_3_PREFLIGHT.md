@@ -168,3 +168,19 @@ ERROR: backup v2 fixture создавал selector через `write_text`, то
 `tests.test_deploy_backup tests.test_deploy_fixture_paths` — 5 tests OK,
 0.477 с. Нужен новый exact-SHA полный CI; этот run допуска не даёт.
 Черновой `stage7_3_harness.py` пока не проверен и не входит в этот CI fix.
+
+## Native proof и исправление fingerprint — 06.11.2026
+
+Для candidate `595d1432ea4c39e1356f3f35dcb9c74530fa6b17` полный CI
+`42245216949/1` success; native Linux verifier, exact snapshot и private image
+build успешны. Native synthetic boundary обнаружил несовпадение schema
+fingerprint CI/runtime и корректно закрыл дальнейший допуск. Подробные
+receipts, границы изоляции и порядок повторного допуска —
+[STAGE7_3_NATIVE_PROOF.md](STAGE7_3_NATIVE_PROOF.md).
+
+Подготовлено узкое исправление runtime под стандартное JSON-кодирование и
+ORDER BY pinned trusted worker; общий compact SQL digest и policy не меняются.
+Нужны новый merge SHA, полный CI, snapshot/image и Linux proof. Предыдущие
+утверждения «Docker не менялся» выше относятся к раннему локальному подэтапу:
+теперь выполнен только private build, без runtime/migration контейнеров.
+Боты не останавливались, production state/units/controller/БД не менялись.
