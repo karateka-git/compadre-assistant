@@ -431,6 +431,15 @@ Docker и `data`; во время будущего выпуска действу
 
 Первый подэтап 7.3 (код и локальный preflight до остановки) подготовлен:
 [проверяемый infrastructure gate, exact-pair recheck и отдельный migration broker](STAGE7_3_PREFLIGHT.md).
+
+Первый полный CI merge SHA `14c8306d035769726e9982a92c8b6a91db5031e9`
+([42242176741/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42242176741))
+отказал в unittest (110 errors/5 failures), несмотря на успешный compatibility
+job. Разобраны non-root selector fixtures и worker tests вне venv;
+подготовлены исправления только тестовой инфраструктуры: 61 целевой и 3
+дополнительных tests OK локально. Нужен полный CI нового точного merge SHA;
+останавливать ботов и продолжать Linux harness до допуска нельзя.
+
 Шаг 7.3 остаётся незавершённым. Боты не останавливались; production и Docker
 не менялись. Итоговый commit/SHA, полный CI и compatibility artifact, точный
 image/OCI, повторная проверка snapshot и private Linux harness/broker остаются

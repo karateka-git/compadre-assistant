@@ -109,3 +109,51 @@ compatibility artifact, точный image/OCI и snapshot, private Linux prefli
 модели и broker, свежий baseline/место/backup и окно без ручных writers.
 Отказ сохраняет действующие каналы. После допуска продолжить штатный сценарий
 на копии по 7.3 и единое окно 7.3–7.6; этот отчёт его не начинает.
+
+## Исправить отказы первого полного CI на Linux
+
+06.11.2026 полный [main-full 42242176741/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42242176741)
+для merge SHA `14c8306d035769726e9982a92c8b6a91db5031e9` завершился failure.
+Compatibility job успешен, но это не полный допуск: full-suite остановился
+на unittest. В job `127975536683` выполнены 1129 tests, 110 errors и 5 failures.
+Подготовка harness остановлена; VPS и боты не затрагивались.
+
+Разобраны все группы traceback: 104 ERROR возникают при root-only проверке
+selector во временных non-root Linux fixtures. Ещё 6 ERROR (`KeyError: old_tests`)
+возникают у SQL mutation tests после раннего отказа worker на hosted system
+Python. Четыре FAIL — assertions положительных worker scenarios и проверки
+missing module, которые также получили ранний отказ из-за отсутствия venv.
+Последний FAIL — отдельный subprocess transport test с той же ошибкой owner
+selector. Итого обе причины объясняют все 110 errors/5 failures; сообщения
+ожидаемых инъекций ошибок в основном логе не являются отдельными CI отказами.
+
+Исправления ограничены tests. `FixtureStatePath` используется только fake
+Host и моделирует root uid/gid только у `active-db.json`; реальные файл,
+mode, type, nlink, inode и проверки selector/state остаются. Новый процесс
+Stage6 получает ту же явную test-path модель. Runtime-код и требование
+настоящего root:root selector в production не менялись. Отдельный тест
+включает POSIX ветку validator и подтверждает отказ для non-root owner,
+неприватного mode и alias без запуска root-процесса.
+
+Worker tests теперь явно получают venv через `worker_python()`. Если suite
+уже работает в проектном venv без system site, используется его Python.
+При hosted system Python один раз создаётся отдельный temporary venv,
+requirements устанавливаются в него и выполняется pip check; system
+site-packages не подключаются. Workers сохраняют обязательные `-I -B` и
+собственную проверку изоляции. Workflow и trusted policy bytes не менялись.
+
+После исправления выполнены через явный проектный venv:
+`tests.test_deploy_database_switch tests.test_deploy_database_recovery
+tests.test_deploy_runtime tests.test_stage6_integration tests.test_stage7_transport
+tests.test_repository_compatibility_runner tests.test_repository_compatibility_contract`
+— **61 tests OK, 61.419 с**. Дополнительные tests модели owner и ветки
+подготовки среды hosted Python — **3 tests OK, 0.010 с**.
+`git diff --check` успешен. Настоящие SQL mutation/old API workers выполнены;
+системные вызовы подготовки новой среды в дополнительном unit test моделируются.
+
+Локальный Linux Docker daemon недоступен, WSL docker-desktop не содержит
+Python. Реальный non-root Linux прогон не выполнен; тест POSIX условия на
+Windows не объявляется его заменой. Требуются review, новый commit/merge SHA
+и новый успешный полный CI точной пары; прежний compatibility artifact для
+`14c8306...` не переносится на новые байты. Исполнитель commit/push не делал.
+Остановка ботов и исполнение migration broker остаются заблокированы.

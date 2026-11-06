@@ -17,6 +17,7 @@ from scripts.check_repository_compatibility import (
 from scripts.ci_repository_compatibility import verify_baseline
 from scripts import ci_repository_compatibility as ci
 from scripts.repository_compatibility_contract import load_policy, verify_inventory, verify_report, verify_tests
+from tests.compatibility_test_environment import worker_python
 
 
 class CompatibilityContractTests(unittest.TestCase):
@@ -205,7 +206,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         output.mkdir()
         modules = [f"tests.test_{name}" for name in BEHAVIOR_MODULES] if full else ["tests.test_user_identity_repository"]
         extra = ["--compatibility-tests", str(COMPATIBILITY_TESTS.resolve())] if full else []
-        result = run_worker(Path(sys.executable), self.checkout, "behavior", output,
+        result = run_worker(worker_python(), self.checkout, "behavior", output,
                             [*extra, "--test-modules", *modules], 180)
         self.assertEqual(snapshot(self.checkout), expected)
         self.assertEqual(
