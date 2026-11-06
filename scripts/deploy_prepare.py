@@ -255,12 +255,36 @@ def write_state(state_dir: Path, checkout: Path, state: Mapping[str, object]) ->
         Path(temporary).unlink(missing_ok=True)
 
 
+def parse_state_object(payload: str) -> dict:
+    """Разбирает JSON state/selector без неоднозначных повторных ключей.
+
+    Args:
+        payload: Содержимое приватного файла, не предназначенное для журнала.
+
+    Returns:
+        JSON object с уникальными ключами во всех вложенных объектах.
+
+    Raises:
+        PreparationError: Корень не object или ключ повторяется.
+        ValueError: JSON повреждён.
+    """
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise PreparationError("Неоднозначные ключи сохранённого состояния")
+            value[key] = item
+        return value
+
+    value = json.loads(payload, object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise PreparationError("Некорректное сохранённое состояние выпуска")
+    return value
+
+
 def read_state(state_dir: Path, checkout: Path) -> dict[str, object] | None:
     """Читает последнее атомарно записанное состояние или возвращает None."""
     path = require_external_state_dir(state_dir, checkout) / "state.json"
     if not path.exists():
         return None
-    value = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(value, dict):
-        raise PreparationError("Некорректное сохранённое состояние выпуска")
-    return value
+    return parse_state_object(path.read_text(encoding="utf-8"))

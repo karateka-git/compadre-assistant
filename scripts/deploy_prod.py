@@ -428,8 +428,8 @@ class Host:
         _atomic_text(self.state_dir / "runtime.env", value)
 
     def require_switch_rollout(self) -> None:
-        """Закрывает эксплуатационный v2 до реализации recovery и установки snapshot."""
-        raise DeployError("SQLite protocol v2 закрыт до шагов 6.4 и 6.5")
+        """Закрывает эксплуатационный v2 до интеграции systemd/backup и snapshot."""
+        raise DeployError("SQLite protocol v2: recovery 6.4 не снимает gate шага 6.5")
 
     def database_env(self, tag: str, database_path: str) -> dict[str, str]:
         """Формирует отдельный Compose override для обоих выбранных поколений."""
@@ -440,9 +440,9 @@ class Host:
         env["ASSISTANT_DATABASE_PATH"] = database_path
         return env
 
-    def set_database_runtime(self, tag: str, expected_id: str, database_path: str) -> None:
+    def set_database_runtime(self, tag: str, expected_id: str, database_path: str, *, recovery: bool = False) -> None:
         """Закрепляет образ и DATABASE_PATH в производном runtime.env под marker."""
-        self.require_snapshot_quiescence()
+        (self.require_recovery_quiescence if recovery else self.require_snapshot_quiescence)()
         if self.image(tag)["Id"] != expected_id:
             raise DeployError("Candidate pin изменился")
         override = (SOURCE_ROOT / "deploy/database-compose.yml").read_text(encoding="utf-8")
@@ -480,9 +480,9 @@ class Host:
         self.require_no_duplicate_polling()
 
     def prepare_database_containers(self, tag: str, expected_id: str,
-                                    database_path: str) -> dict[str, str]:
+                                    database_path: str, *, recovery: bool = False) -> dict[str, str]:
         """Создаёт оба канала без start и проверяет фактические mount/env/image."""
-        self.require_snapshot_quiescence()
+        (self.require_recovery_quiescence if recovery else self.require_snapshot_quiescence)()
         if self.image(tag)["Id"] != expected_id:
             raise DeployError("Candidate pin изменился перед create")
         env = self.database_env(tag, database_path)
@@ -513,6 +513,168 @@ class Host:
                     "image_id": expected_id, "sha": durable["candidate"]["sha"]}):
             raise DeployError("Запуск без durable admission запрещён")
         self.require_database_containers(ids, expected_id, database_path)
+        self.run("docker", "start", *(ids[name] for name in prep.CHANNELS))
+
+    def guard_known_writers(self) -> None:
+        """Закрывает известные writers даже без читаемых state, selector и env.
+
+        Каждая защита выполняется независимо. Docker ID ищутся по Compose
+        labels checkout и канала, включая дубликаты и частичный create.
+        Ошибки не содержат inspect/env или повреждённый JSON; исходные файлы
+        остаются на месте для разбора. Сторонние CLI требуют интеграции 6.5.
+        """
+        failed = False
+        actions = [lambda: self.marker(True), self.timer_suspend,
+                   lambda: self.run("systemctl", "stop", SERVICE)]
+        for action in actions:
+            try:
+                action()
+            except Exception:
+                failed = True
+        for channel in prep.CHANNELS:
+            try:
+                ids = self.run("docker", "ps", "--all", "--no-trunc", "-q", "--filter",
+                               f"label=com.docker.compose.project.working_dir={self.checkout}",
+                               "--filter", f"label=com.docker.compose.service={channel}").splitlines()
+            except Exception:
+                failed = True
+                continue
+            for container_id in ids:
+                for operation in (("docker", "update", "--restart=no", container_id),
+                                  ("docker", "stop", container_id)):
+                    try:
+                        self.run(*operation)
+                    except Exception:
+                        failed = True
+        if failed:
+            raise DeployError("Не все защиты известных writers подтверждены")
+
+    def require_recovery_image(self, state: dict) -> None:
+        """Сверяет прежний SHA, immutable ID и локальный pin с OCI revision."""
+        sha, image_id, tag = state["old_sha"], state["old_image_id"], state["old_tag"]
+        if (not re.fullmatch(r"[0-9a-f]{40}", sha) or not IMAGE_PATTERN.fullmatch(image_id)
+                or tag != prep.pinned_tag(sha)):
+            raise DeployError("Неполный recovery pin")
+        for reference in (tag, image_id):
+            item = self.image(reference)
+            if (item["Id"] != image_id
+                    or (item.get("Config", {}).get("Labels") or {}).get(prep.OCI_REVISION) != sha):
+                raise DeployError("Recovery OCI pin не подтверждён")
+
+    def recovery_inventory(self) -> dict[str, dict[str, Any]]:
+        """Читает все известные channel containers, допуская отсутствие при create.
+
+        Дубликаты, чужие ID и ошибки Docker не трактуются как отсутствие.
+        Инвентарь не требует читаемого Compose/runtime.env или selector.
+        """
+        found = {}
+        for name in prep.CHANNELS:
+            ids = self.run("docker", "ps", "--all", "--no-trunc", "-q", "--filter",
+                           f"label=com.docker.compose.project.working_dir={self.checkout}",
+                           "--filter", f"label=com.docker.compose.service={name}").splitlines()
+            if len(ids) > 1:
+                raise DeployError("Дублированный channel container")
+            if ids:
+                item = json.loads(self.run("docker", "inspect", ids[0], "--format", "{{json .}}"))
+                if not isinstance(item, dict) or item.get("Id") != ids[0]:
+                    raise DeployError("Неоднозначный recovery inventory")
+                found[name] = item
+        if len({item["Id"] for item in found.values()}) != len(found):
+            raise DeployError("Один ID зарегистрирован для двух каналов")
+        return found
+
+    def require_recovery_quiescence(self) -> None:
+        """Требует guards и остановку каждого найденного writer при partial create."""
+        if ((self.state_dir / "deploy-in-progress").read_text(encoding="utf-8") != "critical\n"
+                or any(self.unit_state(unit) != "inactive" for unit in (SERVICE, TIMER, BACKUP_SERVICE))
+                or self.unit_enabled(TIMER)
+                or any(item["State"].get("Running") is not False
+                       or item["HostConfig"]["RestartPolicy"]["Name"] != "no"
+                       for item in self.recovery_inventory().values())):
+            raise DeployError("Recovery writers или guards не остановлены")
+
+    def require_recovery_evidence(self, state: dict) -> None:
+        """Заново проверяет Release/run/attempt и artifact точной previous пары.
+
+        Недоступный API, отозванный artifact или изменившийся внешний policy
+        pin запрещают старому коду открывать новую SQLite.
+        """
+        candidate = state["candidate"]
+        selected = (self.select_emergency(candidate["version"])
+                    if candidate.get("kind") == "emergency" else self.select(candidate["version"]))
+        if any(candidate.get(key) != value for key, value in asdict(selected).items()):
+            raise DeployError("Recovery Release или CI attempt изменился")
+        policy = compatibility.private_text(self.state_dir / "compatibility-policy.sha")
+        token = compatibility.private_text(self.state_dir / "github-read-token")
+        evidence = compatibility.verify_evidence(
+            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != state["compatibility_evidence"]
+                or evidence["schema_fingerprint"] != state["new"]["fingerprint"]
+                or compatibility.private_text(self.state_dir / "compatibility-policy.sha") != policy):
+            raise DeployError("Recovery evidence или fingerprint изменились")
+
+    def require_recovery_observation(self, state: dict) -> None:
+        """Отвергает чужие runtime и возможный приём кандидатом при false."""
+        found = self.recovery_inventory()
+        if set(found) != set(prep.CHANNELS):
+            # Durable false и стадия до start доказывают лишь controller-origin
+            # partial create. После разрешения любого recovery start отсутствие
+            # inspect уже не доказывает, с какой БД мог работать пропавший writer.
+            origin = (state.get("rollback_origin_stage") if state.get("stage") == "rollback_started"
+                      else state.get("stage"))
+            if (state.get("admission_may_have_started") is not False
+                    or origin not in ("database_selected", "runtime_prepared",
+                                                  "recovery_intent", "recovery_selected")
+                    or state.get("recovery_containers")):
+                raise DeployError("Неполный recovery inspect после возможного start")
+        for name, item in found.items():
+            paths = [entry.removeprefix("DATABASE_PATH=") for entry in item["Config"].get("Env", [])
+                     if entry.startswith("DATABASE_PATH=")]
+            mounts = item.get("Mounts", [])
+            if (len(paths) != 1 or len([mount for mount in mounts if mount.get("Destination") == "/app/data"]) != 1
+                    or not any(mount.get("Destination") == "/app/data" and mount.get("Type") == "bind"
+                               and mount.get("Source") == str(self.checkout / "data")
+                               and mount.get("RW") is True for mount in mounts)
+                    or any(mount.get("Destination", "").startswith("/app/data/") for mount in mounts)):
+                raise DeployError("Recovery mount/path не подтверждены")
+            if item.get("Image") == state["old_image_id"] and paths == [state["old"]["container_path"]]:
+                if state["admission_may_have_started"]:
+                    raise DeployError("Runtime old/old противоречит admission нового поколения")
+                continue
+            recovery_ids = state.get("recovery_containers", {})
+            never_started = (item["State"].get("StartedAt") == "0001-01-01T00:00:00Z"
+                             and item.get("RestartCount") == 0 and item["State"].get("Running") is False)
+            if (state.get("recovery_intent") and (recovery_ids.get(name) == item["Id"] or never_started)
+                    and item.get("Image") == state["old_image_id"]
+                    and paths == [state["new" if state["admission_may_have_started"] else "old"]["container_path"]]):
+                continue
+            candidate = state.get("candidate", {})
+            if ("new" not in state or item.get("Image") != candidate.get("image_id")
+                    or paths != [state["new"]["container_path"]]):
+                raise DeployError("Неизвестный runtime при recovery")
+            if state["admission_may_have_started"]:
+                if state.get("prepared_containers", {}).get(name) != item["Id"]:
+                    raise DeployError("Candidate ID не принадлежит durable admission")
+            elif not never_started:
+                raise DeployError("Candidate мог начать приём при false")
+        if set(found) == set(prep.CHANNELS):
+            self.require_no_duplicate_polling()
+
+    def start_recovery_containers(self, ids: dict[str, str]) -> None:
+        """Повторно проверяет durable intent, поколение и pin до start точных ID."""
+        state = prep.read_state(self.state_dir, self.checkout)
+        if (not state or state.get("stage") != "recovery_prepared"
+                or state.get("recovery_containers") != ids or not state.get("recovery_intent")):
+            raise DeployError("Recovery start без durable intent")
+        target = database_switch.recovery_target(self, state)
+        if database_switch.read_selected(self, state) != target:
+            raise DeployError("Recovery selector не совпадает с намерением")
+        self.require_recovery_image(state)
+        if target == "new":
+            self.require_recovery_evidence(state)
+        if self.runtime_tag() != state["old_tag"]:
+            raise DeployError("Recovery runtime pin изменился")
+        self.require_database_containers(ids, state["old_image_id"], state[target]["container_path"])
         self.run("docker", "start", *(ids[name] for name in prep.CHANNELS))
 
     def marker(self, enabled: bool) -> None:
@@ -876,17 +1038,27 @@ def _prepare_candidate(
 
 
 def _recover(host: Host, state: dict[str, Any]) -> None:
-    """Возвращает проверенный старый код, если схема не менялась; иначе закрывает запуск."""
+    """Восстанавливает runtime по границе v2 либо прежнему legacy-контракту."""
     stage = state.get("stage")
-    if "protocol_version" in state or (host.state_dir / "active-db.json").exists():
-        if state.get("protocol_version") != database_switch.PROTOCOL_VERSION or stage not in ("success", "rolled_back"):
-            _degrade(host, state, "SQLite v2 требует recovery шага 6.4")
-            raise DeployError("Legacy recovery не может выбирать SQLite v2")
+    if "protocol_version" in state or _has_switch_files(host):
         try:
-            database_switch.read_selected(host, state)
+            if state.get("protocol_version") != database_switch.PROTOCOL_VERSION:
+                raise DeployError("Legacy recovery не может выбирать SQLite v2")
+            if stage in ("success", "rolled_back"):
+                database_switch.read_selected(host, state)
+                return
+            host.guard_known_writers()
+            # Не доверяем памяти после ошибки fsync/replace state writer.
+            durable = prep.read_state(host.state_dir, host.checkout)
+            if not durable:
+                raise DeployError("Recovery state отсутствует")
+            state.clear()
+            state.update(durable)
+            database_switch.recover(
+                host, state, lambda stage, **changes: _state(host, state, stage, **changes), _atomic_text)
         except Exception as error:
-            _degrade(host, state, "SQLite selector или state повреждены")
-            raise DeployError("Выбор SQLite не доказан") from error
+            _degrade(host, state, "SQLite recovery не подтверждён")
+            raise DeployError("SQLite recovery не подтверждён; запуск запрещён, проверьте защиты writers") from error
         return
     if stage == "degraded":
         raise DeployError("Degraded state требует ручного восстановления")
@@ -968,6 +1140,11 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
 
 def _degrade(host: Host, state: dict[str, Any], reason: str) -> None:
     """При отказе возврата пытается остановить оба канала и оставляет marker."""
+    if "protocol_version" in state or _has_switch_files(host):
+        try:
+            host.guard_known_writers()
+        except Exception:
+            pass
     for action in (lambda: host.marker(True), host.timer_suspend,
                    lambda: host.restart_policy("no"), host.stop_both):
         try:
@@ -980,6 +1157,31 @@ def _degrade(host: Host, state: dict[str, Any], reason: str) -> None:
             # Следующую защиту пробуем и при частичном отказе предыдущей.
             continue
     _state(host, state, "degraded", error=reason)
+
+
+def _has_switch_files(host: Host) -> bool:
+    return any(os.path.lexists(host.state_dir / name) for name in (
+        "active-db.json", "database-compose.yml", "recovery-blocked.json"))
+
+
+def _read_recovery_state(host: Host) -> dict:
+    """Оставляет повреждённый state нетронутым и закрывает известные writers."""
+    try:
+        if (host.state_dir / "recovery-blocked.json").exists():
+            raise DeployError("Recovery требует разбора сохранённого отказа")
+        state = prep.read_state(host.state_dir, host.checkout)
+        if state is None and (_has_switch_files(host) or (host.state_dir / "deploy-in-progress").exists()):
+            raise DeployError("State утрачен при незавершённом переходе")
+        return state or {}
+    except Exception as error:
+        try:
+            host.guard_known_writers()
+        except Exception:
+            pass
+        # Не заменяем повреждённый state догадкой о generation или admission.
+        _atomic_text(host.state_dir / "recovery-blocked.json",
+                     '{"stage":"degraded","reason":"STATE_UNREADABLE"}\n')
+        raise DeployError("State не доказан; запуск запрещён, проверьте защиты writers") from error
 
 
 @metrics.tracked
@@ -1007,7 +1209,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
     else:
         initiator = None
     with prep.deploy_lock(host.state_dir, host.checkout):
-        state = prep.read_state(host.state_dir, host.checkout) or {}
+        state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         switch_state = state.copy() if "protocol_version" in state else None
         _recover(host, state)
@@ -1097,6 +1299,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                              controller_sha=compatibility.private_text(host.state_dir / "controller.sha"),
                              admission_may_have_started=False,
                              compatibility_evidence=host.compatibility_evidence)
+                state["selector_rebind"] = {"from": database_switch.selector(switch_state, side),
+                                            "to": database_switch.selector(state, "old")}
             _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
@@ -1124,7 +1328,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 backup = Path(state["snapshot"]["path"])
                 # Backup/systemd ещё не понимают selector. Не снимать marker и
                 # не возобновлять timer до отдельной интеграции шага 6.5.
-                raise DeployError("SQLite v2 завершил запуск; финализация закрыта до 6.4/6.5")
+                raise DeployError("SQLite v2 завершил запуск; финализация закрыта до 6.5")
             else:
                 backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
                 with metrics.stage("backup"):
@@ -1160,7 +1364,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         except Exception as error:
             if critical:
                 try:
-                    _state(host, state, "rollback_started", error=_error_reason(error))
+                    _state(host, state, "rollback_started", error=_error_reason(error),
+                           rollback_origin_stage=state.get("stage"))
                 except Exception:
                     # Потеря записи state не отменяет обязательный возврат каналов.
                     state.update(stage="rollback_started", error=_error_reason(error))
@@ -1194,7 +1399,7 @@ def verify_pinned(host: Host) -> None:
         DeployError: Pin, проверка обоих каналов или возврат не подтвердились.
     """
     with prep.deploy_lock(host.state_dir, host.checkout):
-        state = prep.read_state(host.state_dir, host.checkout) or {}
+        state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         _recover(host, state)
         if "protocol_version" in state:
