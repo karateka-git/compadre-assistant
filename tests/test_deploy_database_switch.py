@@ -16,6 +16,7 @@ from scripts import deploy_database_switch as switch
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts.select_deploy_release import SelectedRelease
+from tests.deploy_fixture_paths import FixtureStatePath
 
 
 IMAGE = "sha256:" + "2" * 64
@@ -29,6 +30,7 @@ class SwitchHost(prod.Host):
     def __init__(self, root: Path):
         """Создаёт отдельную SQLite и остановленные каналы для каждого теста."""
         super().__init__(root / "checkout", root / "state")
+        self.state_dir = FixtureStatePath(self.state_dir)
         (self.checkout / "data").mkdir(parents=True)
         self.state_dir.mkdir()
         self.marker(True)

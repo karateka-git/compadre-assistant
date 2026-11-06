@@ -18,6 +18,7 @@ from scripts import deploy_prod as prod
 from scripts import deploy_runtime as runtime
 from tests import test_deploy_database_recovery as recovery
 from tests.test_deploy_database_switch import IMAGE, SHA
+from tests.deploy_fixture_paths import FixtureStatePath
 
 
 class IntegrationHost(recovery.RecoveryHost):
@@ -58,6 +59,7 @@ class Stage6IntegrationTests(unittest.TestCase):
         # Конструктор fixture создаёт БД; после restart нужен только новый Host.
         restored = object.__new__(IntegrationHost)
         prod.Host.__init__(restored, host.checkout, host.state_dir)
+        restored.state_dir = FixtureStatePath(restored.state_dir)
         for name in ("found", "commands", "selected", "serial", "starts", "bad_image"):
             setattr(restored, name, getattr(host, name))
         state = prep.read_state(restored.state_dir, restored.checkout)
@@ -146,10 +148,12 @@ from pathlib import Path
 from scripts import deploy_prod as prod, deploy_prepare as prep, deploy_runtime as runtime
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_stage6_integration import IntegrationHost
+from tests.deploy_fixture_paths import FixtureStatePath
 root = Path(sys.argv[1])
 values = json.loads((root / 'transport.json').read_text(encoding='utf-8'))
 host = object.__new__(IntegrationHost)
 prod.Host.__init__(host, root / 'checkout', root / 'state')
+host.state_dir = FixtureStatePath(host.state_dir)
 host.__dict__.update(values)
 host.selected = SelectedRelease(**values['selected'])
 host.commands = []

@@ -16,6 +16,7 @@ from scripts.check_repository_compatibility import (
     MIGRATIONS, export_commit, overlay_sql, run_worker, snapshot,
 )
 from scripts.repository_compatibility_worker import CheckoutImports
+from tests.compatibility_test_environment import worker_python
 
 
 class RepositoryCompatibilityRunnerTest(unittest.TestCase):
@@ -140,7 +141,7 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
         """Ошибочный source не превращается в успешный пустой результат."""
         output = self.root / "output"
         output.mkdir()
-        result = run_worker(Path(sys.executable), self.previous, "behavior", output,
+        result = run_worker(worker_python(), self.previous, "behavior", output,
                             ["--test-modules", "tests.test_missing"], 30)
         self.assertFalse(result["passed"])
         self.assertNotEqual(result["returncode"], 0)
@@ -166,7 +167,7 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
         expected = overlay_sql(checkout, sql_source, original)
         output = self.root / "valid-output"
         output.mkdir()
-        result = run_worker(Path(sys.executable), checkout, "behavior", output,
+        result = run_worker(worker_python(), checkout, "behavior", output,
                             ["--test-modules", "tests.test_user_identity_repository",
                              "tests.test_vault_lease_fencing"], 60)
         self.assertTrue(result["passed"], result)
@@ -178,7 +179,7 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
         overlay_sql(checkout, sql_source, expected)
         output = self.root / "invalid-output"
         output.mkdir()
-        result = run_worker(Path(sys.executable), checkout, "behavior", output,
+        result = run_worker(worker_python(), checkout, "behavior", output,
                             ["--test-modules", "tests.test_user_identity_repository"], 60)
         self.assertFalse(result["passed"])
         self.assertTrue(result["old_tests"]["errors"])
