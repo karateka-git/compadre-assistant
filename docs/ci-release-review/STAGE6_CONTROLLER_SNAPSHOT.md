@@ -5,8 +5,12 @@ SQLite v2. Порядок отдельной установки и возвра�
 [OPERATIONS.md](../OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot),
 общий статус — в [плане](PLAN.md#шаги-этапа-6).
 **Шаг 6.5 выполнен частично: production rollout остаётся закрыт.**
-На VPS не выполнялись ни чтение, ни запись; установленный snapshot не проверен
-заново. Последний исторический источник — [PRODUCTION.md](../PRODUCTION.md).
+Первый локальный проход выполнен без VPS. Затем по отдельному поручению
+проведена только безопасная read-only инвентаризация 06.11.2026; факты ниже.
+Ни controller, ни units, ни runtime/БД на VPS не менялись. Установленный
+snapshot целиком не переаттестован; прежний источник —
+[PRODUCTION.md](../PRODUCTION.md). Локально дополнены boot/finalization и
+доставка schema admission; Linux-приёмка и fencing ещё не завершены.
 
 ## Подготовить автономный архив
 
@@ -43,7 +47,7 @@ imports проверяются до переключения. Это не про
 | Legacy `state.json` | Поля, `last_good`, `retry_after` и неизвестные дополнительные поля не переписываются при чтении. Установка snapshot не мигрирует state в v2. Повтор и legacy recovery покрыты существующими tests. |
 | Marker | Имя и смысл `deploy-in-progress` сохранены; backup CLI сам отвергает marker, не полагаясь только на systemd condition. Установка при marker запрещена. |
 | Lock | Используется существующий `deploy.lock` без удаления inode. Backup удерживает тот же неблокирующий lock на весь online backup. Установка/возврат snapshot должны удерживать этот inode внешним `flock -n`. Linux межпроцессный flock не проверен на Windows. |
-| Compose/systemd | Legacy pinned, critical и marker-guard шаблоны не менялись. Текущие проверки effective unit/Compose сохраняются. `database-compose.yml` и durable admission v2 остаются за gate; штатная финализация/boot ещё не завершены. |
+| Compose/systemd | Legacy pinned, critical и marker-guard шаблоны не менялись. Подготовлены selector oneshot drop-in, durable finalization и guarded boot. Они остаются за gate и не установлены на VPS; Linux-приёмка не выполнена. |
 | Backup timer | Имя timer и исходные enabled/active сохраняются. Подготовлен отдельный drop-in `obs-chat-bot-backup-selector.conf` для backup service; он не устанавливается автоматически. Реальный effective unit и timer не проверены. |
 | Возврат snapshot | До запуска deploy вернуть сохранённые каталог, wrapper, `controller.sha` и проверить digests. После появления v2 state/selector legacy controller не допускается. Нельзя восстанавливать старую БД под видом возврата controller. |
 
@@ -80,15 +84,15 @@ ancestor/descendant bind, readonly/separate bind и неизвестный inven
 Это обнаружение, а не fencing: оно не исключает host Python/SQLite CLI,
 параллельный новый `docker run/compose run`, другой daemon/mount alias или
 другой хост с credentials. `require_switch_rollout` остаётся безусловным,
-без env/CLI bypass. Сохраняются и отдельные отказы финализации
-`candidate_started`/`recovery_verified`; marker/timer вручную не меняются.
+без env/CLI bypass. Новый finalizer вызывается после `candidate_started` либо
+`recovery_verified`, но сам также требует rollout gate. Marker/timer вручную
+не меняются.
 
 ## Продолжить до включения v2
 
-1. Дополнить локальную часть 6.5: определить и реализовать штатную финализацию
-   candidate/recovery и boot path, который проверяет durable state/selector,
-   runtime pin и admission перед polling. Проверить повтор без create/start
-   чужого поколения. Не заменять это прямым systemd `compose up` без проверки.
+1. Провести отдельную проверку локально реализованных finalization/boot и
+   readonly admission delivery. Подтвердить lifecycle на Linux с реальными
+   units и обоими образами; unit tests не заменяют эту приёмку.
 2. Определить реальное ограничение доступа host CLI и ручных Docker writers,
    порядок maintenance/reboot и доверенный круг операторов; доказать, что
    writer не появится после проверки. Простого списка процессов недостаточно.
@@ -103,34 +107,68 @@ ancestor/descendant bind, readonly/separate bind и неизвестный inven
    условий. Локальный архив, зелёные unit tests и исторический снимок VPS
    не являются доказательством установленного controller или Linux-приёмки.
 
-### Получить отсутствующий контракт Linux-стенда
+### Применить полученный lifecycle-контракт
 
-В repository есть только drop-ins, нет базовых `obs-chat-bot.service` и
-`obs-chat-bot-backup.service`. Перед продолжением интеграции нужны безопасные
-read-only наблюдения effective `Type`, `RemainAfterExit`, `KillMode`, `Restart`,
-`TimeoutStartUSec`, `TimeoutStopUSec`, `User`/`Group`, lifecycle команд и
-зависимостей обоих units; затем фиксация reviewed boot/shutdown контракта
-в repository. Не публиковать Environment/credentials и полные команды, если
-они содержат секреты. Дополнительно нужны owner/mode/ACL каталога `data`,
-файлов credentials, Docker socket и группы операторов, inventory других
-systemd/cron/host CLI и Docker writers. На VPS это отдельное действие по
-PRODUCTION; в этом шаге доступа к серверу не было.
+Базовые units не хранятся в repository. Их безопасные effective свойства
+получены отдельным read-only осмотром и позволили продолжить локальную 6.5.
+Environment, содержимое `.env`/ключей/SQLite, полные ExecStart/logs/inspect
+не выводились. На сервере выполнялись только systemctl show безопасных
+свойств и чтение metadata; диагностический Python исполнялся со stdin с `-B`,
+без создания скриптов на VPS. Это инвентаризация, не запуск project tests.
 
-Причина зависимости конкретна: controller удерживает эксклюзивный deploy lock
-во время `systemctl start`. Новый boot helper с тем же lock не сможет
-завершиться, а helper без lock оставляет гонку запуска writer относительно
-stop/snapshot. Нужна отдельная durable finalization state machine с
-согласованным выходом из lock и повтором после прерывания. Предполагать
-семантику отсутствующих base units нельзя. Recovery старого образа на новой
-схеме также требует реализации доставки проверенных admission/context
-`runtime_schema` в readonly mount, а не только проверки CI evidence.
+Контроллер удерживает deploy lock во время `systemctl start`. Новый helper
+решает это без создания второго writer: если lock занят, разрешён **только
+read-only adoption уже работающих точных ID** по durable boot intent. Если
+хоть один контейнер остановлен, adoption отказывает. При свободном lock helper
+может запустить только существующие сохранённые ID, без compose create/up;
+проверяет selector, image/OCI, env/mounts, admission и оба health/polling.
+Перед start старого образа на новой схеме повторяется проверка evidence.
+`restart=no` сохраняется, а будущий drop-in связывает unit с Docker через
+`PartOf=docker.service`; реальный restart/reboot этого порядка ещё не испытан.
 
-Это оставшиеся задачи реализации 6.5, а не уже доказанные свойства 6.4 или
-сценарии, которые можно закрыть зелёным fake transport test. На автономном
-Linux-стенде можно разработать и проверить новый базовый unit/операционный
-контракт; его перенос на VPS затем требует отдельной проверки совместимости
-с существующей установкой. Наличие только Windows workspace не подтверждает
-Linux права, systemd stop/start или исключение ручных writers.
+Finalizer сохраняет `finalization_intent` и точный boot contract до durable
+удаления marker, принимает oneshot unit, повторно проверяет пару, сохраняет
+`runtime_adopted`, возвращает исходные enabled/active timer, затем пишет
+`success`/`rolled_back`. Повтор незавершённой финализации использует тот же
+intent. Ошибки возвращаются controller для recovery/закрытого отказа. Новый
+v2-путь `verify-pinned` проверяет работающий durable boot без legacy stop/start.
+
+При recovery после admission создаются приватные JSON admission/context с
+exact old/candidate SHA/image ID, controller SHA, artifact digest, SQL digest
+старого checkout и fingerprint новой схемы. Compose override монтирует только
+эти файлы readonly и задаёт два schema env. Проверяются их identity, журнал,
+байты/права и фактические mounts. Для совпадающего manifest допуск не нужен.
+Он не заменяет перепроверку GitHub evidence. Файлы создаются под остановленными
+writers до create/start; прежние поколения и WAL не восстанавливаются.
+
+Это локально реализованный контракт 6.5, а не доказанная Linux-приёмка или
+завершение матрицы 6.6. На этой точке работа останавливается по просьбе
+пользователя; следующий шаг 6.6 в этом проходе не выполнялся.
+
+## Read-only наблюдения production от 06.11.2026
+
+Осмотр выполнен 06.11.2026 до контрольного времени 13:04 UTC; точные границы
+отдельно не фиксировались. Источник — узкие `systemctl show`,
+filesystem/xattr metadata, имена процессов/cron-файлов и только Mounts
+Docker inspect, обработанные в памяти с выводом агрегатов. Результат является
+снимком времени; отсутствие writer в списке не является fencing.
+
+| Объект | Наблюдение |
+| --- | --- |
+| Основной unit | loaded, active/exited, enabled, NeedDaemonReload=no; oneshot, RemainAfterExit=yes, KillMode=control-group, Restart=no; start timeout 3 min, stop 1 min; User/Group=user, checkout working directory. Requires docker, After docker/network; Before backup service. |
+| Backup service | loaded, inactive/dead, static, NeedDaemonReload=no; oneshot, RemainAfterExit=no, KillMode=control-group, Restart=no; start timeout infinity, stop 90 s; User/Group=user. Requires и After основного unit. |
+| Backup timer | loaded, active/waiting, enabled, NeedDaemonReload=no. |
+| Внешнее состояние | stage=success, protocol_version отсутствует; marker и selector отсутствуют. Каталог root:root 0700, существующий deploy.lock root:root 0600. Lock не захватывался и не менялся при осмотре. |
+| Права | checkout/data — user:user 0755; SQLite-файл root:root 0644; credentials-файл user:user 0600. Содержимое файлов не читалось. POSIX ACL на data/credentials/socket отсутствуют по xattr metadata; getfacl недоступен. |
+| Docker | socket root:docker 0660; user входит в группы user/docker. Два assistant running и **два прежних catcher exited**, все четыре имеют writable exact bind data. Новый foreign-mount gate отвергнет и два stopped writer; при осмотре они не удалялись/не менялись. |
+| Процессы и cron | Наблюдались dockerd/containerd/shims, cron и несколько Python-процессов; аргументы не читались/не выводились. Имена cron-файлов ограничились штатными placeholder/e2scrub; произвольные другие scheduler/операторы этим не исключены. |
+
+У `user` есть фактический обход общего lock через Docker socket, владение
+data позволяет переименовать файл даже при root-owned SQLite. Read-only осмотр
+не устраняет эти права. До rollout нужны отдельно согласованные maintenance/
+операционный запрет и/или техническое fencing, разбор прежних stopped containers
+и Linux-проверка нового unit/backup. Эти изменения на VPS здесь не разрешались
+и не выполнялись. Безусловный gate сохраняется.
 
 ## Локальные проверки
 
@@ -153,9 +191,9 @@ skips, 53.665 с. Отдельно `tests.test_migration_runner`,
 & 'C:/Users/compadre/Documents/obsChatBot/.venv/Scripts/python.exe' -B -m unittest tests.test_migration_runner tests.test_runtime_schema tests.test_deploy_metrics
 ```
 
-## Подготовленный локальный архив
+## Первый локальный архив — заменяется после продолжения 6.5
 
-Архив создан из окончательного commit локальной подготовки контроллера
+Первый архив создан из commit локальной подготовки контроллера
 `4c7e6d43d6f1a63846f05f2599d97567cf2ce594`, после его commit. Источник
 Git-байтов и manifest относится именно к этому SHA, а не к будущему merge
 или Release. Файл находится вне checkout:
@@ -166,4 +204,24 @@ SHA256: `9c5ab1a84474f897cc3d1a654837feb48e46e339fae962e90b494208e94e6032`.
 snapshot, включая `deploy_prod`, `controller_snapshot`, `deploy_backup`.
 Staging: соседний `staging-4c7e6d4`; оба результата локальные, не установлены
 на VPS. Документационные commits после этого SHA не меняют байты controller;
-если изменится код, архив надо собрать заново из окончательного commit.
+после продолжения boot/finalization этот архив больше не является окончательным.
+Новый архив и его точный SHA/digest фиксируются после commit нового controller.
+
+## Проверки продолжения 6.5 и точка остановки
+
+После read-only inventory и локальной реализации выполнены 133 целевых tests:
+`OK`, 2 Linux-only skips, 67.211 с. К прежним 126 добавлены 7 проверок
+`tests.test_deploy_runtime`: adoption без start/create при занятом lock,
+отказ для stopped ID при таком lock, start только durable ID и безопасный повтор,
+возобновление незавершённой финализации, сохранение новой записи при rolled_back,
+отказ при marker/неизвестной stage/чужом ID/повреждённых admission/selector и
+readonly schema delivery, принимаемая настоящим прежним runtime validator
+на отдельной мигрированной SQLite. Транспорт Docker/systemd подменён.
+Основной прогон — предыдущая общая команда с добавленным
+`tests.test_deploy_runtime` и тремя schema/metrics модулями.
+
+Linux flock, effective unit/PartOf, реальный Docker start/readonly mount,
+reboot/power loss и оба runtime images остаются непроверенными.
+Read-only production inventory не является такими испытаниями. Полный CI
+и VPS установка не выполнялись. На этой безопасной точке 6.5 заканчивается
+текущий проход; 6.6 и этап 7 не начинались. Rollout gate остаётся безусловным.

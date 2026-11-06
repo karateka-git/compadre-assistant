@@ -304,8 +304,8 @@ class DatabaseSwitchTests(unittest.TestCase):
                 self.assertEqual((host.state_dir / "state.json").read_bytes(), before)
                 self.assertEqual(host.commands, [])
 
-    def test_deploy_wires_copy_and_switch_but_cannot_finalize_v2_yet(self):
-        """За тестовым обходом gate deploy выбирает копию и сохраняет true при отказе."""
+    def test_deploy_wires_copy_and_switch_and_retains_new_database_on_health_failure(self):
+        """За тестовым обходом gate отказ health сохраняет новую SQLite и true."""
         with TemporaryDirectory() as temporary:
             host, state, record, _ = self._setup(Path(temporary))
             record("success")
@@ -329,6 +329,7 @@ class DatabaseSwitchTests(unittest.TestCase):
                     stack.enter_context(patch.object(host, name))
                 stack.enter_context(patch.object(host, "run", side_effect=run))
                 stack.enter_context(patch.object(host, "stop_both", side_effect=stop))
+                stack.enter_context(patch.object(host, "verify_both", side_effect=prod.DeployError("health")))
                 stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": False, "active": False}))
                 stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
                 stack.enter_context(patch.object(prep, "require_clean_checkout"))

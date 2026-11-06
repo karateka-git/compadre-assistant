@@ -231,15 +231,20 @@ runtime pin, копирует SQLite API и проверяет integrity/FK. О�
 После отдельного допуска нужны `daemon-reload`, `systemd-analyze verify`,
 проверка effective ExecStart, timer и копии выбранной БД с новой записью.
 
-**Rollout v2 остаётся закрыт.** Drop-in ещё не установлен. Прямой systemd
-`compose up` и Docker restart в штатном пути v2 ещё не проверены; финализация
-`candidate_started`/`recovery_verified` сохраняет marker и выключенный timer.
-Не снимать их вручную. Перед включением нужны проверенные boot/finalization с
-точным selector/runtime и durable admission, а также исключение host CLI,
+**Rollout v2 остаётся закрыт.** Новые drop-ins ещё не установлены. Локально
+реализованы `finalization_intent` → `runtime_adopted` → `success`/`rolled_back`,
+guarded boot и readonly schema admission/context. Будущий
+`deploy/obs-chat-bot-selector.conf` заменяет прямой `compose up` helper-командой:
+при занятом lock она только принимает уже работающую точную пару; при свободном
+запускает существующие durable ID без create/up. Docker restart остаётся `no`.
+Нужны Linux-проверка oneshot/PartOf/reboot, прав и backup, а также исключение host CLI,
 ручного `docker run/compose run`, другого mount/daemon и polling с теми же
 credentials. Проверка writable Docker mounts перед снимком/recovery обнаруживает
 известные контейнеры, но не блокирует создание writer после осмотра. Установка
-snapshot сама по себе gate не снимает; следующие проверки — в рабочем протоколе.
+snapshot сама по себе gate не снимает; следующие проверки и read-only факты
+VPS — в рабочем протоколе. Marker/timer вручную не менять. `verify-pinned`
+для v2 только проверяет durable boot и работающую пару; legacy stop/start
+на selector-поколении не применяется.
 
 Проверить ежедневные SQLite-копии и их журнал:
 

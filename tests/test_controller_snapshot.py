@@ -20,7 +20,8 @@ class ControllerSnapshotTests(unittest.TestCase):
         repository = root / "repository"
         repository.mkdir()
         for name in (*snapshot.DEPENDENCIES, "deploy/deploy-prod", "scripts/deploy_backup.py",
-                     "scripts/controller_snapshot.py", "scripts/deploy_prod.py"):
+                     "scripts/controller_snapshot.py", "scripts/deploy_prod.py", "scripts/deploy_runtime.py",
+                     "scripts/deploy_schema_admission.py"):
             path = repository / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"# fixture\n")

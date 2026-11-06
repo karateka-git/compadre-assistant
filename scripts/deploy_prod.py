@@ -46,6 +46,10 @@ BACKUP_GUARD = Path("/etc/systemd/system/obs-chat-bot-backup.service.d/90-deploy
 PINNED_EXEC = ["/usr/bin/docker", "compose", "up", "-d", "--no-build", "--pull", "never",
                "vk_assistant", "tg_assistant"]
 PINNED_STOP = ["/usr/bin/docker", "compose", "stop", "vk_assistant", "tg_assistant"]
+SELECTOR_EXEC = ["/usr/bin/env", "-i", "HOME=/root", "PATH=/usr/bin:/bin",
+                 "PYTHONPATH=/usr/local/lib/compadre-assistant-deploy", "/usr/bin/python3", "-B",
+                 "-m", "scripts.deploy_runtime", "start"]
+SELECTOR_STOP = SELECTOR_EXEC[:-1] + ["stop"]
 # Префикс ! у systemd сохраняет sandbox, но выполняет только эти команды без User=/Group=.
 PINNED_EXEC_FLAGS = ["no-setuid"]
 DEPLOY_SSH = ("ssh -i /home/user/.ssh/obs-chat-bot_deploy -o IdentitiesOnly=yes "
@@ -235,10 +239,16 @@ class Host:
 
     def require_compose_pin(self, tag: str, *, critical: bool = False) -> None:
         """Проверяет effective image, pull и restart policy обоих каналов."""
-        env = self.compose_env(tag, critical=critical)
+        selected = (self.state_dir / "active-db.json").exists()
+        if selected:
+            state = prep.read_state(self.state_dir, self.checkout) or {}
+            side = database_switch.read_selected(self, state)
+            env = self.database_env(tag, state[side]["container_path"])
+        else:
+            env = self.compose_env(tag, critical=critical)
         self.run("docker", "compose", "config", "--quiet", env=env)
         config = json.loads(self.run("docker", "compose", "config", "--format", "json", env=env))
-        expected_restart = "no" if critical else "unless-stopped"
+        expected_restart = "no" if critical or selected else "unless-stopped"
         if any(config["services"][name].get("image") != tag or
                config["services"][name].get("pull_policy") != "never" or
                str(config["services"][name].get("restart")) != expected_restart
@@ -310,7 +320,8 @@ class Host:
         if dropins != expected:
             raise DeployError("Порядок systemd drop-in не закрепляет безопасный запуск")
         service_interface = "org.freedesktop.systemd1.Service"
-        for property_name, expected in (("ExecStartEx", PINNED_EXEC), ("ExecStopEx", PINNED_STOP)):
+        start, stop = (SELECTOR_EXEC, SELECTOR_STOP) if self.uses_selector_runtime() else (PINNED_EXEC, PINNED_STOP)
+        for property_name, expected in (("ExecStartEx", start), ("ExecStopEx", stop)):
             command = self.systemd_property(service_interface, property_name,
                                             "a(sasasttttuii)")
             if (len(command) != 1 or not isinstance(command[0], list) or len(command[0]) != 10 or
@@ -320,6 +331,12 @@ class Host:
                                         ("WorkingDirectory", str(self.checkout))):
             if self.systemd_text_property(service_interface, property_name) != expected:
                 raise DeployError(f"Effective {property_name} отличается от проверенного unit")
+        if self.uses_selector_runtime():
+            for name, expected_value in (("Type", "oneshot"), ("KillMode", "control-group"), ("Restart", "no")):
+                if self.systemd_text_property(service_interface, name) != expected_value:
+                    raise DeployError("Lifecycle selector unit не совпадает с проверенным контрактом")
+            if self.systemd_property(service_interface, "RemainAfterExit", "b") != [True]:
+                raise DeployError("Selector unit должен сохранять oneshot active state")
         environment = self.systemd_property("org.freedesktop.systemd1.Service", "EnvironmentFiles",
                                             "a(sb)")
         if (not 1 <= len(environment) <= 2 or
@@ -367,7 +384,8 @@ class Host:
             raise DeployError("Внешний Compose override отличается от проверенного шаблона")
         if critical.read_bytes() != (SOURCE_ROOT / "deploy/critical-compose.yml").read_bytes():
             raise DeployError("Critical Compose override отличается от проверенного шаблона")
-        if dropin.read_bytes() != (SOURCE_ROOT / "deploy/obs-chat-bot-pinned.conf").read_bytes():
+        if dropin.read_bytes() not in ((SOURCE_ROOT / "deploy/obs-chat-bot-pinned.conf").read_bytes(),
+                                      (SOURCE_ROOT / "deploy/obs-chat-bot-selector.conf").read_bytes()):
             raise DeployError("Systemd drop-in отличается от проверенного шаблона")
         if (LEGACY_PINNED_DROPIN.exists() and
                 LEGACY_PINNED_DROPIN.read_bytes() !=
@@ -431,6 +449,30 @@ class Host:
         """Закрывает v2 до Linux-приёмки boot, backup и исключения сторонних CLI."""
         raise DeployError("SQLite protocol v2: rollout закрыт до приёмки runtime/backup и fencing writers")
 
+    def uses_selector_runtime(self) -> bool:
+        """Определяет отдельно установленный selector-aware systemd boot path."""
+        return PINNED_DROPIN.is_file() and PINNED_DROPIN.read_bytes() == (
+            SOURCE_ROOT / "deploy/obs-chat-bot-selector.conf").read_bytes()
+
+    def prepare_runtime_schema(self, state: dict, record) -> None:
+        """Доставляет readonly admission/context точному прежнему образу."""
+        from scripts import deploy_schema_admission
+
+        deploy_schema_admission.prepare(self, state, record, _atomic_text)
+
+    def require_runtime_schema(self, item: dict, state: dict) -> None:
+        """Сверяет сохранённые schema файлы и фактический readonly mount канала."""
+        from scripts import deploy_schema_admission
+
+        deploy_schema_admission.require_files(self, state)
+        deploy_schema_admission.require_container(item, state, self.state_dir)
+
+    def finalize_database(self, state: dict, outcome: str) -> None:
+        """Возвращает штатные oneshot unit/timer по durable boot intent v2."""
+        from scripts import deploy_runtime
+
+        deploy_runtime.finalize(self, state, lambda stage, **changes: _state(self, state, stage, **changes), outcome)
+
     def controller_sha(self) -> str:
         """Подтверждает SHA именно установленного snapshot отдельно от Release.
 
@@ -485,6 +527,12 @@ class Host:
         env = self.compose_env(tag, critical=True)
         env["COMPOSE_FILE"] += ":" + str(self.state_dir / "database-compose.yml")
         env["ASSISTANT_DATABASE_PATH"] = database_path
+        state = prep.read_state(self.state_dir, self.checkout) or {}
+        if state.get("runtime_schema") is not None:
+            from scripts import deploy_schema_admission
+
+            deploy_schema_admission.require_files(self, state)
+            env["COMPOSE_FILE"] += ":" + str(self.state_dir / deploy_schema_admission.OVERRIDE)
         return env
 
     def set_database_runtime(self, tag: str, expected_id: str, database_path: str, *, recovery: bool = False) -> None:
@@ -524,6 +572,7 @@ class Host:
                     or any(mount.get("Source") == str(self.checkout / "data")
                            and mount.get("Destination") != "/app/data" for mount in mounts)):
                 raise DeployError("Созданный runtime не соответствует выбранной SQLite")
+            self.require_runtime_schema(item, prep.read_state(self.state_dir, self.checkout) or {})
         self.require_no_duplicate_polling()
 
     def prepare_database_containers(self, tag: str, expected_id: str,
@@ -732,6 +781,12 @@ class Host:
             _atomic_text(path, "critical\n")
         else:
             path.unlink(missing_ok=True)
+            if os.name == "posix":
+                directory = os.open(self.state_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
 
     def unit_state(self, unit: str) -> str:
         """Читает точный ActiveState без вывода содержимого unit."""
@@ -865,7 +920,8 @@ class Host:
             raise DeployError("Повтор версии обнаружил незавершённый marker")
         if any(item.get("Image") != image_id or
                item["State"].get("Health", {}).get("Status") != "healthy" or
-               item["HostConfig"]["RestartPolicy"]["Name"] != "unless-stopped"
+               item["HostConfig"]["RestartPolicy"]["Name"] !=
+               ("no" if (self.state_dir / "active-db.json").exists() else "unless-stopped")
                for item in self.containers().values()):
             raise DeployError("Повтор версии обнаружил нездоровый канал")
 
@@ -1096,6 +1152,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
             if stage in ("success", "rolled_back"):
                 database_switch.read_selected(host, state)
                 return
+            if stage in ("finalization_intent", "runtime_adopted"):
+                host.finalize_database(state, state["boot"]["outcome"])
+                return
             host.guard_known_writers()
             # Не доверяем памяти после ошибки fsync/replace state writer.
             durable = prep.read_state(host.state_dir, host.checkout)
@@ -1261,9 +1320,12 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         switch_state = state.copy() if "protocol_version" in state else None
+        initial_switch = switch_state is None and host.uses_selector_runtime()
         _recover(host, state)
-        if switch_state is not None:
+        if switch_state is not None or initial_switch:
             host.require_switch_rollout()
+            if state.get("stage") == "recovery_verified":
+                host.finalize_database(state, "rolled_back")
         if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
             raise DeployError("Незавершённый предыдущий выпуск обработан; проверьте состояние перед новым запуском")
         if state.get("stage") == "degraded":
@@ -1351,6 +1413,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                              compatibility_evidence=host.compatibility_evidence)
                 state["selector_rebind"] = {"from": database_switch.selector(switch_state, side),
                                             "to": database_switch.selector(state, "old")}
+            elif initial_switch:
+                state["compatibility_evidence"] = host.compatibility_evidence
             _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
@@ -1369,16 +1433,17 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             with metrics.stage("deploy.stop_both"):
                 host.stop_both()
             _state(host, state, "writers_stopped")
-            if switch_state is not None:
-                _atomic_text(host.state_dir / "active-db.json",
-                             json.dumps(database_switch.selector(state, "old")) + "\n")
+            if switch_state is not None or initial_switch:
+                if initial_switch:
+                    database_switch.register_initial(
+                        host, state, lambda stage, **changes: _state(host, state, stage, **changes), _atomic_text)
+                else:
+                    _atomic_text(host.state_dir / "active-db.json",
+                                 json.dumps(database_switch.selector(state, "old")) + "\n")
                 database_switch.transition(
                     host, state, lambda stage, **changes: _state(host, state, stage, **changes), _atomic_text,
                 )
                 backup = Path(state["snapshot"]["path"])
-                # Backup/systemd ещё не понимают selector. Не снимать marker и
-                # не возобновлять timer до отдельной интеграции шага 6.5.
-                raise DeployError("SQLite v2 завершил запуск; финализация закрыта до 6.5")
             else:
                 backup = host.state_dir / "backups" / f"{version}-{selected.sha}.db"
                 with metrics.stage("backup"):
@@ -1398,6 +1463,10 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 _state(host, state, "candidate_started")
             with metrics.stage("deploy.verify_both_1"):
                 host.verify_both(candidate_id, selected.sha)
+            if state.get("protocol_version") == database_switch.PROTOCOL_VERSION:
+                host.finalize_database(state, "success")
+                metrics.available()
+                return
             host.restart_policy("unless-stopped")
             host.marker(False)
             host.activate_unit()
@@ -1421,6 +1490,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                     state.update(stage="rollback_started", error=_error_reason(error))
                 try:
                     _recover(host, state)
+                    if state.get("stage") == "recovery_verified":
+                        host.finalize_database(state, "rolled_back")
                 except Exception as rollback_error:
                     raise DeployError("Выпуск и автоматический возврат не прошли; degraded state") from rollback_error
             else:
@@ -1440,7 +1511,8 @@ def verify_pinned(host: Host) -> None:
     """Проверяет stop/start и recovery обоих каналов на текущем закреплённом образе.
 
     Команда предназначена для контролируемой приёмки установки до первого
-    выпуска; она не меняет код, схему SQLite или выбранную версию.
+    выпуска; она не меняет код, схему SQLite или выбранную версию. Для v2
+    проверяет durable boot и работающую пару без legacy stop/start.
 
     Args:
         host: Адаптер системных операций production VPS.
@@ -1454,6 +1526,12 @@ def verify_pinned(host: Host) -> None:
         _recover(host, state)
         if "protocol_version" in state:
             host.require_switch_rollout()
+            from scripts import deploy_runtime
+
+            boot = deploy_runtime.verify(host, state, require_running=True)
+            host.verify_both(boot["image_id"], boot["sha"])
+            metrics.update(stage="pinned_verified", sha=boot["sha"])
+            return
         if previous_stage not in (None, "success", "rolled_back", "failed_preflight", "pinned_verified"):
             raise DeployError("Предыдущий переход обработан; проверьте состояние перед повтором")
         if state.get("stage") == "degraded":

@@ -57,6 +57,10 @@ class RecoveryHost(SwitchHost):
         """Фиксирует возврат checkout без действий над репозиторием тестов."""
         self.commands.append(("restore", sha))
 
+    def prepare_runtime_schema(self, state, record):
+        """Подменяет проверку Git-SQL; доставка допуска проверяется отдельным тестом."""
+        record("recovery_selected", runtime_schema=None)
+
     def timer_suspend(self):
         """Фиксирует запрет synthetic backup timer."""
         self.commands.append(("timer_suspend",))

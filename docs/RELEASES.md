@@ -114,8 +114,10 @@ commit; его SHA и digest не заменяют SHA/CI приложения. 
 проверка Git-байтов/изолированных imports и selector-aware backup
 ([шаг 6.5](ci-release-review/STAGE6_CONTROLLER_SNAPSHOT.md)). Это локальные
 результаты: snapshot на VPS не установлен, полный CI этого изменения ещё не
-получен. SQLite v2 остаётся закрыт до штатной финализации, Linux/systemd/backup
-приёмки и исключения сторонних writers/CLI. Сам архив не разрешает новый deploy.
+получен. Boot/finalization и доставка schema admission локально дополнены;
+SQLite v2 остаётся закрыт до Linux/systemd/backup приёмки и исключения сторонних
+writers/CLI. Read-only осмотр VPS выявил доступ `user` к Docker socket и два
+stopped legacy writer с writable data bind. Сам архив не разрешает новый deploy.
 
 ## Исправления поддерживаемых линий
 

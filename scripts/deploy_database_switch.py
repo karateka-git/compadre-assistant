@@ -24,6 +24,7 @@ RECOVERABLE_STAGES = frozenset({
     "runtime_prepared", "admission_recorded", "candidate_started",
     "rollback_started", "recovery_intent", "recovery_selected",
     "recovery_prepared", "recovery_verified",
+    "finalization_intent", "runtime_adopted",
 })
 
 
@@ -205,7 +206,8 @@ def recover(host, state: dict, record, publish) -> None:
     """Возвращает прежний runtime на допустимое поколение под deploy lock.
 
     После durable admission сохраняет новую SQLite и требует повторный CI
-    допуск точной пары. Marker и остановленный timer остаются до шага 6.5.
+    допуск точной пары. Marker и остановленный timer остаются до отдельной
+    финализации boot-контракта вызывающим controller.
     Ни snapshot, ни поколения и sidecars не удаляются и не перезаписываются.
 
     Args:
@@ -274,11 +276,12 @@ def recover(host, state: dict, record, publish) -> None:
         raise ValueError("Поколение recovery не подтверждено")
     record("recovery_selected", selected_generation=state[target]["generation_id"])
     host.restore_checkout(state["old_sha"])
+    host.prepare_runtime_schema(state, record)
     database_path = state[target]["container_path"]
     host.set_database_runtime(state["old_tag"], state["old_image_id"], database_path, recovery=True)
     ids = host.prepare_database_containers(state["old_tag"], state["old_image_id"], database_path, recovery=True)
     record("recovery_prepared", recovery_containers=ids)
     host.start_recovery_containers(ids)
     host.verify_both(state["old_image_id"], state["old_sha"])
-    # Не объявляем rolled_back: штатные systemd/backup ещё закрыты rollout gate.
+    # Вызывающий controller отдельно фиксирует boot intent и финализирует unit/timer.
     record("recovery_verified")
