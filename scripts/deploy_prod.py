@@ -46,8 +46,9 @@ BACKUP_GUARD = Path("/etc/systemd/system/obs-chat-bot-backup.service.d/90-deploy
 PINNED_EXEC = ["/usr/bin/docker", "compose", "up", "-d", "--no-build", "--pull", "never",
                "vk_assistant", "tg_assistant"]
 PINNED_STOP = ["/usr/bin/docker", "compose", "stop", "vk_assistant", "tg_assistant"]
+# -P исключает WorkingDirectory приложения из sys.path: helper берётся из root snapshot.
 SELECTOR_EXEC = ["/usr/bin/env", "-i", "HOME=/root", "PATH=/usr/bin:/bin",
-                 "PYTHONPATH=/usr/local/lib/compadre-assistant-deploy", "/usr/bin/python3", "-B",
+                 "PYTHONPATH=/usr/local/lib/compadre-assistant-deploy", "/usr/bin/python3", "-P", "-B",
                  "-m", "scripts.deploy_runtime", "start"]
 SELECTOR_STOP = SELECTOR_EXEC[:-1] + ["stop"]
 # Префикс ! у systemd сохраняет sandbox, но выполняет только эти команды без User=/Group=.

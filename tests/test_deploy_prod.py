@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
@@ -210,6 +211,65 @@ class FakeHost(prod.Host):
 
 class SystemdBootTests(unittest.TestCase):
     """Проверяет effective unit с фактическим порядком production drop-in."""
+
+    def test_selector_python_uses_snapshot_before_checkout(self) -> None:
+        """При cwd=checkout `-P` выбирает root snapshot для обоих helper."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            snapshot = root / "snapshot"
+            for directory, label in ((checkout, "candidate"), (snapshot, "controller")):
+                package = directory / "scripts"
+                package.mkdir(parents=True)
+                (package / "__init__.py").write_text("", encoding="utf-8")
+                for module in ("deploy_runtime", "deploy_backup"):
+                    (package / f"{module}.py").write_text(
+                        f"print({label!r})\n", encoding="utf-8")
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(snapshot)
+            for module in ("deploy_runtime", "deploy_backup"):
+                with self.subTest(module=module):
+                    command = [sys.executable, "-P", "-B", "-m", f"scripts.{module}"]
+                    result = subprocess.run(command, cwd=checkout, env=environment,
+                                            text=True, capture_output=True, check=False)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "controller")
+                    unsafe = subprocess.run(command[:1] + command[2:], cwd=checkout,
+                                            env=environment, text=True, capture_output=True,
+                                            check=False)
+                    self.assertEqual(unsafe.stdout.strip(), "candidate")
+
+    def test_selector_templates_and_dbus_require_safe_path(self) -> None:
+        """Main и backup templates используют `-P`; D-Bus без него закрыт."""
+        self.assertEqual(prod.SELECTOR_EXEC[5:9], ["/usr/bin/python3", "-P", "-B", "-m"])
+        for template, module in (("obs-chat-bot-selector.conf", "deploy_runtime"),
+                                 ("obs-chat-bot-backup-selector.conf", "deploy_backup")):
+            source = prod.SOURCE_ROOT / "deploy" / template
+            text = source.read_text(encoding="utf-8")
+            self.assertIn(f"/usr/bin/python3 -P -B -m scripts.{module}", text)
+            self.assertNotIn(f"/usr/bin/python3 -B -m scripts.{module}", text)
+        with TemporaryDirectory() as temporary:
+            host, unit = self._host(Path(temporary), legacy=False)
+            unit["pinned"].write_bytes(
+                (prod.SOURCE_ROOT / "deploy/obs-chat-bot-selector.conf").read_bytes())
+            for name, command in (("ExecStartEx", prod.SELECTOR_EXEC),
+                                  ("ExecStopEx", prod.SELECTOR_STOP)):
+                unsafe = [part for part in command if part != "-P"]
+                unit["replies"][name] = {"type": "a(sasasttttuii)",
+                                         "data": [[unsafe[0], unsafe,
+                                                   prod.PINNED_EXEC_FLAGS, 0, 0, 0, 0, 0, 0, 0]]}
+            unit["replies"].update({
+                "Type": {"type": "s", "data": "oneshot"},
+                "KillMode": {"type": "s", "data": "control-group"},
+                "Restart": {"type": "s", "data": "no"},
+                "RemainAfterExit": {"type": "b", "data": True},
+            })
+            with patch.object(prod, "LEGACY_PINNED_DROPIN", unit["legacy"]), patch.object(
+                    prod, "CHANNELS_DROPIN", unit["channels"]), patch.object(
+                    prod, "PINNED_DROPIN", unit["pinned"]), patch.object(
+                    host, "uses_selector_runtime", return_value=True):
+                with self.assertRaises(prod.DeployError):
+                    host.require_systemd_boot(unit["runtime"])
 
     @unittest.skipUnless(os.name == "posix" and shutil.which("systemd-analyze") and
                          Path("/usr/bin/docker").exists(),

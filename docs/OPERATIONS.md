@@ -416,6 +416,27 @@ restart policy, снять marker, запустить unit, проверить �
 Если любой признак не доказан, оставить `degraded` и оба канала остановленными.
 Не считать один лишь `active` unit доказательством успешного возврата.
 
+Узкий forward recovery доступен только после отказа финализации уже принятого
+candidate с выбранной новой SQLite, сохранённым `boot.outcome=success` и
+`migration_attempted=false`. После отдельной установки проверенного controller
+snapshot и selector units с безопасным Python import администратор повторно
+сверяет state/marker, точные ID/image/OCI, integrity/FK/fingerprint выбранной
+БД, Release/CI evidence и отсутствие чужих writers. Затем в согласованном
+окне выполняет root-only helper установленного snapshot:
+
+```sh
+sudo env -i HOME=/root PATH=/usr/bin:/bin PYTHONPATH=/usr/local/lib/compadre-assistant-deploy \
+  /usr/bin/python3 -P -B -m scripts.deploy_forward_recovery
+```
+
+Helper удерживает существующий deploy lock, сохраняет durable forward intent
+до запуска и использует только те же два container ID на выбранной новой БД.
+После health/polling он проводит штатную финализацию unit, marker и timer;
+process-crash повтор допускается только для того же intent. При отказе
+оставляет `degraded`, marker и остановленные writers. Команда не выполняет
+новую миграцию, не создаёт контейнеры и не подменяет обычный выпуск. Её
+выполнение требует отдельного решения по фактическому состоянию VPS.
+
 ### Аварийная версия
 
 Аварийный путь требует решения владельца, причины, подтверждённого PR merge
