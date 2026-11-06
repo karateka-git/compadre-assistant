@@ -71,6 +71,10 @@ class FakeHost(prod.Host):
         """Подтверждает согласованность старого pin в fake host."""
         assert old_id == OLD_IMAGE and old_sha == OLD_SHA
 
+    def controller_sha(self) -> str:
+        """Возвращает отдельный SHA синтетического controller snapshot."""
+        return "c" * 40
+
     def require_compose_pin(self, tag: str, *, critical: bool = False) -> None:
         """Фиксирует проверку временного restart=no override."""
         self.actions.append("compose_critical" if critical else "compose_normal")

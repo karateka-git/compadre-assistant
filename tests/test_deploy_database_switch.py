@@ -68,6 +68,13 @@ class SwitchHost(prod.Host):
     def require_no_duplicate_polling(self):
         """Синтетический транспорт не содержит сторонних контейнеров."""
 
+    def require_no_foreign_database_mounts(self, own_ids):
+        """Синтетический транспорт не содержит сторонних Docker writers."""
+
+    def controller_sha(self):
+        """Возвращает SHA синтетического snapshot независимо от candidate."""
+        return "c" * 40
+
     def migrate_copy(self, image_id, directory, *, basename="app.db"):
         """Открывает только отдельную копию; схема этого кандидата неизменна."""
         self.commands.append(("migrate", str(directory / basename)))
@@ -292,7 +299,7 @@ class DatabaseSwitchTests(unittest.TestCase):
             for operation in (lambda: prod.deploy(host, "v1.2.3"), lambda: prod.verify_pinned(host)):
                 with patch.object(prep, "deploy_lock") as lock:
                     lock.return_value.__enter__.return_value = None
-                    with self.assertRaisesRegex(prod.DeployError, "6.4"):
+                    with self.assertRaisesRegex(prod.DeployError, "rollout закрыт"):
                         operation()
                 self.assertEqual((host.state_dir / "state.json").read_bytes(), before)
                 self.assertEqual(host.commands, [])

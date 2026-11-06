@@ -380,7 +380,7 @@ class DatabaseRecoveryTests(unittest.TestCase):
             host, state, _ = self._setup(Path(temporary))
             with patch.object(prep, "deploy_lock", return_value=nullcontext()):
                 for command in (lambda: prod.deploy(host, "v1.2.3"), lambda: prod.verify_pinned(host)):
-                    with self.assertRaisesRegex(prod.DeployError, "gate шага 6.5"):
+                    with self.assertRaisesRegex(prod.DeployError, "rollout закрыт"):
                         command()
             durable = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(durable["stage"], "recovery_verified")

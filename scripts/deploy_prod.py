@@ -428,8 +428,55 @@ class Host:
         _atomic_text(self.state_dir / "runtime.env", value)
 
     def require_switch_rollout(self) -> None:
-        """Закрывает эксплуатационный v2 до интеграции systemd/backup и snapshot."""
-        raise DeployError("SQLite protocol v2: recovery 6.4 не снимает gate шага 6.5")
+        """Закрывает v2 до Linux-приёмки boot, backup и исключения сторонних CLI."""
+        raise DeployError("SQLite protocol v2: rollout закрыт до приёмки runtime/backup и fencing writers")
+
+    def controller_sha(self) -> str:
+        """Подтверждает SHA именно установленного snapshot отдельно от Release.
+
+        Manifest и controller.sha устанавливаются под тем же deploy lock.
+        Release checkout не служит источником идентичности контроллера.
+        """
+        from scripts import controller_snapshot
+
+        sha = compatibility.private_text(self.state_dir / "controller.sha")
+        manifest = prep.parse_state_object((SOURCE_ROOT / controller_snapshot.MANIFEST).read_text(encoding="utf-8"))
+        if not prep.SHA_PATTERN.fullmatch(sha) or manifest.get("controller_sha") != sha:
+            raise DeployError("SHA установленного controller snapshot не подтверждён")
+        controller_snapshot.verify_directory(SOURCE_ROOT, manifest, require_root=True)
+        return sha
+
+    def require_no_foreign_database_mounts(self, own_ids: set[str]) -> None:
+        """Отклоняет сторонние Docker writers с writable bind общей SQLite.
+
+        Проверяются и остановленные контейнеры: их может запустить другой
+        оператор или restart policy. Пути и inspect/env не попадают в журнал.
+        Проверка не исключает host CLI, удалённые credentials или гонку нового
+        docker run; rollout требует отдельного ограничения этих путей записи.
+
+        Args:
+            own_ids: Точные ID каналов, уже проверенные вызывающим кодом.
+
+        Raises:
+            DeployError: Сторонний контейнер имеет writable доступ к data.
+        """
+        data = (self.checkout / "data").resolve()
+        for container_id in self.run("docker", "ps", "--all", "--no-trunc", "-q").splitlines():
+            if container_id in own_ids:
+                continue
+            item = json.loads(self.run("docker", "inspect", container_id, "--format", "{{json .}}"))
+            mounts = item.get("Mounts")
+            if not isinstance(mounts, list):
+                raise DeployError("Не удалось проверить mounts стороннего контейнера")
+            for mount in mounts:
+                if mount.get("RW") is not True:
+                    continue
+                source = Path(mount.get("Source", ""))
+                if not source.is_absolute():
+                    raise DeployError("Не удалось проверить source writable mount")
+                source = source.resolve()
+                if source.is_relative_to(data) or data.is_relative_to(source):
+                    raise DeployError("Сторонний Docker writer имеет доступ к SQLite data")
 
     def database_env(self, tag: str, database_path: str) -> dict[str, str]:
         """Формирует отдельный Compose override для обоих выбранных поколений."""
@@ -592,6 +639,7 @@ class Host:
                        or item["HostConfig"]["RestartPolicy"]["Name"] != "no"
                        for item in self.recovery_inventory().values())):
             raise DeployError("Recovery writers или guards не остановлены")
+        self.require_no_foreign_database_mounts({item["Id"] for item in self.recovery_inventory().values()})
 
     def require_recovery_evidence(self, state: dict) -> None:
         """Заново проверяет Release/run/attempt и artifact точной previous пары.
@@ -892,6 +940,7 @@ class Host:
                        or item["HostConfig"]["RestartPolicy"]["Name"] != "no"
                        for item in self.containers().values())):
             raise DeployError("Остановка writers и backup для окончательного снимка не подтверждена")
+        self.require_no_foreign_database_mounts({item["Id"] for item in self.containers().values()})
 
     def migrate_copy(self, image_id: str, directory: Path, *, basename: str = "app.db") -> None:
         """Запускает candidate CLI только с временной копией, без сети и secrets.
@@ -1285,6 +1334,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "migration_attempted": False, "last_good": last_good,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
                 "deployment": state.get("deployment"),
+                "controller_sha": host.controller_sha(),
             }
             if switch_state is not None:
                 import uuid
@@ -1296,7 +1346,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 side = database_switch.read_selected(host, switch_state)
                 state.update(protocol_version=database_switch.PROTOCOL_VERSION,
                              transition_id=uuid.uuid4().hex, old=switch_state[side],
-                             controller_sha=compatibility.private_text(host.state_dir / "controller.sha"),
+                             controller_sha=host.controller_sha(),
                              admission_may_have_started=False,
                              compatibility_evidence=host.compatibility_evidence)
                 state["selector_rebind"] = {"from": database_switch.selector(switch_state, side),
@@ -1421,7 +1471,8 @@ def verify_pinned(host: Host) -> None:
             state.pop("failed_version", None)
             state.pop("retry_after", None)
             state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
-                         schema_before=schema, timer_before=host.timer_snapshot())
+                         schema_before=schema, timer_before=host.timer_snapshot(),
+                         controller_sha=host.controller_sha())
             _state(host, state, "ready")
         except Exception as error:
             _state(host, state, "failed_preflight", error=type(error).__name__)

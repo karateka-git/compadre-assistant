@@ -128,7 +128,7 @@ LF. 18 октября 2026 года такой архив остановился
 `scripts/deploy_prod.py` **до** замены действующего snapshot. Контрольную сумму
 в установочном скрипте под изменённые байты не подгонять.
 
-Архив `scripts/` и `deploy/` создавать из точного проверенного commit SHA:
+Автономный архив создавать из точного проверенного commit SHA:
 для обычной подготовки это может быть SHA Release, для отдельного исправления
 контроллера — SHA проверенного merge. Записать источник snapshot отдельно от
 SHA устанавливаемого приложения.
@@ -136,8 +136,17 @@ SHA устанавливаемого приложения.
 ```powershell
 $snapshotSha = "PASTE_VERIFIED_40_CHAR_SHA"
 $archivePath = "C:\Temp\release-snapshot.tar"
-git -c core.autocrlf=false archive --format=tar --output=$archivePath $snapshotSha scripts deploy
+$python = "C:\Users\compadre\Documents\obsChatBot\.venv\Scripts\python.exe"
+& $python -B -m scripts.controller_snapshot build --sha $snapshotSha --archive $archivePath
+# Сохранить выданные controller_sha и archive_sha256 во внешний протокол.
+& $python -B -m scripts.controller_snapshot unpack --sha $snapshotSha --archive $archivePath --digest PASTE_SHA256 --directory C:\Temp\controller-staging-UNIQUE
 ```
+
+Архив только `scripts/` + `deploy/` недостаточен для этапов 5–6: imports
+используют `runtime_schema.py` и `migration_runner.py` приложения. Сборщик
+добавляет минимальные Git-зависимости и manifest, отвергает CR и links;
+`unpack` проверяет digest, SHA, все файлы, синтаксис и imports через отдельный
+`python -I -B` вне release checkout. Это локальная проверка, а не допуск CI.
 
 Перед передачей сверить SHA256 всего архива и **каждого обычного файла** в нём
 с `git show <SHA-релиза>:<путь-файла>`; отклонить неожиданные symlink/hardlink.
@@ -157,38 +166,80 @@ snapshot, drop-in, marker и состояния ботов.
 устанавливаемого Release могут различаться; оба записывают отдельно.
 
 1. После PR и проверки точного merge SHA в полном CI выбрать проверенный
-   commit контроллера. Из него создать архив `scripts/` и `deploy/` командой
+   commit контроллера. Из него создать автономный архив сборщиком
    [выше](#архив-контроллера-с-windows-точные-байты-git). Сверить каждый
    файл с `git show <SHA>:<путь>`, отсутствие лишних типов записей и SHA256
-   архива; записать SHA commit и digest. Старый `v2.0.0` tag не содержит
-   исправления preflight и не является источником нового snapshot.
+   архива; записать SHA commit, digest и точный CI run/attempt. После merge
+   пересобрать архив для точного прошедшего полный CI merge SHA.
 2. Получить отдельное согласование на перенос архива и изменение VPS. Перед
    записью заново проверить [production](PRODUCTION.md): `git status`,
    `state.json`/marker, работу двух каналов и backup timer. Не запускать
    установку snapshot при активном deploy или `degraded`; сначала разбирать
    такое состояние. После отказа `failed_preflight` старые каналы должны
-   работать, marker должен отсутствовать.
+   работать, marker должен отсутствовать. На всё время установки удерживать
+   существующий inode `/var/lib/compadre-assistant-deploy/deploy.lock` через
+   `flock -n`; файл не удалять и не переименовывать. Под lock повторно сверить
+   stage/marker, cooldown и отсутствие работающего backup service.
 3. На VPS проверить digest перенесённого архива, безопасно распаковать его в
    новый root-owned staging вне checkout и сверить хеш каждого файла с
    manifest проверенного commit. Проверить Python syntax/imports, права,
    wrapper `deploy-prod` и отсутствие symlink/hardlink, путей вне staging и
-   CR в скриптах. Не выводить `.env`, SQLite, ключи и полные логи.
+   CR в скриптах. Подготовить staging через `controller_snapshot unpack`
+   с внешними `--sha`/`--digest` и `--require-root`; проверить root:root и отсутствие чужой записи.
+   Не выводить `.env`, SQLite, ключи и полные логи.
 4. Сохранить действующий snapshot как отдельную неизменяемую копию и
    переключить каталог `/usr/local/lib/compadre-assistant-deploy` на
-   проверенный staging через переименование в том же filesystem. Если
+   проверенный staging через переименование в том же filesystem. Сохранить
+   также прежние wrapper, `controller.sha`, digests и точные пути копий.
+   Два rename не являются одной атомарной транзакцией: имя установки временно
+   отсутствует; в это окно никто не запускает controller. Если
    переключение не завершилось, вернуть старый каталог до любого deploy.
-   Сверить хеши установленного кода, import модуля и путь wrapper.
-   **Не менять** checkout `v1.0.4`, image pin, БД, marker или state ради
+   Сверить установленный каталог через `controller_snapshot verify` с архивом,
+   внешними SHA/digest, `--directory` и `--require-root`; проверить изолированный import и
+   установить проверенный wrapper как root:root 0755. Его `-B` запрещает
+   создание pycache внутри snapshot. Атомарно записать SHA в `controller.sha`
+   (root:root 0600, fsync файла и каталога); новый controller сверяет его с
+   manifest и собственными байтами. До конца проверки lock не отпускать.
+   **Не менять** release checkout, image pin, БД, marker или state ради
    установки контроллера.
 5. После свежего read-only осмотра, отдельного допуска к установке и окна
-   backup проверить точный Release/SHA/CI `v2.0.0`, текущий `retry_after` и
+   backup проверить точный Release/SHA/CI выбранной версии, текущий `retry_after` и
    отсутствие `degraded`. Только затем рассматривать повтор
-   `sudo deploy-prod v2.0.0`; не стирать cooldown/state для ускорения.
+   `sudo deploy-prod vX.Y.Z`; не стирать cooldown/state для ускорения.
    Записать оба SHA (controller и Release) и результат новой команды.
 
 Этот порядок готовит установку, но не разрешает её автоматически. После
 успешной миграции или отказа проверить фактические stage, schema, backup,
 image ID и оба канала по [порядку возврата](#отказ-выпуска-и-возврат).
+
+При отказе установки под тем же lock вернуть прежние каталог, wrapper и
+`controller.sha`, сверить сохранённые digests/imports, затем pin, state,
+marker и timer с исходным осмотром. Если новый controller уже записал v2
+state/selector, возврат к legacy controller запрещён: он не понимает границу
+приёма. Нужен отдельный совместимый recovery; старая БД не является откатом
+snapshot. Незавершённый staging сохранять до разбора.
+
+### Подготовить backup и штатный запуск для SQLite v2
+
+Локальная подготовка шага 6.5 описана в
+[протоколе snapshot](ci-release-review/STAGE6_CONTROLLER_SNAPSHOT.md).
+`scripts.deploy_backup` выбирает terminal-поколение через selector, сверяет
+runtime pin, копирует SQLite API и проверяет integrity/FK. Он удерживает
+тот же `deploy.lock` до конца backup и отвергает marker даже при прямом CLI.
+Для будущей установки подготовлен `deploy/obs-chat-bot-backup-selector.conf`:
+он заменяет только `ExecStart` backup service; timer и marker guards остаются.
+После отдельного допуска нужны `daemon-reload`, `systemd-analyze verify`,
+проверка effective ExecStart, timer и копии выбранной БД с новой записью.
+
+**Rollout v2 остаётся закрыт.** Drop-in ещё не установлен. Прямой systemd
+`compose up` и Docker restart в штатном пути v2 ещё не проверены; финализация
+`candidate_started`/`recovery_verified` сохраняет marker и выключенный timer.
+Не снимать их вручную. Перед включением нужны проверенные boot/finalization с
+точным selector/runtime и durable admission, а также исключение host CLI,
+ручного `docker run/compose run`, другого mount/daemon и polling с теми же
+credentials. Проверка writable Docker mounts перед снимком/recovery обнаруживает
+известные контейнеры, но не блокирует создание writer после осмотра. Установка
+snapshot сама по себе gate не снимает; следующие проверки — в рабочем протоколе.
 
 Проверить ежедневные SQLite-копии и их журнал:
 

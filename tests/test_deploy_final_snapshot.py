@@ -167,15 +167,16 @@ class FinalSnapshotTests(unittest.TestCase):
                     marker.write_text("unexpected" if refusal == "marker" else "critical\n",
                                       encoding="utf-8")
                     containers = {
-                        "tg": {"State": {"Running": False},
+                        "tg": {"Id": "tg-id", "State": {"Running": False},
                                "HostConfig": {"RestartPolicy": {"Name": "no"}}},
-                        "vk": {"State": {"Running": refusal == "running"},
+                        "vk": {"Id": "vk-id", "State": {"Running": refusal == "running"},
                                "HostConfig": {"RestartPolicy": {
                                    "Name": "unless-stopped" if refusal == "restart" else "no"}}},
                     }
                     with (patch.object(host, "unit_state", side_effect=lambda unit:
                                        "active" if unit == refusal else "inactive"),
                           patch.object(host, "unit_enabled", return_value=refusal == "timer_enabled"),
+                          patch.object(host, "require_no_foreign_database_mounts"),
                           patch.object(host, "containers", return_value=containers)):
                         if refusal is None:
                             host.require_snapshot_quiescence()
