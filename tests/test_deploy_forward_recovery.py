@@ -58,6 +58,10 @@ class ForwardHost(RuntimeHost):
         for item in self.found.values():
             item["State"] = {"Running": False, "Status": "exited"}
 
+    def recovery_inventory(self) -> dict:
+        """Возвращает известные Docker ID без чтения selector."""
+        return self.found
+
     def require_recovery_evidence(self, state: dict) -> None:
         """Оставляет сеть за границей теста exact локального контракта."""
 
@@ -78,6 +82,13 @@ class ForwardHost(RuntimeHost):
         if args[:2] == ("systemctl", "reset-failed"):
             self.commands.append(args)
             self.main_failed = False
+            return ""
+        if args[:2] in (("docker", "update"), ("docker", "stop")):
+            self.commands.append(args)
+            if args[1] == "stop":
+                for item in self.found.values():
+                    if item["Id"] == args[2]:
+                        item["State"] = {"Running": False, "Status": "exited"}
             return ""
         return super().run(*args, env=env)
 
@@ -154,7 +165,8 @@ class ForwardRecoveryTests(unittest.TestCase):
                 before = list(host.commands)
                 with self.assertRaises(prod.DeployError):
                     self._recover(host)
-                self.assertEqual(host.commands, before)
+                self.assertFalse(any(command[:2] == ("docker", "start")
+                                     for command in host.commands[len(before):]))
                 self.assertTrue((host.state_dir / "deploy-in-progress").exists())
 
     def test_rejects_selector_schema_or_evidence_drift(self) -> None:
@@ -175,7 +187,8 @@ class ForwardRecoveryTests(unittest.TestCase):
                 before = list(host.commands)
                 with self.assertRaises((prod.DeployError, ValueError)):
                     self._recover(host)
-                self.assertEqual(host.commands, before)
+                self.assertFalse(any(command[:2] == ("docker", "start")
+                                     for command in host.commands[len(before):]))
 
     def test_crash_after_unit_adoption_replays_finalization(self) -> None:
         """Повтор с уже восстановленным timer не создаёт и не запускает ID."""
@@ -240,3 +253,99 @@ class ForwardRecoveryTests(unittest.TestCase):
             self.assertEqual(durable["forward_recovery"], durable["boot"])
             self.assertTrue((host.state_dir / "deploy-in-progress").exists())
             self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+
+    def test_partial_retry_evidence_failure_closes_running_writer(self) -> None:
+        """API отказ до start переводит частично запущенную пару в degraded."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            state.update(stage="forward_recovery_intent", forward_recovery=state["boot"])
+            prep.write_state(host.state_dir, host.checkout, state)
+            host.main_failed = False
+            host.found["tg_assistant"]["State"] = {"Running": True, "Status": "running"}
+            host.require_recovery_evidence = lambda _state: (_ for _ in ()).throw(
+                prod.DeployError("API unavailable"))  # type: ignore[method-assign]
+            with self.assertRaises(prod.DeployError):
+                self._recover(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+            self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+            self.assertEqual((host.state_dir / "deploy-in-progress").read_text(), "critical\n")
+            self.assertEqual(host.timer, {"enabled": False, "active": False})
+
+    def test_missing_marker_closes_partial_retry(self) -> None:
+        """Пропавший marker восстанавливается и не оставляет polling writer."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            state.update(stage="forward_recovery_intent", forward_recovery=state["boot"])
+            prep.write_state(host.state_dir, host.checkout, state)
+            host.main_failed = False
+            host.marker(False)
+            host.found["tg_assistant"]["State"] = {"Running": True, "Status": "running"}
+            with self.assertRaises(prod.DeployError):
+                self._recover(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+            self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+            self.assertEqual((host.state_dir / "deploy-in-progress").read_text(), "critical\n")
+
+    def test_label_inventory_stops_writer_if_compose_stop_fails(self) -> None:
+        """Дополнительный stop по точным ID работает при сломанном Compose."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            state.update(stage="forward_recovery_intent", forward_recovery=state["boot"])
+            prep.write_state(host.state_dir, host.checkout, state)
+            host.main_failed = False
+            host.found["tg_assistant"]["State"] = {"Running": True, "Status": "running"}
+            host.require_recovery_evidence = lambda _state: (_ for _ in ()).throw(
+                prod.DeployError("API unavailable"))  # type: ignore[method-assign]
+            with patch.object(host, "stop_both", side_effect=prod.DeployError("Compose unavailable")):
+                with self.assertRaises(prod.DeployError):
+                    self._recover(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+            self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+            self.assertTrue(any(command[:2] == ("docker", "stop") for command in host.commands))
+
+    def test_failed_docker_stop_does_not_claim_guards_confirmed(self) -> None:
+        """Невозможность остановить writer получает отдельный безопасный отказ."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            state.update(stage="forward_recovery_intent", forward_recovery=state["boot"])
+            prep.write_state(host.state_dir, host.checkout, state)
+            host.main_failed = False
+            host.found["tg_assistant"]["State"] = {"Running": True, "Status": "running"}
+            host.require_recovery_evidence = lambda _state: (_ for _ in ()).throw(
+                prod.DeployError("API unavailable"))  # type: ignore[method-assign]
+            original = host.run
+
+            def fail_stop(*args: str, env=None) -> str:
+                """Отказывает именно в прямом Docker stop после Compose failure."""
+                if args[:2] == ("docker", "stop"):
+                    raise prod.DeployError("Docker stop unavailable")
+                return original(*args, env=env)
+
+            host.run = fail_stop  # type: ignore[method-assign]
+            with patch.object(host, "stop_both", side_effect=prod.DeployError("Compose unavailable")):
+                with self.assertRaisesRegex(prod.DeployError, "не доказаны"):
+                    self._recover(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+            self.assertEqual((host.state_dir / "deploy-in-progress").read_text(), "critical\n")
+            self.assertTrue(host.found["tg_assistant"]["State"]["Running"])
+
+    def test_adopted_retry_api_failure_closes_running_pair(self) -> None:
+        """Даже после systemd adoption сетевой отказ закрывает оба канала."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            state.update(stage="runtime_adopted", forward_recovery=state["boot"])
+            prep.write_state(host.state_dir, host.checkout, state)
+            host.marker(False)
+            host.main_failed = False
+            host.main_active = True
+            host.timer = state["timer_before"].copy()
+            for item in host.found.values():
+                item["State"] = {"Running": True, "Status": "running"}
+            host.require_recovery_evidence = lambda _state: (_ for _ in ()).throw(
+                prod.DeployError("API unavailable"))  # type: ignore[method-assign]
+            with self.assertRaises(prod.DeployError):
+                self._recover(host)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+            self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+            self.assertEqual((host.state_dir / "deploy-in-progress").read_text(), "critical\n")
+            self.assertEqual(host.timer, {"enabled": False, "active": False})
