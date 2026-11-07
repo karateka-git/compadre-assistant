@@ -33,16 +33,29 @@ systemd unit. Затем отдельная root-only команда [восст
 | --- | --- |
 | Durable state | `success`, `last_good=v3.2.0` на SHA `cabc0e24d28947123868db8a60f6b55095feb63e`; marker отсутствует. |
 | SQLite | Selector указывает на новое поколение. Прежняя и новая БД имеют `integrity_check=ok`, FK 0, совпадающие fingerprint и logical digest до и после recovery; строковые данные не выводились. |
-| Каналы | Те же candidate TG/VK ID `running` и `healthy`, restarts 0, restart policy `no`; polling signals обоих каналов подтверждены в ограниченном окне. Старые боты не запущены. |
+| Каналы | Те же candidate TG/VK ID `running` и `healthy`, restarts 0, restart policy `no`; polling signals обоих каналов подтверждены в ограниченном окне. Пользователь отдельно подтвердил ответы `/help` в Telegram и VK. Старые боты не запущены. |
 | systemd и backup | Основной service и backup timer `active/enabled`; backup service `inactive`. Final snapshot backup цел, root/0400. |
 | Контроллер | Установлен snapshot `aeeb73c557face466ce411b8c22a4aad04750861`; exact main/backup selector units с `python3 -P`. `require_infrastructure` прошёл. |
+
+Дополнительное чтение VPS 07.11.2026 в 06:07:35 UTC подтвердило checkout
+`cabc0e24d28947123868db8a60f6b55095feb63e`, active main service/timer
+и оба тех же TG/VK ID `healthy` с restarts 0. Оно не повторяло проверку
+SQLite, selector и durable state из снимка 06.11.2026.
 
 Повторный read-only допуск к recovery выявил [публичный лимит GitHub API в
 Release selector](ci-release-review/STAGE7_7_DEPLOY_INCIDENT.md#дополнительный-отказ-допуска-после-установки-snapshot).
 Исправление прошло [отдельный CI и private Linux проверку](ci-release-review/STAGE7_7_AUTH_FIX.md),
 затем [установлено](ci-release-review/STAGE7_7_AUTH_INSTALL.md) до единственного
-запуска recovery. Его результат проверен независимо. Живые ответы Telegram/VK
-после восстановления ещё требуют пользовательской приёмки.
+запуска recovery. Его результат проверен независимо; пользователь подтвердил
+живые ответы `/help` в обоих каналах без записи содержимого ответов и ID чатов.
+
+Ротация базы полного CI после этого выпуска была отменена: repository variable
+`COMPATIBILITY_POLICY_SHA` возвращена к `09f15a5b3c01ec73d02379b918104e8cf697b4b2`,
+хотя на VPS установлен v3.2.0. Успешный [main-full 42344876362/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42344876362)
+проверил SHA `a44cd3c73afefc30b832051fc95fff0e5555142a` после возврата policy;
+он **не является допуском будущего deploy** от установленной v3.2.0.
+Разбор и автоматизация перенесены в [бэклог](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
+Reboot и потеря питания VPS не проверялись.
 
 Перед дальнейшими действиями повторно прочитать фактический state, selector,
 marker, контейнеры и timer на VPS: эта запись не является новым допуском.
