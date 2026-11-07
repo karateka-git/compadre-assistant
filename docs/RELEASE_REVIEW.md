@@ -38,6 +38,23 @@ SQLite и durable state при ней повторно не читались.
 другого SHA занял 1 мин 47 с. Длительность ручной работы внутри этих окон
 не измерялась.
 
+Для отказа v3.0.0 подтверждён серверный интервал команды 3 мин 09,605 с;
+оценка «около 3:35» не подтверждена сохранёнными timestamps. Отдельные
+длительности build, backup, migrations и `verify_both` не восстановлены.
+Docker healthcheck имел timeout 5 с: строка `Health check passed` означала,
+что внутренние проверки завершились, но сама по себе не доказывала успешное
+завершение всего probe в лимит Docker. Исторический Health.Log недоступен;
+холодный Telegram probe при recovery v3.0.1 занял 7,407 с, что поддерживает
+объяснение слишком короткого лимита, но не измеряет старый контейнер.
+
+Красная annotation «Ошибка внешнего действия» в успешном
+[main-full 41005012029/1](https://github.com/karateka-git/compadre-assistant/actions/runs/41005012029)
+возникла из намеренного `RuntimeError` в тесте
+`test_accepted_error_and_unexpected_error_clear`: обработчик записал ожидаемое
+исключение в лог, тест и job завершились успешно. Сама annotation не означает
+отказ допуска CI; проверять нужно результат точного run/attempt и обязательных
+jobs.
+
 Для v3.2.0 точный
 [main-full 42249037867/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42249037867)
 шёл с 16:05:08 до 16:09:02 06.11.2026: 3 мин 54 с, `success`. Release
