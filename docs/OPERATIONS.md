@@ -4,7 +4,8 @@
 восстановление. Локальную рабочую копию подготовьте по [SETUP.md](SETUP.md)
 и запускайте по [RUN.md](RUN.md). Условия допуска релиза описаны в
 [RELEASES.md](RELEASES.md), а последний зафиксированный снимок сервера — в
-[PRODUCTION.md](PRODUCTION.md).
+[PRODUCTION.md](PRODUCTION.md). Результаты проверки выпуска v3.2.0 и
+сопоставимые замеры — в [RELEASE_REVIEW.md](RELEASE_REVIEW.md).
 
 | Задача | С чего начать |
 | --- | --- |
@@ -88,18 +89,18 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 Не удалять production-БД по development-инструкции: изменения её схемы требуют
 миграции с сохранением данных.
 
-### Доступ systemd к закреплённому Compose
+### Доступ systemd к выбранному поколению SQLite
 
 Внешний каталог `/var/lib/compadre-assistant-deploy` принадлежит root и имеет
 права `0700`; `runtime.env` и оба Compose override внутри него — root:root
 `0600`. Основной `obs-chat-bot.service` задаёт `User=user` и `Group=user`.
-После удаления устаревшего `90-deploy-pinned.conf` действующий порядок
-drop-in: `channels.conf`, затем `zz-deploy-pinned.conf`. Поздний файл
-должен задавать **обе** итоговые команды:
-`ExecStart=!/usr/bin/docker compose up -d --no-build --pull never
-vk_assistant tg_assistant` и `ExecStop=!/usr/bin/docker compose stop
-vk_assistant tg_assistant`. По [документации systemd](https://www.freedesktop.org/software/systemd/man/257/systemd.service.html)
-префикс `!` выполняет только эти команды без ограничений `User=`/`Group=`;
+Действующий `zz-deploy-pinned.conf` задаёт `ExecStart` и `ExecStop` через
+`/usr/bin/python3 -P -B -m scripts.deploy_runtime start|stop` из
+`/usr/local/lib/compadre-assistant-deploy`. Backup drop-in
+`zz-deploy-selector.conf` вызывает `scripts.deploy_backup` тем же Python
+контрактом. `-P` не даёт рабочему каталогу checkout подменить установленный
+controller; его отсутствие привело к отказу финализации v3.2.0. Префикс `!`
+у команд systemd снимает только ограничения `User=`/`Group=` для этих команд;
 остальные настройки службы сохраняются. Права приватного каталога и файлов
 не ослаблять ради запуска Compose.
 
@@ -107,18 +108,18 @@ vk_assistant tg_assistant`. По [документации systemd](https://www.
 `systemd-analyze verify`, `NeedDaemonReload=no`, порядок `DropInPaths` и
 итоговые D-Bus `ExecStartEx` **и** `ExecStopEx`: точные аргументы и единственный
 флаг `no-setuid`. Также сверить `User=user`, `Group=user`, рабочий каталог,
-путь `EnvironmentFiles` к `runtime.env` и условие, блокирующее службу при
-`deploy-in-progress`. Контроллер `deploy-prod` выполняет эти проверки перед
-обычным выпуском. Если хоть одна не проходит, остановиться до перезапуска;
-подмена прав `0700`/`0600` или одного только `ExecStart` не исправляет путь
-остановки службы.
+путь `EnvironmentFiles` к `runtime.env`, `ConditionPathExists` для
+`deploy-in-progress` и backup selector. Контроллер `deploy-prod` выполняет
+эти проверки перед обычным выпуском. Если хоть одна не проходит, остановиться
+до перезапуска; подмена прав `0700`/`0600` или одного только `ExecStart` не
+исправляет путь остановки службы.
 
-Если Compose запускается как `user`, root-private pin недоступен:
-контейнеры могут запуститься вручную от root, но systemd не подтвердит
-службу, а возврат попадёт в `degraded`. Поэтому до restart проверяют
-обе итоговые команды и флаг `no-setuid`, а не только имя позднего файла.
-Последний проверенный снимок этой конфигурации — в
-[PRODUCTION.md](PRODUCTION.md).
+Если helper запускается как `user`, root-private pin недоступен и unit не
+подтвердит работу. Поэтому до restart проверяют обе итоговые команды и флаг
+`no-setuid`, а не только имя позднего файла. Docker restart policy каналов
+в этом режиме — `no`: только selector-aware systemd boot может запустить
+сохранённые точные container ID после проверки state, DB selector и image.
+Последний проверенный снимок — в [PRODUCTION.md](PRODUCTION.md).
 
 ### Архив контроллера с Windows: точные байты Git
 
@@ -221,45 +222,40 @@ snapshot. Незавершённый staging сохранять до разбо�
 
 ### Подготовить backup и штатный запуск для SQLite v2
 
-Локальная подготовка шага 6.5 описана в
-[протоколе snapshot](ci-release-review/STAGE6_CONTROLLER_SNAPSHOT.md).
-`scripts.deploy_backup` выбирает terminal-поколение через selector, сверяет
-runtime pin, копирует SQLite API и проверяет integrity/FK. Он удерживает
-тот же `deploy.lock` до конца backup и отвергает marker даже при прямом CLI.
-Для будущей установки подготовлен `deploy/obs-chat-bot-backup-selector.conf`:
-он заменяет только `ExecStart` backup service; timer и marker guards остаются.
-В проверяемом gate 7.3 целевое имя этого шаблона —
-`/etc/systemd/system/obs-chat-bot-backup.service.d/zz-deploy-selector.conf`,
-после `90-deploy-guard.conf`. До первого production v2 deploy в 7.7 отдельно
-установить оба selector drop-in (основной — `zz-deploy-pinned.conf`), guards
-и snapshot, затем проверить effective units. Gate не устанавливает их сам.
-Локальная подготовка и оставшиеся блокеры записаны в
-[шаге 7.3](ci-release-review/STAGE7_3_PREFLIGHT.md).
-После отдельного допуска нужны `daemon-reload`, `systemd-analyze verify`,
-проверка effective ExecStart, timer и копии выбранной БД с новой записью.
+`scripts.deploy_backup` выбирает terminal-поколение через `active-db.json`,
+сверяет runtime pin, копирует SQLite через API и проверяет integrity/FK. Он
+удерживает тот же `deploy.lock` до конца backup и отвергает marker даже при
+прямом вызове. Действующий backup drop-in
+`/etc/systemd/system/obs-chat-bot-backup.service.d/zz-deploy-selector.conf`
+заменяет только `ExecStart`; timer и marker guard сохраняются. При изменении
+drop-in проверить `daemon-reload`, effective command, service/timer и копию
+именно выбранного поколения.
 
-**Production rollout v2 остаётся закрыт.** Новые drop-ins ещё не установлены.
-В кандидате безусловный отказ заменён проверкой snapshot, точных файлов и
-effective units/guards, отсутствия известных сторонних writers; перед marker
-повторяется exact-pair CI/image admission. Ручного CLI/env обхода нет. Локально
-реализованы `finalization_intent` → `runtime_adopted` → `success`/`rolled_back`,
-guarded boot и readonly schema admission/context. Будущий
-`deploy/obs-chat-bot-selector.conf` заменяет прямой `compose up` helper-командой:
-при занятом lock она только принимает уже работающую точную пару; при свободном
-запускает существующие durable ID без create/up. Docker restart остаётся `no`.
-Нужны Linux-проверка oneshot/PartOf/reboot, прав и backup. Администратор VPS
-сохраняет доступ к Docker и `data`; во время согласованного окна выпуска он не
-запускает ручной SQLite CLI, `docker run/compose run` и другой writer или polling
-с теми же credentials. Это эксплуатационное правило для доверенного оператора,
-а не техническая защита от него. Проверка writable Docker mounts перед
-снимком/recovery обнаруживает известные контейнеры, но не блокирует создание
-writer после осмотра. Два прежних stopped контейнера с writable mount
-удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
-перед rollout заново проверить полный inventory. Установка
-snapshot сама по себе gate не снимает; следующие проверки и read-only факты
-VPS — в рабочем протоколе. Marker/timer вручную не менять. `verify-pinned`
-для v2 только проверяет durable boot и работающую пару; legacy stop/start
-на selector-поколении не применяется.
+Первый production переход SQLite v2 завершён на v3.2.0 через forward recovery;
+действующие selector-aware main/backup units и snapshot указаны в
+[PRODUCTION.md](PRODUCTION.md). Для каждого следующего deploy условный rollout
+gate проверяет точные файлы snapshot, effective units/guards, отсутствие
+известных сторонних writers и повторный exact-pair CI/image admission до
+marker. Ручного CLI/env обхода нет. `deploy_runtime` при занятом lock только
+принимает уже работающую точную пару; при свободном запускает сохранённые
+durable container ID без create/up. Docker restart policy остаётся `no`.
+
+Контроллер останавливает writers, регистрирует прежнюю SQLite как `old`,
+создаёт и мигрирует проверенное новое поколение и публикует selector после
+durable intent. До admission проверенный recovery может вернуть прежнюю БД;
+после admission остаётся выбранной новая. Старый файл и sidecars автоматически
+не удаляются: порядок хранения вынесен в
+[бэклог](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
+Marker, selector, state и timer вручную не менять ради повтора. Команда
+`verify-pinned` для v2 проверяет durable boot и работающую пару, но не
+выполняет legacy stop/start.
+
+Во время согласованного окна выпуска администратор не запускает ручной SQLite
+CLI, `docker run/compose run` и другой writer или polling с теми же credentials.
+Проверка существующих writable Docker mounts обнаруживает известные контейнеры,
+но не блокирует новый writer после осмотра. Перед каждым rollout инвентарь
+проверяют заново. Reboot и потерю питания единственного VPS не испытывали;
+process-crash на копии не доказывает их поведение.
 
 Проверить ежедневные SQLite-копии и их журнал:
 
@@ -309,8 +305,10 @@ python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --not
 
 ### Закрепить базу полного CI после установки
 
-Только после успешного `deploy-prod` и независимой проверки `last_good`,
-рабочей БД и обоих каналов обновить базу следующего полного CI. Публикация
+Только после подтверждённого `stage=success` и независимой проверки
+`last_good`, рабочей БД и обоих каналов обновить базу следующего полного CI.
+Если исходный `deploy-prod` отказал, успешный forward recovery и его
+независимая приёмка должны быть записаны отдельно. Публикация
 Release без установки на VPS не меняет базу: например, при опубликованной
 v3.2.0 и установленной v3.1.0 внешний CI pin всё ещё должен указывать на
 reviewed policy с v3.1.0. `main-full` и `release-full` читают именно её
@@ -328,6 +326,11 @@ repository variable на **полный SHA reviewed merge commit**, прове�
 тот остаётся закреплён за evidence пары, с которой текущий выпуск был
 установлен. До подтверждённого нового CI нельзя считать зелёный run другой
 пары допуском; при несовпадении pin и `last_good` predeploy закрывается.
+Production хранит `compatibility-policy.sha` и `github-read-token` в
+`/var/lib/compadre-assistant-deploy` с правами root:root/0600. GitHub token
+имеет только чтение Contents и Actions нужного репозитория; его значение не
+печатать и не переносить в checkout. Release selector и verifier используют
+его для чтения GitHub API; отказ авторизации закрывает допуск.
 
 ```powershell
 gh variable set COMPATIBILITY_POLICY_SHA --repo karateka-git/compadre-assistant --body <полный-SHA-reviewed-merge>
@@ -339,7 +342,11 @@ gh workflow run main-full.yml --repo karateka-git/compadre-assistant --ref main
 согласие пользователя и после push перечитать `AGENTS.md`. При неуспешной
 проверке policy/Release или любого обязательного job оставить выпуск закрытым
 и разбирать конкретный run/attempt, не подменяя baseline последним
-опубликованным Release.
+опубликованным Release. После отмены ротации v3.2.0 текущий CI pin вновь
+указывает на v3.1.0, тогда как VPS работает на v3.2.0; порядок выше нужно
+пройти для будущего выпуска. Точное состояние — в [PRODUCTION.md](PRODUCTION.md),
+автоматизация — в
+[бэклоге](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
 
 ### Проверить живое переключение двух каналов
 
@@ -393,28 +400,31 @@ lock, state или backup для «повтора». Сначала сверит
 | --- | --- |
 | `failed_preflight` | Проверка остановилась до переключения. Убедиться, что старые каналы работают и marker отсутствует; устранить причину. `failed_version`/`retry_after` временно закрывают повтор той же версии. |
 | `preparing`, `ready` без marker | После прерывания один повтор той же команды восстанавливает прежний checkout и **завершается отказом**. Проверить прежние SHA, pin и оба канала перед новой попыткой. |
-| `ready`, `critical`, `writers_stopped`, `backup_verified`, `migration_started`, `schema_verified`, `candidate_pinned`, `candidate_started`, `rollback_started` с marker | До попытки новой миграции автоматический возврат допустим только при прежней схеме и целой SQLite. После попытки новой миграции контроллер переводит выпуск в `degraded` даже без новой строки `schema_migrations`: частичное изменение нельзя исключить. Повтор команды служит разбору recovery, а не новой установке. |
+| Legacy-переход с `migration_started`, `schema_verified`, `candidate_pinned` или `rollback_started` и marker | При миграции прежнего файла даже отсутствие новой строки `schema_migrations` не доказывает исходную схему. Контроллер оставляет `degraded`; повтор команды служит разбору recovery, а не новой установке. |
+| SQLite v2 до durable admission | Сверить `admission_may_have_started=false`, selector и оба поколения под lock. Проверенный recovery может выбрать прежнюю БД; stage сам по себе не доказывает направление возврата. |
+| SQLite v2 после durable admission (`admission_recorded`, `candidate_started`, `finalization_intent`, `runtime_adopted`) | Новая БД остаётся выбранной. Прежний образ допустим только на новой схеме при точном compatibility evidence; старую БД не включать из-за возможных новых записей. Отказ доказательств закрывает запуск. |
 | `rolled_back` | Старый runtime подтверждён контроллером; проверить его независимо. Новая выкладка — отдельное решение. |
 | `pinned_verified` | Проверка закреплённого прежнего образа завершена; это не установка новой версии. |
 | `success` | Сверить `last_good` с фактическим checkout и двумя контейнерами. Повтор уже установленной версии даёт `already_installed` без пересоздания. |
 | `degraded` либо несовместимая/неизвестная схема | Оставить marker, остановить оба writer и timer; новая команда заблокирована. Нужен отдельный план ручного восстановления. |
 
-Возврат **не** восстанавливает SQLite из копии автоматически. Если миграции
-изменили схему, старый код, отвергающий неизвестную миграцию, запускать нельзя;
-решение о восстановлении backup должно учитывать записи после копии и
-возможные изменения GitHub vault. При `degraded` под отдельным разрешением
-сохранить lock/marker и проверить прежний SHA/image и схему. Возврат на старый
-runtime допустим только после доказательства **точного прежнего manifest**,
-целостности БД и структуры относительно проверенной backup-копии; при новой
-или неопределённой схеме нужен отдельный план
-продолжения на совместимом коде либо восстановления проверенной backup-копии
-с оценкой записей после неё. При доказанном прежнем manifest установить
-проверенный systemd/Compose snapshot, поднять оба старых канала с прежним
-pin, сверить health/polling и отсутствие дублей. Лишь после этого вернуть
-restart policy, снять marker, запустить unit, проверить оба канала снова,
-вернуть timer к сохранённому состоянию и атомарно записать `rolled_back`.
-Если любой признак не доказан, оставить `degraded` и оба канала остановленными.
-Не считать один лишь `active` unit доказательством успешного возврата.
+Возврат **не** восстанавливает SQLite из backup автоматически. Для v2 сначала
+проверяют `admission_may_have_started`, `active-db.json`, durable intent,
+целостность обоих поколений и точную пару image/CI. После admission
+возвращать selector на старую БД нельзя. Если прежний код отвергает новую
+схему, его нельзя запускать на выбранной БД; нужен отдельный план продолжения
+на совместимом коде либо восстановления backup с оценкой записей после копии
+и возможных изменений GitHub vault.
+
+При legacy `degraded` без selector отдельный план может вернуть прежний
+runtime только после доказательства точного прежнего manifest, целостности
+БД и структуры относительно проверенной backup-копии. При доказанном
+состоянии восстановить проверенный systemd/Compose snapshot и прежний pin,
+поднять оба канала, сверить health/polling и отсутствие дублей, затем
+финализировать marker, unit, timer и `rolled_back`. Эти действия не применять
+к v2 вместо selector-aware recovery. Если любой признак не доказан, оставить
+`degraded` и оба канала остановленными. Один лишь `active` unit не доказывает
+успешный возврат.
 
 Узкий forward recovery доступен только после отказа финализации уже принятого
 candidate с выбранной новой SQLite, сохранённым `boot.outcome=success` и
@@ -458,23 +468,22 @@ PR выпускаемой линии и связанный main PR, если о�
 marker и rollback действуют как обычно. Настоящий аварийный выпуск на VPS
 пока не испытан.
 
-В подготовленном [controller шага 5.5](ci-release-review/STAGE5_PREDEPLOY.md)
-emergency не обходит `repository-compatibility`: нужны успешные steps этого
+Действующий controller в режиме emergency не обходит
+`repository-compatibility`: нужны успешные steps этого
 job и доверенное evidence точного run/attempt, совпадающие с установленной
 базой. Ошибка API, pin/evidence или предварительной SQLite-копии даёт отказ
-до marker/остановки. Перед будущей установкой snapshot надо отдельно
-подготовить внешние `compatibility-policy.sha` и `github-read-token` по
-указанному контракту; на VPS эти изменения ещё не применялись.
+до marker/остановки. Внешние `compatibility-policy.sha` и
+`github-read-token` проверяют заново перед каждой попыткой; наличие файлов
+само по себе не даёт допуска.
 
 ### Разобрать отказ predeploy по SAFE-коду
 
-Подготовленный controller записывает статический `SAFE_*` в stderr и поле
+Controller записывает статический `SAFE_*` в stderr и поле
 `error` состояния `failed_preflight`; приватный `metrics-*.json` сохраняет
 его в `predeploy_reason`. Поле `reason` метрик по-прежнему обозначает тип
 исключения. Код не включает token, HTTP body, SQL или строки БД. При ошибке
 возврата checkout сохранённый `predeploy_reason` объясняет первичный отказ,
-а сообщение контроллера требует отдельно разобрать recovery. На VPS этот
-новый контракт ещё не установлен.
+а сообщение контроллера требует отдельно разобрать recovery.
 
 | Код | Проверка и дальнейшее действие |
 | --- | --- |
