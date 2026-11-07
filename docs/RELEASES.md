@@ -62,18 +62,15 @@ flowchart TD
 
 `full-suite` проверяет точный checkout, все unittest, три автономных smoke, свежую и предыдущую SQLite-схему, сборку образа и healthcheck. CI работает с тестовыми данными. Он не подтверждает реальные ответы ботов, systemd или production SQLite.
 
-Подготовленный SQLite gate дополнительно требует `repository-compatibility`
-для точной previous/candidate пары. Перед первым запуском нужно закрепить
-reviewed policy commit во внешней repository variable `COMPATIBILITY_POLICY_SHA`;
-без неё CI отказывает. Baseline, 107 операций, artifact и границы локальной
-проверки описаны в [шаге 5.4](ci-release-review/STAGE5_CI.md). Исторический CI
-установленной v3.1.0 сохраняет допуск по точному SHA; это не разрешает новые
-схемы. Локально реализована [predeploy-проверка](ci-release-review/STAGE5_PREDEPLOY.md)
-artifact, installed SHA/pin и предварительной SQLite-копии; её установка на VPS
-и приёмка с настоящим CI artifact ещё не выполнены.
-[Независимая локальная проверка 5.6](ci-release-review/STAGE5_REVIEW.md)
-подтвердила отказ до marker/stop и сохранение безопасного кода причины;
-она не заменяет живой CI и Linux/VPS приёмку.
+Для изменения схемы `repository-compatibility` проверяет точную пару
+previous/candidate SHA по внешне закреплённой policy. Матрица прежнего SQLite
+repository API содержит 107 операций; CI проверяет миграции на копии,
+совместимость прежнего кода с обновлённой схемой и фиксирует schema fingerprint
+и artifact. Установленный controller до остановки каналов сверяет GitHub
+run/attempt, обязательные jobs, policy, прежний Release, artifact и фактический
+`last_good`; затем мигрирует закрытую копию рабочей SQLite и сравнивает её
+схему с fingerprint из CI. Неуспех любого условия закрывает выпуск без
+переключения рабочей БД. Рабочая БД не является входом тестов CI.
 
 Оба контроллера полного CI (`main-full` и `release-full`) берут previous SHA
 из JSON по **внешнему reviewed `COMPATIBILITY_POLICY_SHA`**. Они подтверждают,
@@ -86,8 +83,10 @@ artifact, installed SHA/pin и предварительной SQLite-копии;
 и независимой проверки VPS нужно отдельным PR обновить reviewed policy на
 новый установленный SHA и только затем перевести repository variable на SHA
 этого reviewed commit. До такой ротации новый CI продолжает проверять прежнюю
-установленную базу; если она уже сменилась, допуск нового deploy закрывается
-при сравнении с `last_good`. Порядок — в [операциях](OPERATIONS.md#закрепить-базу-полного-ci-после-установки).
+базу; если она уже сменилась, допуск нового deploy закрывается при сравнении
+с `last_good`. Текущее расхождение после отмены ротации v3.2.0 записано в
+[PRODUCTION.md](PRODUCTION.md). Порядок — в
+[операциях](OPERATIONS.md#закрепить-базу-полного-ci-после-установки).
 
 Для обычного выпуска допуск сверяет репозиторий, workflow (`main-full.yml` при создании линии, `release-full.yml` для PATCH), ref, полный SHA, run/attempt и обязательные jobs/steps. `pending`, `skipped`, `failure` и сбой GitHub API закрывают допуск. Проверка другого SHA, даже более позднего в той же линии, не подходит.
 
@@ -124,21 +123,24 @@ artifact, installed SHA/pin и предварительной SQLite-копии;
 Обычный `deploy-prod vX.Y.Z` принимает опубликованный GitHub Release с полным допуском точного SHA релизной ветки. Он отдельно проверяет Release и состояние VPS, закрепляет образ, делает backup, останавливает оба канала, при необходимости применяет миграции и проверяет запуск обоих каналов. Перед эксплуатационным действием следуйте [OPERATIONS.md](OPERATIONS.md) и проверьте актуальное состояние по [PRODUCTION.md](PRODUCTION.md).
 
 Controller устанавливается отдельным автономным snapshot из проверенного
-commit; его SHA и digest не заменяют SHA/CI приложения. Подготовлены сборка,
-проверка Git-байтов/изолированных imports и selector-aware backup
-([шаг 6.5](ci-release-review/STAGE6_CONTROLLER_SNAPSHOT.md)). Это локальные
-результаты: snapshot на VPS не установлен, полный CI этого изменения ещё не
-получен. Boot/finalization и доставка schema admission локально дополнены;
-SQLite v2 остаётся закрыт до Linux/systemd/backup приёмки и согласованного окна
-без ручных writers. Администратор VPS сохраняет доступ к Docker и `data` как
-доверенный оператор. Два обнаруженных stopped legacy writer с writable data bind
-удалены в [шаге 6.6](ci-release-review/STAGE6_INTEGRATION.md#зафиксировать-разрешённую-очистку-vps);
-перед rollout требуется свежий inventory. Сам архив не разрешает новый deploy.
-В кандидате [7.3](ci-release-review/STAGE7_3_PREFLIGHT.md) безусловный rollout
-отказ заменён проверкой установленного snapshot, selector/backup effective
-units и guards. Перед marker/stop отдельно повторяются точная Release/CI пара,
-artifact, policy pin и image/OCI. Production допуск пока не получен; новые
-drop-ins и snapshot остаются отдельной установкой 7.7 после испытаний на копии.
+commit; его SHA и digest не заменяют SHA/CI приложения. Перед выпуском
+проверяют Git-байты snapshot, изолированные imports, точные wrapper и
+selector-aware systemd/backup units, права и внешний policy pin. Перед
+marker/stop controller повторно сверяет точную Release/CI пару, artifact,
+schema fingerprint и image/OCI. Доступ оператора к Docker и `data` сохраняется;
+на время установки действует окно без ручных writers и второго polling с теми
+же credentials. Наличие snapshot само по себе не разрешает deploy.
+
+Для SQLite v2 контроллер останавливает writers, делает проверенную копию
+выбранной БД, применяет миграции к **новому поколению** и публикует selector
+только после durable intent. До записи admission возможен проверенный возврат
+к прежнему поколению. После durable admission новая БД может содержать записи
+новых ботов: автоматическое переключение на старый файл запрещено. При отказе
+нужны сохранённые state/marker и отдельный проверенный recovery; старые
+поколения и backup не удаляются автоматически. Действующий порядок и узкий
+forward recovery описаны в [OPERATIONS.md](OPERATIONS.md#отказ-выпуска-и-возврат).
+Установка v3.2.0 завершилась именно forward recovery после отказа исходного
+`deploy-prod`; [итог и ограничения](RELEASE_REVIEW.md) записаны отдельно.
 
 ## Исправления поддерживаемых линий
 
