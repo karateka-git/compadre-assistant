@@ -15,6 +15,7 @@ from tests.test_full_ci_controller import admission_jobs, admission_run
 
 SHA = "a" * 40
 NEW_HEAD = "b" * 40
+OBJECT_SHA = "d" * 40
 REPO = selector.EXPECTED_REPOSITORY
 
 
@@ -41,6 +42,7 @@ class FakeApi:
                      f"https://github.com/{REPO}/actions/runs/1/attempts/1\n"),
         }
         self.tag = {"ref": f"refs/tags/{version}", "object": {"type": "commit", "sha": SHA}}
+        self.tag_object: dict | None = None
         self.run = admission_run(SHA)
         self.jobs = admission_jobs(SHA)
         self.run["repository"] = {"full_name": REPO}
@@ -77,6 +79,8 @@ class FakeApi:
             return deepcopy(self.release)
         if path == f"/git/ref/tags/{self.version}":
             return deepcopy(self.tag)
+        if path == f"/git/tags/{OBJECT_SHA}":
+            return deepcopy(self.tag_object)
         if path == f"/git/ref/heads/{self.branch}":
             return {"ref": f"refs/heads/{self.branch}", "object": {"type": "commit", "sha": self.head}}
         if path == f"/compare/{SHA}...{self.head}":
@@ -204,9 +208,9 @@ class SelectDeployReleaseTests(unittest.TestCase):
                 with self.assertRaises(selector.DeploySelectionError):
                     selector.select_release(api, api.version)
 
-    def test_tag_must_be_direct_and_protected(self) -> None:
-        """Annotated tag, изменение tag и отсутствие защиты дают отказ."""
-        for changed in (dict(type="tag", sha=SHA), dict(type="commit", sha=NEW_HEAD)):
+    def test_tag_must_have_proven_object_and_protection(self) -> None:
+        """Неподтверждённый объект, изменение tag и отсутствие защиты дают отказ."""
+        for changed in (dict(type="tag", sha=OBJECT_SHA), dict(type="commit", sha=NEW_HEAD)):
             api = FakeApi()
             api.tag["object"] = changed
             with self.assertRaises(selector.DeploySelectionError):
@@ -216,6 +220,21 @@ class SelectDeployReleaseTests(unittest.TestCase):
             self.select()
         self.api.rule.pop("bypass_actors")
         self.assertEqual(self.select().sha, SHA)
+
+    def test_annotated_tag_binds_commit_object_and_attempt(self) -> None:
+        """Селектор сохраняет точный объект и отвергает чужой CI или nested tag."""
+        self.api.tag["object"] = {"type": "tag", "sha": OBJECT_SHA}
+        evidence = selector.ReleaseTagEvidence(NEW_HEAD, "c" * 40, 1, 1, "e" * 64)
+        self.api.tag_object = {"tag": self.api.version, "sha": OBJECT_SHA, "message": evidence.message(),
+                               "object": {"type": "commit", "sha": SHA}}
+        self.assertEqual((self.select().tag_object_sha, self.select().compatibility), (OBJECT_SHA, evidence))
+        wrong_attempt = selector.ReleaseTagEvidence(NEW_HEAD, "c" * 40, 1, 2, "e" * 64)
+        for change in ({"message": wrong_attempt.message()}, {"sha": SHA},
+                       {"object": {"type": "tag", "sha": SHA}}):
+            with self.subTest(change=change), patch.object(
+                self.api, "tag_object", dict(self.api.tag_object, **change),
+            ), self.assertRaises(selector.DeploySelectionError):
+                self.select()
 
     def test_branch_and_manifest_must_match(self) -> None:
         """Чужая ветка, неполный SHA и неверный CI URL закрывают допуск."""

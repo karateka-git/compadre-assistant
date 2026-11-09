@@ -13,12 +13,16 @@ from scripts.full_ci_admission import Admission, MAIN_WORKFLOW, RELEASE_WORKFLOW
 
 SHA = "a" * 40
 OLD = "b" * 40
+PIN = "c" * 40
+OBJECT_SHA = "d" * 40
+FINGERPRINT = "e" * 64
 
 
 class FakeApi:
     """Возвращает управляемую историю GitHub и записывает мутации."""
 
     repository = publisher.EXPECTED_REPOSITORY
+    token = "test-token"
 
     def __init__(self) -> None:
         """Создаёт пустую историю выпусков и включённую защиту."""
@@ -33,6 +37,7 @@ class FakeApi:
             "rules": [{"type": "update"}, {"type": "deletion"}],
         }
         self.posts: list[tuple[str, dict]] = []
+        self.tag_object: dict | None = None
         self.move_after_tag = False
 
     def get(self, path, **parameters):
@@ -41,6 +46,12 @@ class FakeApi:
             return {"enabled": self.immutable}
         if path == "/rulesets/7":
             return self.rule
+        if path == "/actions/variables/COMPATIBILITY_POLICY_SHA":
+            return {"name": "COMPATIBILITY_POLICY_SHA", "value": PIN}
+        if path == f"/git/tags/{OBJECT_SHA}":
+            return self.tag_object
+        if path == "/git/ref/tags/v1.0.0":
+            return self.tags[-1]
         if path == "/git/ref/heads/release/1.0":
             return {"object": {"sha": OLD if self.move_after_tag and self.posts else SHA}}
         if path == "/releases/tags/v1.0.0":
@@ -63,11 +74,16 @@ class FakeApi:
     def post(self, path, payload):
         """Имитирует атомарное создание ref и GitHub Release."""
         self.posts.append((path, payload))
+        if path == "/git/tags":
+            self.tag_object = {"tag": payload["tag"], "sha": OBJECT_SHA, "message": payload["message"],
+                               "object": {"type": payload["type"], "sha": payload["object"]}}
+            return self.tag_object.copy()
         if path == "/git/refs":
             if self.tags:
                 raise publisher.PublishError("HTTP 422")
-            self.tags.append({"ref": payload["ref"]})
-            return {"ref": payload["ref"], "object": {"sha": payload["sha"]}}
+            reference = {"ref": payload["ref"], "object": {"type": "tag", "sha": payload["sha"]}}
+            self.tags.append(reference)
+            return reference.copy()
         if path == "/releases":
             self.releases.append({"tag_name": payload["tag_name"]})
             return {"id": 42, "tag_name": payload["tag_name"], "draft": False,
@@ -96,6 +112,10 @@ class PublishTests(unittest.TestCase):
         self.admission = patch.object(publisher, "select_successful_run", side_effect=self.admit)
         self.admission.start()
         self.addCleanup(self.admission.stop)
+        self.previous = self.enterContext(patch.object(publisher, "previous_release_sha", return_value=OLD))
+        self.evidence = self.enterContext(patch.object(
+            publisher, "verify_evidence", return_value={"policy_sha": PIN, "schema_fingerprint": FINGERPRINT},
+        ))
 
     def admit(self, api, repository, workflow, sha, branch):
         """Создаёт положительный результат для запрошенного caller."""
@@ -177,9 +197,31 @@ class PublishTests(unittest.TestCase):
         prepared = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
         url = publisher.publish(self.api, prepared)
         self.assertEqual(url, "https://github.com/release")
-        self.assertEqual([path for path, _ in self.api.posts], ["/git/refs", "/releases"])
-        self.assertEqual(self.api.posts[0][1]["sha"], SHA)
-        self.assertEqual(self.api.posts[1][1]["target_commitish"], SHA)
+        self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs", "/releases"])
+        annotation = publisher.ReleaseTagEvidence.from_message(self.api.posts[0][1]["message"])
+        self.assertEqual(annotation, publisher.ReleaseTagEvidence(OLD, PIN, 123, 1, FINGERPRINT))
+        self.assertEqual(self.api.posts[0][1]["object"], SHA)
+        self.assertEqual(self.api.posts[1][1]["sha"], OBJECT_SHA)
+        self.assertEqual(self.api.posts[2][1]["target_commitish"], SHA)
+        self.previous.assert_called_with(self.api, "main", policy_sha=PIN)
+        self.assertEqual(self.evidence.call_args.args[1:], (prepared.admission, PIN, OLD))
+
+    def test_unconfirmed_evidence_or_tag_object_blocks_publication(self) -> None:
+        """Сбой evidence запрещает запись, чужой tag object запрещает Release."""
+        prepared = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        with patch.object(publisher, "verify_evidence", side_effect=ValueError("private transport details")):
+            with self.assertRaisesRegex(ValueError, "^SAFE_PUBLICATION_EVIDENCE$"):
+                publisher.publish(self.api, prepared)
+        self.assertEqual(self.api.posts, [])
+        original_get = self.api.get
+
+        def get(path, **parameters):
+            result = original_get(path, **parameters)
+            return dict(result, sha="f" * 40) if path == f"/git/tags/{OBJECT_SHA}" else result
+
+        with patch.object(self.api, "get", side_effect=get), self.assertRaisesRegex(ValueError, "объект Git-тега"):
+            publisher.publish(self.api, prepared)
+        self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
 
     def test_publish_requires_immutable_release_confirmation(self) -> None:
         """Настройка репозитория без immutable выпуска не подтверждает публикацию."""
@@ -200,7 +242,7 @@ class PublishTests(unittest.TestCase):
         with patch.object(publisher, "_candidate", side_effect=[None, None, publisher.PublishError("tip")]):
             with self.assertRaisesRegex(publisher.PublishError, "tip"):
                 publisher.publish(self.api, prepared)
-        self.assertEqual([path for path, _ in self.api.posts], ["/git/refs"])
+        self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
 
     def test_check_and_dry_run_never_post(self) -> None:
         """Оба режима просмотра проверяют допуск без создания объектов."""

@@ -19,7 +19,7 @@ import zipfile
 
 from scripts import deploy_prepare as prep
 from scripts.ci_repository_compatibility import verify_baseline
-from scripts.full_ci_admission import COMPATIBILITY_STEPS, select_successful_run
+from scripts.full_ci_admission import Admission, COMPATIBILITY_STEPS, select_successful_run
 from scripts.full_ci_controller import GitHub
 from scripts.repository_compatibility_contract import load_policy, verify_report, verify_tests
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
@@ -131,7 +131,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
 
     Args:
         api: Независимый GitHub API с actions/contents read.
-        selected: Закреплённый Release с точной попыткой полного CI.
+        selected: Закреплённый Release или допуск точной попытки обычного CI.
         policy_sha: Внешний reviewed pin контроллера, не поле artifact.
         previous_sha: SHA фактически установленного last_good.
 
@@ -144,7 +144,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     if not re.fullmatch(r"[0-9a-f]{40}", policy_sha):
         raise PredeployError("SAFE_POLICY_PIN")
     branch = "main" if selected.workflow == "main-full.yml" else selected.branch
-    if selected.kind == "emergency":
+    if not isinstance(selected, Admission) and selected.kind == "emergency":
         run = api.get(f"/actions/runs/{selected.run_id}/attempts/{selected.run_attempt}")
         workflow = api.get(f"/actions/workflows/{selected.workflow}")
         path = f".github/workflows/{selected.workflow}"
@@ -186,7 +186,8 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
         raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
     with check("SAFE_BASELINE_RELEASE"):
         verify_baseline(policy, api.get(f"/releases/tags/{policy['release_tag']}"),
-                        api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha)
+                        api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha,
+                        lambda sha: api.get(f"/git/tags/{sha}"))
     for name in ("full-suite.yml", "main-full.yml", "release-full.yml"):
         path = f".github/workflows/{name}"
         if _blob(api, policy_sha, path) != _blob(api, selected.sha, path):

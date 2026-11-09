@@ -21,6 +21,29 @@ SHA = "a" * 40
 class DeployPrepareTests(unittest.TestCase):
     """Использует только временные каталоги и искусственные SQLite-БД."""
 
+    def test_local_release_tag_matches_object_and_commit(self) -> None:
+        """Аннотацию нельзя заменить другим объектом того же коммита."""
+        with TemporaryDirectory() as temporary:
+            checkout = Path(temporary)
+
+            def git(*args: str) -> str:
+                return prepare._run("git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                    "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args, cwd=checkout)
+
+            git("init", "--quiet")
+            git("commit", "--quiet", "--allow-empty", "-m", "release")
+            sha = git("rev-parse", "HEAD")
+            git("tag", "v1.0.0")
+            git("tag", "-a", "v1.0.1", "-m", "evidence")
+            object_sha = git("rev-parse", "refs/tags/v1.0.1")
+            prepare.require_exact_tag(checkout, "v1.0.0", sha)
+            prepare.require_exact_tag(checkout, "v1.0.1", sha, tag_object_sha=object_sha)
+            git("tag", "-f", "-a", "v1.0.1", "-m", "foreign evidence")
+            with self.assertRaises(prepare.PreparationError):
+                prepare.require_exact_tag(checkout, "v1.0.1", sha, tag_object_sha=object_sha)
+            with self.assertRaises(prepare.PreparationError):
+                prepare.require_exact_tag(checkout, "v1.0.1", sha)
+
     def test_state_is_atomic_private_and_outside_checkout(self) -> None:
         """Состояние не попадает в checkout и переживает повторную запись."""
         with TemporaryDirectory() as temporary:

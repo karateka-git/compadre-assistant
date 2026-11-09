@@ -25,6 +25,7 @@ from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
+from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
 
@@ -199,7 +200,8 @@ class Host:
         self.run("git", "fetch", "--no-tags", "origin", selected.sha, env=env)
         self.run("git", "fetch", "--no-tags", "origin",
                  f"refs/tags/{selected.version}:refs/tags/{selected.version}", env=env)
-        prep.require_exact_tag(self.checkout, selected.version, selected.sha)
+        prep.require_exact_tag(self.checkout, selected.version, selected.sha,
+                               tag_object_sha=selected.tag_object_sha)
         self.run("git", "checkout", "--detach", selected.sha)
         prep.require_clean_checkout(self.checkout, selected.sha)
 
@@ -518,7 +520,10 @@ class Host:
 
         self.require_switch_rollout()
         candidate = state["candidate"]
-        selected = SelectedRelease(**{field.name: candidate[field.name] for field in fields(SelectedRelease)})
+        selection = {field.name: candidate[field.name] for field in fields(SelectedRelease) if field.name in candidate}
+        if selection.get("compatibility") is not None:
+            selection["compatibility"] = ReleaseTagEvidence(**selection["compatibility"])
+        selected = SelectedRelease(**selection)
         _same_selection(self, selected)
         self.require_baseline(state["last_good"], state["old_sha"], state["old_image_id"])
         prep.check_candidate_image(candidate["image_id"], candidate["sha"])
@@ -1207,7 +1212,8 @@ def _prepare_candidate(
         with compatibility.check("SAFE_PREDEPLOY_IO"):
             host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
         _same_selection(host, selected)
-        prep.require_exact_tag(host.checkout, selected.version, selected.sha)
+        prep.require_exact_tag(host.checkout, selected.version, selected.sha,
+                               tag_object_sha=selected.tag_object_sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
         host.require_compose_pin(old_tag)
         host.require_compose_pin(tag, critical=True)

@@ -23,7 +23,7 @@ from tests.compatibility_test_environment import worker_python
 class CompatibilityContractTests(unittest.TestCase):
     """Проверяет доверенную базу и manifest без GitHub/VPS."""
 
-    def test_baseline_requires_pinned_immutable_release_and_direct_tag(self) -> None:
+    def test_baseline_requires_pinned_immutable_release_and_commit(self) -> None:
         """Произвольные input, tag и Release не заменяют закреплённую базу."""
         policy = load_policy()
         release = {"id": policy["release_id"], "tag_name": policy["release_tag"],
@@ -39,6 +39,13 @@ class CompatibilityContractTests(unittest.TestCase):
                 verify_baseline(policy, release, {"object": obj}, policy["previous_sha"])
         with self.assertRaises(ValueError):
             verify_baseline(policy, release, reference, "a" * 40)
+        annotated = {"object": {"type": "tag", "sha": "e" * 40}}
+        tag = {"sha": "e" * 40, "tag": policy["release_tag"], "message": "evidence",
+               "object": reference["object"]}
+        verify_baseline(policy, release, annotated, policy["previous_sha"], lambda _: tag)
+        with self.assertRaises(ValueError):
+            verify_baseline(policy, release, annotated, policy["previous_sha"],
+                            lambda _: dict(tag, sha="f" * 40))
 
     def test_manifest_rejects_empty_skips_duplicates_and_missing_test(self) -> None:
         """Даже passed=true не заменяет полный выполненный manifest."""

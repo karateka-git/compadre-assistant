@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 from urllib.parse import quote
 
+from scripts.ci_repository_compatibility import ReleaseTagEvidence, resolve_release_tag
 from scripts.check_hotfix_pairs import HotfixError, check_release
 from scripts.create_release_branch import (
     EXPECTED_REPOSITORY, ReleaseBranchError, checked_main_head, repository_from_origin,
@@ -17,8 +18,9 @@ from scripts.full_ci_admission import (
     Admission, AdmissionError, MAIN_WORKFLOW, RELEASE_WORKFLOW, SHA_PATTERN,
     select_successful_run,
 )
-from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, tag_commit
+from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, previous_release_sha, tag_commit
 from scripts.github_publishing import PublishingError, PublishingGitHub
+from scripts.predeploy_compatibility import EvidenceAPI, check, verify_evidence
 
 
 class PublishError(RuntimeError):
@@ -38,6 +40,7 @@ class PreparedRelease:
     change: str
     notes: str
     make_latest: str
+    compatibility: ReleaseTagEvidence
 
 
 def _sha(value: object, label: str) -> str:
@@ -171,6 +174,25 @@ def _candidate(api: GitHub, branch: str, sha: str) -> None:
         raise PublishError("Candidate не является текущим tip релизной ветки")
 
 
+def _policy_pin(api: GitHub) -> str:
+    """Читает внешний reviewed pin независимо от данных кандидата."""
+    name = "COMPATIBILITY_POLICY_SHA"
+    variable = api.get(f"/actions/variables/{name}")
+    if not isinstance(variable, dict) or variable.get("name") != name:
+        raise PublishError("GitHub не подтвердил внешний CI policy pin")
+    return _sha(variable.get("value"), name)
+
+
+def _compatibility(api: GitHub, admission: Admission) -> ReleaseTagEvidence:
+    """Берёт данные аннотации только из полного доказательства точной попытки CI."""
+    pin = _policy_pin(api)
+    with check("SAFE_PUBLICATION_EVIDENCE"):
+        previous = previous_release_sha(api, admission.branch, policy_sha=pin)
+        result = verify_evidence(EvidenceAPI(api.repository, api.token), admission, pin, previous)
+        return ReleaseTagEvidence(previous, result["policy_sha"], admission.run_id,
+                                  admission.run_attempt, result["schema_fingerprint"])
+
+
 def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> PreparedRelease:
     """Проверяет номер, защиту, историю, парные PR и полный CI точного SHA.
 
@@ -213,6 +235,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         admission = select_successful_run(api, api.repository, MAIN_WORKFLOW, sha, "main")
     if admission is None:
         raise PublishError("Нет успешного полного CI для точного SHA")
+    compatibility = _compatibility(api, admission)
     _candidate(api, branch, sha)
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
@@ -232,11 +255,24 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         body += f"\nПарные PR исправлений:\n{pair_lines}\n"
     make_latest = "true" if not history or parts > max(history) else "false"
     return PreparedRelease(version, branch, sha, admission, pairs, body,
-                           change, notes, make_latest)
+                           change, notes, make_latest, compatibility)
+
+
+def _require_published_tag(api: GitHub, prepared: PreparedRelease, object_sha: str) -> None:
+    """Подтверждает неизменность объекта тега и реквизитов допуска."""
+    reference = api.get(f"/git/ref/tags/{quote(prepared.version, safe='')}")
+    if not isinstance(reference, dict) or reference.get("ref") != f"refs/tags/{prepared.version}":
+        raise PublishError("GitHub не подтвердил ref аннотированного тега")
+    sha, actual_object, message = resolve_release_tag(
+        reference, prepared.version, lambda tag_sha: api.get(f"/git/tags/{tag_sha}"),
+    )
+    if (actual_object != object_sha or sha != prepared.sha or message is None
+            or ReleaseTagEvidence.from_message(message) != prepared.compatibility):
+        raise PublishError("Аннотированный тег не совпадает с проверенным допуском")
 
 
 def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
-    """Создаёт новый tag ref и затем опубликованный GitHub Release.
+    """Создаёт аннотированный tag ref и затем опубликованный GitHub Release.
 
     Args:
         api: Клиент GitHub с правом создания тега и Release.
@@ -252,11 +288,19 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
     """
     if prepare(api, prepared.version, prepared.sha, prepared.change, prepared.notes) != prepared:
         raise PublishError("Допуск изменился после подготовки выпуска")
-    tag = api.post("/git/refs", {"ref": f"refs/tags/{prepared.version}", "sha": prepared.sha})
-    if tag.get("ref") != f"refs/tags/{prepared.version}" or tag.get("object", {}).get("sha") != prepared.sha:
+    tag = api.post("/git/tags", {"tag": prepared.version, "message": prepared.compatibility.message(),
+                                "object": prepared.sha, "type": "commit"})
+    object_sha = _sha(tag.get("sha"), "объект аннотированного тега")
+    reference = {"object": {"type": "tag", "sha": object_sha}}
+    target, _, message = resolve_release_tag(reference, prepared.version, lambda _: tag)
+    if (target != prepared.sha or message is None
+            or ReleaseTagEvidence.from_message(message) != prepared.compatibility):
+        raise PublishError("Создание объекта аннотированного тега не подтверждено")
+    tag = api.post("/git/refs", {"ref": f"refs/tags/{prepared.version}", "sha": object_sha})
+    if (tag.get("ref") != f"refs/tags/{prepared.version}"
+            or tag.get("object", {}).get("type") != "tag" or tag["object"].get("sha") != object_sha):
         raise PublishError("Создание тега не подтверждено; версию разбирать вручную")
-    if tag_commit(api, prepared.version) != prepared.sha:
-        raise PublishError("Тег не указывает на candidate; Release не создавался")
+    _require_published_tag(api, prepared, object_sha)
     _candidate(api, prepared.branch, prepared.sha)
     if prepared.pairs:
         history = _published_versions(api)
@@ -271,6 +315,8 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
     if select_successful_run(api, api.repository, prepared.admission.workflow,
                              prepared.sha, prepared.admission.branch) != prepared.admission:
         raise PublishError("Допуск CI изменился после создания тега")
+    if _policy_pin(api) != prepared.compatibility.policy_sha:
+        raise PublishError("Внешний CI policy pin изменился после создания тега")
     release = api.post("/releases", {
         "tag_name": prepared.version, "target_commitish": prepared.sha,
         "name": prepared.version, "body": prepared.body,
@@ -290,8 +336,7 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
             confirmed.get("immutable") is not True or
             not confirmed.get("published_at")):
         raise PublishError("Опубликованный Release не совпадает с подготовленным")
-    if tag_commit(api, prepared.version) != prepared.sha:
-        raise PublishError("Тег изменился после публикации; выпуск требует ручного разбора")
+    _require_published_tag(api, prepared, object_sha)
     return release["html_url"]
 
 

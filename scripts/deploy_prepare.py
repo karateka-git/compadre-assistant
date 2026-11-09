@@ -108,13 +108,30 @@ def require_clean_checkout(checkout: Path, expected_sha: str) -> None:
         raise PreparationError("HEAD не совпадает с проверенным SHA")
 
 
-def require_exact_tag(checkout: Path, version: str, sha: str) -> None:
-    """Сверяет локальный прямой commit tag с выбранным SHA после fetch."""
-    if not VERSION_PATTERN.fullmatch(version) or not SHA_PATTERN.fullmatch(sha):
+def require_exact_tag(checkout: Path, version: str, sha: str, *, tag_object_sha: str | None = None) -> None:
+    """Подтверждает загруженный ref, commit и объект аннотированного тега.
+
+    Args:
+        checkout: Локальный Git checkout на VPS.
+        version: Названная версия опубликованного Release.
+        sha: Выбранный commit версии.
+        tag_object_sha: SHA объекта тега от селектора. None требует прямой ref.
+
+    Raises:
+        PreparationError: Локальный ref не совпал с проверенным на GitHub.
+    """
+    if (not VERSION_PATTERN.fullmatch(version) or not SHA_PATTERN.fullmatch(sha)
+            or (tag_object_sha is not None and not SHA_PATTERN.fullmatch(tag_object_sha))):
         raise PreparationError("Некорректная версия или SHA")
-    target = _run("git", "cat-file", "-t", f"refs/tags/{version}", cwd=checkout)
-    if target != "commit" or _run("git", "rev-parse", f"refs/tags/{version}", cwd=checkout) != sha:
-        raise PreparationError("Локальный тег не указывает напрямую на выбранный commit")
+    ref = f"refs/tags/{version}"
+    target = _run("git", "cat-file", "-t", ref, cwd=checkout)
+    if tag_object_sha is None:
+        if target == "commit" and _run("git", "rev-parse", ref, cwd=checkout) == sha:
+            return
+    elif (target == "tag" and _run("git", "rev-parse", ref, cwd=checkout) == tag_object_sha
+            and _run("git", "rev-parse", ref + "^{commit}", cwd=checkout) == sha):
+        return
+    raise PreparationError("Локальный тег не совпадает с выбранным объектом и commit")
 
 
 def pinned_tag(sha: str) -> str:

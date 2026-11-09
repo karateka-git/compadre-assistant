@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
+from dataclasses import asdict, dataclass
 import hashlib
 import json
 import os
@@ -21,14 +23,91 @@ from scripts.check_repository_compatibility import export_commit, snapshot
 from scripts.repository_compatibility_contract import load_policy, verify_inventory, verify_report
 
 
-def verify_baseline(policy: dict, release: dict, reference: dict, requested: str) -> None:
-    """Подтверждает immutable Release и прямой tag; input не выбирает baseline.
+@dataclass(frozen=True)
+class ReleaseTagEvidence:
+    """Хранит проверенные реквизиты CI в аннотации релизного тега."""
+
+    previous_sha: str
+    policy_sha: str
+    run_id: int
+    run_attempt: int
+    schema_fingerprint: str
+
+    def __post_init__(self) -> None:
+        """Отклоняет недопустимые значения при чтении и публикации тега."""
+        for value, length in ((self.previous_sha, 40), (self.policy_sha, 40),
+                              (self.schema_fingerprint, 64)):
+            if not isinstance(value, str) or not re.fullmatch(f"[0-9a-f]{{{length}}}", value):
+                raise ValueError("Некорректный SHA или отпечаток схемы в аннотации тега")
+        if any(type(number) is not int or number <= 0 for number in (self.run_id, self.run_attempt)):
+            raise ValueError("Некорректная попытка CI в аннотации тега")
+
+    def message(self) -> str:
+        """Возвращает каноническую аннотацию версии 1."""
+        return json.dumps({"version": 1, **asdict(self)}, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def from_message(cls, message: str) -> ReleaseTagEvidence:
+        """Читает аннотацию версии 1 и отвергает неоднозначные поля."""
+        if not isinstance(message, str) or len(message) > 1024:
+            raise ValueError("Некорректный размер или формат аннотации тега")
+        body = message.rstrip("\n")
+        data = json.loads(body)
+        if not isinstance(data, dict) or data.pop("version", None) != 1:
+            raise ValueError("Неизвестная версия аннотации тега")
+        try:
+            evidence = cls(**data)
+        except TypeError as error:
+            raise ValueError("Неполная аннотация тега") from error
+        if evidence.message() != body:
+            raise ValueError("Аннотация тега не каноническая")
+        return evidence
+
+
+def resolve_release_tag(reference: dict, version: str,
+                        read_tag: Callable[[str], object] | None) -> tuple[str, str | None, str | None]:
+    """Разыменовывает прямой commit ref или один объект аннотированного тега.
+
+    Args:
+        reference: Ответ Git refs API для указанной версии.
+        version: Ожидаемое имя Git-тега.
+        read_tag: Чтение объекта тега по SHA. None разрешает только прямой ref.
+
+    Returns:
+        SHA коммита, SHA объекта тега и его сообщение, если он аннотирован.
+
+    Raises:
+        ValueError: Тип, SHA или имя тега не подтверждены.
+    """
+    obj = reference.get("object") if isinstance(reference, dict) else None
+    if not isinstance(obj, dict) or not isinstance(obj.get("sha"), str) or not re.fullmatch(
+            r"[0-9a-f]{40}", obj["sha"]):
+        raise ValueError("Некорректный Git tag ref")
+    if obj.get("type") == "commit":
+        return obj["sha"], None, None
+    if obj.get("type") != "tag" or read_tag is None:
+        raise ValueError("Недопустимый тип Git-тега")
+    tag = read_tag(obj["sha"])
+    if (not isinstance(tag, dict) or tag.get("sha") != obj["sha"] or tag.get("tag") != version
+            or not isinstance(tag.get("message"), str)):
+        raise ValueError("Не подтверждён точный объект Git-тега")
+    target = tag.get("object")
+    if (not isinstance(target, dict) or target.get("type") != "commit"
+            or not isinstance(target.get("sha"), str) or not re.fullmatch(r"[0-9a-f]{40}", target["sha"])):
+        raise ValueError("Аннотированный тег должен указывать прямо на commit")
+    return target["sha"], obj["sha"], tag["message"]
+
+
+def verify_baseline(policy: dict, release: dict, reference: dict, requested: str,
+                    read_tag: Callable[[str], object] | None = None) -> None:
+    """Подтверждает immutable Release и commit тега, закреплённые в policy.
 
     Args:
         policy: Manifest из внешне закреплённого checkout.
         release: Ответ GitHub Releases API для закреплённого tag.
         reference: Ответ Git refs API для того же tag.
         requested: SHA, переданный candidate controller для проверки равенства.
+        read_tag: Чтение объекта аннотированного тега по SHA.
 
     Raises:
         ValueError: Любой признак базы не соответствует доверенной policy.
@@ -37,8 +116,7 @@ def verify_baseline(policy: dict, release: dict, reference: dict, requested: str
             or release.get("tag_name") != policy["release_tag"]
             or release.get("immutable") is not True or release.get("draft") is not False
             or release.get("prerelease") is not False or not release.get("published_at")
-            or reference.get("object", {}).get("type") != "commit"
-            or reference.get("object", {}).get("sha") != policy["previous_sha"]):
+            or resolve_release_tag(reference, policy["release_tag"], read_tag)[0] != policy["previous_sha"]):
         raise ValueError("baseline is not the pinned immutable release/tag")
 
 
@@ -82,7 +160,8 @@ def main() -> int:
         raise ValueError("unexpected caller workflow")
     release = _get(policy["repository"], f"releases/tags/{policy['release_tag']}")
     reference = _get(policy["repository"], f"git/ref/tags/{policy['release_tag']}")
-    verify_baseline(policy, release, reference, args.previous_sha)
+    verify_baseline(policy, release, reference, args.previous_sha,
+                    lambda sha: _get(policy["repository"], f"git/tags/{sha}"))
     with TemporaryDirectory(prefix="compatibility-policy-") as temporary:
         root = Path(temporary)
         trusted = export_commit(policy_root, policy_sha, root / "policy")
