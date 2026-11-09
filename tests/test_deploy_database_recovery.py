@@ -245,7 +245,12 @@ class DatabaseRecoveryTests(unittest.TestCase):
             with self.subTest(fault=fault), TemporaryDirectory() as temporary:
                 self._assert_annotated_deploy(Path(temporary), fault)
 
-    def _assert_annotated_deploy(self, root, fault):
+    def test_annotated_deploy_retries_after_pre_stop_refusal(self):
+        """Повтор после локального отказа заново допускает тот же аннотированный Release."""
+        with TemporaryDirectory() as temporary:
+            self._assert_annotated_deploy(Path(temporary), None, retry=True)
+
+    def _assert_annotated_deploy(self, root, fault, *, retry=False):
         host = RecoveryHost(root)
         host.marker(False)
         old_database = host.selected_database()
@@ -269,6 +274,7 @@ class DatabaseRecoveryTests(unittest.TestCase):
             migrate(copy_db)
             fingerprint = prod.compatibility.schema_fingerprint(copy_db)
         api = annotated_release(host, fingerprint)
+        policy_pin = host.state_dir / "compatibility-policy.sha"
         original_run = host.run
         original_prepare = host.prepare_database_containers
         original_verify = host.verify_both
@@ -292,6 +298,8 @@ class DatabaseRecoveryTests(unittest.TestCase):
             with closing(sqlite3.connect(path)) as db:
                 migrate(db)
             migrated.append(path)
+            if retry and len(migrated) == 1:
+                prod._atomic_text(policy_pin, "e" * 40)
 
         def prepare_runtime(*args, recovery=False):
             ids = original_prepare(*args, recovery=recovery)
@@ -343,6 +351,30 @@ class DatabaseRecoveryTests(unittest.TestCase):
             stack.enter_context(patch.object(prod, "GitHub", return_value=api))
             stack.enter_context(patch.object(prod.compatibility, "verify_evidence", side_effect=AssertionError("legacy")))
             requests = stack.enter_context(patch.object(api, "get", side_effect=get))
+            if retry:
+                old_ids = {name: item["Id"] for name, item in host.found.items()}
+                with self.assertRaisesRegex(prod.DeployError, "SAFE_POLICY_PIN"):
+                    prod.deploy(host, host.selected.version)
+                refused = prep.read_state(host.state_dir, host.checkout)
+                self.assertEqual(refused["stage"], "failed_preflight")
+                self.assertEqual(refused["last_good"]["sha"], OLD_SHA)
+                self.assertEqual(host.selected_database(), old_database)
+                self.assertEqual(old_database.read_bytes(), old_bytes)
+                self.assertFalse((host.state_dir / "active-db.json").exists())
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+                self.assertFalse(list(host.state_dir.glob("final-*.db")))
+                self.assertEqual({name: item["Id"] for name, item in host.found.items()
+                                  if item["State"]["Running"]}, old_ids)
+                self.assertFalse(any(command[:3] in (("docker", "compose", "stop"),
+                                                     ("docker", "compose", "create"))
+                                     or command[:2] in (("docker", "stop"), ("docker", "start"))
+                                     for command in host.commands))
+                with self.assertRaisesRegex(prod.DeployError, "временно закрыт"):
+                    prod.deploy(host, host.selected.version)
+                self.assertEqual(len(migrated), 1)
+                self.assertEqual(requests.call_count, 4)
+                prod._atomic_text(policy_pin, POLICY_SHA)
+                prep.write_state(host.state_dir, host.checkout, refused | {"retry_after": "2000-01-01T00:00:00+00:00"})
             if fault is None:
                 self.assertEqual(prod.deploy(host, host.selected.version), host.selected.sha)
             else:
@@ -365,7 +397,7 @@ class DatabaseRecoveryTests(unittest.TestCase):
 
             self.assertEqual(durable["candidate"]["sha"], host.selected.sha)
             self.assertEqual(durable["compatibility_evidence"]["tag_object_sha"], host.selected.tag_object_sha)
-            self.assertEqual(len(migrated), 2)
+            self.assertEqual(len(migrated), 3 if retry else 2)
             self.assertNotEqual(migrated[0], migrated[1])
             snapshot = Path(durable["snapshot"]["path"])
             self.assertEqual(hashlib.sha256(snapshot.read_bytes()).hexdigest(), durable["snapshot"]["sha256"])
@@ -401,7 +433,7 @@ class DatabaseRecoveryTests(unittest.TestCase):
                 self.assertEqual(prod._current_image(host), IMAGE if fault is None else OLD_IMAGE)
                 self.assertEqual(host.starts, 2 if fault == "after_admission" else 1)
                 self.assertFalse((host.state_dir / "deploy-in-progress").exists())
-                self.assertEqual(requests.call_count, 12 if fault == "after_admission" else 4)
+                self.assertEqual(requests.call_count, (12 if fault == "after_admission" else 4) + (4 if retry else 0))
 
     def test_recovery_crash_boundaries_converge(self):
         """Повтор после durable recovery stage и start не создаёт второй polling."""
@@ -414,6 +446,13 @@ class DatabaseRecoveryTests(unittest.TestCase):
                     host, state, record = self._setup(Path(temporary),
                         "admission_recorded" if admitted else "database_selected")
                     host.guard_known_writers()
+                    target = "new" if admitted else "old"
+                    rows = [("original",)]
+                    if admitted:
+                        with closing(sqlite3.connect(state[target]["host_path"])) as db:
+                            db.execute("INSERT INTO messages VALUES(2, 'accepted-after-admission')")
+                            db.commit()
+                        rows.append(("accepted-after-admission",))
 
                     def interrupted(name, **changes):
                         record(name, **changes)
@@ -441,8 +480,14 @@ class DatabaseRecoveryTests(unittest.TestCase):
                         switch.recover(host, state, interrupted, publish)
                     durable = prep.read_state(host.state_dir, host.checkout)
                     self._recover(host, durable)
-                    self.assertEqual(switch.read_selected(host, durable), "new" if admitted else "old")
+                    durable = prep.read_state(host.state_dir, host.checkout)
+                    self.assertEqual(switch.read_selected(host, durable), target)
                     self.assertEqual(durable["stage"], "recovery_verified")
+                    self.assertEqual({name: item["Id"] for name, item in host.found.items()
+                                      if item["State"]["Running"] and item["Image"] == OLD_IMAGE},
+                                     durable["recovery_containers"])
+                    with closing(sqlite3.connect(host.selected_database())) as db:
+                        self.assertEqual(db.execute("SELECT text FROM messages ORDER BY id").fetchall(), rows)
 
     def test_bad_evidence_pin_selector_database_or_boundary_stop_every_writer(self):
         """Неизвестный state и API outage оставляют обе БД и закрытый marker."""

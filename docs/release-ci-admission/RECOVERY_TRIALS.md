@@ -52,7 +52,7 @@ Git-тега, четыре чтения из GitHub fixture по закрепл�
 | 5.2. Отказ после остановки каналов | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_annotated_deploy_and_automatic_recovery_boundaries` и `test_before_admission_recovers_old_at_every_prestart_stage`. | До отметки приёма проверить возврат старых ботов на `old`. После отметки добавить запись в WAL новой БД и сверить её после возврата прежних ботов на `new`. Повторить со сменой доказательства перед запуском старых ботов и проверить закрытый запуск. |
 | 5.3. Остановить автоматику | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_bad_evidence_pin_selector_database_or_boundary_stop_every_writer`, `test_malformed_or_missing_state_preserved_and_both_entry_points_guard`. | Проверить, какие stage, причина и сведения о guards доступны оператору. Сверить выбранную БД, marker, остановку обоих writers и состояние таймера. Отдельно отметить случаи, когда подтверждение остановки получить не удалось. |
 | 5.3. Выполнить forward recovery | [`test_deploy_forward_recovery.py`](../../tests/test_deploy_forward_recovery.py), `test_annotated_finalization_failure_recovers_only_the_same_release` и `test_rejects_selector_schema_or_evidence_drift`. | Вызвать `forward.recover` после сбоя финализации. Проверить реальный `Host.require_recovery_evidence` на временном Git-теге и смоделированном API. Сверить тот же candidate SHA, пару container ID и выбранную БД, записи, `success`, снятие marker и восстановление таймера. |
-| 5.4. Повторить после отказа | [`test_deploy_database_switch.py`](../../tests/test_deploy_database_switch.py), `test_final_candidate_refusal_can_be_retried_without_stopping_channels`. | Повторить `prod.deploy` после `failed_preflight`. Сверить состояние, прежние каналы, selector и записи. Проверить, что изменившийся marker или selector закрывает безопасный повтор. |
+| 5.4. Повторить после отказа | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_annotated_deploy_retries_after_pre_stop_refusal`. [`test_deploy_database_switch.py`](../../tests/test_deploy_database_switch.py), `test_final_candidate_refusal_can_be_retried_without_stopping_channels`. | Повторить `prod.deploy` после отказа локальной сверки аннотированного тега. Сверить состояние, прежние каналы, selector и записи. Проверить, что изменившийся marker или selector закрывает безопасный повтор при уже включённом SQLite v2. |
 | 5.4. Возобновить после прерывания | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_recovery_crash_boundaries_converge`, `test_repeated_command_recovery_retains_gate_and_single_pair`. [`test_deploy_forward_recovery.py`](../../tests/test_deploy_forward_recovery.py), `test_retry_after_process_crash_uses_same_running_ids`. | Прервать процесс после записи состояния или после `docker start`. Сверить результат повтора, выбранную БД, записи и инвентарь активных контейнеров. При неоднозначности проверить остановку известных writers. |
 | 5.5. Разделить готовность каналов | `Host.verify_both` из [`deploy_prod.py`](../../scripts/deploy_prod.py) с подменой `containers`, `image`, `logs` и монотонных часов. Для проверки отсутствия дублей есть `test_duplicate_polling_detected_without_logging_token` в [`test_deploy_prod.py`](../../tests/test_deploy_prod.py). | Задать один готовый канал и второй без health или сигнала polling. Проверить текущий исход, затем возможность сохранить готовый канал при доказанном образе, выбранной БД и отсутствии чужих writers. Проверить ограниченный повтор, полный возврат после подтверждения обоих и безопасный отказ при подмене. `RecoveryHost.verify_both` упрощён и сам по себе эти случаи не покрывает. |
 
@@ -142,3 +142,24 @@ Docker, systemd и готовность каналов моделировали�
 restart policy, marker и состояние таймера. Тест с отказом `docker stop`
 подтвердил, что даже сохранённый `degraded` не доказывает остановку
 каждого writer. Порядок действий описан в [инструкции по возврату](../OPERATIONS.md#отказ-выпуска-и-возврат).
+
+## Результаты 5.4. Повтор после отказа и прерывания
+
+```powershell
+& $recoveryPython -m unittest tests.test_deploy_database_recovery tests.test_deploy_database_switch tests.test_deploy_forward_recovery
+```
+
+9 ноября 2026 года прошли 45 тестов. Целевой SHA аннотированного
+выпуска в тесте повтора — `51e628720402e528dd57c4a38c5e304ed829763a`.
+Остальные сценарии этого шага используют синтетический кандидат
+`bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`.
+
+| Сценарий | Backup и записи | Фактический исход |
+| --- | --- | --- |
+| Повтор `deploy-prod` после локального `SAFE_POLICY_PIN` | При первом отказе снимка ещё нет, прежняя SQLite побайтно совпадает. После успешного повтора проверены снимок, SHA-256 и `original` в новой БД. | После миграции предварительной копии контроллер записал `failed_preflight`. Оба прежних ID продолжили работу без stop, create или start. Немедленный повтор остановился на cooldown. После восстановления pin и имитации истечения cooldown тот же Release дошёл до `success` и `new`. Каждый допуск сделал четыре чтения Contents, закрытый cooldown не сделал ни одного. |
+| Отказ при уже включённом SQLite v2 | Выбранная SQLite сохранилась побайтно. Новый backup до допуска не создаётся. | Повтор дошёл до сверки без остановки. Это подтвердилось и с историческим `failed_preflight`. При несовпадении marker или selector безопасный повтор закрывается и фиксируется `degraded`. |
+| Повтор автоматического возврата после прерывания | Реальный recovery сверил снимок из `state.json` и его SHA-256. В восьми точках до границы приёма сохранилась `original` на `old`. В шести точках после границы сохранились `original` и `accepted-after-admission` на `new`. | После восстановления из сохранённого состояния получен `recovery_verified`. Работают два точных ID, записанных в `recovery_containers`, на прежнем образе. Прерванная попытка может потребовать остановки и пересоздания пары. Тестовый Docker запрещает create или start при уже работающем writer. |
+| Повтор forward recovery после частичного `docker start` | Используются существующая `new` и ранее сделанный снимок. Проверка записей для точного forward recovery приведена в результате 5.3. | Telegram уже работал. Повтор запустил только сохранённый ID VK и дошёл до `success`. Если marker пропал или API перестал подтверждать доказательство, запущенный writer останавливается, сохраняются `degraded` и marker. |
+
+Простой Telegram и VK не измерялся. Испытания фиксировали выбор поколения,
+данные и порядок команд через имитацию Docker, systemd и GitHub.
