@@ -163,7 +163,7 @@ flowchart TD
     subgraph COMMON["Общий workflow full-suite.yml"]
         COMPAT["repository-compatibility"]
         subgraph CANDIDATE["Задача full-suite"]
-            UNIT["Тесты кандидата"]
+            UNIT["Общий набор unittest"]
             SQLITE["sqlite-smoke"]
             PIPELINE["pipeline-smoke"]
             ANALYSIS["analysis-smoke"]
@@ -209,7 +209,9 @@ SHA контроллер `release-full` сверяет результат `main-
 
 Smoke — короткая проверка целого сценария. Все три команды выполняются по
 порядку внутри одного шага `Run three autonomous smoke checks`. В интерфейсе
-GitHub Actions они видны в журнале этого шага.
+GitHub Actions они видны в журнале этого шага. Из общего набора `unittest`
+удалены обёртки, которые повторяли те же три сценария. На VPS при подготовке
+кандидата все три команды отдельно запускаются внутри собранного образа.
 [Описание smoke-команд](../RUN.md#7-проверить-sqlite-контур)
 
 ## Проверить допуск на VPS
