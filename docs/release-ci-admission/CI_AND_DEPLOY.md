@@ -34,7 +34,10 @@ flowchart TD
     VPS -->|Установка успешна| VERIFY["Автоматически сверить состояние VPS без записи"]
     VERIFY -->|Фактическое состояние подтверждено| LIVE["Владелец проверяет живые ответы Telegram и VK"]
     VERIFY -->|Обнаружено расхождение| MISMATCH["Оператор разбирает расхождение<br/>Обновление базы CI остановлено"]
-    LIVE -->|Выпуск принят| BASE["Оператор готовит PR с новой базой CI<br/>После review и merge меняет pin и запускает полный CI"]
+    LIVE -->|Живые ответы подтверждены| TAGOK["Владелец разрешает создать тег установки"]
+    TAGOK --> TAG["Оператор запускает сверку VPS и создание production/vX.Y.Z"]
+    TAG -->|Тот же runtime и точный SHA подтверждены| BASE["Оператор готовит PR с новой базой CI<br/>После review и merge меняет pin и запускает полный CI"]
+    TAG -->|Сверка не прошла| MISMATCH
     VPS -->|Сбой после допуска в ходе установки| AUTO["Контроллер пытается безопасно восстановить работу"]
     AUTO -->|Прежние боты восстановлены| RETRY["Оператор разбирает причину и решает, когда повторять выпуск"]
     AUTO -->|Автовозврат не подтверждён| MANUAL["Оператор разбирает состояние<br/>Действия на VPS согласуются отдельно"]
@@ -42,8 +45,8 @@ flowchart TD
     classDef owner fill:#fef3c7,stroke:#a16207,color:#422006
     classDef operator fill:#dbeafe,stroke:#1d4ed8,color:#172554
     classDef automatic fill:#dcfce7,stroke:#15803d,color:#052e16
-    class PUSHOK,WINDOW,LIVE owner
-    class PR,MERGE,RUN,PREP,PUB,DEPLOY,BASE,MISMATCH,RETRY,MANUAL operator
+    class PUSHOK,WINDOW,LIVE,TAGOK owner
+    class PR,MERGE,RUN,PREP,PUB,DEPLOY,TAG,BASE,MISMATCH,RETRY,MANUAL operator
     class FAST,FULL,VPS,VERIFY,AUTO automatic
 ```
 
@@ -60,6 +63,11 @@ CI, выполнить проверки без записи и провести 
 обновление базы CI останавливается, а оператор может повторить только
 приёмку через `deploy-prod vX.Y.Z --verify-installed <SHA>`.
 Проверка живых ответов остаётся отдельным шагом владельца.
+
+Для тега установки владелец подтверждает ответы обоих каналов для
+конкретного `runtime_id`. Скрипт перед записью заново читает VPS и сверяет
+Release и точный SHA. Тег `production/vX.Y.Z` фиксирует факт приёмки на
+момент проверки. [Команды тега установки](../OPERATIONS.md#зафиксировать-приёмку-тегом-установки)
 
 При новой релизной линии оператор также создаёт `release/X.Y` на проверенном
 SHA и публикует ветку после разрешения записи. Если CI завершился отказом,
