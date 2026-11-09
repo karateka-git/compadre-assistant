@@ -508,7 +508,7 @@ class Host:
             raise DeployError("SQLite protocol v2: rollout закрыт; инфраструктура не подтверждена") from error
 
     def require_switch_candidate(self, state: dict) -> None:
-        """Повторяет точный CI/image/pair допуск перед marker и остановкой writers.
+        """Сверяет допуск непосредственно перед marker и остановкой writers.
 
         Args:
             state: Подготовленный переход с результатом миграции online-копии.
@@ -524,17 +524,24 @@ class Host:
         if selection.get("compatibility") is not None:
             selection["compatibility"] = ReleaseTagEvidence(**selection["compatibility"])
         selected = SelectedRelease(**selection)
-        _same_selection(self, selected)
+        verified = state["compatibility_evidence"]
+        annotated = "tag_object_sha" in verified
+        if not annotated:
+            _same_selection(self, selected)
         self.require_baseline(state["last_good"], state["old_sha"], state["old_image_id"])
         prep.check_candidate_image(candidate["image_id"], candidate["sha"])
         if self.image(candidate["tag"])["Id"] != candidate["image_id"]:
             raise DeployError("Candidate tag изменился перед остановкой")
         policy_path = self.state_dir / "compatibility-policy.sha"
         policy = compatibility.private_text(policy_path)
-        token = compatibility.private_text(self.state_dir / "github-read-token")
-        evidence = compatibility.verify_evidence(
-            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
-        if (evidence != state["compatibility_evidence"]
+        if annotated:
+            prep.require_clean_checkout(self.checkout, candidate["sha"])
+            evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
+        else:
+            token = compatibility.private_text(self.state_dir / "github-read-token")
+            evidence = compatibility.verify_evidence(
+                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != verified
                 or compatibility.private_text(policy_path) != policy
                 or self.controller_sha() != state["controller_sha"]):
             raise DeployError("Допуск candidate изменился перед остановкой")
@@ -781,10 +788,10 @@ class Host:
         self.require_no_foreign_database_mounts({item["Id"] for item in self.recovery_inventory().values()})
 
     def require_recovery_evidence(self, state: dict) -> None:
-        """Заново проверяет Release/run/attempt и artifact точной previous пары.
+        """Заново проверяет Release, попытку CI и доказательство точной пары.
 
-        Недоступный API, отозванный artifact или изменившийся внешний policy
-        pin запрещают старому коду открывать новую SQLite.
+        Формат сохранённого доказательства задаёт маршрут проверки. Ошибка API,
+        изменение тега, artifact или внешнего pin закрывают восстановление.
         """
         candidate = state["candidate"]
         selected = (self.select_emergency(candidate["version"])
@@ -793,9 +800,14 @@ class Host:
             raise DeployError("Recovery Release или CI attempt изменился")
         policy = compatibility.private_text(self.state_dir / "compatibility-policy.sha")
         token = compatibility.private_text(self.state_dir / "github-read-token")
-        evidence = compatibility.verify_evidence(
-            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
-        if (evidence != state["compatibility_evidence"]
+        verified = state["compatibility_evidence"]
+        if "tag_object_sha" in verified:
+            evidence = compatibility.verify_tag_evidence(
+                GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy, state["old_sha"])
+        else:
+            evidence = compatibility.verify_evidence(
+                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != verified
                 or evidence["schema_fingerprint"] != state["new"]["fingerprint"]
                 or compatibility.private_text(self.state_dir / "compatibility-policy.sha") != policy):
             raise DeployError("Recovery evidence или fingerprint изменились")
@@ -1038,7 +1050,8 @@ class Host:
                 raise compatibility.PredeployError("SAFE_INSTALLED_REVISION")
 
     def predeploy(self, selected: SelectedRelease, candidate_id: str, before: list[str],
-                  expected: list[str], good: dict[str, Any], old_sha: str, old_id: str) -> None:
+                  expected: list[str], good: dict[str, Any], old_sha: str, old_id: str,
+                  *, annotated: bool = False) -> None:
         """Проверяет доверенное evidence и приватную online-копию под deploy lock.
 
         Args:
@@ -1049,6 +1062,7 @@ class Host:
             good: Сохранённый last_good до подготовки.
             old_sha: Фактический исходный SHA checkout.
             old_id: Фактический исходный ID обоих каналов.
+            annotated: Использовать доказательство аннотированного тега для SQLite v2.
 
         Raises:
             compatibility.PredeployError: База, evidence или копия не подтверждены;
@@ -1060,9 +1074,13 @@ class Host:
         pin_path = self.state_dir / "compatibility-policy.sha"
         policy_sha = compatibility.private_text(pin_path)
         token = compatibility.private_text(self.state_dir / "github-read-token")
-        api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
         with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
-            evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
+            if annotated:
+                evidence = compatibility.verify_tag_evidence(
+                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha)
+            else:
+                api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
+                evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
         with metrics.stage("predeploy.copy"):
             with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
                 directory = Path(temporary)
@@ -1070,11 +1088,12 @@ class Host:
                 compatibility.verify_copy(self.selected_database(), directory,
                                           before, expected, evidence["schema_fingerprint"],
                                           lambda work: self.migrate_copy(candidate_id, work))
-        # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
-        with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
-            if (compatibility.private_text(pin_path) != policy_sha
-                    or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
-                raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
+        if not annotated:
+            # Исторический допуск зависит от доступности artifact после миграции.
+            with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
+                if (compatibility.private_text(pin_path) != policy_sha
+                        or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
+                    raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
         self.compatibility_evidence = evidence
 
@@ -1183,7 +1202,7 @@ def _error_reason(error: Exception) -> str:
 
 def _prepare_candidate(
     host: Host, version: str, old_sha: str, old_id: str, old_tag: str,
-    *, emergency: bool = False, last_good: dict[str, Any] | None = None,
+    *, emergency: bool = False, last_good: dict[str, Any] | None = None, sqlite_v2: bool = False,
 ) -> tuple[SelectedRelease, str, str, list[str], list[str]]:
     """Готовит candidate без остановки каналов и восстанавливает checkout при ошибке."""
     try:
@@ -1193,8 +1212,10 @@ def _prepare_candidate(
             raise DeployError("Тип выбранного Release не соответствует команде")
         if selected.sha == old_sha:
             raise DeployError("Текущий код уже имеет SHA выбранной версии")
+        annotated = sqlite_v2 and not emergency and selected.compatibility is not None
         host.fetch(selected)
-        _same_selection(host, selected)
+        if not annotated:
+            _same_selection(host, selected)
         prep.require_clean_checkout(host.checkout, selected.sha)
         with metrics.stage("build"):
             tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
@@ -1210,8 +1231,12 @@ def _prepare_candidate(
         if expected[:len(before)] != before:
             raise compatibility.PredeployError("SAFE_SCHEMA_PREFIX")
         with compatibility.check("SAFE_PREDEPLOY_IO"):
-            host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
-        _same_selection(host, selected)
+            if annotated:
+                host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id, annotated=True)
+            else:
+                host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
+        if not annotated:
+            _same_selection(host, selected)
         prep.require_exact_tag(host.checkout, selected.version, selected.sha,
                                tag_object_sha=selected.tag_object_sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
@@ -1512,6 +1537,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
                 host, version, old_sha, old_id, old_tag, emergency=emergency, last_good=last_good,
+                sqlite_v2=switch_state is not None or initial_switch,
             )
         except Exception as error:
             try:

@@ -17,6 +17,12 @@ CONTAINER_ADMISSION = "/run/compadre-schema/admission.json"
 CONTAINER_LAUNCH = "/run/compadre-schema/launch.json"
 
 
+def _verification_id(evidence: dict) -> str:
+    if "tag_object_sha" in evidence:
+        return evidence["verification_id"]
+    return evidence["artifact_digest"].removeprefix("sha256:")
+
+
 def prepare(host, state: dict, record, publish) -> None:
     """Под остановленными writers закрепляет контракт exact old image/new schema.
 
@@ -49,7 +55,7 @@ def prepare(host, state: dict, record, publish) -> None:
     context = {"base_sha": state["old_sha"], "base_image_id": state["old_image_id"],
                "candidate_sha": state["candidate"]["sha"], "candidate_image_id": state["candidate"]["image_id"],
                "controller_sha": state["controller_sha"],
-               "verification_id": evidence["artifact_digest"].removeprefix("sha256:")}
+               "verification_id": _verification_id(evidence)}
     admission = context | {"format_version": 1, "base_journal": base, "target_journal": target_journal,
                            "base_sql_sha256": runtime_schema.migration_sql_fingerprint(migrations_dir),
                            "schema_sha256": state[side]["fingerprint"]}
@@ -96,7 +102,7 @@ def require_files(host, state: dict) -> None:
     expected = {"base_sha": state["old_sha"], "base_image_id": state["old_image_id"],
                 "candidate_sha": state["candidate"]["sha"], "candidate_image_id": state["candidate"]["image_id"],
                 "controller_sha": state["controller_sha"],
-                "verification_id": state["compatibility_evidence"]["artifact_digest"].removeprefix("sha256:")}
+                "verification_id": _verification_id(state["compatibility_evidence"])}
     if (schema["launch"] != expected or schema["admission"]["schema_sha256"] != state[side]["fingerprint"]
             or schema["admission"]["target_journal"] != [[int(name[:4]), name] for name in state[side]["manifest"]]):
         raise ValueError("Runtime schema admission не принадлежит выбранному переходу")
