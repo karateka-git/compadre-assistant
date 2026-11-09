@@ -1228,6 +1228,46 @@ def _prepare_candidate(
         raise DeployError(f"Подготовка не удалась: {type(error).__name__}") from error
 
 
+def _recover_v2_preflight(host: Host, state: dict[str, Any]) -> None:
+    """Подтверждает рабочий selector после сохранённого отказа до перехода."""
+    if os.path.lexists(host.state_dir / "deploy-in-progress"):
+        raise DeployError("Отказ preflight противоречит критическому marker")
+    if "boot" in state:
+        from scripts import deploy_runtime
+
+        boot = state["boot"]
+        if boot != deploy_runtime.boot_record(state, boot["outcome"]):
+            raise DeployError("Прежний boot после preflight не подтверждён")
+        database_switch.read_selected(host, state)
+        return
+    # Прежний контроллер при позднем отказе записывал ID кандидата до
+    # перепривязки selector. Восстанавливаем только прежний точный ID.
+    good = state.get("last_good")
+    if (not isinstance(good, dict)
+            or any(not isinstance(good.get(key), str) or good[key] != state.get(field)
+                   for key, field in (("sha", "old_sha"), ("image_id", "old_image_id"), ("tag", "old_tag")))
+            or state.get("admission_may_have_started") is not False
+            or state.get("migration_attempted") is not False
+            or any(key in state for key in ("new", "snapshot", "admission", "registration_intent",
+                                            "switch_intent", "recovery_intent"))):
+        raise DeployError("Отказ preflight не доказывает прежнее поколение")
+    if "selector_rebind" not in state:
+        database_switch.read_selected(host, state)
+        return
+    database_switch.require_boundary(state)
+    old = database_switch.selector(state, "old")
+    rebind = state["selector_rebind"]
+    previous = rebind["from"]
+    restored = state | {"transition_id": previous["transition_id"]}
+    if (not isinstance(previous["transition_id"], str)
+            or rebind["to"] != old or previous == old or previous != database_switch.selector(restored, "old")
+            or database_switch.read_selected(host, restored) != "old"):
+        raise DeployError("Прежний selector после preflight не подтверждён")
+    state["transition_id"] = restored["transition_id"]
+    del state["selector_rebind"]
+    _state(host, state, "failed_preflight")
+
+
 def _recover(host: Host, state: dict[str, Any]) -> None:
     """Восстанавливает runtime по границе v2 либо прежнему legacy-контракту."""
     stage = state.get("stage")
@@ -1237,6 +1277,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
                 raise DeployError("Legacy recovery не может выбирать SQLite v2")
             if stage in ("success", "rolled_back"):
                 database_switch.read_selected(host, state)
+                return
+            if stage == "failed_preflight":
+                _recover_v2_preflight(host, state)
                 return
             if stage in ("finalization_intent", "runtime_adopted"):
                 host.finalize_database(state, state["boot"]["outcome"])
@@ -1378,6 +1421,20 @@ def _read_recovery_state(host: Host) -> dict:
         raise DeployError("State не доказан; запуск запрещён, проверьте защиты writers") from error
 
 
+def _preflight_failed(host: Host, state: dict, previous_switch: dict | None, error: Exception,
+                      **changes: Any) -> None:
+    """Записывает отказ попытки, сохраняя завершённый boot и selector."""
+    if previous_switch is not None:
+        state = previous_switch
+        if state.get("stage") in ("success", "rolled_back"):
+            state.update(error=_error_reason(error), **changes)
+            prep.write_state(host.state_dir, host.checkout, state)
+            metrics.update(stage="failed_preflight")
+            print("deploy-prod stage=failed_preflight", flush=True)
+            return
+    _state(host, state, "failed_preflight", error=_error_reason(error), **changes)
+
+
 @metrics.tracked
 def deploy(host: Host, version: str, *, emergency: bool = False,
            reason: str | None = None) -> None:
@@ -1405,9 +1462,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
     with prep.deploy_lock(host.state_dir, host.checkout):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
+        _recover(host, state)
         switch_state = state.copy() if "protocol_version" in state else None
         initial_switch = switch_state is None and host.uses_selector_runtime()
-        _recover(host, state)
         if switch_state is not None or initial_switch:
             host.require_switch_rollout()
             if state.get("stage") == "recovery_verified":
@@ -1438,7 +1495,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             host.installed(old_id, old_sha)
             host.require_no_duplicate_polling()
         except Exception as error:
-            _state(host, state, "failed_preflight", error=_error_reason(error))
+            _preflight_failed(host, state, switch_state, error)
             raise DeployError("Исходное состояние production не прошло preflight") from error
         state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
                      failed_version=version)
@@ -1458,9 +1515,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 _state(host, state, "preparing", error=_error_reason(error))
                 raise DeployError(f"Checkout не возвращён после подготовки; "
                                   f"нужен recovery: {_error_reason(error)}") from error
-            _state(host, state, "failed_preflight", error=_error_reason(error),
-                   failed_version=version,
-                   retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
+            _preflight_failed(host, state, switch_state, error, failed_version=version,
+                              retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
         database = host.selected_database()
         if emergency:
@@ -1501,10 +1557,11 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                                             "to": database_switch.selector(state, "old")}
             elif initial_switch:
                 state["compatibility_evidence"] = host.compatibility_evidence
-            _state(host, state, "ready")
+            if switch_state is None and not initial_switch:
+                _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
-            _state(host, state, "failed_preflight", error=_error_reason(error))
+            _preflight_failed(host, state, switch_state, error)
             raise DeployError("Не удалось сохранить состояние подготовки") from error
         critical = False
         try:
@@ -1514,6 +1571,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             if switch_state is not None or initial_switch:
                 with metrics.stage("v2.admission_recheck"):
                     host.require_switch_candidate(state)
+                _state(host, state, "ready")
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -1584,12 +1642,13 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                         host.finalize_database(state, "rolled_back")
                 except Exception as rollback_error:
                     raise DeployError("Выпуск и автоматический возврат не прошли; degraded state") from rollback_error
+                state["failed_version"] = version
+                state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
+                prep.write_state(host.state_dir, host.checkout, state)
             else:
                 host.restore_checkout(old_sha)
-                _state(host, state, "failed_preflight", error=_error_reason(error))
-            state["failed_version"] = version
-            state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
-            prep.write_state(host.state_dir, host.checkout, state)
+                _preflight_failed(host, state, switch_state, error, failed_version=version,
+                                  retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             if isinstance(error, compatibility.PredeployError):
                 metrics.update(predeploy_reason=error.code)
                 raise DeployError(f"Выпуск не установлен: {error.code}", code=error.code) from error

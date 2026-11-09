@@ -15,6 +15,7 @@ from unittest.mock import patch
 from scripts import deploy_database_switch as switch
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
+from scripts import deploy_runtime as runtime
 from scripts.select_deploy_release import SelectedRelease
 from tests.deploy_fixture_paths import FixtureStatePath
 
@@ -389,37 +390,96 @@ class DatabaseSwitchTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 switch.register_initial(host, state, record, prod._atomic_text)
 
-    def test_final_candidate_refusal_does_not_stop_or_publish_marker(self):
-        """Поздний отказ допуска сохраняет пару без marker/stop и без новой миграции."""
-        with TemporaryDirectory() as temporary:
-            host, state, record, _ = self._setup(Path(temporary))
-            record("success")
-            host.marker(False)
-            host.compatibility_evidence = state["compatibility_evidence"]
-            selected = SelectedRelease("karateka-git/compadre-assistant", "v1.2.3",
-                                       "release/1.2", SHA, 5, "main-full.yml", 8, 1)
-            original = (host.checkout / "data/app.db").read_bytes()
-            with ExitStack() as stack:
-                for name in ("require_switch_rollout", "installed", "require_baseline", "restore_checkout"):
-                    stack.enter_context(patch.object(host, name))
-                stack.enter_context(patch.object(host, "run", return_value="a" * 40))
-                stop = stack.enter_context(patch.object(host, "stop_both"))
-                marker = stack.enter_context(patch.object(host, "marker"))
-                stack.enter_context(patch.object(host, "require_switch_candidate", side_effect=prod.DeployError("revoked")))
-                stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": True, "active": True}))
-                stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
-                stack.enter_context(patch.object(prep, "require_clean_checkout"))
-                stack.enter_context(patch.object(prod, "_current_image", return_value=IMAGE))
-                stack.enter_context(patch.object(prod, "_prepare_candidate", return_value=(
-                    selected, prep.pinned_tag(SHA), IMAGE, MANIFEST, MANIFEST)))
-                with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, selected.version)
+    def test_final_candidate_refusal_can_be_retried_without_stopping_channels(self):
+        """Повтор достигает допуска и закрывается при marker или подменённом selector."""
+        for previous in ("current", "old_failed_state", "marker", "selector"):
+            with self.subTest(previous=previous), TemporaryDirectory() as temporary:
+                self._assert_final_refusal_retry(Path(temporary), previous)
+
+    def _assert_final_refusal_retry(self, root: Path, previous: str) -> None:
+        """Использует настоящий selector, SQLite и durable state для двух вызовов."""
+        host, state, record, _ = self._setup(root)
+        installed_sha = "a" * 40
+        state["candidate"].update(sha=installed_sha, tag=prep.pinned_tag(installed_sha))
+        switch.transition(host, state, record, prod._atomic_text)
+        boot = runtime.boot_record(state, "success")
+        record("success", boot=boot, last_good={"version": "v1.2.2", "sha": installed_sha,
+                                                "image_id": IMAGE, "tag": boot["tag"]})
+        host.marker(False)
+        host.commands.clear()
+        host.compatibility_evidence = state["compatibility_evidence"]
+        selected = SelectedRelease("karateka-git/compadre-assistant", "v1.2.3",
+                                   "release/1.2", SHA, 5, "main-full.yml", 8, 1)
+        database = host.selected_database()
+        original = database.read_bytes()
+        selector = host.state_dir / "active-db.json"
+        original_selector = selector.read_bytes()
+
+        def require_candidate(candidate: dict) -> None:
+            self.assertEqual(host.selected_database(), database)
+            self.assertEqual(host.runtime_tag(), boot["tag"])
+            self.assertEqual(candidate["old"]["host_path"], str(database))
+            raise prod.DeployError("revoked")
+
+        with ExitStack() as stack:
+            for name in ("require_switch_rollout", "installed", "require_baseline", "restore_checkout",
+                         "timer_suspend", "restart_policy"):
+                stack.enter_context(patch.object(host, name))
+            stack.enter_context(patch.object(host, "run", return_value=installed_sha))
+            stop = stack.enter_context(patch.object(host, "stop_both"))
+            guard = stack.enter_context(patch.object(host, "guard_known_writers"))
+            marker = stack.enter_context(patch.object(host, "marker", wraps=host.marker))
+            gate = stack.enter_context(patch.object(host, "require_switch_candidate", side_effect=require_candidate))
+            stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": True, "active": True}))
+            stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
+            stack.enter_context(patch.object(prep, "require_clean_checkout"))
+            stack.enter_context(patch.object(prod, "_current_image", return_value=IMAGE))
+            stack.enter_context(patch.object(prod, "_prepare_candidate", return_value=(
+                selected, prep.pinned_tag(SHA), IMAGE, MANIFEST, MANIFEST)))
+            with self.assertRaisesRegex(prod.DeployError, "Выпуск не установлен"):
+                prod.deploy(host, selected.version)
+            stable = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(stable["stage"], "success")
+            self.assertEqual(stable["boot"], boot)
+            self.assertEqual(stable["last_good"], state["last_good"])
             stop.assert_not_called()
             marker.assert_not_called()
-            self.assertFalse((host.state_dir / "deploy-in-progress").exists())
-            self.assertEqual(original, (host.checkout / "data/app.db").read_bytes())
-            self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "failed_preflight")
-            self.assertFalse(any(command[0] == "migrate" for command in host.commands))
+            with self.assertRaisesRegex(prod.DeployError, "временно закрыт"):
+                prod.deploy(host, selected.version)
+            self.assertEqual(gate.call_count, 1)
+            stop.assert_not_called()
+            if previous != "current":
+                # Так предыдущий контроллер сохранял отказ после записи ready.
+                stable = gate.call_args.args[0] | {"stage": "failed_preflight"}
+            stable["retry_after"] = "2000-01-01T00:00:00+00:00"
+            prep.write_state(host.state_dir, host.checkout, stable)
+            if previous == "marker":
+                host.marker(True)
+            elif previous == "selector":
+                prod._atomic_text(selector, json.dumps(json.loads(original_selector) | {
+                    "transition_id": "f" * 32,
+                }))
+            if previous in ("marker", "selector"):
+                with self.assertRaisesRegex(prod.DeployError, "recovery не подтверждён"):
+                    prod.deploy(host, selected.version)
+                self.assertEqual(gate.call_count, 1)
+                guard.assert_called()
+                stop.assert_called_once()
+                self.assertEqual(prep.read_state(host.state_dir, host.checkout)["stage"], "degraded")
+                return
+            with self.assertRaisesRegex(prod.DeployError, "Выпуск не установлен"):
+                prod.deploy(host, selected.version)
+            self.assertEqual(gate.call_count, 2)
+            stop.assert_not_called()
+            marker.assert_not_called()
+            guard.assert_not_called()
+        durable = prep.read_state(host.state_dir, host.checkout)
+        self.assertEqual(durable["stage"], "success" if previous == "current" else "failed_preflight")
+        self.assertEqual(host.selected_database(), database)
+        self.assertEqual(selector.read_bytes(), original_selector)
+        self.assertEqual(database.read_bytes(), original)
+        self.assertTrue(all(item["State"]["Running"] for item in host.found.values()))
+        self.assertFalse(any(command[0] == "migrate" for command in host.commands))
 
     @unittest.skipUnless(shutil.which("docker"), "Нужен Docker Compose CLI")
     def test_real_compose_requires_same_selected_path_for_both_channels(self):
