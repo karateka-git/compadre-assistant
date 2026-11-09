@@ -51,7 +51,7 @@ Git-тега, четыре чтения из GitHub fixture по закрепл�
 | 5.2. Отказ до миграции и после миграции предварительной копии | [`test_predeploy_compatibility.py`](../../tests/test_predeploy_compatibility.py), `test_annotated_route_keeps_writers_before_failed_local_or_remote_admission`. | Вызвать отказ чтения CI до миграции, затем несовпадение отпечатка или pin после миграции копии. Проверить `failed_preflight`, прежние SHA и БД, отсутствие marker и остановки каналов. |
 | 5.2. Отказ после остановки каналов | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_annotated_deploy_and_automatic_recovery_boundaries` и `test_before_admission_recovers_old_at_every_prestart_stage`. | До отметки приёма проверить возврат старых ботов на `old`. После отметки добавить запись в WAL новой БД и сверить её после возврата прежних ботов на `new`. Повторить со сменой доказательства перед запуском старых ботов и проверить закрытый запуск. |
 | 5.3. Остановить автоматику | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_bad_evidence_pin_selector_database_or_boundary_stop_every_writer`, `test_malformed_or_missing_state_preserved_and_both_entry_points_guard`. | Проверить, какие stage, причина и сведения о guards доступны оператору. Сверить выбранную БД, marker, остановку обоих writers и состояние таймера. Отдельно отметить случаи, когда подтверждение остановки получить не удалось. |
-| 5.3. Выполнить forward recovery | [`test_deploy_forward_recovery.py`](../../tests/test_deploy_forward_recovery.py), `test_recovers_same_ids_and_new_database`, `test_rejects_selector_schema_or_evidence_drift`. | Вызвать `forward.recover` после сбоя финализации. Сверить тот же candidate SHA, пару container ID и выбранную БД, записи, `success`, снятие marker и восстановление таймера. `ForwardHost` подменяет `require_recovery_evidence`. Для проверки нового допуска связать этот вызов с `Host.require_recovery_evidence` и временным Git из проверки тега. |
+| 5.3. Выполнить forward recovery | [`test_deploy_forward_recovery.py`](../../tests/test_deploy_forward_recovery.py), `test_annotated_finalization_failure_recovers_only_the_same_release` и `test_rejects_selector_schema_or_evidence_drift`. | Вызвать `forward.recover` после сбоя финализации. Проверить реальный `Host.require_recovery_evidence` на временном Git-теге и смоделированном API. Сверить тот же candidate SHA, пару container ID и выбранную БД, записи, `success`, снятие marker и восстановление таймера. |
 | 5.4. Повторить после отказа | [`test_deploy_database_switch.py`](../../tests/test_deploy_database_switch.py), `test_final_candidate_refusal_can_be_retried_without_stopping_channels`. | Повторить `prod.deploy` после `failed_preflight`. Сверить состояние, прежние каналы, selector и записи. Проверить, что изменившийся marker или selector закрывает безопасный повтор. |
 | 5.4. Возобновить после прерывания | [`test_deploy_database_recovery.py`](../../tests/test_deploy_database_recovery.py), `test_recovery_crash_boundaries_converge`, `test_repeated_command_recovery_retains_gate_and_single_pair`. [`test_deploy_forward_recovery.py`](../../tests/test_deploy_forward_recovery.py), `test_retry_after_process_crash_uses_same_running_ids`. | Прервать процесс после записи состояния или после `docker start`. Сверить результат повтора, выбранную БД, записи и инвентарь активных контейнеров. При неоднозначности проверить остановку известных writers. |
 | 5.5. Разделить готовность каналов | `Host.verify_both` из [`deploy_prod.py`](../../scripts/deploy_prod.py) с подменой `containers`, `image`, `logs` и монотонных часов. Для проверки отсутствия дублей есть `test_duplicate_polling_detected_without_logging_token` в [`test_deploy_prod.py`](../../tests/test_deploy_prod.py). | Задать один готовый канал и второй без health или сигнала polling. Проверить текущий исход, затем возможность сохранить готовый канал при доказанном образе, выбранной БД и отсутствии чужих writers. Проверить ограниченный повтор, полный возврат после подтверждения обоих и безопасный отказ при подмене. `RecoveryHost.verify_both` упрощён и сам по себе эти случаи не покрывает. |
@@ -107,3 +107,38 @@ commit временного аннотированного тега. После 
 работа Docker, systemd, polling и таймера моделируется. Простой Telegram и
 VK не измерялся. В модели подтверждены порядок действий, выбор SQLite и
 сохранность записей.
+
+## Результаты 5.3. Остановка автоматики и ручное восстановление
+
+```powershell
+& $recoveryPython -m unittest tests.test_deploy_database_recovery tests.test_deploy_forward_recovery
+```
+
+9 ноября 2026 года прошли 28 тестов. После запуска кандидата с SHA
+`51e628720402e528dd57c4a38c5e304ed829763a` тест сохранил строку
+`accepted-after-admission` в выбранной SQLite. Ошибка принятия контейнеров
+основным systemd unit прервала `finalization_intent`. При попытке
+автоматического возврата смоделированный отказ GitHub Contents закрыл
+проверку доказательства для прежних ботов.
+
+| Сценарий | Фактический исход | Граница действий |
+| --- | --- | --- |
+| Повреждённый или потерянный `state.json` | Обычная установка и `--verify-pinned` отказали без повторного запуска известных writers. Повреждённый файл сохранился, взамен потерянного новый state не появился. В `recovery-blocked.json` записана причина `STATE_UNREADABLE`. | Оператор сохраняет файлы, отдельно подтверждает selector, остановку writers и таймера. Пригодное поколение SQLite нужно определить по сохранённым файлам. |
+| Не завершилась финализация, автооткат не подтвердил доказательство | `degraded`, маркер `critical` сохранён, таймер выключен, оба writers остановлены. Выбрана `new`, в `last_good` сохранился прежний SHA. | Сверить `rollback_origin_stage`, `boot`, выбранное поколение, точные контейнеры и результат допуска. После возможной записи прежнюю SQLite оставляют как источник для разбора. |
+| Ручной forward при изменившейся попытке CI | Отказ без `docker start`, сохранены `degraded` и защитные условия. | Для ручного продолжения нужно подтвердить тот же выпуск и ту же попытку. |
+| Ручной forward при восстановленном доступе и точном доказательстве | `success` с тем же SHA, поколением `new` и двумя исходными container ID. Реальный verifier прочитал локальный тег и сделал четыре запроса к подменённому Contents API. Контроллер запустил эти ID, снял marker и восстановил таймер. | Допустимо продолжить ту же финализацию после проверки `boot.outcome=success`, `migration_attempted=false` и отсутствия чужих writers. |
+
+В сценарии с точным тегом снимок `final-<generation_id>.db` совпал с
+сохранённым SHA-256. Проверки целостности и foreign keys прошли на снимке
+и обеих БД. `original` сохранилась в снимке и обоих поколениях,
+`accepted-after-admission` осталась на `new`. Повтор использовал существующие
+контейнеры и SQLite. Мигратор и `docker compose create` после отказа
+финализации не вызывались. Простой Telegram и VK не измерялся, поскольку
+Docker, systemd и готовность каналов моделировались.
+
+Обычный контроллер сообщает, что возврат не подтверждён и запуск закрыт.
+Короткое сообщение CLI forward recovery показывает класс ошибки. Для
+подтверждения остановки оператор сверяет фактические Docker ID и их
+restart policy, marker и состояние таймера. Тест с отказом `docker stop`
+подтвердил, что даже сохранённый `degraded` не доказывает остановку
+каждого writer. Порядок действий описан в [инструкции по возврату](../OPERATIONS.md#отказ-выпуска-и-возврат).

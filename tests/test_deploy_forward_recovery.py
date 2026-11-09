@@ -1,9 +1,12 @@
 """Проверяет forward recovery v2 с настоящими state/SQLite и fake transport."""
 
 from contextlib import closing, nullcontext
+from dataclasses import asdict, replace
+import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -13,6 +16,8 @@ from scripts import deploy_forward_recovery as forward
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts import deploy_runtime as runtime
+from scripts.select_deploy_release import SelectedRelease
+from tests.test_deploy_database_recovery import OLD_IMAGE, OLD_SHA, annotated_release
 from tests.test_deploy_database_switch import IMAGE, MANIFEST, SHA
 from tests.test_deploy_runtime import RuntimeHost
 
@@ -93,6 +98,51 @@ class ForwardHost(RuntimeHost):
         return super().run(*args, env=env)
 
 
+class AnnotatedForwardHost(ForwardHost):
+    """Проверяет настоящий аннотированный тег, подменяя только внешний транспорт."""
+
+    def __init__(self, root: Path) -> None:
+        """Создаёт точный локальный Git checkout и синтетические внешние pin/token."""
+        super().__init__(root)
+        self.selected = SelectedRelease(prod.EXPECTED_REPOSITORY, "v1.2.3", "release/1.2", SHA,
+                                        5, "main-full.yml", 8, 1)
+        old = switch.identity(self.checkout / "data/app.db", "legacy", MANIFEST)
+        self.api = annotated_release(self, old["fingerprint"])
+        with (self.checkout / ".git/info/exclude").open("a", encoding="utf-8") as exclude:
+            exclude.write("\n/data/\n")
+        subprocess.run(("git", "checkout", "--detach", "--quiet", self.selected.sha),
+                       cwd=self.checkout, check=True)
+        prod._atomic_text(self.state_dir / "github-read-token", "synthetic-test-token")
+
+    def select(self, version: str) -> SelectedRelease:
+        """Возвращает смоделированный результат точного селектора Release и CI."""
+        if version != self.selected.version:
+            raise AssertionError(version)
+        return self.selected
+
+    def image(self, reference: str) -> dict:
+        """Возвращает разные OCI SHA прежнего образа и кандидата из локального Git."""
+        old = reference in (OLD_IMAGE, prep.pinned_tag(OLD_SHA))
+        return {"Id": OLD_IMAGE if old else IMAGE,
+                "Config": {"Labels": {prep.OCI_REVISION: OLD_SHA if old else self.selected.sha}}}
+
+    def require_recovery_evidence(self, state: dict) -> None:
+        """Выполняет проверку внешнего pin, локального тега и GitHub Contents."""
+        prod.Host.require_recovery_evidence(self, state)
+
+    def run(self, *args: str, env=None) -> str:
+        """Моделирует stop unit и поиск точных ID для защиты после отказа."""
+        if args[:2] == ("systemctl", "stop"):
+            self.commands.append(args)
+            self.main_active = self.main_failed = False
+            return ""
+        if args[:3] == ("docker", "ps", "--all"):
+            self.commands.append(args)
+            channel = args[-1].removeprefix("label=com.docker.compose.service=")
+            return self.found[channel]["Id"]
+        return super().run(*args, env=env)
+
+
 class ForwardRecoveryTests(unittest.TestCase):
     """Проверяет gate, durable intent и повтор после прерывания."""
 
@@ -110,6 +160,17 @@ class ForwardRecoveryTests(unittest.TestCase):
                                "image_id": IMAGE, "tag": prep.pinned_tag(SHA)},
                  "compatibility_evidence": {"schema_fingerprint": old["fingerprint"]}}
 
+        self._start_candidate(host, state)
+        for item in host.found.values():
+            item["State"] = {"Running": False, "Status": "exited"}
+        state.update(stage="degraded", migration_attempted=False,
+                     rollback_origin_stage="finalization_intent",
+                     boot=runtime.boot_record(state, "success"))
+        prep.write_state(host.state_dir, host.checkout, state)
+        host.main_failed = True
+        return host, state
+
+    def _start_candidate(self, host: ForwardHost, state: dict) -> None:
         def record(stage: str, **changes) -> None:
             """Сохраняет каждый переход через настоящий atomic writer."""
             state.update(changes, stage=stage)
@@ -117,13 +178,6 @@ class ForwardRecoveryTests(unittest.TestCase):
 
         switch.register_initial(host, state, record, prod._atomic_text)
         switch.transition(host, state, record, prod._atomic_text)
-        for item in host.found.values():
-            item["State"] = {"Running": False, "Status": "exited"}
-        record("degraded", migration_attempted=False,
-               rollback_origin_stage="finalization_intent",
-               boot=runtime.boot_record(state, "success"))
-        host.main_failed = True
-        return host, state
 
     def _recover(self, host: ForwardHost) -> None:
         """Запускает recovery с реальным lock и изолированной Git-проверкой."""
@@ -149,6 +203,83 @@ class ForwardRecoveryTests(unittest.TestCase):
             self.assertEqual(set(starts[-1][2:]), set(state["prepared_containers"].values()))
             self.assertFalse(any(command[:3] == ("docker", "compose", "create")
                                  for command in host.commands[len(host.commands) - 3:]))
+
+    def test_annotated_finalization_failure_recovers_only_the_same_release(self) -> None:
+        """Отказ adoption и недоступность CI оставляют ту же БД для ручного forward."""
+        with TemporaryDirectory() as temporary:
+            host = AnnotatedForwardHost(Path(temporary).resolve())
+            selected = host.selected
+            candidate = asdict(selected) | {"image_id": IMAGE, "tag": prep.pinned_tag(selected.sha)}
+            evidence = prod.compatibility.verify_tag_evidence(host.api, host.checkout, selected,
+                                                              selected.compatibility.policy_sha, OLD_SHA)
+            state = {"schema_before": MANIFEST, "schema_after": MANIFEST,
+                     "controller_sha": "c" * 40, "old_sha": OLD_SHA, "old_image_id": OLD_IMAGE,
+                     "old_tag": prep.pinned_tag(OLD_SHA), "candidate": candidate,
+                     "timer_before": {"enabled": True, "active": True}, "migration_attempted": False,
+                     "last_good": {"version": "v1.2.2", "sha": OLD_SHA,
+                                   "image_id": OLD_IMAGE, "tag": prep.pinned_tag(OLD_SHA)},
+                     "compatibility_evidence": evidence}
+            self._start_candidate(host, state)
+            ids = state["prepared_containers"]
+            generation = state["new"]["generation_id"]
+            with closing(sqlite3.connect(state["new"]["host_path"])) as db:
+                db.execute("INSERT INTO messages VALUES(2, 'accepted-after-admission')")
+                db.commit()
+            before = len(host.commands)
+
+            with patch.object(host, "activate_unit", side_effect=prod.DeployError("adoption failure")):
+                with self.assertRaisesRegex(prod.DeployError, "adoption failure"):
+                    host.finalize_database(state, "success")
+            self.assertEqual(state["stage"], "finalization_intent")
+            prod._state(host, state, "rollback_started", rollback_origin_stage=state["stage"])
+            with patch.object(prep, "deploy_lock", return_value=nullcontext()), patch.object(
+                prod.compatibility, "private_text", side_effect=lambda path: path.read_text().strip(),
+            ), patch.object(prod, "GitHub", return_value=host.api), patch.object(
+                prod.compatibility, "EvidenceAPI", side_effect=AssertionError("unexpected artifact API"),
+            ):
+                with patch.object(host.api, "get", side_effect=OSError("CI unavailable")) as unavailable:
+                    with self.assertRaisesRegex(prod.DeployError, "SQLite recovery не подтверждён"):
+                        prod._recover(host, state)
+                unavailable.assert_called_once()
+                blocked = prep.read_state(host.state_dir, host.checkout)
+                self.assertEqual(blocked["stage"], "degraded")
+                self.assertEqual(blocked["last_good"]["sha"], OLD_SHA)
+                self.assertTrue(all(not item["State"]["Running"] for item in host.found.values()))
+                self.assertEqual((host.state_dir / "deploy-in-progress").read_text(), "critical\n")
+                self.assertEqual(host.timer, {"enabled": False, "active": False})
+                self.assertEqual(switch.read_selected(host, state), "new")
+
+                host.selected = replace(selected, run_attempt=selected.run_attempt + 1)
+                with self.assertRaisesRegex(prod.DeployError, "writers остановлены и guards подтверждены") as error:
+                    forward.recover(host)
+                self.assertIn("CI attempt изменился", str(error.exception.__cause__))
+                self.assertFalse(any(command[:2] == ("docker", "start") for command in host.commands[before:]))
+                host.selected = selected
+                with patch.object(host.api, "get", wraps=host.api.get) as get:
+                    forward.recover(host)
+                self.assertEqual(get.call_count, 4)
+
+            durable = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(durable["stage"], "success")
+            self.assertEqual(durable["last_good"]["sha"], selected.sha)
+            self.assertEqual(durable["new"]["generation_id"], generation)
+            self.assertEqual(switch.read_selected(host, durable), "new")
+            self.assertEqual(durable["boot"]["containers"], ids)
+            self.assertEqual(host.timer, state["timer_before"])
+            self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+            self.assertEqual([command for command in host.commands[before:] if command[:2] == ("docker", "start")],
+                             [("docker", "start", *(ids[name] for name in prep.CHANNELS))])
+            self.assertFalse(any(command[0] == "migrate" or command[:3] == ("docker", "compose", "create")
+                                 for command in host.commands[before:]))
+            backup = Path(durable["snapshot"]["path"])
+            self.assertEqual(hashlib.sha256(backup.read_bytes()).hexdigest(), durable["snapshot"]["sha256"])
+            original = [("original",)]
+            for path, expected in ((backup, original), (durable["old"]["host_path"], original),
+                                   (durable["new"]["host_path"], original + [("accepted-after-admission",)])):
+                with closing(sqlite3.connect(path)) as db:
+                    self.assertEqual(db.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+                    self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
+                    self.assertEqual(db.execute("SELECT text FROM messages ORDER BY id").fetchall(), expected)
 
     def test_rejects_changed_boundary_or_candidate(self) -> None:
         """Изменённые selector/admission/boot/ID закрывают start."""
