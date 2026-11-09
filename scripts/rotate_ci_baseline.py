@@ -124,7 +124,7 @@ def require_accepted_installation(api: GitHub, receipt: InstallationReceipt) -> 
         InstallationTagError: Тег или Release не совпадает с VPS.
     """
     require_published_release(api, receipt)
-    if not installation_tag_exists(api, receipt.version, receipt.sha):
+    if not installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
         raise RotationError("Для текущей приёмки отсутствует тег установки")
 
 

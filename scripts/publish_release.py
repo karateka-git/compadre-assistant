@@ -21,6 +21,7 @@ from scripts.full_ci_admission import (
 from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, previous_release_sha, tag_commit
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.predeploy_compatibility import EvidenceAPI, check, verify_evidence
+from scripts.release_sqlite_summary import EXPECTED_MIGRATION_LABEL, expected_migration_at
 
 
 class PublishError(RuntimeError):
@@ -214,7 +215,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         raise PublishError("Требуется полный 40-символьный SHA")
     if not notes.strip():
         raise PublishError("Release notes не должны быть пустыми")
-    reserved = ("Тип выпуска:", "Commit:", "Ветка:", "Полный CI:")
+    reserved = ("Тип выпуска:", "Commit:", "Ветка:", "Полный CI:", EXPECTED_MIGRATION_LABEL)
     if any(line.startswith(reserved) for line in notes.splitlines()):
         raise PublishError("Release notes содержат служебное поле манифеста")
     branch = f"release/{major}.{minor}"
@@ -236,6 +237,10 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     if admission is None:
         raise PublishError("Нет успешного полного CI для точного SHA")
     compatibility = _compatibility(api, admission)
+    try:
+        expected_migration = expected_migration_at(api, sha)
+    except ValueError as error:
+        raise PublishError(f"Не подтверждена ожидаемая миграция SQLite: {error}") from error
     _candidate(api, branch, sha)
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
@@ -250,7 +255,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         for release_number, main_number, main_sha in pairs
     )
     body = (f"{notes.strip()}\n\nТип выпуска: обычный\nCommit: `{sha}`\nВетка: `{branch}`\n"
-            f"Полный CI: {run_url}\n")
+            f"Полный CI: {run_url}\n{EXPECTED_MIGRATION_LABEL} `{expected_migration}`\n")
     if pair_lines:
         body += f"\nПарные PR исправлений:\n{pair_lines}\n"
     make_latest = "true" if not history or parts > max(history) else "false"
