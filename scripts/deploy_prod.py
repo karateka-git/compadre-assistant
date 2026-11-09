@@ -1468,7 +1468,7 @@ def _preflight_failed(host: Host, state: dict, previous_switch: dict | None, err
 
 @metrics.tracked
 def deploy(host: Host, version: str, *, emergency: bool = False,
-           reason: str | None = None) -> None:
+           reason: str | None = None) -> str | None:
     """Развёртывает названный Release или возвращает оба канала на старый образ.
 
     Args:
@@ -1476,6 +1476,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         version: Каноническая опубликованная версия.
         emergency: Явный выбор аварийного маршрута.
         reason: Причина решения о развёртывании аварийного выпуска.
+
+    Returns:
+        Точный SHA новой установки или None для уже установленного выпуска.
 
     Raises:
         DeployError: Допуск, переключение или проверка завершились отказом.
@@ -1512,7 +1515,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             metrics.update(stage="already_installed", sha=last_good.get("sha"),
                            run_id=last_good.get("ci_run_id"), run_attempt=last_good.get("ci_run_attempt"))
             print("deploy-prod stage=already_installed", flush=True)
-            return
+            return None
         if isinstance(last_good, dict) and _version(version) <= _version(str(last_good.get("version"))):
             raise DeployError("Обычный выпуск должен быть выше последнего успешного")
         if state.get("failed_version") == version and state.get("retry_after"):
@@ -1646,7 +1649,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with metrics.stage("v2.finalize"):
                     host.finalize_database(state, "success")
                 metrics.available()
-                return
+                return selected.sha
             host.restart_policy("unless-stopped")
             host.marker(False)
             host.activate_unit()
@@ -1660,6 +1663,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "ci_run_attempt": selected.run_attempt,
                 "kind": selected.kind, "deployment": state.get("deployment"),
             }, error=None)
+            return selected.sha
         except Exception as error:
             if critical:
                 try:
@@ -1768,26 +1772,51 @@ def verify_pinned(host: Host) -> None:
             raise DeployError("Проверка pin не прошла; оба канала возвращены") from error
 
 
+def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> None:
+    """Выводит только технические признаки, отдельно от результата установки."""
+    from scripts import deploy_acceptance
+
+    try:
+        receipt = deploy_acceptance.verify_installed(host, version, sha)
+    except (DeployError, deploy_acceptance.DeployError) as error:
+        # При python -m текущий DeployError принадлежит __main__.
+        raise DeployError(f"Техническая приёмка не пройдена ({error})") from error
+    except Exception as error:
+        raise DeployError(f"Техническая приёмка не пройдена ({type(error).__name__})") from error
+    payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    print(payload if machine else f"deploy-prod technical_acceptance={payload}", flush=True)
+
+
 def main() -> None:
-    """Обрабатывает выпуск по версии или проверку текущего pin."""
+    """Обрабатывает установку, техническую приёмку или проверку текущего pin."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?")
     parser.add_argument("--emergency", action="store_true", help="явный аварийный выпуск")
     parser.add_argument("--reason", help="обязательная причина аварийного развёртывания")
     parser.add_argument("--verify-pinned", action="store_true",
                         help="контролируемый stop/start обоих каналов на текущем pin")
+    parser.add_argument("--verify-installed", metavar="SHA",
+                        help="техническая приёмка указанной версии и SHA без изменений")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        if args.verify_pinned and (args.emergency or args.reason is not None):
-            raise DeployError("Проверка pin несовместима с аварийным режимом")
+        if args.verify_installed is not None and args.verify_pinned:
+            raise DeployError("Укажите версию для технической приёмки")
+        if (args.verify_pinned or args.verify_installed is not None) and (
+                args.emergency or args.reason is not None):
+            raise DeployError("Проверка несовместима с режимом установки аварийного выпуска")
+        host = Host()
         if args.verify_pinned:
-            verify_pinned(Host())
+            verify_pinned(host)
+        elif args.verify_installed is not None:
+            _report_acceptance(host, args.version, args.verify_installed, machine=True)
         else:
-            deploy(Host(), args.version, emergency=args.emergency, reason=args.reason)
+            installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
+            if installed_sha is not None:
+                _report_acceptance(host, args.version, installed_sha, machine=False)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error
