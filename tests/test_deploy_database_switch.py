@@ -306,47 +306,79 @@ class DatabaseSwitchTests(unittest.TestCase):
                 self.assertEqual((host.state_dir / "state.json").read_bytes(), before)
                 self.assertEqual(host.commands, [])
 
+    def _deploy_with_metrics(self, root: Path, *, health_failed: bool):
+        """Проводит v2 deploy через SQLite и финализацию с изолированным транспортом."""
+        host, state, record, _ = self._setup(root)
+        record("success")
+        selected = SelectedRelease("karateka-git/compadre-assistant", "v1.2.3",
+                                   "release/1.2", SHA, 5, "main-full.yml", 8, 1)
+        original_run = host.run
+
+        def run(*args, env=None):
+            if args == ("git", "rev-parse", "HEAD"):
+                return "a" * 40
+            return original_run(*args, env=env)
+
+        def stop():
+            for item in host.found.values():
+                item["State"]["Running"] = False
+
+        def prepare_candidate(*args, **kwargs):
+            host.predeploy(selected, IMAGE, MANIFEST, MANIFEST, None, "a" * 40, IMAGE)
+            return selected, prep.pinned_tag(SHA), IMAGE, MANIFEST, MANIFEST
+
+        with ExitStack() as stack:
+            for name in ("require_switch_rollout", "require_switch_candidate", "installed", "require_baseline",
+                         "timer_suspend", "restart_policy", "restore_checkout", "activate_unit", "timer_restore"):
+                stack.enter_context(patch.object(host, name))
+            stack.enter_context(patch.object(host, "run", side_effect=run))
+            stack.enter_context(patch.object(host, "stop_both", side_effect=stop))
+            stack.enter_context(patch.object(host, "image", return_value={
+                "Id": IMAGE, "Config": {"Labels": {prep.OCI_REVISION: SHA}},
+            }))
+            stack.enter_context(patch.object(host, "verify_both",
+                                             side_effect=prod.DeployError("health") if health_failed else None))
+            stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": False, "active": False}))
+            stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
+            stack.enter_context(patch.object(prep, "require_clean_checkout"))
+            stack.enter_context(patch.object(prod, "_current_image", return_value=IMAGE))
+            stack.enter_context(patch.object(prod.compatibility, "private_text", return_value="c" * 40))
+            stack.enter_context(patch.object(prod.compatibility, "verify_evidence",
+                                             return_value=state["compatibility_evidence"]))
+            stack.enter_context(patch.object(prod, "_prepare_candidate", side_effect=prepare_candidate))
+            if health_failed:
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, selected.version)
+            else:
+                prod.deploy(host, selected.version)
+        return host
+
     def test_deploy_wires_copy_and_switch_and_retains_new_database_on_health_failure(self):
         """За тестовым обходом gate отказ health сохраняет новую SQLite и true."""
         with TemporaryDirectory() as temporary:
-            host, state, record, _ = self._setup(Path(temporary))
-            record("success")
-            host.compatibility_evidence = state["compatibility_evidence"]
-            selected = SelectedRelease("karateka-git/compadre-assistant", "v1.2.3",
-                                       "release/1.2", SHA, 5, "main-full.yml", 8, 1)
-            original_run = host.run
-
-            def run(*args, env=None):
-                if args == ("git", "rev-parse", "HEAD"):
-                    return "a" * 40
-                return original_run(*args, env=env)
-
-            def stop():
-                for item in host.found.values():
-                    item["State"]["Running"] = False
-
-            with ExitStack() as stack:
-                for name in ("require_switch_rollout", "require_switch_candidate", "installed", "require_baseline",
-                             "timer_suspend", "restart_policy", "restore_checkout"):
-                    stack.enter_context(patch.object(host, name))
-                stack.enter_context(patch.object(host, "run", side_effect=run))
-                stack.enter_context(patch.object(host, "stop_both", side_effect=stop))
-                stack.enter_context(patch.object(host, "verify_both", side_effect=prod.DeployError("health")))
-                stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": False, "active": False}))
-                stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
-                stack.enter_context(patch.object(prep, "require_clean_checkout"))
-                stack.enter_context(patch.object(prod, "_current_image", return_value=IMAGE))
-                stack.enter_context(patch.object(prod.compatibility, "private_text", return_value="c" * 40))
-                stack.enter_context(patch.object(prod, "_prepare_candidate", return_value=(
-                    selected, prep.pinned_tag(SHA), IMAGE, MANIFEST, MANIFEST)))
-                with self.assertRaises(prod.DeployError):
-                    prod.deploy(host, selected.version)
+            host = self._deploy_with_metrics(Path(temporary), health_failed=True)
             durable = prep.read_state(host.state_dir, host.checkout)
             self.assertEqual(durable["stage"], "degraded")
             self.assertIs(durable["admission_may_have_started"], True)
             self.assertEqual(switch.read_selected(host, durable), "new")
             self.assertFalse(any(item["State"]["Running"] for item in host.found.values()))
             self.assertEqual(len([command for command in host.commands if command[:2] == ("docker", "start")]), 1)
+
+    def test_deploy_records_v2_stage_durations(self):
+        """Отчёт штатной точки входа содержит достигнутые этапы v2 и их длительность."""
+        with TemporaryDirectory() as temporary:
+            host = self._deploy_with_metrics(Path(temporary), health_failed=False)
+            path, = host.state_dir.glob("metrics-*.json")
+            report = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(report["result"], "success")
+            self.assertEqual([item["stage"] for item in report["stages"]], [
+                "predeploy.evidence", "predeploy.copy", "predeploy.evidence_recheck",
+                "v2.admission_recheck", "deploy.stop_both", "v2.final_copy",
+                "v2.start_channels", "deploy.verify_both_1", "v2.finalize",
+            ])
+            for item in report["stages"]:
+                self.assertEqual(item["result"], "success")
+                self.assertGreaterEqual(item["seconds"], 0)
 
     def test_rollout_gate_and_repeat_registration_fail_closed(self):
         """Нет внешнего флага обхода gate; начальная регистрация не повторяется."""

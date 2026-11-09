@@ -1056,16 +1056,17 @@ class Host:
         policy_sha = compatibility.private_text(pin_path)
         token = compatibility.private_text(self.state_dir / "github-read-token")
         api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
-        with compatibility.check("SAFE_EVIDENCE_READ"):
+        with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
             evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
-        with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
-            directory = Path(temporary)
-            os.chmod(directory, 0o700)
-            compatibility.verify_copy(self.selected_database(), directory,
-                                      before, expected, evidence["schema_fingerprint"],
-                                      lambda work: self.migrate_copy(candidate_id, work))
+        with metrics.stage("predeploy.copy"):
+            with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
+                directory = Path(temporary)
+                os.chmod(directory, 0o700)
+                compatibility.verify_copy(self.selected_database(), directory,
+                                          before, expected, evidence["schema_fingerprint"],
+                                          lambda work: self.migrate_copy(candidate_id, work))
         # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
-        with compatibility.check("SAFE_EVIDENCE_RECHECK"):
+        with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
             if (compatibility.private_text(pin_path) != policy_sha
                     or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
                 raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
@@ -1511,7 +1512,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with compatibility.check("SAFE_INSTALLED_RUNTIME"):
                     host.require_baseline(last_good, old_sha, old_id)
             if switch_state is not None or initial_switch:
-                host.require_switch_candidate(state)
+                with metrics.stage("v2.admission_recheck"):
+                    host.require_switch_candidate(state)
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -1551,7 +1553,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             with metrics.stage("deploy.verify_both_1"):
                 host.verify_both(candidate_id, selected.sha)
             if state.get("protocol_version") == database_switch.PROTOCOL_VERSION:
-                host.finalize_database(state, "success")
+                with metrics.stage("v2.finalize"):
+                    host.finalize_database(state, "success")
                 metrics.available()
                 return
             host.restart_policy("unless-stopped")
