@@ -36,7 +36,13 @@ flowchart TD
     VERIFY -->|Обнаружено расхождение| MISMATCH["Оператор разбирает расхождение<br/>Обновление базы CI остановлено"]
     LIVE -->|Живые ответы подтверждены| TAGOK["Владелец разрешает создать тег установки"]
     TAGOK --> TAG["Оператор запускает сверку VPS и создание production/vX.Y.Z"]
-    TAG -->|Тот же runtime и точный SHA подтверждены| BASE["Оператор готовит PR с новой базой CI<br/>После review и merge меняет pin и запускает полный CI"]
+    TAG -->|Тот же runtime и точный SHA подтверждены| BASE["Оператор готовит отдельный PR с новой базой CI"]
+    BASE -->|PR прошёл review и слит| PIN["По согласованию с владельцем оператор меняет GitHub pin<br/>и запускает полный CI точного SHA main"]
+    PIN --> CI_NEW["GitHub выполняет полный CI под новым pin"]
+    CI_NEW -->|Полный CI точной попытки успешен| ACT["По согласованию с владельцем оператор запускает активацию на VPS"]
+    ACT --> ACT_VPS["VPS подтверждает установку, новый GitHub pin и CI<br/>затем атомарно меняет свой pin"]
+    CI_NEW -->|Отказ CI| MISMATCH
+    ACT_VPS -->|Сверка не прошла| MISMATCH
     TAG -->|Сверка не прошла| MISMATCH
     VPS -->|Сбой после допуска в ходе установки| AUTO["Контроллер пытается безопасно восстановить работу"]
     AUTO -->|Прежние боты восстановлены| RETRY["Оператор разбирает причину и решает, когда повторять выпуск"]
@@ -46,8 +52,8 @@ flowchart TD
     classDef operator fill:#dbeafe,stroke:#1d4ed8,color:#172554
     classDef automatic fill:#dcfce7,stroke:#15803d,color:#052e16
     class PUSHOK,WINDOW,LIVE,TAGOK owner
-    class PR,MERGE,RUN,PREP,PUB,DEPLOY,TAG,BASE,MISMATCH,RETRY,MANUAL operator
-    class FAST,FULL,VPS,VERIFY,AUTO automatic
+    class PR,MERGE,RUN,PREP,PUB,DEPLOY,TAG,BASE,PIN,ACT,MISMATCH,RETRY,MANUAL operator
+    class FAST,FULL,VPS,VERIFY,CI_NEW,ACT_VPS,AUTO automatic
 ```
 
 Жёлтые блоки — участие владельца, синие — действия оператора, зелёные —
@@ -68,6 +74,13 @@ CI, выполнить проверки без записи и провести 
 конкретного `runtime_id`. Скрипт перед записью заново читает VPS и сверяет
 Release и точный SHA. Тег `production/vX.Y.Z` фиксирует факт приёмки на
 момент проверки. [Команды тега установки](../OPERATIONS.md#зафиксировать-приёмку-тегом-установки)
+
+Ротация начинает новый полный CI после reviewed PR и перевода GitHub pin.
+До успешной активации pin на VPS следующий deploy не проходит допуск.
+Если ответ запуска потерялся, оператор ищет точную попытку и продолжает
+с её номером. Для активации VPS сам подтверждает новый GitHub pin и результат
+CI, а штатный `verifier` выпуска сохраняет прежнее число запросов.
+[Команды ротации](../OPERATIONS.md#закрепить-базу-полного-ci-после-установки)
 
 При новой релизной линии оператор также создаёт `release/X.Y` на проверенном
 SHA и публикует ветку после разрешения записи. Если CI завершился отказом,

@@ -220,6 +220,25 @@ class FullCiControllerTests(unittest.TestCase):
                 self.assertEqual(controller.decide(api, mode, SHA_D, branch, False),
                                  {"run-full": "true", "previous-release-sha": SHA_B})
 
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.object(controller, "git", return_value=SHA_D)
+    @patch.object(controller, "full_success", side_effect=AssertionError("ротация не ищет старый CI"))
+    def test_rotation_forces_full_with_exact_new_pin_and_main(self, _old, _git) -> None:
+        """При ротации прежняя зелёная попытка не подменяет запуск с новым pin."""
+        api = FakeGitHub()
+        self.assertEqual(controller.decide(api, "main", SHA_D, "main", False,
+                                          rotation_policy_sha=SHA_A, rotation_main_sha=SHA_D),
+                         {"run-full": "true", "previous-release-sha": SHA_B})
+        self.assertEqual(api.contents_refs, [SHA_A])
+        for mode, branch, pin, main in (("main", "main", SHA_C, SHA_D), ("main", "main", SHA_A, SHA_C),
+                                        ("main", "main", "", SHA_D), ("release", "release/3.2", SHA_A, SHA_D)):
+            with self.subTest(mode=mode, pin=pin, main=main), self.assertRaises(controller.ControllerError):
+                controller.decide(api, mode, SHA_D, branch, False, rotation_policy_sha=pin, rotation_main_sha=main)
+        with patch.dict("os.environ", {"GITHUB_EVENT_NAME": "push"}), self.assertRaises(controller.ControllerError):
+            controller.decide(api, "main", SHA_D, "main", False,
+                              rotation_policy_sha=SHA_A, rotation_main_sha=SHA_D)
+        self.assertEqual(api.contents_refs, [SHA_A])
+
     def test_missing_or_invalid_external_pin_fails_closed(self) -> None:
         """Без внешнего полного SHA кандидат не может выбрать свою policy."""
         for pin in ("", "bad", SHA_A.upper()):

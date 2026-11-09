@@ -353,48 +353,76 @@ python -m scripts.publish_installation_tag @installationArgs --publish --confirm
 
 ### Закрепить базу полного CI после установки
 
-Только после подтверждённого `stage=success` и независимой проверки
-`last_good`, рабочей БД и обоих каналов обновить базу следующего полного CI.
-Если исходный `deploy-prod` отказал, успешный forward recovery и его
-независимая приёмка должны быть записаны отдельно. Публикация
-Release без установки на VPS не меняет базу: например, при опубликованной
-v3.2.0 и установленной v3.1.0 внешний CI pin всё ещё должен указывать на
-reviewed policy с v3.1.0. `main-full` и `release-full` читают именно её
-`previous_sha`, `release_tag` и `release_id`, проверяют immutable Release и
-прямой tag. `full-suite` повторно проверяет ту же policy и точную пару.
-
-После установки нового выпуска сверить на VPS установленный SHA и Release ID
-без вывода данных БД. В отдельном PR обновить только baseline поля
-`scripts/repository_compatibility_policy.json` до этого SHA/tag/ID; проверить
-матрицу старого repository API, `pr-fast` и merge commit. Затем установить
-repository variable на **полный SHA reviewed merge commit**, проверить её
-значение и запустить ручной полный `main-full` для текущего SHA `main`.
-Для существующей release-линии проверить `release-full` точного нового SHA.
-Новый CI pin не заменяет отдельный production `compatibility-policy.sha`:
-тот остаётся закреплён за evidence пары, с которой текущий выпуск был
-установлен. До подтверждённого нового CI нельзя считать зелёный run другой
-пары допуском; при несовпадении pin и `last_good` predeploy закрывается.
-Production хранит `compatibility-policy.sha` и `github-read-token` в
-`/var/lib/compadre-assistant-deploy` с правами root:root/0600. GitHub token
-имеет только чтение Contents и Actions нужного репозитория; его значение не
-печатать и не переносить в checkout. Release selector и verifier используют
-его для чтения GitHub API; отказ авторизации закрывает допуск.
+Начинайте после независимой приёмки установки SQLite v2 и создания
+`production/vX.Y.Z`. После forward recovery отдельно зафиксируйте его
+результат и пройдите ту же приёмку. Источник новой базы — свежий `last_good`
+на VPS, подтверждённый соответствующими immutable Release и тегом установки.
 
 ```powershell
-gh variable set COMPATIBILITY_POLICY_SHA --repo karateka-git/compadre-assistant --body <полный-SHA-reviewed-merge>
-gh variable list --repo karateka-git/compadre-assistant --json name,value
-gh workflow run main-full.yml --repo karateka-git/compadre-assistant --ref main
+python -m scripts.rotate_ci_baseline @installationArgs prepare
 ```
 
-Перед каждым Git-действием проверить чистоту worktree; для push получить
-согласие пользователя и после push перечитать `AGENTS.md`. При неуспешной
-проверке policy/Release или любого обязательного job оставить выпуск закрытым
-и разбирать конкретный run/attempt, не подменяя baseline последним
-опубликованным Release. После отмены ротации v3.2.0 текущий CI pin вновь
-указывает на v3.1.0, тогда как VPS работает на v3.2.0; порядок выше нужно
-пройти для будущего выпуска. Точное состояние — в [PRODUCTION.md](PRODUCTION.md),
-автоматизация — в
-[бэклоге](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
+Используйте `$installationArgs` из [проверки тега установки](#зафиксировать-приёмку-тегом-установки).
+Команда в чистой ветке на основе `main` сверяет матрицу repository API
+с локальным Git-объектом принятого SHA и меняет только `previous_sha`,
+`release_tag` и `release_id` в `scripts/repository_compatibility_policy.json`.
+Если объекта нет, получите его из GitHub. Если SQLite API изменился и
+матрица больше ему не соответствует, согласуйте изменения матрицы и её
+тестов до ротации. Просмотрите diff и проведите отдельный PR с review,
+зелёным `pr-fast` и merge commit. Для `git push` требуется явное согласие
+пользователя. После push перечитайте `AGENTS.md`.
+
+После слияния получите номер PR, полный SHA текущего `main` и прежнее
+значение `COMPATIBILITY_POLICY_SHA`. Команды `pin` и `dispatch` изменяют
+GitHub и выполняются оператором по явному согласованию владельца. `pin`
+переводит переменную на точный reviewed merge commit и читает её обратно.
+`dispatch` запускает отдельный полный `main-full` с новым pin для выбранного
+SHA даже при старом зелёном CI того же коммита.
+
+```powershell
+python -m scripts.rotate_ci_baseline @installationArgs pin --pr <номер-PR> --main-sha <SHA-main> --expected-old-pin <прежний-GitHub-pin>
+python -m scripts.rotate_ci_baseline @installationArgs dispatch --pr <номер-PR> --main-sha <SHA-main>
+python -m scripts.rotate_ci_baseline @installationArgs finish --pr <номер-PR> --main-sha <SHA-main-прогона> --run-id <run> --attempt <attempt>
+```
+
+Если ответ `dispatch` потерялся, найдите в Actions запуск `CI baseline <новый-pin>`
+с тем же SHA и проверьте номер попытки. Для известного запуска используйте
+`finish` или повторите его попытку в GitHub после разбора причины отказа.
+Если `main` успел продвинуться, `finish` принимает уже прошедший прогон по
+его исходному SHA, пока этот SHA остаётся в истории `main` и policy совпадает.
+Если исходная попытка остановилась из-за движения `main`, выберите новый SHA
+для отдельного запуска с той же reviewed policy. `finish` подтверждает
+полные jobs и evidence точного run/attempt с новой базой и возвращает
+`policy_sha`, `main_sha`, `run_id`, `attempt` и свежий `runtime_id`.
+
+Согласуйте отдельную активацию на VPS. Узнайте прежний локальный pin из
+`/var/lib/compadre-assistant-deploy/compatibility-policy.sha`. Он может
+отличаться от прежней переменной GitHub. Передайте его и реквизиты `finish`.
+
+```bash
+sudo deploy-prod vX.Y.Z --activate-ci-baseline <установленный-SHA> <прежний-VPS-pin> <policy_sha> <main_sha> <run_id> <attempt> <runtime_id>
+```
+
+Под блокировкой выпуска контроллер сверяет принятую установку, актуальный
+GitHub pin и успешную новую попытку. После сверки он атомарно меняет только
+локальный pin. Повтор с тем же подтверждённым состоянием допустим. При
+частичной ротации, ошибке API или неуспехе новой попытки локальный pin
+остаётся прежним, поэтому допуск следующей версии закрыт до сверки новой
+базы. Работающие каналы продолжают обслуживать текущий выпуск.
+
+Для подготовки достаточно чтения Contents. Для проверки PR, переменной и
+результатов нужны Contents, Pull requests, Variables и Actions на чтение.
+Для `pin` нужен токен владельца с Variables write, для `dispatch` —
+с Actions write. GitHub-токен оператора не передаётся в SSH. VPS использует
+отдельный `github-read-token` с Actions, Contents и Variables read для
+активации. Токен и локальный pin хранятся вне checkout с правами root:root/0600.
+Скрипт ротации не публикует Release и не выполняет `git push`.
+
+Перед первым выпуском с изменёнными workflow установите совместимый
+controller snapshot и завершите ротацию на reviewed merge, в котором уже
+присутствуют эти workflow. Если база уже совпадает с установленной версией,
+согласуйте отдельный reviewed pin для новых байтов workflow. Последнее
+документированное состояние приведено в [PRODUCTION.md](PRODUCTION.md).
 
 ### Проверить живое переключение двух каналов
 

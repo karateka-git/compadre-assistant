@@ -207,13 +207,38 @@ def previous_release_sha(api: GitHub, branch: str, *, policy_sha: str | None = N
     return previous
 
 
-def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict[str, str]:
-    """Возвращает решение caller и SHA схемы прежнего выпуска."""
+def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool, *,
+           rotation_policy_sha: str = "", rotation_main_sha: str = "") -> dict[str, str]:
+    """Возвращает решение caller и SHA схемы прежнего выпуска.
+
+    Args:
+        api: GitHub-клиент для проверки точной ветки и закреплённой базы.
+        mode: Имя caller main или release.
+        sha: Полный SHA события CI.
+        branch: Ветка события CI.
+        created: Признак создания release-ветки.
+        rotation_policy_sha: Ожидаемый новый внешний pin при ротации.
+        rotation_main_sha: Ожидаемый точный SHA main при ротации.
+
+    Returns:
+        Outputs caller для запуска полного набора и выбора его базы.
+
+    Raises:
+        ControllerError: Checkout, ref, предыдущая попытка или ротация не подтверждены.
+    """
     if not SHA_PATTERN.fullmatch(sha) or git("rev-parse", "HEAD") != sha:
         raise ControllerError("Checkout не соответствует полному GITHUB_SHA")
     ref = api.get(f"/git/ref/heads/{quote(branch, safe='/')}")
     if ref["object"]["sha"] != sha:
         raise ControllerError("Ветка ушла с SHA события; устаревший run нельзя продолжать")
+    if rotation_policy_sha or rotation_main_sha:
+        if (mode != "main" or branch != "main" or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or rotation_main_sha != sha or not SHA_PATTERN.fullmatch(rotation_policy_sha)
+                or rotation_policy_sha != os.environ.get("COMPATIBILITY_POLICY_SHA")):
+            raise ControllerError("Ротация требует точные SHA текущего main и нового внешнего CI pin")
+        # Прежний успешный run мог проверять другую базу на том же SHA.
+        previous = previous_release_sha(api, branch, policy_sha=rotation_policy_sha)
+        return {"run-full": "true", "previous-release-sha": previous}
     if mode == "main":
         if branch != "main":
             raise ControllerError("Ручной main-full разрешён только для main")
@@ -255,6 +280,8 @@ def main() -> None:
         result = decide(
             api, arguments.mode, os.environ.get("GITHUB_SHA", ""), branch,
             os.environ.get("BRANCH_CREATED") == "true",
+            rotation_policy_sha=os.environ.get("ROTATION_POLICY_SHA", ""),
+            rotation_main_sha=os.environ.get("ROTATION_MAIN_SHA", ""),
         )
         print(result)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

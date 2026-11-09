@@ -479,7 +479,8 @@ class AdmissionBoundaryTests(unittest.TestCase):
 
     def test_annotated_route_keeps_writers_before_failed_local_or_remote_admission(self):
         """После копии разрешены только локальные проверки, а ошибка безопасна."""
-        faults = {"api": "SAFE_EVIDENCE_READ", "schema": "SAFE_COPY_FINGERPRINT", "pin": "SAFE_POLICY_PIN"}
+        faults = {"api": "SAFE_EVIDENCE_READ", "schema": "SAFE_COPY_FINGERPRINT", "pin": "SAFE_POLICY_PIN",
+                  "partial_rotation": "SAFE_POLICY_PIN", "old_baseline": "SAFE_INSTALLED_PREVIOUS_SHA"}
         for fault, code in faults.items():
             with self.subTest(fault=fault), TemporaryDirectory() as temporary:
                 host = FakeHost(Path(temporary))
@@ -488,7 +489,9 @@ class AdmissionBoundaryTests(unittest.TestCase):
                 api.trusted["repository_compatibility_policy.json"] = json.dumps(api.policy).encode()
                 with closing(sqlite3.connect(host.selected_database())) as connection:
                     fingerprint = gate.schema_fingerprint(connection)
-                proof = ReleaseTagEvidence(OLD_SHA, POLICY_SHA, 1, 1, "c" * 64 if fault == "schema" else fingerprint)
+                previous_sha = "d" * 40 if fault == "old_baseline" else OLD_SHA
+                proof = ReleaseTagEvidence(previous_sha, POLICY_SHA, 1, 1,
+                                           "c" * 64 if fault == "schema" else fingerprint)
                 selected = replace(api.selected, compatibility=proof, tag_object_sha="d" * 40)
                 migrated = False
 
@@ -497,7 +500,8 @@ class AdmissionBoundaryTests(unittest.TestCase):
                     migrated = True
 
                 def read_pin(path):
-                    if fault == "pin" and migrated and path.name == "compatibility-policy.sha":
+                    if path.name == "compatibility-policy.sha" and (
+                            fault == "partial_rotation" or fault == "pin" and migrated):
                         return "e" * 40
                     return POLICY_SHA
 
@@ -533,7 +537,7 @@ class AdmissionBoundaryTests(unittest.TestCase):
                         prod.deploy(host, selected.version)
                 self.assertEqual(failure.exception.code, code)
                 select.assert_called_once_with(selected.version)
-                self.assertEqual(migrated, fault != "api")
+                self.assertEqual(migrated, fault not in ("api", "partial_rotation", "old_baseline"))
                 self.assertTrue(host.running)
                 self.assertNotIn("marker_on", host.actions)
                 self.assertNotIn("stop_both", host.actions)
