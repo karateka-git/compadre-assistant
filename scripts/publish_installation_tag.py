@@ -16,9 +16,12 @@ from urllib.error import HTTPError
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.deploy_prepare import PreparationError, parse_state_object
 from scripts.full_ci_admission import MAIN_WORKFLOW, RELEASE_WORKFLOW, SHA_PATTERN
-from scripts.full_ci_controller import ControllerError
+from scripts.full_ci_controller import ControllerError, GitHub
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.publish_release import PublishError, _version
+from scripts.release_sqlite_summary import (
+    InstallationSchemaEvidence, InstallationTag, build_summary, expected_migration_at, read_installation_tag,
+)
 from scripts.select_deploy_release import DeploySelectionError, _emergency_manifest, _manifest, _release, _tag
 
 
@@ -113,7 +116,7 @@ def read_receipt(version: str, sha: str, *, ssh_host: str, known_hosts: Path,
     return _receipt(result.stdout, version, sha)
 
 
-def require_published_release(api: PublishingGitHub, receipt: InstallationReceipt) -> None:
+def require_published_release(api: GitHub, receipt: InstallationReceipt) -> None:
     """Подтверждает, что опубликованный Release и его тег описывают принятый SHA.
 
     Args:
@@ -125,40 +128,66 @@ def require_published_release(api: PublishingGitHub, receipt: InstallationReceip
         DeploySelectionError: Release либо его манифест не подтверждён.
         ControllerError: GitHub не ответил на проверку.
     """
-    if api.repository != EXPECTED_REPOSITORY:
-        raise InstallationTagError("Репозиторий тега установки не совпадает с проектом")
-    release = _release(api, receipt.version)
-    if release["id"] != receipt.release_id or release["target_commitish"] != receipt.sha:
+    release_id, run_id, run_attempt = _published_release(api, receipt.version, receipt.sha, receipt.kind)
+    if release_id != receipt.release_id:
         raise InstallationTagError("Опубликованный Release не совпадает с приёмкой")
-    tag_sha, _, annotation = _tag(api, receipt.version, allow_annotation=receipt.kind == "ordinary")
-    if receipt.kind == "ordinary":
-        manifest_sha, _, run_id, run_attempt = _manifest(release["body"], receipt.version, api.repository)
-        if ((run_id, run_attempt) != (receipt.run_id, receipt.run_attempt)
-                or (annotation is not None and (annotation.run_id, annotation.run_attempt) != (run_id, run_attempt))):
-            raise InstallationTagError("Прогон опубликованного Release не совпадает с приёмкой")
+    if receipt.kind == "ordinary" and (run_id, run_attempt) != (receipt.run_id, receipt.run_attempt):
+        raise InstallationTagError("Прогон опубликованного Release не совпадает с приёмкой")
+
+
+def _published_release(api: GitHub, version: str, sha: str,
+                       kind: str | None = None) -> tuple[int, int | None, int | None]:
+    """Читает точный immutable Release и удостоверяет его тег и манифест."""
+    _version(version)
+    if api.repository != EXPECTED_REPOSITORY or not SHA_PATTERN.fullmatch(sha):
+        raise InstallationTagError("Некорректный репозиторий или SHA тега установки")
+    release = _release(api, version)
+    if release["target_commitish"] != sha:
+        raise InstallationTagError("Опубликованный Release относится к другому SHA")
+    body = release["body"]
+    if kind is None:
+        kind = "emergency" if "Тип выпуска: аварийный" in body.splitlines() else "ordinary"
+    tag_sha, _, annotation = _tag(api, version, allow_annotation=kind == "ordinary")
+    run_id = run_attempt = None
+    if kind == "ordinary":
+        manifest_sha, _, run_id, run_attempt = _manifest(body, version, api.repository)
+        if annotation is not None and (annotation.run_id, annotation.run_attempt) != (run_id, run_attempt):
+            raise InstallationTagError("Прогон опубликованного Release не совпадает с аннотацией")
     else:
-        workflow = MAIN_WORKFLOW if _version(receipt.version)[2] == 0 else RELEASE_WORKFLOW
-        manifest_sha, *_ = _emergency_manifest(release["body"], receipt.version, api.repository, workflow)
-    if tag_sha != receipt.sha or manifest_sha != receipt.sha:
-        raise InstallationTagError("SHA релизного тега, манифеста и приёмки не совпадают")
+        workflow = MAIN_WORKFLOW if _version(version)[2] == 0 else RELEASE_WORKFLOW
+        manifest_sha, *_ = _emergency_manifest(body, version, api.repository, workflow)
+    if tag_sha != sha or manifest_sha != sha:
+        raise InstallationTagError("SHA релизного тега и манифеста не совпадают с ожидаемым")
+    return release["id"], run_id, run_attempt
 
 
-def installation_tag_exists(api: PublishingGitHub, version: str, sha: str) -> bool:
-    """Проверяет точный прямой ref тега установки без записи в GitHub.
+def installation_tag_exists(api: GitHub, version: str, sha: str, *,
+                            receipt: InstallationReceipt | None = None) -> bool:
+    """Проверяет точный ref тега установки без записи в GitHub.
 
     Args:
         api: Клиент GitHub ожидаемого репозитория.
         version: Каноническая версия установленного выпуска.
         sha: Полный SHA принятых Release и VPS.
+        receipt: Свежая приёмка для сверки SQLite аннотированного тега.
 
     Returns:
         True при точном совпадении, False при отсутствии тега.
 
     Raises:
-        InstallationTagError: Ref существует на другом SHA или имеет иной тип.
+        InstallationTagError: Ref, объект тега или данные приёмки расходятся.
         ControllerError: GitHub не ответил на проверку.
         PublishError: Версия не каноническая.
     """
+    existing = _read_installation_tag(api, version, sha)
+    if (existing is not None and existing.evidence is not None and receipt is not None
+            and existing.evidence != _sqlite_evidence(receipt, version, sha)):
+        raise InstallationTagError("Сведения SQLite существующего тега расходятся со свежей приёмкой")
+    return existing is not None
+
+
+def _read_installation_tag(api: GitHub, version: str, sha: str) -> InstallationTag | None:
+    """Читает прямой ref или канонический объект тега для принятого коммита."""
     _version(version)
     if api.repository != EXPECTED_REPOSITORY or not SHA_PATTERN.fullmatch(sha):
         raise InstallationTagError("Некорректный репозиторий или SHA тега установки")
@@ -167,13 +196,53 @@ def installation_tag_exists(api: PublishingGitHub, version: str, sha: str) -> bo
         reference = api.get(f"/git/ref/{name}")
     except ControllerError as error:
         if isinstance(error.__cause__, HTTPError) and error.__cause__.code == 404:
-            return False
+            return None
         raise
-    target = reference.get("object") if isinstance(reference, dict) else None
-    if (not isinstance(target, dict) or reference.get("ref") != f"refs/{name}"
-            or target.get("type") != "commit" or target.get("sha") != sha):
-        raise InstallationTagError("Тег установки существует с неподтверждённым типом или SHA")
-    return True
+    try:
+        return read_installation_tag(reference, version, sha, lambda object_sha: api.get(f"/git/tags/{object_sha}"))
+    except ValueError as error:
+        raise InstallationTagError(f"Тег установки не подтверждён: {error}") from error
+
+
+def _expected_migration(api: GitHub, sha: str) -> str:
+    """Сохраняет сообщение о некорректном каталоге в контракте команды."""
+    try:
+        return expected_migration_at(api, sha)
+    except ValueError as error:
+        raise InstallationTagError(f"Не подтверждена ожидаемая миграция SQLite: {error}") from error
+
+
+def summarize(api: GitHub, version: str, sha: str) -> dict[str, object]:
+    """Собирает сводку SQLite из точного опубликованного коммита и тега установки.
+
+    Args:
+        api: Клиент GitHub ожидаемого репозитория с правом чтения.
+        version: Каноническая версия опубликованного Release.
+        sha: Полный SHA релизного коммита.
+
+    Returns:
+        Ожидаемая миграция и, при наличии аннотации, принятая SQLite.
+
+    Raises:
+        InstallationTagError: Источники расходятся или не подтверждены.
+        DeploySelectionError: Release или его релизный тег не подтверждён.
+        ControllerError: GitHub не ответил на проверку.
+    """
+    release_id, run_id, run_attempt = _published_release(api, version, sha)
+    expected = _expected_migration(api, sha)
+    installation = _read_installation_tag(api, version, sha)
+    try:
+        return build_summary(version, sha, release_id, run_id, run_attempt, expected, installation)
+    except ValueError as error:
+        raise InstallationTagError(f"Сводка SQLite не подтверждена: {error}") from error
+
+
+def _sqlite_evidence(receipt: InstallationReceipt, version: str, sha: str) -> InstallationSchemaEvidence:
+    """Выделяет точные реквизиты SQLite из записи приёмки."""
+    try:
+        return InstallationSchemaEvidence.from_receipt(asdict(receipt), version, sha)
+    except ValueError as error:
+        raise InstallationTagError(f"SQLite в приёмке не подтверждена: {error}") from error
 
 
 def publish(api: PublishingGitHub, read_fresh: Callable[[], InstallationReceipt],
@@ -202,36 +271,56 @@ def publish(api: PublishingGitHub, read_fresh: Callable[[], InstallationReceipt]
     if receipt.runtime_id != confirmed_runtime:
         raise InstallationTagError("Runtime VPS изменился после проверки живых ответов")
     require_published_release(api, receipt)
-    if installation_tag_exists(api, receipt.version, receipt.sha):
+    evidence = _sqlite_evidence(receipt, receipt.version, receipt.sha)
+    if installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
         return receipt
+    if evidence.migration != _expected_migration(api, receipt.sha):
+        raise InstallationTagError("Миграция принятой SQLite не совпадает с коммитом выпуска")
+    tag_name = f"production/{receipt.version}"
+    ref_name = f"refs/tags/{tag_name}"
+    tag = api.post("/git/tags", {"tag": tag_name, "message": evidence.message(),
+                                  "object": receipt.sha, "type": "commit"})
+    object_sha = tag.get("sha") if isinstance(tag, dict) else None
     try:
-        api.post("/git/refs", {"ref": f"refs/tags/production/{receipt.version}", "sha": receipt.sha})
+        created = read_installation_tag({"ref": ref_name, "object": {"type": "tag", "sha": object_sha}},
+                                        receipt.version, receipt.sha, lambda _: tag)
+    except ValueError as error:
+        raise InstallationTagError(f"Не подтверждён созданный объект тега установки: {error}") from error
+    if created.evidence != evidence:
+        raise InstallationTagError("Созданный объект тега установки содержит другие сведения SQLite")
+    try:
+        api.post("/git/refs", {"ref": ref_name, "sha": created.object_sha})
     except PublishingError as error:
         # Запись могла пройти до потери ответа, либо такой же ref создал другой процесс.
-        if installation_tag_exists(api, receipt.version, receipt.sha):
+        if installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
             return receipt
         raise InstallationTagError("Создание тега не подтверждено GitHub") from error
-    if not installation_tag_exists(api, receipt.version, receipt.sha):
+    if not installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
         raise InstallationTagError("После создания точный тег установки не подтверждён")
     return receipt
 
 
 def main() -> None:
-    """Проверяет приёмку или публикует тег по явному решению владельца."""
+    """Проверяет приёмку, публикует тег владельца или выводит сводку SQLite."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", help="точный опубликованный релиз vMAJOR.MINOR.PATCH")
     parser.add_argument("sha", help="полный ожидаемый SHA выпуска")
-    parser.add_argument("--ssh-host", required=True, help="проверенный адрес user@host")
-    parser.add_argument("--known-hosts", required=True, type=Path, help="файл с проверенным ключом VPS")
+    parser.add_argument("--ssh-host", help="проверенный адрес user@host")
+    parser.add_argument("--known-hosts", type=Path, help="файл с проверенным ключом VPS")
     parser.add_argument("--identity", type=Path, help="локальный путь к ключу SSH")
     parser.add_argument("--confirm-live", metavar="RUNTIME_ID",
                         help="подтвердить живые ответы Telegram и VK для этого runtime")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--check", action="store_true", help="прочитать приёмку без записи")
     mode.add_argument("--publish", action="store_true", help="создать и подтвердить тег установки")
+    mode.add_argument("--summary", action="store_true", help="показать опубликованную сводку SQLite без SSH")
     args = parser.parse_args()
     if args.publish != (args.confirm_live is not None):
-        parser.error("--confirm-live обязателен при --publish и недопустим при --check")
+        parser.error("--confirm-live обязателен только при --publish")
+    if not args.summary and (args.ssh_host is None or args.known_hosts is None):
+        parser.error("--ssh-host и --known-hosts обязательны при --check и --publish")
+    if args.summary and any(value is not None for value in (args.ssh_host, args.known_hosts, args.identity)):
+        parser.error("--summary не использует настройки SSH")
 
     def read_fresh() -> InstallationReceipt:
         return read_receipt(args.version, args.sha, ssh_host=args.ssh_host,
@@ -241,13 +330,15 @@ def main() -> None:
         if repository_from_origin() != EXPECTED_REPOSITORY:
             raise InstallationTagError("Origin не совпадает с репозиторием проекта")
         api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
-        if args.publish:
+        if args.summary:
+            print(json.dumps(summarize(api, args.version, args.sha), ensure_ascii=False, indent=2))
+        elif args.publish:
             receipt = publish(api, read_fresh, args.confirm_live)
             print(f"Тег установки подтверждён: production/{receipt.version} -> {receipt.sha}")
         else:
             receipt = read_fresh()
             require_published_release(api, receipt)
-            installation_tag_exists(api, receipt.version, receipt.sha)
+            installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt)
             print(json.dumps(asdict(receipt), ensure_ascii=False, separators=(",", ":")))
     except (ControllerError, DeploySelectionError, InstallationTagError, PublishError, PublishingError,
             ReleaseBranchError) as error:

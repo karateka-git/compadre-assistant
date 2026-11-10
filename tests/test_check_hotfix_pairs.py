@@ -278,7 +278,7 @@ class HotfixTests(unittest.TestCase):
         self.admission.side_effect = lambda api, repo, workflow, sha, branch: (
             object() if workflow == hotfix.MAIN_WORKFLOW else None
         )
-        with self.assertRaisesRegex(hotfix.HotfixError, "release-full"):
+        with self.assertRaisesRegex(hotfix.HotfixError, "release-check-full"):
             hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE)
         self.assertEqual(hotfix.check_release(self.api, "release/1.0", RELEASE_SHA,
                                               BASE, require_full_ci=False), [(10, 11, MAIN_SHA)])

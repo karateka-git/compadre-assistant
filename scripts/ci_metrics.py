@@ -13,9 +13,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from scripts.full_ci_admission import (
+    FULL_CALLERS, FULL_SUITE_CHECK, MAIN_WORKFLOW, PR_CHECK, PR_WORKFLOW,
+)
+
 
 # Измеряются только caller workflows; reusable suite отдельно не запускается.
-WORKFLOWS = {"pr-fast.yml", "main-full.yml", "release-full.yml"}
+WORKFLOWS = {PR_WORKFLOW, *FULL_CALLERS}
 # Полный SHA позволяет различать PR head, тестовый merge и проверяемый выпуск.
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -45,19 +49,19 @@ def duration(start: object, end: object) -> int | None:
 
 def classify(workflow: str, jobs: list[dict]) -> str:
     """Различает короткий PR, полный main/release и пропущенный набор."""
-    if workflow == "pr-fast.yml":
-        if sum(job.get("name") == "pr-fast" for job in jobs) != 1:
-            raise MetricsError("Отсутствует или повторяется pr-fast job")
-        return "pr-fast"
-    prefix = "main-full" if workflow == "main-full.yml" else "release-full"
-    suite = [job for job in jobs if job.get("name") in {prefix, f"{prefix} / full-suite"}]
+    if workflow == PR_WORKFLOW:
+        if sum(job.get("name") == PR_CHECK for job in jobs) != 1:
+            raise MetricsError(f"Отсутствует или повторяется job {PR_CHECK}")
+        return PR_CHECK
+    prefix = FULL_CALLERS[workflow]
+    suite = [job for job in jobs if job.get("name") in {prefix, f"{prefix} / {FULL_SUITE_CHECK}"}]
     if len(suite) != 1:
-        raise MetricsError("Отсутствует или повторяется full-suite job")
+        raise MetricsError(f"Отсутствует или повторяется job {FULL_SUITE_CHECK}")
     if suite[0].get("conclusion") == "skipped":
         return "skipped"
     if suite[0].get("name") == prefix:
-        raise MetricsError("Неизвестная структура full-suite job")
-    return "full-main" if workflow == "main-full.yml" else "full-release"
+        raise MetricsError(f"Неизвестная структура job {FULL_SUITE_CHECK}")
+    return "full-main" if workflow == MAIN_WORKFLOW else "full-release"
 
 
 def summarize(run: dict, jobs: list[dict], workflow: str, repository: str,
@@ -240,7 +244,12 @@ def comparable_previous(api: GitHub, report: dict) -> dict | None:
         if type(candidate_id) is not int or type(attempt) is not int or not isinstance(sha, str):
             raise MetricsError("GitHub API: некорректная история run")
         jobs = api.jobs(candidate_id, attempt)
-        if classify(report["workflow"], jobs) != report["kind"]:
+        try:
+            kind = classify(report["workflow"], jobs)
+        except MetricsError:
+            # Путь workflow общий для истории. Сравниваем только новый набор имён.
+            continue
+        if kind != report["kind"]:
             continue
         previous = summarize(candidate, jobs, report["workflow"], report["repository"],
                              candidate_id, attempt, sha)

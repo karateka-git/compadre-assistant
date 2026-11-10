@@ -99,13 +99,15 @@ class DeployRuntimeTests(unittest.TestCase):
             self.assertEqual(before, host.commands)
 
     def test_boot_restarts_only_durable_ids_and_repeat_is_read_only(self):
-        """Свободный lock разрешает start существующих ID, но не compose create."""
+        """Штатный boot остаётся доступен после ротации CI pin и сохраняет ID."""
         with TemporaryDirectory() as temporary:
             host, state, record = self._fixture(Path(temporary).resolve())
             runtime.finalize(host, state, record, "success")
+            prod._atomic_text(host.state_dir / "compatibility-policy.sha", "d" * 40 + "\n")
             for item in host.found.values():
                 item["State"] = {"Running": False, "Status": "exited"}
-            with patch.object(prep, "deploy_lock", return_value=nullcontext()):
+            with (patch.object(prep, "deploy_lock", return_value=nullcontext()),
+                  patch.object(host, "require_recovery_evidence", side_effect=AssertionError("завершённый boot"))):
                 runtime.start(host)
                 before = list(host.commands)
                 runtime.start(host)

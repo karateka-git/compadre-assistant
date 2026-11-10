@@ -13,7 +13,7 @@ from urllib.parse import quote
 from scripts.ci_repository_compatibility import ReleaseTagEvidence, resolve_release_tag
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.full_ci_admission import (
-    AdmissionError, MAIN_WORKFLOW, RELEASE_WORKFLOW, ReadOnlyGitHub, SHA_PATTERN,
+    AdmissionError, MAIN_WORKFLOW, PR_CHECK, RELEASE_WORKFLOW, ReadOnlyGitHub, SHA_PATTERN,
     select_successful_run,
 )
 from scripts.full_ci_controller import ControllerError, GitHub
@@ -263,7 +263,7 @@ def _emergency_manifest(body: str, version: str, repository: str,
         raise DeploySelectionError("Отсутствующий CI не может ссылаться на конкретный run")
     pr_rows = re.findall(r"(?m)^- PR #([1-9][0-9]*) -> (main|release/[1-9][0-9]*\.[0-9]+); "
                          r"merge `([0-9a-f]{40})` \(([^()]+)\); "
-                         r"pr-fast=(success|failure|pending|not_run|unverified) "
+                         rf"{re.escape(PR_CHECK)}=(success|failure|pending|not_run|unverified) "
                          r"\[([^\]\r\n]+)\]; bypass=(yes|no|unverified)"
                          r"(?:; rule suite [1-9][0-9]*)?$", body)
     if ("PR и состояние на момент merge:" not in body or not pr_rows or
@@ -326,7 +326,7 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
         bypass, suite_id = _bypass_at_merge(api, pr)
         suffix = f"; rule suite {suite_id}" if suite_id else ""
         expected = (f"- PR #{number} -> {expected_branch}; merge `{pr['merge_commit_sha']}` "
-                    f"({pr['merged_at']}); pr-fast={fast.state} [{fast.source}]; "
+                    f"({pr['merged_at']}); {PR_CHECK}={fast.state} [{fast.source}]; "
                     f"bypass={bypass}{suffix}")
         if row != expected:
             raise DeploySelectionError(f"Журнал PR #{number} не совпадает с GitHub")
@@ -388,7 +388,7 @@ def _verify_emergency_pulls(api: ReadOnlyGitHub, body: str, version: str,
     full_match = re.fullmatch(r"Полный CI: (main-full\.yml|release-full\.yml) "
                               r"(success|failure|pending|not_run|unverified) — .+", full_line)
     assert full_match is not None  # Поле уже разобрано в _emergency_manifest.
-    missing = [f"- pr-fast PR #{number}: {observed[number]['fast']}" for number in numbers
+    missing = [f"- {PR_CHECK} PR #{number}: {observed[number]['fast']}" for number in numbers
                if observed[number]["fast"] != "success"]
     if full_match[2] != "success":
         missing.append(f"- {full_match[1]}: {full_match[2]}")

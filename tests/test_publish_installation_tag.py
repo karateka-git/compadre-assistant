@@ -16,10 +16,12 @@ from scripts import deploy_acceptance as acceptance
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts import publish_installation_tag as installation
+from scripts import rotate_ci_baseline as rotation
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import ControllerError
 from scripts.github_publishing import PublishingError
+from scripts.release_sqlite_summary import MIGRATIONS_PREFIX, InstallationSchemaEvidence
 from tests import test_deploy_acceptance as acceptance_tests
 
 
@@ -27,6 +29,7 @@ VERSION = "v3.4.1"
 SHA = "1" * 40
 RUNTIME_ID = "2" * 64
 TAG_OBJECT = "3" * 40
+INSTALLATION_OBJECT = "8" * 40
 TAG_PATH = f"/git/ref/tags/production/{VERSION}"
 RECEIPT = installation.InstallationReceipt(
     1, VERSION, SHA, "ordinary", 1, 2, 3, "4" * 32, "0007_schema.sql", RUNTIME_ID,
@@ -60,15 +63,16 @@ class FakeGitHub:
             "message": ReleaseTagEvidence("5" * 40, "6" * 40, 2, 3, "7" * 64).message(),
         }
         self.ref = None
+        self.installed_annotation = None
         self.posts = []
         self.post_error = False
-        self.created_sha = SHA
+        self.created_sha = INSTALLATION_OBJECT
 
     def authenticated_user(self):
         """Возвращает GitHub identity оператора."""
         return self.owner
 
-    def get(self, path):
+    def get(self, path, **parameters):
         """Читает Release, объекты тега и точный installation ref."""
         if path == f"/releases/tags/{VERSION}":
             return self.release
@@ -76,6 +80,13 @@ class FakeGitHub:
             return self.tag
         if path == f"/git/tags/{TAG_OBJECT}":
             return self.annotation
+        if path == f"/git/tags/{INSTALLATION_OBJECT}":
+            return self.installed_annotation
+        if path == f"/contents/{MIGRATIONS_PREFIX.rstrip('/')}":
+            if parameters != {"ref": SHA}:
+                raise AssertionError(parameters)
+            names = [f"{number:04}_schema.sql" for number in range(1, 8)]
+            return [{"type": "file", "name": name, "path": MIGRATIONS_PREFIX + name} for name in names]
         if path == TAG_PATH:
             if self.ref is None:
                 raise ControllerError("missing") from HTTPError(path, 404, "missing", {}, None)
@@ -85,8 +96,17 @@ class FakeGitHub:
     def post(self, path, payload):
         """Записывает выбранный ref и при необходимости теряет ответ."""
         self.posts.append((path, payload))
+        if path == "/git/tags":
+            self.installed_annotation = {
+                "tag": payload["tag"], "sha": INSTALLATION_OBJECT, "message": payload["message"],
+                "object": {"type": payload["type"], "sha": payload["object"]},
+            }
+            return self.installed_annotation
+        if path != "/git/refs":
+            raise AssertionError(path)
         if self.created_sha is not None:
-            self.ref = tag_ref(f"production/{VERSION}", "commit", self.created_sha)
+            kind = "tag" if self.created_sha == INSTALLATION_OBJECT else "commit"
+            self.ref = tag_ref(f"production/{VERSION}", kind, self.created_sha)
         if self.post_error:
             raise PublishingError("create response lost")
         return self.ref
@@ -156,11 +176,49 @@ class PublishInstallationTagTests(unittest.TestCase):
                         installation.read_receipt(VERSION, SHA, ssh_host="example.invalid", known_hosts=host_keys)
 
     def test_publish_creates_once_and_checks_readback(self):
-        """Первое создание пишет прямой SHA, а повтор только сверяет его."""
+        """Первое создание пишет аннотацию, а повтор только сверяет её."""
         api = FakeGitHub()
+        self.assertEqual(installation.summarize(api, VERSION, SHA)["installation_status"], "pending")
         self.assertEqual(installation.publish(api, lambda: RECEIPT, RUNTIME_ID), RECEIPT)
         self.assertEqual(installation.publish(api, lambda: RECEIPT, RUNTIME_ID), RECEIPT)
-        self.assertEqual(api.posts, [("/git/refs", {"ref": f"refs/tags/production/{VERSION}", "sha": SHA})])
+        evidence = InstallationSchemaEvidence.from_receipt(asdict(RECEIPT), VERSION, SHA)
+        self.assertEqual(api.posts, [
+            ("/git/tags", {"tag": f"production/{VERSION}", "message": evidence.message(),
+                           "object": SHA, "type": "commit"}),
+            ("/git/refs", {"ref": f"refs/tags/production/{VERSION}", "sha": INSTALLATION_OBJECT}),
+        ])
+        self.assertTrue(installation.installation_tag_exists(api, VERSION, SHA))
+        summary = installation.summarize(api, VERSION, SHA)
+        self.assertEqual(summary["installation_status"], "accepted")
+        self.assertEqual(summary["installation_tag_object_sha"], INSTALLATION_OBJECT)
+        self.assertEqual(summary["generation_id"], RECEIPT.generation_id)
+        self.assertEqual(summary["expected_migration"], RECEIPT.migration)
+        self.assertEqual(summary["applied_migration"], RECEIPT.migration)
+
+    def test_existing_direct_tag_stays_legacy(self):
+        """Прямой тег подтверждается без дописывания сведений о старой SQLite."""
+        api = FakeGitHub()
+        api.ref = tag_ref(f"production/{VERSION}", "commit", SHA)
+        self.assertEqual(installation.publish(api, lambda: RECEIPT, RUNTIME_ID), RECEIPT)
+        summary = installation.summarize(api, VERSION, SHA)
+        self.assertEqual(summary["installation_status"], "legacy_tag")
+        self.assertIsNone(summary["applied_migration"])
+        self.assertEqual(api.posts, [])
+
+    def test_existing_annotation_conflict_fails_without_rewrite(self):
+        """Принятое поколение и прогон нельзя заменить новым POST."""
+        api = FakeGitHub()
+        installation.publish(api, lambda: RECEIPT, RUNTIME_ID)
+        rotation.require_accepted_installation(api, RECEIPT)
+        with self.assertRaisesRegex(installation.InstallationTagError, "расходятся"):
+            rotation.require_accepted_installation(api, replace(RECEIPT, generation_id="f" * 32))
+        with self.assertRaisesRegex(installation.InstallationTagError, "расходятся"):
+            installation.publish(api, lambda: replace(RECEIPT, generation_id="f" * 32), RUNTIME_ID)
+        conflicting = replace(InstallationSchemaEvidence.from_receipt(asdict(RECEIPT), VERSION, SHA), run_attempt=5)
+        api.installed_annotation["message"] = conflicting.message()
+        with self.assertRaisesRegex(installation.InstallationTagError, "попыткой CI"):
+            installation.summarize(api, VERSION, SHA)
+        self.assertEqual(len(api.posts), 2)
 
     def test_rejects_drift_wrong_owner_or_existing_conflict(self):
         """Несовпадение приёмки, Release или существующего тега запрещает запись."""
@@ -169,8 +227,9 @@ class PublishInstallationTagTests(unittest.TestCase):
             ("owner", {"id": 1, "login": "operator"}, RECEIPT),
             ("release", {"id": 11}, RECEIPT),
             ("tag", tag_ref(VERSION, "commit", "a" * 40), RECEIPT),
-            ("ref", tag_ref(f"production/{VERSION}", "tag", SHA), RECEIPT),
+            ("ref", tag_ref(f"production/{VERSION}", "tag", INSTALLATION_OBJECT), RECEIPT),
             ("ref", tag_ref(f"production/{VERSION}", "commit", "b" * 40), RECEIPT),
+            ("receipt", None, replace(RECEIPT, migration="0006_schema.sql")),
         )
         for attribute, value, receipt in cases:
             with self.subTest(attribute=attribute, value=value):
@@ -185,17 +244,17 @@ class PublishInstallationTagTests(unittest.TestCase):
 
     def test_lost_or_conflicting_create_is_resolved_by_exact_ref(self):
         """Потеря ответа допустима только при точном read-back после POST."""
-        for created_sha in (SHA, "c" * 40, None):
+        for created_sha in (INSTALLATION_OBJECT, SHA, "c" * 40, None):
             with self.subTest(created_sha=created_sha):
                 api = FakeGitHub()
                 api.created_sha = created_sha
                 api.post_error = True
-                if created_sha == SHA:
+                if created_sha in (INSTALLATION_OBJECT, SHA):
                     self.assertEqual(installation.publish(api, lambda: RECEIPT, RUNTIME_ID), RECEIPT)
                 else:
                     with self.assertRaises(installation.InstallationTagError):
                         installation.publish(api, lambda: RECEIPT, RUNTIME_ID)
-                self.assertEqual(len(api.posts), 1)
+                self.assertEqual(len(api.posts), 2)
 
     def test_emergency_requires_a_matching_published_manifest(self):
         """Аварийная приёмка с SQLite v2 принимает только свой прямой релизный тег."""
@@ -206,10 +265,12 @@ class PublishInstallationTagTests(unittest.TestCase):
             "Причина: исправление\n"
             f"Полный CI: release-full.yml failure — https://github.com/{EXPECTED_REPOSITORY}/actions/runs/1/attempts/1\n"
             f"PR и состояние на момент merge:\n- PR #4 -> release/3.4; merge `{SHA}` "
-            "(release); pr-fast=success [ci]; bypass=no\nНеподтверждённые или неуспешные проверки:"
+            "(release); pr-check=success [ci]; bypass=no\nНеподтверждённые или неуспешные проверки:"
         )
         receipt = replace(RECEIPT, kind="emergency")
+        self.assertIsNone(installation.summarize(api, VERSION, SHA)["run_id"])
         self.assertEqual(installation.publish(api, lambda: receipt, RUNTIME_ID), receipt)
+        self.assertEqual(installation.summarize(api, VERSION, SHA)["run_id"], receipt.run_id)
 
     def test_check_cli_has_no_write_and_publish_requires_live_confirmation(self):
         """Режим чтения выводит приёмку, а явное решение обязательно для записи."""
@@ -226,6 +287,11 @@ class PublishInstallationTagTests(unittest.TestCase):
             with patch("sys.argv", arguments + ["--check"]):
                 installation.main()
             self.assertEqual(json.loads(stdout.getvalue()), asdict(RECEIPT))
+            stdout.truncate(0)
+            stdout.seek(0)
+            with patch("sys.argv", arguments[:3] + ["--summary"]):
+                installation.main()
+            self.assertEqual(json.loads(stdout.getvalue())["expected_migration"], RECEIPT.migration)
             with patch("sys.argv", arguments + ["--publish"]), self.assertRaises(SystemExit) as error:
                 installation.main()
             self.assertEqual(error.exception.code, 2)

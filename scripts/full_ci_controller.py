@@ -15,7 +15,8 @@ from urllib.request import Request, urlopen
 
 from scripts.ci_repository_compatibility import verify_baseline
 from scripts.full_ci_admission import (
-    AdmissionError, MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN, RELEASE_WORKFLOW,
+    AdmissionError, COMPATIBILITY_CHECK, FULL_CALLERS, FULL_SUITE_CHECK,
+    MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN, RELEASE_WORKFLOW,
     SHA_PATTERN, select_successful_run,
 )
 
@@ -98,6 +99,8 @@ def prior_full_attempt(api: GitHub, workflow: str, sha: str, branch: str) -> boo
     """Находит прежний полный запуск, чтобы новый dispatch не заменял rerun."""
     runs = api.pages(f"/actions/workflows/{workflow}/runs", key="workflow_runs", head_sha=sha)
     current_run = os.environ.get("GITHUB_RUN_ID")
+    caller = FULL_CALLERS[workflow]
+    checks = {f"{caller} / {name}" for name in (FULL_SUITE_CHECK, COMPATIBILITY_CHECK)}
     for run in runs:
         if (run.get("head_sha") != sha or run.get("head_branch") != branch
                 or str(run.get("id")) == current_run):
@@ -105,8 +108,7 @@ def prior_full_attempt(api: GitHub, workflow: str, sha: str, branch: str) -> boo
         if run.get("status") != "completed":
             return True
         jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs", filter="latest")
-        if any((job.get("name") in {"full-suite", "repository-compatibility"} or
-                job.get("name", "").endswith((" / full-suite", " / repository-compatibility")))
+        if any(job.get("name") in checks
                and job.get("conclusion") != "skipped"
                for job in jobs):
             return True
@@ -133,11 +135,11 @@ def activation_sha(head: str) -> str:
         ).returncode == 0
         if exists:
             return sha
-    raise ControllerError("Bootstrap commit main-full не найден в первой родительской линии")
+    raise ControllerError("Bootstrap commit pre-release-check-full не найден в первой родительской линии")
 
 
 def merged_since_last_success(api: GitHub, head: str) -> tuple[int, str]:
-    """Считает только PR merge commits до успеха full-suite или bootstrap."""
+    """Считает только PR merge commits до успеха check-full-suite или bootstrap."""
     anchor = activation_sha(head)
     count = 0
     for sha in git("rev-list", "--first-parent", head).splitlines():
@@ -207,16 +209,41 @@ def previous_release_sha(api: GitHub, branch: str, *, policy_sha: str | None = N
     return previous
 
 
-def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict[str, str]:
-    """Возвращает решение caller и SHA схемы прежнего выпуска."""
+def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool, *,
+           rotation_policy_sha: str = "", rotation_main_sha: str = "") -> dict[str, str]:
+    """Возвращает решение caller и SHA схемы прежнего выпуска.
+
+    Args:
+        api: GitHub-клиент для проверки точной ветки и закреплённой базы.
+        mode: Имя caller main или release.
+        sha: Полный SHA события CI.
+        branch: Ветка события CI.
+        created: Признак создания release-ветки.
+        rotation_policy_sha: Ожидаемый новый внешний pin при ротации.
+        rotation_main_sha: Ожидаемый точный SHA main при ротации.
+
+    Returns:
+        Outputs caller для запуска полного набора и выбора его базы.
+
+    Raises:
+        ControllerError: Checkout, ref, предыдущая попытка или ротация не подтверждены.
+    """
     if not SHA_PATTERN.fullmatch(sha) or git("rev-parse", "HEAD") != sha:
         raise ControllerError("Checkout не соответствует полному GITHUB_SHA")
     ref = api.get(f"/git/ref/heads/{quote(branch, safe='/')}")
     if ref["object"]["sha"] != sha:
         raise ControllerError("Ветка ушла с SHA события; устаревший run нельзя продолжать")
+    if rotation_policy_sha or rotation_main_sha:
+        if (mode != "main" or branch != "main" or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+                or rotation_main_sha != sha or not SHA_PATTERN.fullmatch(rotation_policy_sha)
+                or rotation_policy_sha != os.environ.get("COMPATIBILITY_POLICY_SHA")):
+            raise ControllerError("Ротация требует точные SHA текущего main и нового внешнего CI pin")
+        # Прежний успешный run мог проверять другую базу на том же SHA.
+        previous = previous_release_sha(api, branch, policy_sha=rotation_policy_sha)
+        return {"run-full": "true", "previous-release-sha": previous}
     if mode == "main":
         if branch != "main":
-            raise ControllerError("Ручной main-full разрешён только для main")
+            raise ControllerError("Ручной pre-release-check-full разрешён только для main")
         count, anchor = merged_since_last_success(api, sha)
         print(f"main bootstrap={anchor}, PR since success={count}")
         if count < 3 and os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
@@ -227,10 +254,10 @@ def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool) -> dict
             raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный rerun")
     elif mode == "release":
         if not RELEASE_BRANCH_PATTERN.fullmatch(branch):
-            raise ControllerError("release-full разрешён только для release/X.Y")
+            raise ControllerError("release-check-full разрешён только для release/X.Y")
         if created:
             if not full_success(api, MAIN_WORKFLOW, sha, "main"):
-                raise ControllerError("Созданная release ветка не имеет успешного main-full этого SHA")
+                raise ControllerError("Созданная release ветка не имеет успешного pre-release-check-full этого SHA")
             return {"run-full": "false", "previous-release-sha": ""}
         # После PR merge в существующую release-ветку появляется новый SHA:
         # результат main для него невозможен при разрешённом merge commit.
@@ -255,6 +282,8 @@ def main() -> None:
         result = decide(
             api, arguments.mode, os.environ.get("GITHUB_SHA", ""), branch,
             os.environ.get("BRANCH_CREATED") == "true",
+            rotation_policy_sha=os.environ.get("ROTATION_POLICY_SHA", ""),
+            rotation_main_sha=os.environ.get("ROTATION_MAIN_SHA", ""),
         )
         print(result)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:

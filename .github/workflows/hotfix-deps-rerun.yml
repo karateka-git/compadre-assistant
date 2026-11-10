@@ -1,4 +1,4 @@
-name: Hotfix dependency rerun
+name: pr-merge-main-rerun
 
 on:
   pull_request_target:
@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   rerun:
+    name: pr-merge-main-rerun
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -34,7 +35,7 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Rerun current hotfix-deps job
+      - name: Rerun current pr-merge-main-check job
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python -m scripts.rerun_hotfix_deps

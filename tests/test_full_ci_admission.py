@@ -60,17 +60,18 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual((result.sha, result.run_id, result.run_attempt), (SHA_D, 1, 1))
         self.assertEqual(self.api.requested_jobs, ["/actions/runs/1/attempts/1/jobs"])
 
-    def test_only_pinned_installed_release_keeps_historical_contract(self) -> None:
-        """Старый run v3.1.0 не требует нового job; новый SHA не получает исключение."""
-        self.api.jobs = self.api.jobs[:2]
-        self.api.jobs[1]["steps"] = [step for step in self.api.jobs[1]["steps"]
-                                     if step["name"] != "Require repository compatibility evidence"]
+    def test_old_and_mixed_job_names_are_denied(self) -> None:
+        """Допуск принимает новый набор и ci-metrics, а прежние имена оставляет истории."""
+        current = deepcopy(self.api.jobs)
+        previous = [dict(job, name=name) for job, name in zip(current, (
+            "main-full-controller", "main-full / full-suite", "main-full / repository-compatibility",
+        ), strict=True)]
+        self.api.jobs = previous
         self.assertIsNone(self.select())
-        self.api.runs[0]["head_sha"] = admission.LEGACY_FULL_SHA
-        for job in self.api.jobs:
-            job["head_sha"] = admission.LEGACY_FULL_SHA
-        self.assertIsNotNone(admission.select_successful_run(
-            self.api, "owner/repo", admission.MAIN_WORKFLOW, admission.LEGACY_FULL_SHA, "main"))
+        self.api.jobs = [*current, previous[1]]
+        self.assertIsNone(self.select())
+        self.api.jobs = [*current, dict(current[0], name="ci-metrics")]
+        self.assertIsNotNone(self.select())
 
     def test_missing_or_skipped_compatibility_job_is_denied(self) -> None:
         """Зелёный прежний full-suite не заменяет обязательный новый набор."""
@@ -90,10 +91,10 @@ class AdmissionTests(unittest.TestCase):
         run = self.api.runs[0]
         run.update({"workflow_id": 2, "head_branch": "release/1.2",
                     "path": ".github/workflows/release-full.yml@refs/heads/release/1.2"})
-        self.api.jobs[0]["name"] = "release-full-controller"
+        self.api.jobs[0]["name"] = "release-check-full-controller"
         self.api.jobs[0]["steps"][0]["name"] = "Checkout exact release commit"
-        self.api.jobs[1]["name"] = "release-full / full-suite"
-        self.api.jobs[2]["name"] = "release-full / repository-compatibility"
+        self.api.jobs[1]["name"] = "release-check-full / check-full-suite"
+        self.api.jobs[2]["name"] = "release-check-full / check-full-repository-compatibility-check"
         self.assertIsNotNone(admission.select_successful_run(
             self.api, "owner/repo", admission.RELEASE_WORKFLOW, SHA_D, "release/1.2"))
         self.assertIsNone(admission.select_successful_run(
@@ -120,7 +121,7 @@ class AdmissionTests(unittest.TestCase):
         self.api.runs = [original_run]
         for job_index, key, value in (
             (0, "conclusion", "failure"), (1, "status", "in_progress"),
-            (1, "head_sha", "a" * 40), (1, "name", "other / full-suite"),
+            (1, "head_sha", "a" * 40), (1, "name", "other / check-full-suite"),
         ):
             with self.subTest(job=job_index, key=key):
                 self.api.jobs = deepcopy(original_jobs)

@@ -1,11 +1,14 @@
 """Проверяет v2 recovery на настоящих SQLite/WAL с fake Docker/systemd."""
 
-from contextlib import closing, nullcontext
-from dataclasses import asdict
+from contextlib import closing, ExitStack, nullcontext
+from dataclasses import asdict, replace
 import copy
+import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -13,13 +16,49 @@ from unittest.mock import patch
 from scripts import deploy_database_switch as switch
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
+from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_deploy_database_switch import SwitchHost, MANIFEST, IMAGE, SHA
+from tests.test_predeploy_compatibility import ArtifactAPI, POLICY_SHA
 
 
 OLD_SHA = "a" * 40
 OLD_IMAGE = "sha256:" + "1" * 64
 ZERO_TIME = "0001-01-01T00:00:00Z"
+
+
+def annotated_release(host, schema_fingerprint: str | None = None) -> ArtifactAPI:
+    """Готовит локальный Git-тег, reviewed policy и API ответ для изолированного кандидата."""
+    api = ArtifactAPI()
+    api.policy["previous_sha"] = OLD_SHA
+    api.trusted["repository_compatibility_policy.json"] = json.dumps(api.policy).encode()
+    prod._atomic_text(host.state_dir / "compatibility-policy.sha", POLICY_SHA)
+    if schema_fingerprint is None:
+        with closing(sqlite3.connect(host.selected_database())) as db:
+            schema_fingerprint = prod.compatibility.schema_fingerprint(db)
+
+    def git(*args):
+        return subprocess.check_output(
+            ("git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
+             "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args),
+            cwd=host.checkout, text=True, env=os.environ | {
+                "GIT_AUTHOR_DATE": "2026-11-04T00:00:00Z", "GIT_COMMITTER_DATE": "2026-11-04T00:00:00Z",
+            },
+        ).strip()
+
+    git("init", "--quiet", "--object-format=sha1")
+    workflows = host.checkout / ".github/workflows"
+    workflows.mkdir(parents=True)
+    for name in prod.compatibility.WORKFLOWS:
+        (workflows / name).write_bytes(api.workflow_bytes)
+    git("add", ".github")
+    git("commit", "--quiet", "-m", "Fixture")
+    selected = host.selected
+    evidence = ReleaseTagEvidence(OLD_SHA, POLICY_SHA, selected.run_id, selected.run_attempt, schema_fingerprint)
+    git("tag", "-a", "-m", evidence.message(), selected.version)
+    host.selected = replace(selected, sha=git("rev-parse", "HEAD"), compatibility=evidence,
+                            tag_object_sha=git("rev-parse", f"refs/tags/{selected.version}"))
+    return api
 
 
 class Crash(BaseException):
@@ -47,7 +86,7 @@ class RecoveryHost(SwitchHost):
         """Возвращает проверяемые OCI revision обоих локальных образов."""
         old = reference in (OLD_IMAGE, prep.pinned_tag(OLD_SHA))
         return {"Id": OLD_IMAGE if old else IMAGE, "Config": {"Labels": {
-            prep.OCI_REVISION: "f" * 40 if self.bad_image else OLD_SHA if old else SHA}}}
+            prep.OCI_REVISION: "f" * 40 if self.bad_image else OLD_SHA if old else self.selected.sha}}}
 
     def select(self, version):
         """Возвращает synthetic immutable Release для проверки точной записи."""
@@ -200,6 +239,202 @@ class DatabaseRecoveryTests(unittest.TestCase):
                                      [("original",), ("accepted-after-admission",)])
                 self.assertEqual(host.starts, 3)
 
+    def test_annotated_deploy_and_automatic_recovery_boundaries(self):
+        """Проверяет выбор поколения при успехе и четырёх отказах через deploy-prod."""
+        for fault in (None, "before_migration", "before_admission", "after_admission", "evidence_mismatch"):
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                self._assert_annotated_deploy(Path(temporary), fault)
+
+    def test_annotated_deploy_retries_after_pre_stop_refusal(self):
+        """Повтор после локального отказа заново допускает тот же аннотированный Release."""
+        with TemporaryDirectory() as temporary:
+            self._assert_annotated_deploy(Path(temporary), None, retry=True)
+
+    def _assert_annotated_deploy(self, root, fault, *, retry=False):
+        host = RecoveryHost(root)
+        host.marker(False)
+        old_database = host.selected_database()
+        old_bytes = old_database.read_bytes()
+        migration = "0002_recovery_fixture.sql"
+        expected = [*MANIFEST, migration]
+        for item in host.found.values():
+            item["State"].update(Running=True, Status="running")
+            item["Config"]["Labels"] = {prep.OCI_REVISION: OLD_SHA}
+        old_tag = prep.pinned_tag(OLD_SHA)
+        host.set_runtime(old_tag, OLD_IMAGE)
+        prep.write_state(host.state_dir, host.checkout, {"stage": "success", "last_good": {
+            "version": "v1.2.2", "sha": OLD_SHA, "image_id": OLD_IMAGE, "tag": old_tag}})
+
+        def migrate(db):
+            db.executescript("CREATE INDEX messages_text ON messages(text);"
+                             f"INSERT INTO schema_migrations VALUES(2, '{migration}');")
+
+        with closing(sqlite3.connect(old_database)) as source, closing(sqlite3.connect(":memory:")) as copy_db:
+            source.backup(copy_db)
+            migrate(copy_db)
+            fingerprint = prod.compatibility.schema_fingerprint(copy_db)
+        api = annotated_release(host, fingerprint)
+        policy_pin = host.state_dir / "compatibility-policy.sha"
+        original_run = host.run
+        original_prepare = host.prepare_database_containers
+        original_verify = host.verify_both
+        migrated = []
+        committed_wal = None
+
+        def run(*args, env=None):
+            if args == ("git", "rev-parse", "HEAD"):
+                return OLD_SHA
+            if args[:3] == ("docker", "compose", "stop"):
+                host.commands.append(args)
+                for item in host.found.values():
+                    item["State"].update(Running=False, Status="exited")
+                return ""
+            return original_run(*args, env=env)
+
+        def migrate_copy(image, directory, *, basename="app.db"):
+            self.assertEqual(image, IMAGE)
+            path = directory / basename
+            self.assertNotEqual(path, old_database)
+            with closing(sqlite3.connect(path)) as db:
+                migrate(db)
+            migrated.append(path)
+            if retry and len(migrated) == 1:
+                prod._atomic_text(policy_pin, "e" * 40)
+
+        def prepare_runtime(*args, recovery=False):
+            ids = original_prepare(*args, recovery=recovery)
+            if not recovery and fault == "before_admission":
+                raise prod.DeployError("synthetic create failure")
+            return ids
+
+        def verify_runtime(image, sha, **kwargs):
+            nonlocal committed_wal
+            original_verify(image, sha, **kwargs)
+            if image == IMAGE and fault in ("after_admission", "evidence_mismatch"):
+                db = stack.enter_context(closing(sqlite3.connect(host.selected_database())))
+                db.execute("PRAGMA journal_mode=WAL")
+                db.execute("PRAGMA wal_autocheckpoint=0")
+                db.execute("INSERT INTO messages VALUES(2, 'accepted-after-admission')")
+                db.commit()
+                wal = Path(str(host.selected_database()) + "-wal")
+                committed_wal = wal.read_bytes()
+                self.assertTrue(committed_wal)
+                raise prod.DeployError("synthetic health failure")
+
+        original_get = api.get
+
+        def get(path, **kwargs):
+            if fault == "evidence_mismatch":
+                durable = prep.read_state(host.state_dir, host.checkout)
+                if durable["stage"] == "recovery_prepared":
+                    api.workflow_bytes = b"different reviewed workflow"
+            elif fault == "before_migration":
+                api.workflow_bytes = b"different reviewed workflow"
+            return original_get(path, **kwargs)
+
+        with ExitStack() as stack:
+            for name in ("require_switch_rollout", "installed", "fetch", "require_compose_pin",
+                         "activate_unit", "timer_restore"):
+                stack.enter_context(patch.object(host, name))
+            for name in ("check_candidate_image", "require_clean_checkout", "require_disk_space"):
+                stack.enter_context(patch.object(prep, name))
+            stack.enter_context(patch.object(host, "uses_selector_runtime", return_value=True))
+            stack.enter_context(patch.object(host, "timer_snapshot", return_value={"enabled": False, "active": False}))
+            stack.enter_context(patch.object(host, "run", side_effect=run))
+            stack.enter_context(patch.object(host, "migrate_copy", side_effect=migrate_copy))
+            stack.enter_context(patch.object(host, "prepare_database_containers", side_effect=prepare_runtime))
+            stack.enter_context(patch.object(host, "verify_both", side_effect=verify_runtime))
+            stack.enter_context(patch.object(prep, "deploy_lock", return_value=nullcontext()))
+            stack.enter_context(patch.object(prep, "build_pinned_image",
+                                             return_value=(prep.pinned_tag(host.selected.sha), IMAGE)))
+            stack.enter_context(patch.object(prod, "_schema_names", return_value=expected))
+            stack.enter_context(patch.object(prod, "GitHub", return_value=api))
+            stack.enter_context(patch.object(prod.compatibility, "verify_evidence", side_effect=AssertionError("legacy")))
+            requests = stack.enter_context(patch.object(api, "get", side_effect=get))
+            if retry:
+                old_ids = {name: item["Id"] for name, item in host.found.items()}
+                with self.assertRaisesRegex(prod.DeployError, "SAFE_POLICY_PIN"):
+                    prod.deploy(host, host.selected.version)
+                refused = prep.read_state(host.state_dir, host.checkout)
+                self.assertEqual(refused["stage"], "failed_preflight")
+                self.assertEqual(refused["last_good"]["sha"], OLD_SHA)
+                self.assertEqual(host.selected_database(), old_database)
+                self.assertEqual(old_database.read_bytes(), old_bytes)
+                self.assertFalse((host.state_dir / "active-db.json").exists())
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+                self.assertFalse(list(host.state_dir.glob("final-*.db")))
+                self.assertEqual({name: item["Id"] for name, item in host.found.items()
+                                  if item["State"]["Running"]}, old_ids)
+                self.assertFalse(any(command[:3] in (("docker", "compose", "stop"),
+                                                     ("docker", "compose", "create"))
+                                     or command[:2] in (("docker", "stop"), ("docker", "start"))
+                                     for command in host.commands))
+                with self.assertRaisesRegex(prod.DeployError, "временно закрыт"):
+                    prod.deploy(host, host.selected.version)
+                self.assertEqual(len(migrated), 1)
+                self.assertEqual(requests.call_count, 4)
+                prod._atomic_text(policy_pin, POLICY_SHA)
+                prep.write_state(host.state_dir, host.checkout, refused | {"retry_after": "2000-01-01T00:00:00+00:00"})
+            if fault is None:
+                self.assertEqual(prod.deploy(host, host.selected.version), host.selected.sha)
+            else:
+                with self.assertRaises(prod.DeployError):
+                    prod.deploy(host, host.selected.version)
+
+            durable = prep.read_state(host.state_dir, host.checkout)
+            self.assertEqual(old_database.read_bytes(), old_bytes)
+            if fault == "before_migration":
+                self.assertEqual(durable["stage"], "failed_preflight")
+                self.assertEqual(durable["error"], "SAFE_WORKFLOW_BYTES")
+                self.assertEqual(host.selected_database(), old_database)
+                self.assertEqual(durable["last_good"]["sha"], OLD_SHA)
+                self.assertEqual(prod._current_image(host), OLD_IMAGE)
+                self.assertEqual(migrated, [])
+                self.assertFalse((host.state_dir / "active-db.json").exists())
+                self.assertFalse(list(host.state_dir.glob("final-*.db")))
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+                return
+
+            self.assertEqual(durable["candidate"]["sha"], host.selected.sha)
+            self.assertEqual(durable["compatibility_evidence"]["tag_object_sha"], host.selected.tag_object_sha)
+            self.assertEqual(len(migrated), 3 if retry else 2)
+            self.assertNotEqual(migrated[0], migrated[1])
+            snapshot = Path(durable["snapshot"]["path"])
+            self.assertEqual(hashlib.sha256(snapshot.read_bytes()).hexdigest(), durable["snapshot"]["sha256"])
+            prep.validate_schema(snapshot, MANIFEST)
+            with closing(sqlite3.connect(snapshot)) as db:
+                self.assertEqual(db.execute("SELECT text FROM messages").fetchall(), [("original",)])
+            admitted = fault != "before_admission"
+            self.assertIs(durable["admission_may_have_started"], admitted)
+            self.assertEqual(switch.read_selected(host, durable), "new" if admitted else "old")
+            self.assertEqual(durable["new"]["fingerprint"], fingerprint)
+            selected_database = host.selected_database()
+            prep.validate_schema(selected_database, expected if admitted else MANIFEST)
+            with closing(sqlite3.connect(selected_database)) as db:
+                rows = [("original",)]
+                if fault in ("after_admission", "evidence_mismatch"):
+                    rows.append(("accepted-after-admission",))
+                self.assertEqual(db.execute("SELECT text FROM messages ORDER BY id").fetchall(), rows)
+            if committed_wal is not None:
+                self.assertEqual(Path(str(selected_database) + "-wal").read_bytes(), committed_wal)
+
+            self.assertEqual(durable["last_good"]["sha"], host.selected.sha if fault is None else OLD_SHA)
+            if fault is None:
+                self.assertEqual(durable["last_good"]["backup_id"], str(snapshot))
+            if fault == "evidence_mismatch":
+                self.assertEqual(durable["stage"], "degraded")
+                self.assertEqual(host.starts, 1)
+                self.assertTrue((host.state_dir / "deploy-in-progress").exists())
+                self.assertFalse(any(item["State"]["Running"] for item in host.found.values()))
+                self.assertEqual(requests.call_count, 10)
+            else:
+                self.assertEqual(durable["stage"], "success" if fault is None else "rolled_back")
+                self.assertEqual(durable["boot"]["sha"], durable["last_good"]["sha"])
+                self.assertEqual(prod._current_image(host), IMAGE if fault is None else OLD_IMAGE)
+                self.assertEqual(host.starts, 2 if fault == "after_admission" else 1)
+                self.assertFalse((host.state_dir / "deploy-in-progress").exists())
+                self.assertEqual(requests.call_count, (12 if fault == "after_admission" else 4) + (4 if retry else 0))
+
     def test_recovery_crash_boundaries_converge(self):
         """Повтор после durable recovery stage и start не создаёт второй polling."""
         for admitted in (False, True):
@@ -211,6 +446,13 @@ class DatabaseRecoveryTests(unittest.TestCase):
                     host, state, record = self._setup(Path(temporary),
                         "admission_recorded" if admitted else "database_selected")
                     host.guard_known_writers()
+                    target = "new" if admitted else "old"
+                    rows = [("original",)]
+                    if admitted:
+                        with closing(sqlite3.connect(state[target]["host_path"])) as db:
+                            db.execute("INSERT INTO messages VALUES(2, 'accepted-after-admission')")
+                            db.commit()
+                        rows.append(("accepted-after-admission",))
 
                     def interrupted(name, **changes):
                         record(name, **changes)
@@ -238,8 +480,14 @@ class DatabaseRecoveryTests(unittest.TestCase):
                         switch.recover(host, state, interrupted, publish)
                     durable = prep.read_state(host.state_dir, host.checkout)
                     self._recover(host, durable)
-                    self.assertEqual(switch.read_selected(host, durable), "new" if admitted else "old")
+                    durable = prep.read_state(host.state_dir, host.checkout)
+                    self.assertEqual(switch.read_selected(host, durable), target)
                     self.assertEqual(durable["stage"], "recovery_verified")
+                    self.assertEqual({name: item["Id"] for name, item in host.found.items()
+                                      if item["State"]["Running"] and item["Image"] == OLD_IMAGE},
+                                     durable["recovery_containers"])
+                    with closing(sqlite3.connect(host.selected_database())) as db:
+                        self.assertEqual(db.execute("SELECT text FROM messages ORDER BY id").fetchall(), rows)
 
     def test_bad_evidence_pin_selector_database_or_boundary_stop_every_writer(self):
         """Неизвестный state и API outage оставляют обе БД и закрытый marker."""

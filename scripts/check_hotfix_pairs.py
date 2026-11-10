@@ -269,7 +269,7 @@ def check_baseline(api: GitHub, branch: str, baseline: str) -> None:
         if len(tags) != 1 or tag_commit(api, tags[0]) != baseline:
             raise HotfixError("Baseline не является последним опубликованным выпуском линии")
     elif select_successful_run(api, api.repository, MAIN_WORKFLOW, baseline, "main") is None:
-        raise HotfixError("Начальный baseline не имеет успешного main-full")
+        raise HotfixError("Начальный baseline не имеет успешного pre-release-check-full")
 
 
 def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
@@ -281,7 +281,7 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
         branch: Действующая релизная ветка release/X.Y.
         candidate: Её точный текущий SHA перед публикацией.
         baseline: SHA прошлого выпуска этой линии либо SHA создания ветки.
-        require_full_ci: Требовать успешный release-full для обычной публикации.
+        require_full_ci: Требовать успешный release-check-full для обычной публикации.
 
     Returns:
         Список release PR, main PR (или None) и подтверждённого SHA main.
@@ -328,7 +328,7 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
     if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
         raise HotfixError("Релизная ветка сдвинулась во время проверки")
     if require_full_ci and select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
-        raise HotfixError("Нет успешного release-full для точного SHA")
+        raise HotfixError("Нет успешного release-check-full для точного SHA")
     return result
 
 

@@ -9,6 +9,16 @@ from typing import Protocol
 
 MAIN_WORKFLOW = "main-full.yml"
 RELEASE_WORKFLOW = "release-full.yml"
+PR_WORKFLOW = "pr-fast.yml"
+# Пути сохраняют идентичность workflow, а допуск сверяет отображаемые имена jobs.
+PR_CHECK = "pr-check"
+PR_MERGE_MAIN_CHECK = "pr-merge-main-check"
+FULL_CALLERS = {
+    MAIN_WORKFLOW: "pre-release-check-full",
+    RELEASE_WORKFLOW: "release-check-full",
+}
+COMPATIBILITY_CHECK = "check-full-repository-compatibility-check"
+FULL_SUITE_CHECK = "check-full-suite"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 RELEASE_BRANCH_PATTERN = re.compile(r"release/(\d+)\.(\d+)\Z")
 FULL_STEPS = frozenset({
@@ -18,9 +28,6 @@ FULL_STEPS = frozenset({
     "Run three autonomous smoke checks", "Check fresh and previous SQLite schemas",
     "Build and healthcheck candidate image", "Publish check manifest",
 })
-# Уже установленная v3.1.0 сохраняет исторический допуск до нового контракта.
-# Исключение по точному SHA нельзя расширить input/ref кандидата.
-LEGACY_FULL_SHA = "dd71c2ba42a0744b5b654cedcf73009ce8879058"
 COMPATIBILITY_STEPS = frozenset({
     "Validate external policy pin", "Checkout trusted compatibility policy",
     "Checkout compatibility candidate", "Setup compatibility Python",
@@ -74,23 +81,23 @@ def _positive_int(value: object, description: str) -> int:
 
 def _names_and_steps(jobs: list[object], workflow: str, sha: str) -> bool:
     """Проверяет каждый обязательный job и шаг одной попытки."""
-    caller = "main-full" if workflow == MAIN_WORKFLOW else "release-full"
+    caller = FULL_CALLERS[workflow]
     required = {
         f"{caller}-controller": {
             "Checkout exact main commit" if workflow == MAIN_WORKFLOW
             else "Checkout exact release commit", "Decide full run",
         },
-        f"{caller} / full-suite": FULL_STEPS if sha != LEGACY_FULL_SHA else
-        FULL_STEPS - {"Require repository compatibility evidence"},
+        f"{caller} / {FULL_SUITE_CHECK}": FULL_STEPS,
+        f"{caller} / {COMPATIBILITY_CHECK}": COMPATIBILITY_STEPS,
     }
-    if sha != LEGACY_FULL_SHA:
-        required[f"{caller} / repository-compatibility"] = COMPATIBILITY_STEPS
     seen: set[str] = set()
     for raw_job in jobs:
         job = _object(raw_job, "job")
         name = job.get("name")
         if not isinstance(name, str) or name in seen:
             raise AdmissionError("Отсутствует или повторяется имя job")
+        if name not in required and name != "ci-metrics":
+            return False
         seen.add(name)
         if job.get("head_sha") != sha or job.get("status") != "completed" or job.get("conclusion") != "success":
             return False
@@ -133,7 +140,7 @@ def select_successful_run(
     Raises:
         AdmissionError: Запрос или ответ API неоднозначен либо повреждён.
     """
-    if workflow not in (MAIN_WORKFLOW, RELEASE_WORKFLOW):
+    if workflow not in FULL_CALLERS:
         raise AdmissionError("Неизвестный caller workflow")
     if (run_id is None) != (run_attempt is None):
         raise AdmissionError("ID запуска и попытка должны задаваться вместе")

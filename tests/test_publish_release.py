@@ -9,6 +9,7 @@ from io import StringIO
 
 from scripts import publish_release as publisher
 from scripts.full_ci_admission import Admission, MAIN_WORKFLOW, RELEASE_WORKFLOW
+from scripts.release_sqlite_summary import MIGRATIONS_PREFIX
 
 
 SHA = "a" * 40
@@ -39,6 +40,10 @@ class FakeApi:
         self.posts: list[tuple[str, dict]] = []
         self.tag_object: dict | None = None
         self.move_after_tag = False
+        self.migrations = [
+            {"type": "file", "name": name, "path": MIGRATIONS_PREFIX + name}
+            for name in ("0001_initial_schema.sql", "0002_new_table.sql")
+        ]
 
     def get(self, path, **parameters):
         """Возвращает настройку защиты или текущий ref ветки."""
@@ -48,6 +53,10 @@ class FakeApi:
             return self.rule
         if path == "/actions/variables/COMPATIBILITY_POLICY_SHA":
             return {"name": "COMPATIBILITY_POLICY_SHA", "value": PIN}
+        if path == f"/contents/{MIGRATIONS_PREFIX.rstrip('/')}":
+            if parameters != {"ref": SHA}:
+                raise AssertionError(parameters)
+            return self.migrations
         if path == f"/git/tags/{OBJECT_SHA}":
             return self.tag_object
         if path == "/git/ref/tags/v1.0.0":
@@ -203,8 +212,18 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.api.posts[0][1]["object"], SHA)
         self.assertEqual(self.api.posts[1][1]["sha"], OBJECT_SHA)
         self.assertEqual(self.api.posts[2][1]["target_commitish"], SHA)
+        self.assertIn("Ожидаемая миграция SQLite: `0002_new_table.sql`", self.api.posts[2][1]["body"])
         self.previous.assert_called_with(self.api, "main", policy_sha=PIN)
         self.assertEqual(self.evidence.call_args.args[1:], (prepared.admission, PIN, OLD))
+
+    def test_missing_candidate_migration_and_operator_label_fail_before_publication(self) -> None:
+        """Последняя миграция вычисляется по SHA и имеет зарезервированную строку."""
+        with self.assertRaisesRegex(publisher.PublishError, "служебное поле"):
+            publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Ожидаемая миграция SQLite: 0009")
+        self.api.migrations = self.api.migrations[1:]
+        with self.assertRaisesRegex(publisher.PublishError, "ожидаемая миграция"):
+            publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        self.assertEqual(self.api.posts, [])
 
     def test_unconfirmed_evidence_or_tag_object_blocks_publication(self) -> None:
         """Сбой evidence запрещает запись, чужой tag object запрещает Release."""

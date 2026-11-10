@@ -51,10 +51,10 @@ class FakeApi:
         self.run["path"] = f".github/workflows/{self.workflow}"
         if patch:
             self.run["workflow_id"] = 2
-            self.jobs[0]["name"] = "release-full-controller"
+            self.jobs[0]["name"] = "release-check-full-controller"
             self.jobs[0]["steps"][0]["name"] = "Checkout exact release commit"
-            self.jobs[1]["name"] = "release-full / full-suite"
-            self.jobs[2]["name"] = "release-full / repository-compatibility"
+            self.jobs[1]["name"] = "release-check-full / check-full-suite"
+            self.jobs[2]["name"] = "release-check-full / check-full-repository-compatibility-check"
         self.rules = [{"id": 7, "target": "tag", "enforcement": "active"}]
         self.rule = {
             "target": "tag", "enforcement": "active", "bypass_actors": [],
@@ -294,7 +294,7 @@ class SelectDeployReleaseTests(unittest.TestCase):
             f"https://github.com/{REPO}/actions/runs/1/attempts/1\n\n"
             "PR и состояние на момент merge:\n"
             f"- PR #42 -> main; merge `{SHA}` (2026-10-15T00:00:00Z); "
-            "pr-fast=failure [GitHub Actions]; bypass=yes\n\n"
+            "pr-check=failure [GitHub Actions]; bypass=yes\n\n"
             "Неподтверждённые или неуспешные проверки:\n- main-full: failure\n"
         )
         api.run["conclusion"] = "failure"

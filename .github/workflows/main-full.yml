@@ -1,9 +1,17 @@
-name: Main full
+name: pre-release-check-full
+run-name: ${{ inputs.rotation_policy_sha && format('CI baseline {0}', inputs.rotation_policy_sha) || '' }}
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rotation_policy_sha:
+        description: Reviewed policy SHA for a baseline rotation
+        type: string
+      rotation_main_sha:
+        description: Exact main SHA for a baseline rotation
+        type: string
 
 permissions:
   actions: read
@@ -16,7 +24,7 @@ concurrency:
 
 jobs:
   controller:
-    name: main-full-controller
+    name: pre-release-check-full-controller
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -34,10 +42,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
+          ROTATION_POLICY_SHA: ${{ inputs.rotation_policy_sha }}
+          ROTATION_MAIN_SHA: ${{ inputs.rotation_main_sha }}
         run: python -m scripts.full_ci_controller main
 
   full-suite:
-    name: main-full
+    name: pre-release-check-full
     needs: controller
     if: needs.controller.outputs.run-full == 'true'
     permissions:

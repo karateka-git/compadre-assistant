@@ -94,7 +94,7 @@ class FakeApi:
                      "created_at": "2026-10-16T07:58:00Z",
                      "run_attempt": 1}]
         if path == "/actions/runs/101/attempts/1/jobs":
-            return [{"name": "pr-fast", "started_at": "2026-10-16T07:58:10Z",
+            return [{"name": "pr-check", "started_at": "2026-10-16T07:58:10Z",
                      "completed_at": self.fast_completed, "conclusion": self.fast_conclusion}]
         if path == "/rulesets/rule-suites":
             return [{"id": 31, "ref": "refs/heads/main", "after_sha": MERGE,
