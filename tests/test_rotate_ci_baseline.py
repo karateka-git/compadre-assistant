@@ -1,5 +1,6 @@
 """Проверяет операторские шаги ротации без GitHub и production VPS."""
 
+from copy import deepcopy
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -7,6 +8,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
+from urllib.request import Request
 
 from scripts import rotate_ci_baseline as rotation
 from scripts.full_ci_admission import Admission
@@ -156,3 +158,146 @@ class RotateCIBaselineTest(unittest.TestCase):
             pin.side_effect = [POLICY_SHA, PREVIOUS_PIN]
             with self.assertRaisesRegex(rotation.RotationError, "pin изменился"):
                 verify()
+
+
+class MergedPolicyPRTest(unittest.TestCase):
+    """Проверяет ротацию, когда GitHub очистил связь прогона со слитым PR."""
+
+    def setUp(self):
+        """Готовит ответы GitHub для merge, точной попытки и её checkout."""
+        self.api = Mock(spec=rotation.RotationGitHub)
+        self.api.repository = rotation.EXPECTED_REPOSITORY
+        self.head = "7" * 40
+        self.test_sha = "8" * 40
+        self.tree = {"sha": "9" * 40}
+        self.parents = [{"sha": PREVIOUS_PIN}, {"sha": self.head}]
+        self.workflow = f"/actions/workflows/{rotation.PR_WORKFLOW}"
+        self.run_path = "/actions/runs/20/attempts/1"
+        self.completed_at = "2026-11-10T10:26:00Z"
+        repo = {"full_name": self.api.repository}
+        self.pull = {"number": 42, "merged_at": "2026-11-10T10:35:29Z", "merge_commit_sha": POLICY_SHA,
+                     "head": {"sha": self.head, "ref": "policy-branch", "repo": repo},
+                     "base": {"sha": PREVIOUS_PIN, "ref": "main"}}
+        self.run = {"id": 20, "run_attempt": 1, "workflow_id": 30, "check_suite_id": 40,
+                    "path": f".github/workflows/{rotation.PR_WORKFLOW}", "event": "pull_request",
+                    "repository": repo, "head_repository": repo, "head_branch": "policy-branch", "head_sha": self.head,
+                    "created_at": "2026-11-10T10:25:33Z", "run_started_at": "2026-11-10T10:25:33Z", "pull_requests": []}
+        self.job = {"id": 50, "name": rotation.PR_CHECK, "run_id": 20, "run_attempt": 1, "head_sha": self.head,
+                    "status": "completed", "conclusion": "success", "started_at": "2026-11-10T10:25:36Z",
+                    "completed_at": self.completed_at,
+                    "steps": [{"name": "Checkout test merge", "conclusion": "success",
+                               "started_at": "2026-11-10T10:25:38Z", "completed_at": "2026-11-10T10:25:39Z"}]}
+        self.check = {"id": 50, "name": rotation.PR_CHECK, "status": "completed", "conclusion": "success",
+                      "head_sha": self.head, "completed_at": self.completed_at,
+                      "app": {"id": 15368, "slug": "github-actions"}, "check_suite": {"id": 40}}
+        self.log = ("2026-11-10T10:25:38.5573548Z [command]/usr/bin/git -c protocol.version=2 fetch --prune origin "
+                    f"+{self.test_sha}:refs/remotes/pull/42/merge\n"
+                    "2026-11-10T10:25:39.0823584Z [command]/usr/bin/git checkout --progress --force refs/remotes/pull/42/merge\n"
+                    "2026-11-10T10:25:39.1298545Z [command]/usr/bin/git log -1 --format=%H\n"
+                    f"2026-11-10T10:25:39.1333946Z {self.test_sha}\n")
+        self.responses = {
+            "/git/ref/heads/main": {"ref": "refs/heads/main", "object": {"type": "commit", "sha": MAIN_SHA}},
+            "/pulls/42": self.pull,
+            f"/compare/{POLICY_SHA}...{MAIN_SHA}": {"status": "ahead", "base_commit": {"sha": POLICY_SHA}},
+            f"/git/commits/{POLICY_SHA}": {"sha": POLICY_SHA, "tree": self.tree, "parents": self.parents},
+            f"/git/commits/{self.test_sha}": {"sha": self.test_sha, "tree": self.tree, "parents": self.parents},
+            self.workflow: {"id": 30, "path": self.run["path"]}, self.run_path: deepcopy(self.run),
+            "/check-runs/50": self.check,
+        }
+        policy_files = [{"filename": rotation.POLICY_FILE, "status": "modified"}]
+        self.pages = {f"{self.workflow}/runs": [self.run], f"{self.run_path}/jobs": [self.job],
+                      "/pulls/42/files": policy_files, f"/commits/{POLICY_SHA}": policy_files}
+        self.api.get.side_effect = lambda path: self.responses[path]
+        self.api.pages.side_effect = lambda path, **params: self.pages[path]
+        self.api.job_log.side_effect = lambda job_id: self.log
+        self.old_policy = json.loads(Path(rotation.POLICY_FILE).read_text(encoding="utf-8"))
+        self.new_policy = {**self.old_policy, "previous_sha": INSTALLED_SHA,
+                           "release_tag": RECEIPT.version, "release_id": RECEIPT.release_id}
+
+    def _review(self, *, main_sha=MAIN_SHA, resume=False):
+        def read_blob(_api, sha, _path):
+            return json.dumps(self.old_policy if sha == PREVIOUS_PIN else self.new_policy).encode()
+
+        with patch.object(rotation, "require_accepted_installation"), patch.object(rotation, "_blob", side_effect=read_blob):
+            return rotation.review_rotation(self.api, RECEIPT, pr=42, main_sha=main_sha, resume=resume)
+
+    def test_accepts_exact_checkout_of_merged_policy_pr(self):
+        """Подтверждает текущий main и повторную проверку после его продвижения."""
+        self.assertEqual(self._review(), PLAN)
+        self.api.job_log.assert_called_once_with(50)
+        self.api.pages.assert_any_call(f"{self.workflow}/runs", key="workflow_runs", event="pull_request", head_sha=self.head)
+        new_main = "a" * 40
+        self.responses["/git/ref/heads/main"]["object"]["sha"] = new_main
+        self.responses[f"/compare/{MAIN_SHA}...{new_main}"] = {"status": "ahead", "base_commit": {"sha": MAIN_SHA}}
+        self.responses[f"/compare/{POLICY_SHA}...{new_main}"] = {"status": "ahead", "base_commit": {"sha": POLICY_SHA}}
+        self.assertEqual(self._review(resume=True), PLAN)
+        self.assertEqual(self._review(main_sha=new_main), replace(PLAN, main_sha=new_main))
+
+    def test_rejects_other_pr_and_different_checkout(self):
+        """SHA головы сам по себе не доказывает точный PR или его test merge."""
+        log = self.log
+        for bad_log in (log.replace("pull/42/merge", "pull/43/merge"),
+                        log.replace(f" {self.test_sha}\n", f" {MAIN_SHA}\n"),
+                        log.replace("10:25:39.", "10:25:40.")):
+            self.log = bad_log
+            with self.subTest(log=bad_log), self.assertRaisesRegex(rotation.RotationError, "checkout test merge этого PR"):
+                self._review()
+        self.log = log
+        test_merge = self.responses[f"/git/commits/{self.test_sha}"]
+        for field, value in (("parents", [{"sha": MAIN_SHA}, {"sha": self.head}]), ("tree", {"sha": MAIN_SHA})):
+            with self.subTest(field=field), patch.dict(test_merge, {field: value}), \
+                    self.assertRaisesRegex(rotation.RotationError, "не совпадает с родителями и деревом"):
+                self._review()
+
+    def test_rejects_untrusted_run_job_and_incomplete_metadata(self):
+        """Требует конкретные workflow, job, попытку, приложение и время."""
+        attempt = self.responses[self.run_path]
+        for metadata, values in ((self.pull["head"], {"repo": None}),
+                                 (attempt, {"workflow_id": 99}), (attempt, {"path": ".github/workflows/other.yml"}),
+                                 (attempt, {"head_sha": MAIN_SHA}), (attempt, {"pull_requests": [{"number": 43}]}),
+                                 (attempt, {"run_started_at": None}), (self.job, {"run_attempt": 2}),
+                                 (self.check, {"app": None}), (self.check, {"check_suite": None}),
+                                 (self.check, {"app": {"id": 999, "slug": "github-actions"}}),
+                                 (self.check, {"check_suite": {"id": 999}})):
+            with self.subTest(values=values), patch.dict(metadata, values), self.assertRaises(rotation.RotationError):
+                self._review()
+        self.api.job_log.assert_not_called()
+        for path in (self.run_path, "/check-runs/50"):
+            with self.subTest(path=path), patch.dict(self.responses, {path: None}), self.assertRaises(rotation.RotationError):
+                self._review()
+        for steps in (None, [{}], [1]):
+            with self.subTest(steps=steps), patch.dict(self.job, {"steps": steps}), self.assertRaises(rotation.RotationError):
+                self._review()
+
+    def test_uses_last_attempt_before_merge(self):
+        """Поздняя ошибка не перекрывается прежним успехом, повтор после merge не учитывается."""
+        self.run["run_attempt"] = 2
+        second_path = "/actions/runs/20/attempts/2"
+        second = {**self.run, "run_started_at": "2026-11-10T10:36:00Z"}
+        self.responses[second_path] = second
+        self.assertEqual(self._review(), PLAN)
+        second["run_started_at"] = "2026-11-10T10:25:34Z"
+        second_job = {**self.job, "id": 51, "run_attempt": 2}
+        self.pages[f"{second_path}/jobs"] = [second_job]
+        self.responses["/check-runs/51"] = {**self.check, "id": 51}
+        self.assertEqual(self._review(), PLAN)
+        self.api.job_log.assert_called_with(51)
+        # API не позволяет установить порядок окончания job и merge в одну секунду.
+        for result in ({"conclusion": "failure"}, {"status": "in_progress", "completed_at": None},
+                       {"completed_at": self.pull["merged_at"]}):
+            with self.subTest(result=result), patch.dict(second_job, result), \
+                    self.assertRaisesRegex(rotation.RotationError, "Последняя попытка"):
+                self._review()
+        second["run_started_at"] = self.responses[self.run_path]["run_started_at"]
+        with self.assertRaisesRegex(rotation.RotationError, "последняя попытка"):
+            self._review()
+
+    def test_job_log_redirect_preserves_token_only_on_api_request(self):
+        """HTTPS redirect хранилища получает запрос без GitHub token."""
+        request = Request("https://api.github.com/repos/owner/repo/actions/jobs/50/logs")
+        request.add_unredirected_header("Authorization", "Bearer example")
+        handler = rotation._JobLogRedirect()
+        redirect = handler.redirect_request(request, None, 302, "", {}, "https://logs.example/50")
+        self.assertFalse(redirect.has_header("Authorization"))
+        with self.assertRaisesRegex(rotation.RotationError, "незащищённую ссылку"):
+            handler.redirect_request(request, None, 302, "", {}, "http://logs.example/50")
