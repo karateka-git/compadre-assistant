@@ -3,7 +3,7 @@
 import base64
 from contextlib import closing, ExitStack, redirect_stderr
 from copy import deepcopy
-from dataclasses import replace
+from dataclasses import asdict, replace
 import hashlib
 import io
 import json
@@ -20,6 +20,7 @@ import zipfile
 
 from scripts import predeploy_compatibility as gate
 from scripts import deploy_prod as prod
+from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.repository_compatibility_contract import load_policy
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
@@ -142,6 +143,66 @@ class EvidenceTests(unittest.TestCase):
         api.jobs[2]["conclusion"] = "failure"
         with self.assertRaises(ValueError):
             self.verify(api)
+
+    def test_annotated_evidence_reads_four_pinned_files_without_artifact(self):
+        """Считает запросы по fixture и сверяет точные bytes локального Git."""
+        api = ArtifactAPI()
+        with patch.object(api, "get", wraps=api.get) as get, patch.object(
+            api, "pages", wraps=api.pages,
+        ) as pages, patch.object(api, "download", wraps=api.download) as download:
+            self.verify(api)
+            self.assertEqual(get.call_count + pages.call_count + download.call_count, 19)
+
+        with TemporaryDirectory() as temporary:
+            checkout = Path(temporary) / "checkout"
+            checkout.mkdir()
+
+            def git(*args):
+                return subprocess.check_output(
+                    ("git", "-c", "user.name=CI", "-c", "user.email=ci@example.invalid",
+                     "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", *args),
+                    cwd=checkout, text=True,
+                ).strip()
+
+            git("init", "--quiet")
+            workflows = checkout / ".github/workflows"
+            workflows.mkdir(parents=True)
+            for name in gate.WORKFLOWS:
+                (workflows / name).write_bytes(api.workflow_bytes)
+            git("add", ".github")
+            git("commit", "--quiet", "-m", "Fixture")
+            proof = ReleaseTagEvidence(api.policy["previous_sha"], POLICY_SHA, 1, 1, "c" * 64)
+            git("tag", "-a", "-m", proof.message(), api.selected.version)
+            selected = replace(api.selected, sha=git("rev-parse", "HEAD"), compatibility=proof,
+                               tag_object_sha=git("rev-parse", f"refs/tags/{api.selected.version}"))
+
+            with patch.object(api, "get", wraps=api.get) as get, patch.object(
+                api, "pages", side_effect=AssertionError("unexpected pagination"),
+            ), patch.object(api, "download", side_effect=AssertionError("unexpected artifact")):
+                record = gate.verify_tag_evidence(api, checkout, selected, POLICY_SHA, proof.previous_sha)
+                self.assertEqual(get.call_count, 4)
+                self.assertTrue(all(call.kwargs == {"ref": POLICY_SHA} for call in get.call_args_list))
+                self.assertEqual(record["schema_fingerprint"], proof.schema_fingerprint)
+                self.assertEqual(record["tag_object_sha"], selected.tag_object_sha)
+                self.assertRegex(record["verification_id"], r"^[0-9a-f]{64}$")
+                self.assertNotIn("artifact_digest", record)
+
+            host = prod.Host(checkout, checkout.parent / "state")
+            state = {"candidate": asdict(selected), "old_sha": proof.previous_sha,
+                     "compatibility_evidence": record, "new": {"fingerprint": proof.schema_fingerprint}}
+            with patch.object(host, "select", return_value=selected), patch.object(
+                gate, "private_text", return_value=POLICY_SHA,
+            ), patch.object(prod, "GitHub", return_value=api), patch.object(
+                gate, "verify_evidence", side_effect=AssertionError("unexpected legacy evidence"),
+            ):
+                host.require_recovery_evidence(state)
+                state["new"]["fingerprint"] = "d" * 64
+                with self.assertRaisesRegex(prod.DeployError, "fingerprint"):
+                    host.require_recovery_evidence(state)
+
+            api.workflow_bytes = b"different pinned workflow"
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_WORKFLOW_BYTES"):
+                gate.verify_tag_evidence(api, checkout, selected, POLICY_SHA, proof.previous_sha)
 
     def test_artifact_metadata_digest_and_api_fail_closed(self):
         """Неверный run/SHA, expiry, digest и API outage закрывают допуск."""
@@ -415,6 +476,68 @@ class AdmissionBoundaryTests(unittest.TestCase):
                     self.assertNotIn("stop_both", host.actions)
                     self.assertTrue(host.running)
                     self.assertEqual(host.head, OLD_SHA)
+
+    def test_annotated_route_keeps_writers_before_failed_local_or_remote_admission(self):
+        """После копии разрешены только локальные проверки, а ошибка безопасна."""
+        faults = {"api": "SAFE_EVIDENCE_READ", "schema": "SAFE_COPY_FINGERPRINT", "pin": "SAFE_POLICY_PIN"}
+        for fault, code in faults.items():
+            with self.subTest(fault=fault), TemporaryDirectory() as temporary:
+                host = FakeHost(Path(temporary))
+                api = ArtifactAPI()
+                api.policy["previous_sha"] = OLD_SHA
+                api.trusted["repository_compatibility_policy.json"] = json.dumps(api.policy).encode()
+                with closing(sqlite3.connect(host.selected_database())) as connection:
+                    fingerprint = gate.schema_fingerprint(connection)
+                proof = ReleaseTagEvidence(OLD_SHA, POLICY_SHA, 1, 1, "c" * 64 if fault == "schema" else fingerprint)
+                selected = replace(api.selected, compatibility=proof, tag_object_sha="d" * 40)
+                migrated = False
+
+                def migrate(*args):
+                    nonlocal migrated
+                    migrated = True
+
+                def read_pin(path):
+                    if fault == "pin" and migrated and path.name == "compatibility-policy.sha":
+                        return "e" * 40
+                    return POLICY_SHA
+
+                def local_object(checkout, kind, ref):
+                    if kind == "tag":
+                        return b"tag fixture\n\n" + proof.message().encode()
+                    return api.workflow_bytes
+
+                get_response = api.get
+
+                def get(path, **parameters):
+                    self.assertFalse(migrated, "GitHub запрос после миграции копии")
+                    if fault == "api":
+                        raise OSError("unavailable")
+                    return get_response(path, **parameters)
+
+                real_predeploy = prod.Host.predeploy
+                with ExitStack() as stack:
+                    for patcher in deploy_tests.DeployProdTests()._patches():
+                        stack.enter_context(patcher)
+                    select = stack.enter_context(patch.object(host, "select", return_value=selected))
+                    stack.enter_context(patch.object(host, "uses_selector_runtime", return_value=True))
+                    stack.enter_context(patch.object(host, "require_switch_rollout"))
+                    stack.enter_context(patch.object(host, "predeploy", side_effect=lambda *args, **kwargs:
+                                                    real_predeploy(host, *args, **kwargs)))
+                    stack.enter_context(patch.object(host, "migrate_copy", side_effect=migrate))
+                    stack.enter_context(patch.object(gate, "_local_git_object", side_effect=local_object))
+                    stack.enter_context(patch.object(gate, "private_text", side_effect=read_pin))
+                    stack.enter_context(patch.object(api, "get", side_effect=get))
+                    stack.enter_context(patch.object(prod, "GitHub", return_value=api))
+                    stack.enter_context(patch.object(gate, "verify_evidence", side_effect=AssertionError("legacy")))
+                    with self.assertRaises(prod.DeployError) as failure:
+                        prod.deploy(host, selected.version)
+                self.assertEqual(failure.exception.code, code)
+                select.assert_called_once_with(selected.version)
+                self.assertEqual(migrated, fault != "api")
+                self.assertTrue(host.running)
+                self.assertNotIn("marker_on", host.actions)
+                self.assertNotIn("stop_both", host.actions)
+                self.assertEqual(host.head, OLD_SHA)
 
     def test_preparation_schema_and_image_checks_have_safe_codes(self):
         """Ранние проверки до evidence сохраняют код вместо generic DeployError."""

@@ -10,6 +10,7 @@ import stat
 import uuid
 
 from scripts import deploy_final_snapshot as snapshot
+from scripts import deploy_metrics as metrics
 from scripts import deploy_prepare as prep
 from scripts import predeploy_compatibility as compatibility
 
@@ -150,14 +151,15 @@ def transition(host, state: dict, record, publish) -> None:
     generation = uuid.uuid4().hex
     evidence = state["compatibility_evidence"]
     candidate = state["candidate"]
-    path = snapshot.prepare(
-        Path(state["old"]["host_path"]), host.state_dir, generation,
-        state["schema_before"], state["schema_after"], evidence["schema_fingerprint"],
-        require_quiescence=host.require_snapshot_quiescence,
-        migrate=lambda work: host.migrate_copy(candidate["image_id"], work.parent, basename=work.name),
-        record_snapshot=lambda item: record("snapshot_verified", snapshot={
-            "path": str(item.path), "sha256": item.sha256, "integrity": True, "foreign_keys": True}),
-    )
+    with metrics.stage("v2.final_copy"):
+        path = snapshot.prepare(
+            Path(state["old"]["host_path"]), host.state_dir, generation,
+            state["schema_before"], state["schema_after"], evidence["schema_fingerprint"],
+            require_quiescence=host.require_snapshot_quiescence,
+            migrate=lambda work: host.migrate_copy(candidate["image_id"], work.parent, basename=work.name),
+            record_snapshot=lambda item: record("snapshot_verified", snapshot={
+                "path": str(item.path), "sha256": item.sha256, "integrity": True, "foreign_keys": True}),
+        )
     new = identity(path, generation, state["schema_after"])
     record("candidate_copy_verified", new=new)
     record("switch_intent", switch_intent={"from": state["old"]["generation_id"], "to": generation})
@@ -173,12 +175,13 @@ def transition(host, state: dict, record, publish) -> None:
     record("admission_recorded", admission_may_have_started=True,
            admission={"transition_id": state["transition_id"], "generation_id": generation,
                       "image_id": candidate["image_id"], "sha": candidate["sha"]})
-    durable = prep.read_state(host.state_dir, host.checkout)
-    if (durable is None or durable.get("admission_may_have_started") is not True
-            or durable.get("admission") != state["admission"]
-            or durable.get("prepared_containers") != ids or read_selected(host, durable) != "new"):
-        raise ValueError("Durable admission не подтверждён")
-    host.start_database_containers(ids, candidate["image_id"], new["container_path"])
+    with metrics.stage("v2.start_channels"):
+        durable = prep.read_state(host.state_dir, host.checkout)
+        if (durable is None or durable.get("admission_may_have_started") is not True
+                or durable.get("admission") != state["admission"]
+                or durable.get("prepared_containers") != ids or read_selected(host, durable) != "new"):
+            raise ValueError("Durable admission не подтверждён")
+        host.start_database_containers(ids, candidate["image_id"], new["container_path"])
     record("candidate_started")
 
 

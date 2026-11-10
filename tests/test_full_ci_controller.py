@@ -50,7 +50,7 @@ class FakeGitHub:
     """Отдаёт предсказуемые ответы для сценариев контроллера."""
 
     def __init__(self, releases=None, runs=None, jobs=None, prs=None, policy=None,
-                 release=None, reference=None, content=None) -> None:
+                 release=None, reference=None, content=None, tag_object=None) -> None:
         """Сохраняет наборы ответов REST API для теста."""
         self.releases = releases or []
         self.runs = runs or {}
@@ -63,6 +63,7 @@ class FakeGitHub:
         }
         self.release = release
         self.reference = reference
+        self.tag_object = tag_object
         self.content = content
         self.contents_refs = []
 
@@ -89,6 +90,8 @@ class FakeGitHub:
         if path.startswith("/git/ref/tags/"):
             return self.reference if self.reference is not None else {
                 "object": {"type": "commit", "sha": SHA_B}}
+        if path.startswith("/git/tags/"):
+            return self.tag_object
         if path == "/contents/scripts/repository_compatibility_policy.json":
             self.contents_refs.append(parameters.get("ref"))
             return self.content if self.content is not None else {"encoding": "base64", "content": base64.b64encode(
@@ -236,8 +239,18 @@ class FullCiControllerTests(unittest.TestCase):
         for api in (FakeGitHub(release={**FakeGitHub().get("/releases/tags/v3.1.0"),
                                         "immutable": False}),
                     FakeGitHub(reference={"object": {"type": "tag", "sha": SHA_B}})):
-            with self.assertRaisesRegex(ValueError, "pinned immutable"):
+            with self.assertRaises(ValueError):
                 controller.previous_release_sha(api, "release/3.3")
+
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
+    def test_ci_accepts_annotated_production_baseline(self) -> None:
+        """После ротации CI использует commit аннотированного immutable тега."""
+        api = FakeGitHub(
+            reference={"object": {"type": "tag", "sha": SHA_C}},
+            tag_object={"sha": SHA_C, "tag": "v3.1.0", "message": "evidence",
+                        "object": {"type": "commit", "sha": SHA_B}},
+        )
+        self.assertEqual(controller.previous_release_sha(api, "release/3.3"), SHA_B)
 
     @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
     def test_corrupt_external_policy_bytes_fail_closed(self) -> None:

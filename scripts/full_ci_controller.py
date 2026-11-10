@@ -166,12 +166,13 @@ def tag_commit(api: GitHub, tag: str) -> str:
     raise ControllerError(f"Тег {tag} не указывает на commit")
 
 
-def previous_release_sha(api: GitHub, branch: str) -> str:
+def previous_release_sha(api: GitHub, branch: str, *, policy_sha: str | None = None) -> str:
     """Читает прежний выпуск из внешне закреплённой CI policy.
 
     Args:
         api: Читающий GitHub API клиент.
         branch: Имя main либо release/X.Y.
+        policy_sha: Уже прочитанный внешний pin. CI по умолчанию берёт его из окружения.
 
     Returns:
         SHA выпуска, закреплённого в policy для установленной production базы.
@@ -181,7 +182,7 @@ def previous_release_sha(api: GitHub, branch: str) -> str:
     """
     if branch != "main" and not RELEASE_BRANCH_PATTERN.fullmatch(branch):
         raise ControllerError(f"Недопустимая ветка: {branch}")
-    pin = os.environ.get("COMPATIBILITY_POLICY_SHA", "")
+    pin = os.environ.get("COMPATIBILITY_POLICY_SHA", "") if policy_sha is None else policy_sha
     if not SHA_PATTERN.fullmatch(pin):
         raise ControllerError("Не задан точный внешний SHA CI policy")
     response = api.get("/contents/scripts/repository_compatibility_policy.json", ref=pin)
@@ -202,7 +203,7 @@ def previous_release_sha(api: GitHub, branch: str) -> str:
     previous = policy["previous_sha"]
     tag = quote(policy["release_tag"], safe="")
     verify_baseline(policy, api.get(f"/releases/tags/{tag}"),
-                    api.get(f"/git/ref/tags/{tag}"), previous)
+                    api.get(f"/git/ref/tags/{tag}"), previous, lambda sha: api.get(f"/git/tags/{sha}"))
     return previous
 
 

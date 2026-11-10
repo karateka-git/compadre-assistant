@@ -202,7 +202,7 @@ def check_imports(directory: Path) -> None:
     """
     code = ("import sys; sys.path.insert(0, sys.argv[1]); "
             "from scripts import deploy_prod, controller_snapshot, deploy_backup, deploy_runtime, "
-            "deploy_schema_admission, deploy_forward_recovery; "
+            "deploy_schema_admission, deploy_forward_recovery, deploy_acceptance; "
             "assert str(deploy_prod.SOURCE_ROOT) == sys.argv[1]")
     result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(directory.resolve())],
                             cwd=directory.parent, capture_output=True, check=False)

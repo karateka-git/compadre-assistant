@@ -25,6 +25,7 @@ from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
+from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
 
@@ -199,7 +200,8 @@ class Host:
         self.run("git", "fetch", "--no-tags", "origin", selected.sha, env=env)
         self.run("git", "fetch", "--no-tags", "origin",
                  f"refs/tags/{selected.version}:refs/tags/{selected.version}", env=env)
-        prep.require_exact_tag(self.checkout, selected.version, selected.sha)
+        prep.require_exact_tag(self.checkout, selected.version, selected.sha,
+                               tag_object_sha=selected.tag_object_sha)
         self.run("git", "checkout", "--detach", selected.sha)
         prep.require_clean_checkout(self.checkout, selected.sha)
 
@@ -506,7 +508,7 @@ class Host:
             raise DeployError("SQLite protocol v2: rollout закрыт; инфраструктура не подтверждена") from error
 
     def require_switch_candidate(self, state: dict) -> None:
-        """Повторяет точный CI/image/pair допуск перед marker и остановкой writers.
+        """Сверяет допуск непосредственно перед marker и остановкой writers.
 
         Args:
             state: Подготовленный переход с результатом миграции online-копии.
@@ -518,18 +520,28 @@ class Host:
 
         self.require_switch_rollout()
         candidate = state["candidate"]
-        selected = SelectedRelease(**{field.name: candidate[field.name] for field in fields(SelectedRelease)})
-        _same_selection(self, selected)
+        selection = {field.name: candidate[field.name] for field in fields(SelectedRelease) if field.name in candidate}
+        if selection.get("compatibility") is not None:
+            selection["compatibility"] = ReleaseTagEvidence(**selection["compatibility"])
+        selected = SelectedRelease(**selection)
+        verified = state["compatibility_evidence"]
+        annotated = "tag_object_sha" in verified
+        if not annotated:
+            _same_selection(self, selected)
         self.require_baseline(state["last_good"], state["old_sha"], state["old_image_id"])
         prep.check_candidate_image(candidate["image_id"], candidate["sha"])
         if self.image(candidate["tag"])["Id"] != candidate["image_id"]:
             raise DeployError("Candidate tag изменился перед остановкой")
         policy_path = self.state_dir / "compatibility-policy.sha"
         policy = compatibility.private_text(policy_path)
-        token = compatibility.private_text(self.state_dir / "github-read-token")
-        evidence = compatibility.verify_evidence(
-            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
-        if (evidence != state["compatibility_evidence"]
+        if annotated:
+            prep.require_clean_checkout(self.checkout, candidate["sha"])
+            evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
+        else:
+            token = compatibility.private_text(self.state_dir / "github-read-token")
+            evidence = compatibility.verify_evidence(
+                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != verified
                 or compatibility.private_text(policy_path) != policy
                 or self.controller_sha() != state["controller_sha"]):
             raise DeployError("Допуск candidate изменился перед остановкой")
@@ -776,10 +788,10 @@ class Host:
         self.require_no_foreign_database_mounts({item["Id"] for item in self.recovery_inventory().values()})
 
     def require_recovery_evidence(self, state: dict) -> None:
-        """Заново проверяет Release/run/attempt и artifact точной previous пары.
+        """Заново проверяет Release, попытку CI и доказательство точной пары.
 
-        Недоступный API, отозванный artifact или изменившийся внешний policy
-        pin запрещают старому коду открывать новую SQLite.
+        Формат сохранённого доказательства задаёт маршрут проверки. Ошибка API,
+        изменение тега, artifact или внешнего pin закрывают восстановление.
         """
         candidate = state["candidate"]
         selected = (self.select_emergency(candidate["version"])
@@ -788,9 +800,14 @@ class Host:
             raise DeployError("Recovery Release или CI attempt изменился")
         policy = compatibility.private_text(self.state_dir / "compatibility-policy.sha")
         token = compatibility.private_text(self.state_dir / "github-read-token")
-        evidence = compatibility.verify_evidence(
-            compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
-        if (evidence != state["compatibility_evidence"]
+        verified = state["compatibility_evidence"]
+        if "tag_object_sha" in verified:
+            evidence = compatibility.verify_tag_evidence(
+                GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy, state["old_sha"])
+        else:
+            evidence = compatibility.verify_evidence(
+                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+        if (evidence != verified
                 or evidence["schema_fingerprint"] != state["new"]["fingerprint"]
                 or compatibility.private_text(self.state_dir / "compatibility-policy.sha") != policy):
             raise DeployError("Recovery evidence или fingerprint изменились")
@@ -1033,7 +1050,8 @@ class Host:
                 raise compatibility.PredeployError("SAFE_INSTALLED_REVISION")
 
     def predeploy(self, selected: SelectedRelease, candidate_id: str, before: list[str],
-                  expected: list[str], good: dict[str, Any], old_sha: str, old_id: str) -> None:
+                  expected: list[str], good: dict[str, Any], old_sha: str, old_id: str,
+                  *, annotated: bool = False) -> None:
         """Проверяет доверенное evidence и приватную online-копию под deploy lock.
 
         Args:
@@ -1044,6 +1062,7 @@ class Host:
             good: Сохранённый last_good до подготовки.
             old_sha: Фактический исходный SHA checkout.
             old_id: Фактический исходный ID обоих каналов.
+            annotated: Использовать доказательство аннотированного тега для SQLite v2.
 
         Raises:
             compatibility.PredeployError: База, evidence или копия не подтверждены;
@@ -1055,20 +1074,26 @@ class Host:
         pin_path = self.state_dir / "compatibility-policy.sha"
         policy_sha = compatibility.private_text(pin_path)
         token = compatibility.private_text(self.state_dir / "github-read-token")
-        api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
-        with compatibility.check("SAFE_EVIDENCE_READ"):
-            evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
-        with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
-            directory = Path(temporary)
-            os.chmod(directory, 0o700)
-            compatibility.verify_copy(self.selected_database(), directory,
-                                      before, expected, evidence["schema_fingerprint"],
-                                      lambda work: self.migrate_copy(candidate_id, work))
-        # Долгая миграция не сохраняет доверие к отозванному artifact или pin.
-        with compatibility.check("SAFE_EVIDENCE_RECHECK"):
-            if (compatibility.private_text(pin_path) != policy_sha
-                    or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
-                raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
+        with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
+            if annotated:
+                evidence = compatibility.verify_tag_evidence(
+                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha)
+            else:
+                api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
+                evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
+        with metrics.stage("predeploy.copy"):
+            with TemporaryDirectory(prefix="predeploy-", dir=self.state_dir) as temporary:
+                directory = Path(temporary)
+                os.chmod(directory, 0o700)
+                compatibility.verify_copy(self.selected_database(), directory,
+                                          before, expected, evidence["schema_fingerprint"],
+                                          lambda work: self.migrate_copy(candidate_id, work))
+        if not annotated:
+            # Исторический допуск зависит от доступности artifact после миграции.
+            with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
+                if (compatibility.private_text(pin_path) != policy_sha
+                        or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
+                    raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
         self.compatibility_evidence = evidence
 
@@ -1177,7 +1202,7 @@ def _error_reason(error: Exception) -> str:
 
 def _prepare_candidate(
     host: Host, version: str, old_sha: str, old_id: str, old_tag: str,
-    *, emergency: bool = False, last_good: dict[str, Any] | None = None,
+    *, emergency: bool = False, last_good: dict[str, Any] | None = None, sqlite_v2: bool = False,
 ) -> tuple[SelectedRelease, str, str, list[str], list[str]]:
     """Готовит candidate без остановки каналов и восстанавливает checkout при ошибке."""
     try:
@@ -1187,8 +1212,10 @@ def _prepare_candidate(
             raise DeployError("Тип выбранного Release не соответствует команде")
         if selected.sha == old_sha:
             raise DeployError("Текущий код уже имеет SHA выбранной версии")
+        annotated = sqlite_v2 and not emergency and selected.compatibility is not None
         host.fetch(selected)
-        _same_selection(host, selected)
+        if not annotated:
+            _same_selection(host, selected)
         prep.require_clean_checkout(host.checkout, selected.sha)
         with metrics.stage("build"):
             tag, candidate_id = prep.build_pinned_image(host.checkout, selected.sha)
@@ -1204,9 +1231,14 @@ def _prepare_candidate(
         if expected[:len(before)] != before:
             raise compatibility.PredeployError("SAFE_SCHEMA_PREFIX")
         with compatibility.check("SAFE_PREDEPLOY_IO"):
-            host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
-        _same_selection(host, selected)
-        prep.require_exact_tag(host.checkout, selected.version, selected.sha)
+            if annotated:
+                host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id, annotated=True)
+            else:
+                host.predeploy(selected, candidate_id, before, expected, last_good, old_sha, old_id)
+        if not annotated:
+            _same_selection(host, selected)
+        prep.require_exact_tag(host.checkout, selected.version, selected.sha,
+                               tag_object_sha=selected.tag_object_sha)
         prep.require_clean_checkout(host.checkout, selected.sha)
         host.require_compose_pin(old_tag)
         host.require_compose_pin(tag, critical=True)
@@ -1227,6 +1259,46 @@ def _prepare_candidate(
         raise DeployError(f"Подготовка не удалась: {type(error).__name__}") from error
 
 
+def _recover_v2_preflight(host: Host, state: dict[str, Any]) -> None:
+    """Подтверждает рабочий selector после сохранённого отказа до перехода."""
+    if os.path.lexists(host.state_dir / "deploy-in-progress"):
+        raise DeployError("Отказ preflight противоречит критическому marker")
+    if "boot" in state:
+        from scripts import deploy_runtime
+
+        boot = state["boot"]
+        if boot != deploy_runtime.boot_record(state, boot["outcome"]):
+            raise DeployError("Прежний boot после preflight не подтверждён")
+        database_switch.read_selected(host, state)
+        return
+    # Прежний контроллер при позднем отказе записывал ID кандидата до
+    # перепривязки selector. Восстанавливаем только прежний точный ID.
+    good = state.get("last_good")
+    if (not isinstance(good, dict)
+            or any(not isinstance(good.get(key), str) or good[key] != state.get(field)
+                   for key, field in (("sha", "old_sha"), ("image_id", "old_image_id"), ("tag", "old_tag")))
+            or state.get("admission_may_have_started") is not False
+            or state.get("migration_attempted") is not False
+            or any(key in state for key in ("new", "snapshot", "admission", "registration_intent",
+                                            "switch_intent", "recovery_intent"))):
+        raise DeployError("Отказ preflight не доказывает прежнее поколение")
+    if "selector_rebind" not in state:
+        database_switch.read_selected(host, state)
+        return
+    database_switch.require_boundary(state)
+    old = database_switch.selector(state, "old")
+    rebind = state["selector_rebind"]
+    previous = rebind["from"]
+    restored = state | {"transition_id": previous["transition_id"]}
+    if (not isinstance(previous["transition_id"], str)
+            or rebind["to"] != old or previous == old or previous != database_switch.selector(restored, "old")
+            or database_switch.read_selected(host, restored) != "old"):
+        raise DeployError("Прежний selector после preflight не подтверждён")
+    state["transition_id"] = restored["transition_id"]
+    del state["selector_rebind"]
+    _state(host, state, "failed_preflight")
+
+
 def _recover(host: Host, state: dict[str, Any]) -> None:
     """Восстанавливает runtime по границе v2 либо прежнему legacy-контракту."""
     stage = state.get("stage")
@@ -1236,6 +1308,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
                 raise DeployError("Legacy recovery не может выбирать SQLite v2")
             if stage in ("success", "rolled_back"):
                 database_switch.read_selected(host, state)
+                return
+            if stage == "failed_preflight":
+                _recover_v2_preflight(host, state)
                 return
             if stage in ("finalization_intent", "runtime_adopted"):
                 host.finalize_database(state, state["boot"]["outcome"])
@@ -1377,9 +1452,23 @@ def _read_recovery_state(host: Host) -> dict:
         raise DeployError("State не доказан; запуск запрещён, проверьте защиты writers") from error
 
 
+def _preflight_failed(host: Host, state: dict, previous_switch: dict | None, error: Exception,
+                      **changes: Any) -> None:
+    """Записывает отказ попытки, сохраняя завершённый boot и selector."""
+    if previous_switch is not None:
+        state = previous_switch
+        if state.get("stage") in ("success", "rolled_back"):
+            state.update(error=_error_reason(error), **changes)
+            prep.write_state(host.state_dir, host.checkout, state)
+            metrics.update(stage="failed_preflight")
+            print("deploy-prod stage=failed_preflight", flush=True)
+            return
+    _state(host, state, "failed_preflight", error=_error_reason(error), **changes)
+
+
 @metrics.tracked
 def deploy(host: Host, version: str, *, emergency: bool = False,
-           reason: str | None = None) -> None:
+           reason: str | None = None) -> str | None:
     """Развёртывает названный Release или возвращает оба канала на старый образ.
 
     Args:
@@ -1387,6 +1476,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         version: Каноническая опубликованная версия.
         emergency: Явный выбор аварийного маршрута.
         reason: Причина решения о развёртывании аварийного выпуска.
+
+    Returns:
+        Точный SHA новой установки или None для уже установленного выпуска.
 
     Raises:
         DeployError: Допуск, переключение или проверка завершились отказом.
@@ -1404,9 +1496,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
     with prep.deploy_lock(host.state_dir, host.checkout):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
+        _recover(host, state)
         switch_state = state.copy() if "protocol_version" in state else None
         initial_switch = switch_state is None and host.uses_selector_runtime()
-        _recover(host, state)
         if switch_state is not None or initial_switch:
             host.require_switch_rollout()
             if state.get("stage") == "recovery_verified":
@@ -1423,7 +1515,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             metrics.update(stage="already_installed", sha=last_good.get("sha"),
                            run_id=last_good.get("ci_run_id"), run_attempt=last_good.get("ci_run_attempt"))
             print("deploy-prod stage=already_installed", flush=True)
-            return
+            return None
         if isinstance(last_good, dict) and _version(version) <= _version(str(last_good.get("version"))):
             raise DeployError("Обычный выпуск должен быть выше последнего успешного")
         if state.get("failed_version") == version and state.get("retry_after"):
@@ -1437,7 +1529,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             host.installed(old_id, old_sha)
             host.require_no_duplicate_polling()
         except Exception as error:
-            _state(host, state, "failed_preflight", error=_error_reason(error))
+            _preflight_failed(host, state, switch_state, error)
             raise DeployError("Исходное состояние production не прошло preflight") from error
         state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
                      failed_version=version)
@@ -1448,6 +1540,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
                 host, version, old_sha, old_id, old_tag, emergency=emergency, last_good=last_good,
+                sqlite_v2=switch_state is not None or initial_switch,
             )
         except Exception as error:
             try:
@@ -1457,9 +1550,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 _state(host, state, "preparing", error=_error_reason(error))
                 raise DeployError(f"Checkout не возвращён после подготовки; "
                                   f"нужен recovery: {_error_reason(error)}") from error
-            _state(host, state, "failed_preflight", error=_error_reason(error),
-                   failed_version=version,
-                   retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
+            _preflight_failed(host, state, switch_state, error, failed_version=version,
+                              retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
         database = host.selected_database()
         if emergency:
@@ -1500,10 +1592,11 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                                             "to": database_switch.selector(state, "old")}
             elif initial_switch:
                 state["compatibility_evidence"] = host.compatibility_evidence
-            _state(host, state, "ready")
+            if switch_state is None and not initial_switch:
+                _state(host, state, "ready")
         except Exception as error:
             host.restore_checkout(old_sha)
-            _state(host, state, "failed_preflight", error=_error_reason(error))
+            _preflight_failed(host, state, switch_state, error)
             raise DeployError("Не удалось сохранить состояние подготовки") from error
         critical = False
         try:
@@ -1511,7 +1604,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with compatibility.check("SAFE_INSTALLED_RUNTIME"):
                     host.require_baseline(last_good, old_sha, old_id)
             if switch_state is not None or initial_switch:
-                host.require_switch_candidate(state)
+                with metrics.stage("v2.admission_recheck"):
+                    host.require_switch_candidate(state)
+                _state(host, state, "ready")
             critical = True
             host.marker(True)
             _state(host, state, "critical")
@@ -1551,9 +1646,10 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
             with metrics.stage("deploy.verify_both_1"):
                 host.verify_both(candidate_id, selected.sha)
             if state.get("protocol_version") == database_switch.PROTOCOL_VERSION:
-                host.finalize_database(state, "success")
+                with metrics.stage("v2.finalize"):
+                    host.finalize_database(state, "success")
                 metrics.available()
-                return
+                return selected.sha
             host.restart_policy("unless-stopped")
             host.marker(False)
             host.activate_unit()
@@ -1567,6 +1663,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "ci_run_attempt": selected.run_attempt,
                 "kind": selected.kind, "deployment": state.get("deployment"),
             }, error=None)
+            return selected.sha
         except Exception as error:
             if critical:
                 try:
@@ -1581,12 +1678,13 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                         host.finalize_database(state, "rolled_back")
                 except Exception as rollback_error:
                     raise DeployError("Выпуск и автоматический возврат не прошли; degraded state") from rollback_error
+                state["failed_version"] = version
+                state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
+                prep.write_state(host.state_dir, host.checkout, state)
             else:
                 host.restore_checkout(old_sha)
-                _state(host, state, "failed_preflight", error=_error_reason(error))
-            state["failed_version"] = version
-            state["retry_after"] = (datetime.now(timezone.utc) + COOLDOWN).isoformat()
-            prep.write_state(host.state_dir, host.checkout, state)
+                _preflight_failed(host, state, switch_state, error, failed_version=version,
+                                  retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             if isinstance(error, compatibility.PredeployError):
                 metrics.update(predeploy_reason=error.code)
                 raise DeployError(f"Выпуск не установлен: {error.code}", code=error.code) from error
@@ -1674,26 +1772,51 @@ def verify_pinned(host: Host) -> None:
             raise DeployError("Проверка pin не прошла; оба канала возвращены") from error
 
 
+def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> None:
+    """Выводит только технические признаки, отдельно от результата установки."""
+    from scripts import deploy_acceptance
+
+    try:
+        receipt = deploy_acceptance.verify_installed(host, version, sha)
+    except (DeployError, deploy_acceptance.DeployError) as error:
+        # При python -m текущий DeployError принадлежит __main__.
+        raise DeployError(f"Техническая приёмка не пройдена ({error})") from error
+    except Exception as error:
+        raise DeployError(f"Техническая приёмка не пройдена ({type(error).__name__})") from error
+    payload = json.dumps(receipt, sort_keys=True, separators=(",", ":"))
+    print(payload if machine else f"deploy-prod technical_acceptance={payload}", flush=True)
+
+
 def main() -> None:
-    """Обрабатывает выпуск по версии или проверку текущего pin."""
+    """Обрабатывает установку, техническую приёмку или проверку текущего pin."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?")
     parser.add_argument("--emergency", action="store_true", help="явный аварийный выпуск")
     parser.add_argument("--reason", help="обязательная причина аварийного развёртывания")
     parser.add_argument("--verify-pinned", action="store_true",
                         help="контролируемый stop/start обоих каналов на текущем pin")
+    parser.add_argument("--verify-installed", metavar="SHA",
+                        help="техническая приёмка указанной версии и SHA без изменений")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        if args.verify_pinned and (args.emergency or args.reason is not None):
-            raise DeployError("Проверка pin несовместима с аварийным режимом")
+        if args.verify_installed is not None and args.verify_pinned:
+            raise DeployError("Укажите версию для технической приёмки")
+        if (args.verify_pinned or args.verify_installed is not None) and (
+                args.emergency or args.reason is not None):
+            raise DeployError("Проверка несовместима с режимом установки аварийного выпуска")
+        host = Host()
         if args.verify_pinned:
-            verify_pinned(Host())
+            verify_pinned(host)
+        elif args.verify_installed is not None:
+            _report_acceptance(host, args.version, args.verify_installed, machine=True)
         else:
-            deploy(Host(), args.version, emergency=args.emergency, reason=args.reason)
+            installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
+            if installed_sha is not None:
+                _report_acceptance(host, args.version, installed_sha, machine=False)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error

@@ -297,11 +297,59 @@ python -m scripts.publish_release v1.0.5 <полный-SHA> --change patch --not
 сверить изменения линии, указанный SHA и результаты полного CI; публикация
 не запускает VPS. На сервере после свежего read-only осмотра
 [PRODUCTION.md](PRODUCTION.md), отдельного эксплуатационного допуска и
-проверки окна backup вызвать `sudo deploy-prod vX.Y.Z`. Команда синхронна:
-по окончании проверить stage/state, отсутствие marker, точный SHA/image ID
-обоих каналов, health и polling, службу, backup timer и SQLite integrity.
-Для реальных ответов Telegram/VK требуется пользовательская проверка.
-Результат доступен в серверном журнале; внешних уведомлений сейчас нет.
+проверки окна backup вызвать `sudo deploy-prod vX.Y.Z`. Контроллер с
+технической приёмкой после записи `success` повторно читает состояние без
+записи. Он проверяет отсутствие marker, точный SHA и image ID обоих
+работающих healthy-контейнеров без рестартов, выбранную SQLite и её
+целостность, основной сервис и исходное состояние таймера backup.
+Успешный старт polling уже проверен при установке. Живой ответ каждого
+канала владелец подтверждает отдельно.
+
+Если техническая приёмка не прошла, команда сообщает отказ, а завершённая
+установка и `last_good` сохраняются. После проверки состояния повторите
+только приёмку для ожидаемого SHA. Эту же проверку используйте после
+успешного forward recovery.
+
+```bash
+sudo deploy-prod vX.Y.Z --verify-installed <полный-SHA>
+```
+
+Успешная повторная приёмка возвращает JSON со сведениями о версии, SHA,
+Release, попытке CI, поколении SQLite, последней миграции и идентификаторе
+работающей пары. Повторную сверку выполняют на VPS. Для живых ответов
+Telegram и VK отдельно требуется подтверждение владельца.
+
+### Зафиксировать приёмку тегом установки
+
+После технической приёмки SQLite v2 выполните `--check` на машине
+оператора. Укажите точные версию и SHA, адрес VPS из
+[PRODUCTION.md](PRODUCTION.md#доступ) и локальный файл `known_hosts`
+с ранее проверенным ключом хоста. SSH выполняет только повторную
+техническую приёмку. Если `sudo -n` или сверка не прошли, остановитесь
+и разберите причину.
+
+```powershell
+$installationArgs = @('vX.Y.Z', '<полный-SHA>', '--ssh-host', '<user@host>',
+    '--known-hosts', '<файл-known_hosts>', '--identity', '<локальный-ключ-SSH>')
+python -m scripts.publish_installation_tag @installationArgs --check
+```
+
+Владелец отдельно проверяет живые ответы Telegram и VK для полученного
+`runtime_id`. После его явного решения о создании тега повторите команду
+в режиме записи. Используйте локальный `GITHUB_TOKEN` владельца с правом
+записи Contents в репозиторий.
+
+```powershell
+python -m scripts.publish_installation_tag @installationArgs --publish --confirm-live '<runtime_id>'
+```
+
+Команда заново сверяет VPS и опубликованный Release. Если состояние пары
+контейнеров или БД изменилось, повторите техническую и живую приёмку.
+Подтверждённый тег `production/vX.Y.Z` указывает на тот же коммит, что
+релизный тег `vX.Y.Z`. Повтор с тем же SHA допустим. При конфликтующем
+теге остановитесь и передайте разбор владельцу. Для ротации базы CI
+заново подтвердите актуальный `last_good` на VPS. Тег фиксирует приёмку
+на момент проверки.
 
 ### Закрепить базу полного CI после установки
 
@@ -495,6 +543,7 @@ Controller записывает статический `SAFE_*` в stderr и п�
 | `SAFE_INSTALLED_PREVIOUS_SHA`, `SAFE_BASELINE_RELEASE` | Сопоставить installed SHA с reviewed baseline и immutable Release/tag; новый baseline требует review policy. |
 | `SAFE_INSTALLED_LAST_GOOD`, `SAFE_INSTALLED_RUNTIME`, `SAFE_INSTALLED_IMAGE`, `SAFE_INSTALLED_REVISION` | Проверить last_good, systemd/pin, оба контейнера и OCI revision; не продолжать установку при drift. |
 | `SAFE_WORKFLOW_BYTES` | Сверить три workflow с внешним policy commit; изменение требует нового reviewed pin. |
+| `SAFE_TAG_EVIDENCE` | Сверить объект аннотированного тега, Release и точную попытку CI. Если они расходятся, остановить установку и проверить происхождение выпуска. |
 | `SAFE_ARTIFACT_MISSING`, `SAFE_ARTIFACT_METADATA`, `SAFE_ARTIFACT_DIGEST` | Проверить уникальность artifact, run/head SHA, срок хранения и SHA256 ZIP из GitHub metadata; при истечении нужен новый CI run/attempt. |
 | `SAFE_ARTIFACT_REDIRECT`, `SAFE_ARTIFACT_SIZE`, `SAFE_ARTIFACT_EXPANDED_SIZE`, `SAFE_ARTIFACT_MEMBER`, `SAFE_ARTIFACT_FORMAT` | Проверить HTTPS download, лимит 64 MiB, структуру ZIP и JSON; повреждённый artifact не принимать. |
 | `SAFE_EVIDENCE_IDENTITY`, `SAFE_CANDIDATE_SHA` | Сверить точную пару SHA, policy, run/attempt, результаты и внутренние хеши. |

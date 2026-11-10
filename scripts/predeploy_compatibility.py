@@ -13,13 +13,14 @@ from pathlib import Path, PurePosixPath
 import re
 import sqlite3
 import stat
+import subprocess
 from tempfile import TemporaryDirectory
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 from scripts import deploy_prepare as prep
-from scripts.ci_repository_compatibility import verify_baseline
-from scripts.full_ci_admission import COMPATIBILITY_STEPS, select_successful_run
+from scripts.ci_repository_compatibility import ReleaseTagEvidence, verify_baseline
+from scripts.full_ci_admission import Admission, COMPATIBILITY_STEPS, select_successful_run
 from scripts.full_ci_controller import GitHub
 from scripts.repository_compatibility_contract import load_policy, verify_report, verify_tests
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
@@ -30,6 +31,7 @@ MAX_ARTIFACT = 64 * 1024 * 1024
 HARNESS = ("ci_repository_compatibility.py", "repository_compatibility_contract.py",
            "repository_compatibility_policy.json", "check_repository_compatibility.py",
            "repository_compatibility_worker.py", "repository_compatibility_cases.py")
+WORKFLOWS = ("full-suite.yml", "main-full.yml", "release-full.yml")
 
 
 class PredeployError(ValueError):
@@ -110,6 +112,91 @@ def _blob(api: GitHub, sha: str, path: str) -> bytes:
     return data
 
 
+def _local_git_object(checkout: Path, kind: str, ref: str) -> bytes:
+    return subprocess.run(("git", "--no-replace-objects", "cat-file", kind, ref),
+                          cwd=checkout, capture_output=True, check=True).stdout
+
+
+def _trusted_policy(data: bytes) -> dict:
+    with TemporaryDirectory(prefix="predeploy-policy-") as temporary:
+        path = Path(temporary) / "policy.json"
+        path.write_bytes(data)
+        with check("SAFE_POLICY_CONTENT"):
+            return load_policy(path)
+
+
+def tag_evidence_record(checkout: Path, selected, policy_sha: str, previous_sha: str) -> dict:
+    """Сверяет загруженный аннотированный тег и возвращает запись для recovery.
+
+    Args:
+        checkout: Git checkout с загруженным объектом тега.
+        selected: Обычный immutable Release с точной успешной попыткой CI.
+        policy_sha: Внешний reviewed pin установленного контроллера.
+        previous_sha: SHA фактически установленного last_good.
+
+    Returns:
+        Идентификатор доказательства, pin и отпечаток схемы для выбранной пары.
+
+    Raises:
+        PredeployError: Тег, попытка, pin или исходный SHA не совпали.
+    """
+    if not re.fullmatch(r"[0-9a-f]{40}", policy_sha):
+        raise PredeployError("SAFE_POLICY_PIN")
+    with check("SAFE_TAG_EVIDENCE"):
+        if selected.kind != "ordinary" or not selected.tag_object_sha or not selected.compatibility:
+            raise PredeployError("SAFE_TAG_EVIDENCE")
+        prep.require_exact_tag(checkout, selected.version, selected.sha, tag_object_sha=selected.tag_object_sha)
+        raw = _local_git_object(checkout, "tag", selected.tag_object_sha)
+        _, separator, message = raw.partition(b"\n\n")
+        if not separator:
+            raise PredeployError("SAFE_TAG_EVIDENCE")
+        evidence = ReleaseTagEvidence.from_message(message.decode("utf-8"))
+        if (evidence != selected.compatibility
+                or (evidence.run_id, evidence.run_attempt) != (selected.run_id, selected.run_attempt)):
+            raise PredeployError("SAFE_TAG_EVIDENCE")
+    if evidence.previous_sha != previous_sha:
+        raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
+    if evidence.policy_sha != policy_sha:
+        raise PredeployError("SAFE_POLICY_PIN")
+    return {"tag_object_sha": selected.tag_object_sha, "policy_sha": policy_sha,
+            "schema_fingerprint": evidence.schema_fingerprint,
+            "verification_id": hashlib.sha256(b"compadre-release-tag-v1\0" + raw).hexdigest()}
+
+
+def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
+                        previous_sha: str) -> dict:
+    """Проверяет аннотацию и независимо сверяет workflow с reviewed policy.
+
+    Селектор уже доказал успешный job точной попытки, которой принадлежит
+    аннотация. На VPS используются только GitHub Contents и локальные blobs.
+
+    Args:
+        api: Читающий GitHub API выбранного репозитория.
+        checkout: Git checkout точного коммита кандидата или его сохранённого объекта.
+        selected: Результат селектора опубликованного immutable Release.
+        policy_sha: Внешний reviewed pin установленного контроллера.
+        previous_sha: SHA фактически установленного last_good.
+
+    Returns:
+        Идентификатор доказательства, pin и ожидаемый отпечаток схемы.
+
+    Raises:
+        PredeployError: Аннотация, pinned policy или workflow не подтверждены.
+    """
+    if api.repository != selected.repository:
+        raise PredeployError("SAFE_CI_PROVENANCE")
+    record = tag_evidence_record(checkout, selected, policy_sha, previous_sha)
+    policy = _trusted_policy(_blob(api, policy_sha, "scripts/repository_compatibility_policy.json"))
+    if policy["repository"] != selected.repository or policy["previous_sha"] != previous_sha:
+        raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
+    with check("SAFE_WORKFLOW_BYTES"):
+        for name in WORKFLOWS:
+            path = f".github/workflows/{name}"
+            if _blob(api, policy_sha, path) != _local_git_object(checkout, "blob", f"{selected.sha}:{path}"):
+                raise PredeployError("SAFE_WORKFLOW_BYTES")
+    return record
+
+
 def _files(payload: bytes) -> dict[str, bytes]:
     result = {}
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -131,7 +218,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
 
     Args:
         api: Независимый GitHub API с actions/contents read.
-        selected: Закреплённый Release с точной попыткой полного CI.
+        selected: Закреплённый Release или допуск точной попытки обычного CI.
         policy_sha: Внешний reviewed pin контроллера, не поле artifact.
         previous_sha: SHA фактически установленного last_good.
 
@@ -144,7 +231,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     if not re.fullmatch(r"[0-9a-f]{40}", policy_sha):
         raise PredeployError("SAFE_POLICY_PIN")
     branch = "main" if selected.workflow == "main-full.yml" else selected.branch
-    if selected.kind == "emergency":
+    if not isinstance(selected, Admission) and selected.kind == "emergency":
         run = api.get(f"/actions/runs/{selected.run_id}/attempts/{selected.run_attempt}")
         workflow = api.get(f"/actions/workflows/{selected.workflow}")
         path = f".github/workflows/{selected.workflow}"
@@ -177,17 +264,14 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
                                branch, selected.run_id, selected.run_attempt) is None:
         raise PredeployError("SAFE_CI_ATTEMPT")
     trusted = {name: _blob(api, policy_sha, f"scripts/{name}") for name in HARNESS}
-    with TemporaryDirectory(prefix="predeploy-policy-") as temporary:
-        path = Path(temporary) / "policy.json"
-        path.write_bytes(trusted["repository_compatibility_policy.json"])
-        with check("SAFE_POLICY_CONTENT"):
-            policy = load_policy(path)
+    policy = _trusted_policy(trusted["repository_compatibility_policy.json"])
     if policy["repository"] != selected.repository or policy["previous_sha"] != previous_sha:
         raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
     with check("SAFE_BASELINE_RELEASE"):
         verify_baseline(policy, api.get(f"/releases/tags/{policy['release_tag']}"),
-                        api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha)
-    for name in ("full-suite.yml", "main-full.yml", "release-full.yml"):
+                        api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha,
+                        lambda sha: api.get(f"/git/tags/{sha}"))
+    for name in WORKFLOWS:
         path = f".github/workflows/{name}"
         if _blob(api, policy_sha, path) != _blob(api, selected.sha, path):
             raise PredeployError("SAFE_WORKFLOW_BYTES")

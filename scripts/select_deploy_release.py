@@ -10,6 +10,7 @@ import re
 import sys
 from urllib.parse import quote
 
+from scripts.ci_repository_compatibility import ReleaseTagEvidence, resolve_release_tag
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.full_ci_admission import (
     AdmissionError, MAIN_WORKFLOW, RELEASE_WORKFLOW, ReadOnlyGitHub, SHA_PATTERN,
@@ -41,6 +42,8 @@ class SelectedRelease:
     ci_source: str | None = None
     published_ci_state: str | None = None
     published_ci_source: str | None = None
+    tag_object_sha: str | None = None
+    compatibility: ReleaseTagEvidence | None = None
 
 
 def _sha(value: object, label: str) -> str:
@@ -74,13 +77,22 @@ def _release(api: ReadOnlyGitHub, version: str) -> dict:
     return value
 
 
-def _tag_commit(api: ReadOnlyGitHub, version: str) -> str:
-    """Требует прямой commit tag без промежуточного annotated tag."""
+def _tag(api: ReadOnlyGitHub, version: str, *,
+         allow_annotation: bool = False) -> tuple[str, str | None, ReleaseTagEvidence | None]:
+    """Сверяет точный ref и читает аннотацию обычного выпуска."""
     value = api.get(f"/git/ref/tags/{quote(version, safe='')}")
-    if (not isinstance(value, dict) or value.get("ref") != f"refs/tags/{version}" or
-            not isinstance(value.get("object"), dict) or value["object"].get("type") != "commit"):
-        raise DeploySelectionError("Тег отсутствует или не указывает напрямую на commit")
-    return _sha(value["object"].get("sha"), "tag")
+    if not isinstance(value, dict) or value.get("ref") != f"refs/tags/{version}":
+        raise DeploySelectionError("Не подтверждён ref релизного тега")
+
+    def read_tag(sha: str) -> object:
+        return api.get(f"/git/tags/{sha}")
+
+    try:
+        sha, object_sha, message = resolve_release_tag(value, version, read_tag if allow_annotation else None)
+        evidence = ReleaseTagEvidence.from_message(message) if message is not None else None
+    except ValueError as error:
+        raise DeploySelectionError("Не подтверждён commit или аннотация релизного тега") from error
+    return sha, object_sha, evidence
 
 
 def _manifest(body: str, version: str, repository: str) -> tuple[str, str, int, int]:
@@ -167,11 +179,14 @@ def select_release(api: ReadOnlyGitHub, version: str) -> SelectedRelease:
     major, minor, patch = _version(version)
     branch = f"release/{major}.{minor}"
     release = _release(api, version)
-    tag_sha = _tag_commit(api, version)
+    tag = _tag(api, version, allow_annotation=True)
+    tag_sha, object_sha, evidence = tag
     manifest_sha, manifest_branch, run_id, attempt = _manifest(release["body"], version, api.repository)
     if (manifest_branch != branch or release["target_commitish"] != tag_sha or
             manifest_sha != tag_sha):
         raise DeploySelectionError("SHA тега, Release и манифеста не совпадают")
+    if evidence is not None and (evidence.run_id, evidence.run_attempt) != (run_id, attempt):
+        raise DeploySelectionError("Попытка CI в аннотации и манифесте Release не совпадает")
     head = _branch_head(api, branch)
     _check_ancestor(api, tag_sha, head)
     # immutable конкретного Release виден без admin token; settings endpoint
@@ -185,10 +200,12 @@ def select_release(api: ReadOnlyGitHub, version: str) -> SelectedRelease:
     if admission is None:
         raise DeploySelectionError("Закреплённый полный CI не подтвердил точный SHA")
     # Изменение Release, тега или ветки во время чтения делает снимок непригодным.
-    if _release(api, version) != release or _tag_commit(api, version) != tag_sha or _branch_head(api, branch) != head:
+    if (_release(api, version) != release or _tag(api, version, allow_annotation=True) != tag
+            or _branch_head(api, branch) != head):
         raise DeploySelectionError("GitHub Release, tag или ветка изменились во время проверки")
     return SelectedRelease(api.repository, version, branch, tag_sha, release["id"],
-                           workflow, admission.run_id, admission.run_attempt)
+                           workflow, admission.run_id, admission.run_attempt,
+                           tag_object_sha=object_sha, compatibility=evidence)
 
 
 def _emergency_manifest(body: str, version: str, repository: str,
@@ -406,7 +423,8 @@ def _verify_patch_history(api: ReadOnlyGitHub, version: str, sha: str,
     prior_patch = max(item[0] for item in previous)
     if prior_patch != patch - 1 or sum(item[0] == prior_patch for item in previous) != 1:
         raise DeploySelectionError("Предыдущая версия PATCH неоднозначна")
-    baseline = _tag_commit(api, next(tag for number, tag in previous if number == prior_patch))
+    previous_tag = next(tag for number, tag in previous if number == prior_patch)
+    baseline = _tag(api, previous_tag, allow_annotation=True)[0]
     release_merges = {number: item["merge_sha"] for number, item in observed.items()
                       if item["branch"] == branch}
     if len(set(release_merges.values())) != len(release_merges):
@@ -483,7 +501,7 @@ def select_emergency_release(api: ReadOnlyGitHub, version: str) -> SelectedRelea
     workflow = MAIN_WORKFLOW if patch == 0 else RELEASE_WORKFLOW
     ci_branch = "main" if patch == 0 else branch
     release = _release(api, version)
-    tag_sha = _tag_commit(api, version)
+    tag_sha = _tag(api, version)[0]
     manifest_sha, manifest_branch, reason, published_state, published_source = _emergency_manifest(
         release["body"], version, api.repository, workflow,
     )
@@ -507,7 +525,7 @@ def select_emergency_release(api: ReadOnlyGitHub, version: str) -> SelectedRelea
         if run is None or select_successful_run(api, api.repository, workflow, tag_sha,
                                                 ci_branch, int(run[1]), int(run[2])) is None:
             raise DeploySelectionError("Успех полного CI в Release не подтверждён")
-    if _release(api, version) != release or _tag_commit(api, version) != tag_sha or _branch_head(api, branch) != head:
+    if _release(api, version) != release or _tag(api, version)[0] != tag_sha or _branch_head(api, branch) != head:
         raise DeploySelectionError("GitHub Release, tag или ветка изменились во время проверки")
     run = re.fullmatch(
         rf"https://github\.com/{re.escape(api.repository)}/actions/runs/([1-9][0-9]*)/attempts/([1-9][0-9]*)",
