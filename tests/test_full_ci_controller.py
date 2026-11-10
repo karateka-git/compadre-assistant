@@ -37,11 +37,11 @@ def admission_jobs(sha: str) -> list[dict]:
         return [{"name": name, "status": "completed", "conclusion": "success"} for name in names]
 
     return [
-        {"name": "main-full-controller", "head_sha": sha, "status": "completed",
+        {"name": "pre-release-check-full-controller", "head_sha": sha, "status": "completed",
          "conclusion": "success", "steps": steps(("Checkout exact main commit", "Decide full run"))},
-        {"name": "main-full / full-suite", "head_sha": sha, "status": "completed",
+        {"name": "pre-release-check-full / check-full-suite", "head_sha": sha, "status": "completed",
          "conclusion": "success", "steps": steps(admission.FULL_STEPS)},
-        {"name": "main-full / repository-compatibility", "head_sha": sha, "status": "completed",
+        {"name": "pre-release-check-full / check-full-repository-compatibility-check", "head_sha": sha, "status": "completed",
          "conclusion": "success", "steps": steps(admission.COMPATIBILITY_STEPS)},
     ]
 
@@ -130,7 +130,7 @@ class FullCiControllerTests(unittest.TestCase):
         api = FakeGitHub(
             runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]},
             jobs={"/actions/runs/1/jobs": [{
-                "name": "main-full / full-suite", "conclusion": "skipped", "steps": [],
+                "name": "pre-release-check-full / check-full-suite", "conclusion": "skipped", "steps": [],
             }]},
         )
         self.assertFalse(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
@@ -147,8 +147,8 @@ class FullCiControllerTests(unittest.TestCase):
             runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [
                 {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "completed"}]},
             jobs={"/actions/runs/1/jobs": [
-                {"name": "main-full / full-suite", "conclusion": "skipped"},
-                {"name": "main-full / repository-compatibility", "conclusion": "failure"}]},
+                {"name": "pre-release-check-full / check-full-suite", "conclusion": "skipped"},
+                {"name": "pre-release-check-full / check-full-repository-compatibility-check", "conclusion": "failure"}]},
         )
         self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 
@@ -157,7 +157,7 @@ class FullCiControllerTests(unittest.TestCase):
         run = {"id": 1, "head_sha": SHA_D, "head_branch": "main", "status": "completed"}
         api = FakeGitHub(
             runs={("/actions/workflows/main-full.yml/runs", SHA_D, None): [run]},
-            jobs={"/actions/runs/1/jobs": [{"name": "main-full / full-suite", "conclusion": "cancelled"}]},
+            jobs={"/actions/runs/1/jobs": [{"name": "pre-release-check-full / check-full-suite", "conclusion": "cancelled"}]},
         )
         self.assertTrue(controller.prior_full_attempt(api, controller.MAIN_WORKFLOW, SHA_D, "main"))
 

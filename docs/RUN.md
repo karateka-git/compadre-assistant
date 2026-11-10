@@ -31,9 +31,9 @@ python -m unittest discover -s tests
 ```
 
 Локальный запуск отдельного файла не заменяет проверку PR или допуск релиза.
-Состав `pr-fast` находится в [workflow PR](../.github/workflows/pr-fast.yml),
+Состав `pr-check` находится в [workflow PR](../.github/workflows/pr-fast.yml),
 а полный набор и дополнительные проверки — в
-[full-suite](../.github/workflows/full-suite.yml). Условия выпуска описаны в
+[check-full-suite](../.github/workflows/full-suite.yml). Условия выпуска описаны в
 [RELEASES.md](RELEASES.md).
 
 ## Быстрый запуск через скрипты

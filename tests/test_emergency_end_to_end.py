@@ -143,7 +143,7 @@ class PatchApi(api_tests.FakeApi):
                      "created_at": "2026-10-16T07:58:00Z", "run_attempt": 1}
                     for number in (10, 11)]
         if path in ("/actions/runs/110/attempts/1/jobs", "/actions/runs/111/attempts/1/jobs"):
-            return [{"name": "pr-fast", "started_at": "2026-10-16T07:58:10Z",
+            return [{"name": "pr-check", "started_at": "2026-10-16T07:58:10Z",
                      "completed_at": "2026-10-16T07:59:00Z",
                      "conclusion": "failure" if "/110/" in path else "success"}]
         if path == "/rulesets/rule-suites":
@@ -230,7 +230,8 @@ class EmergencyEndToEndTests(unittest.TestCase):
                             self.assertIn("start_both", host.actions)
                             self.assertTrue(Path(state["last_good"]["backup_id"]).is_file())
                     original = api.posts[-1][1]["body"]
-                    for forged in (original.replace("pr-fast=failure", "pr-fast=success"),
+                    for forged in (original.replace("pr-check=failure", "pr-check=success"),
+                                   original.replace("pr-check=", "pr-fast="),
                                    original.replace("- PR #11", "- omitted #11"),
                                    original.replace("/runs/102/attempts/1", "/runs/999/attempts/1"),
                                    original.replace("Неподтверждённые или неуспешные проверки:",

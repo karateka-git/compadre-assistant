@@ -93,7 +93,7 @@ class RotationGitHub(PublishingGitHub):
         self._write("PATCH", f"/actions/variables/{PIN_NAME}", {"value": _sha(sha, PIN_NAME)}, 204)
 
     def dispatch_rotation(self, plan: RotationPlan) -> int:
-        """Запускает main-full с заданными pin и SHA.
+        """Запускает pre-release-check-full с заданными pin и SHA.
 
         Args:
             plan: Свежая принятая установка, reviewed pin и точный SHA main.
@@ -220,7 +220,7 @@ def review_rotation(api: PublishingGitHub, receipt: InstallationReceipt, *, pr: 
     if current_main != main_sha and _trusted_policy(_blob(api, current_main, POLICY_FILE)) != desired:
         raise RotationError("Текущий main больше не содержит проверенную CI policy")
     if _fast_at_merge(api, pull).state != "success":
-        raise RotationError("Для merge CI policy не подтверждён успешный pr-fast")
+        raise RotationError("Для merge CI policy не подтверждён успешный pr-check")
     return RotationPlan(receipt, policy_sha, main_sha)
 
 
@@ -299,7 +299,7 @@ def dispatch(api: RotationGitHub, plan: RotationPlan, *, read_fresh: Callable[[]
 
 def verify_rotation_run(api: EvidenceAPI, *, receipt: InstallationReceipt, policy_sha: str, main_sha: str,
                         run_id: int, attempt: int) -> Admission:
-    """Подтверждает точный полный main-full под новым reviewed pin и базой.
+    """Подтверждает точный полный pre-release-check-full под новым reviewed pin и базой.
 
     Args:
         api: Клиент чтения GitHub Actions, Contents и Variables.
@@ -329,7 +329,7 @@ def verify_rotation_run(api: EvidenceAPI, *, receipt: InstallationReceipt, polic
             or run.get("head_branch") != "main" or run.get("status") != "completed"
             or run.get("display_title") != RUN_TITLE_PREFIX + policy_sha
             or run.get("conclusion") != "success"):
-        raise RotationError("Не подтверждена указанная успешная попытка ручного main-full")
+        raise RotationError("Не подтверждена указанная успешная попытка ручного pre-release-check-full")
     policy = _trusted_policy(_blob(api, policy_sha, POLICY_FILE))
     if policy != _policy_for_receipt(policy, receipt):
         raise RotationError("Новый CI pin не указывает на принятый Release VPS")
@@ -351,7 +351,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("prepare", help="подготовить файл policy для отдельного PR")
     update = commands.add_parser("pin", help="обновить GitHub pin после слияния PR")
-    start = commands.add_parser("dispatch", help="явно запустить main-full с новым pin")
+    start = commands.add_parser("dispatch", help="явно запустить pre-release-check-full с новым pin")
     finish = commands.add_parser("finish", help="подтвердить точный CI run для активации на VPS")
     for command in (update, start, finish):
         command.add_argument("--pr", required=True, type=int)
@@ -379,7 +379,7 @@ def main() -> None:
             pin(api, plan, expected_old=args.expected_old_pin, read_fresh=read_fresh)
             print(f"Подтверждён GitHub CI pin {plan.policy_sha}")
         elif args.command == "dispatch":
-            print(f"Запущен main-full run={dispatch(api, plan, read_fresh=read_fresh)}")
+            print(f"Запущен pre-release-check-full run={dispatch(api, plan, read_fresh=read_fresh)}")
         else:
             verify_rotation_run(EvidenceAPI(api.repository, api.token), receipt=plan.receipt,
                                 policy_sha=plan.policy_sha, main_sha=plan.main_sha,

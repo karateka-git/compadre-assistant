@@ -106,7 +106,7 @@ def _ensure_remote_branch_absent(api: ReadOnlyGitHub, branch: str) -> None:
 
 
 def prepare(api: ReadOnlyGitHub, branch: str, sha: str, *, publish_remote: bool = False) -> Admission:
-    """Проверяет точный commit, успешный main-full и состояние ветки.
+    """Проверяет точный commit, успешный pre-release-check-full и состояние ветки.
 
     Args:
         api: Клиент GitHub API с доступом на чтение.
@@ -140,7 +140,7 @@ def prepare(api: ReadOnlyGitHub, branch: str, sha: str, *, publish_remote: bool 
     checked_main_head(api, sha)
     admission = select_successful_run(api, EXPECTED_REPOSITORY, MAIN_WORKFLOW, sha, "main")
     if admission is None:
-        raise ReleaseBranchError("Нет успешного полного main-full для точного SHA")
+        raise ReleaseBranchError("Нет успешного полного pre-release-check-full для точного SHA")
     # Повторное чтение обнаруживает движение или переписывание main во время проверки CI.
     checked_main_head(api, sha)
     _ensure_remote_branch_absent(api, branch)
@@ -166,7 +166,7 @@ def publish_remote_branch(api: PublishingGitHub, branch: str, sha: str) -> Admis
     Args:
         api: GitHub-клиент с правом записи Git refs.
         branch: Имя release/X.Y, ранее созданное локально.
-        sha: Полный SHA успешного main-full.
+        sha: Полный SHA успешного pre-release-check-full.
 
     Returns:
         Повторно проверенный допуск полного CI.
@@ -194,7 +194,7 @@ def main() -> None:
     """Проверяет допуск и явно создаёт локальную либо удалённую ветку."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("branch", help="новая ветка release/X.Y")
-    parser.add_argument("sha", help="полный SHA успешного main-full")
+    parser.add_argument("sha", help="полный SHA успешного pre-release-check-full")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--check-only", action="store_true", help="только проверить допуск")
     modes.add_argument("--publish-remote", action="store_true", help="создать ветку на GitHub после локальной")
@@ -212,7 +212,7 @@ def main() -> None:
         elif arguments.check_only:
             action = "Проверено"
         print(f"{action}: {arguments.branch} -> {admission.sha}; "
-              f"main-full run={admission.run_id}, attempt={admission.run_attempt}")
+              f"pre-release-check-full run={admission.run_id}, attempt={admission.run_attempt}")
     except (AdmissionError, ControllerError, PublishingError, ReleaseBranchError,
             KeyError, TypeError, ValueError) as error:
         print(f"Release branch: {error}", file=sys.stderr)

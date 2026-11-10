@@ -20,7 +20,10 @@ import zipfile
 
 from scripts import deploy_prepare as prep
 from scripts.ci_repository_compatibility import ReleaseTagEvidence, verify_baseline
-from scripts.full_ci_admission import Admission, COMPATIBILITY_STEPS, select_successful_run
+from scripts.full_ci_admission import (
+    Admission, COMPATIBILITY_CHECK, COMPATIBILITY_STEPS, FULL_CALLERS, MAIN_WORKFLOW,
+    RELEASE_WORKFLOW, select_successful_run,
+)
 from scripts.full_ci_controller import GitHub
 from scripts.repository_compatibility_contract import load_policy, verify_report, verify_tests
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
@@ -31,7 +34,7 @@ MAX_ARTIFACT = 64 * 1024 * 1024
 HARNESS = ("ci_repository_compatibility.py", "repository_compatibility_contract.py",
            "repository_compatibility_policy.json", "check_repository_compatibility.py",
            "repository_compatibility_worker.py", "repository_compatibility_cases.py")
-WORKFLOWS = ("full-suite.yml", "main-full.yml", "release-full.yml")
+WORKFLOWS = ("full-suite.yml", MAIN_WORKFLOW, RELEASE_WORKFLOW)
 
 
 class PredeployError(ValueError):
@@ -230,12 +233,12 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     """
     if not re.fullmatch(r"[0-9a-f]{40}", policy_sha):
         raise PredeployError("SAFE_POLICY_PIN")
-    branch = "main" if selected.workflow == "main-full.yml" else selected.branch
+    branch = "main" if selected.workflow == MAIN_WORKFLOW else selected.branch
     if not isinstance(selected, Admission) and selected.kind == "emergency":
         run = api.get(f"/actions/runs/{selected.run_id}/attempts/{selected.run_attempt}")
         workflow = api.get(f"/actions/workflows/{selected.workflow}")
         path = f".github/workflows/{selected.workflow}"
-        if (selected.workflow not in ("main-full.yml", "release-full.yml")
+        if (selected.workflow not in FULL_CALLERS
                 or run.get("id") != selected.run_id or run.get("run_attempt") != selected.run_attempt
                 or run.get("head_sha") != selected.sha or run.get("head_branch") != branch
                 or run.get("repository", {}).get("full_name") != selected.repository
@@ -245,10 +248,10 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
                 or run.get("event") not in ("push", "workflow_dispatch")
                 or run.get("status") != "completed"):
             raise PredeployError("SAFE_CI_PROVENANCE")
-        caller = selected.workflow.removesuffix(".yml")
+        caller = FULL_CALLERS[selected.workflow]
         jobs = [job for job in api.pages(
             f"/actions/runs/{selected.run_id}/attempts/{selected.run_attempt}/jobs", key="jobs")
-            if job.get("name") == f"{caller} / repository-compatibility"]
+            if job.get("name") == f"{caller} / {COMPATIBILITY_CHECK}"]
         if len(jobs) != 1:
             raise PredeployError("SAFE_CI_JOB_MISSING")
         job = jobs[0]

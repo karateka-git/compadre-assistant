@@ -1,4 +1,4 @@
-"""Повторно запускает актуальный hotfix-deps после слияния зависимости."""
+"""Повторно запускает актуальный pr-merge-main-check после слияния зависимости."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from scripts.check_hotfix_pairs import (
     require_repository,
 )
 from scripts.create_release_branch import EXPECTED_REPOSITORY
-from scripts.full_ci_admission import SHA_PATTERN
+from scripts.full_ci_admission import PR_MERGE_MAIN_CHECK, PR_WORKFLOW, SHA_PATTERN
 from scripts.full_ci_controller import ControllerError, GitHub
 
 
@@ -71,7 +71,7 @@ def target_prs(api: GitHub, event: dict) -> tuple[dict, ...]:
 
 
 def current_failed_job(api: GitHub, pr: dict) -> int | None:
-    """Находит failed hotfix-deps для текущих head и base PR.
+    """Находит failed pr-merge-main-check для текущих head и base PR.
 
     Args:
         api: Читающий клиент GitHub.
@@ -92,7 +92,7 @@ def current_failed_job(api: GitHub, pr: dict) -> int | None:
     if not all(isinstance(sha, str) and SHA_PATTERN.fullmatch(sha)
                for sha in (head_sha, base_sha, merge_sha)):
         raise RerunError("Неизвестен текущий head, base или test-merge SHA PR")
-    runs = api.pages("/actions/workflows/pr-fast.yml/runs", key="workflow_runs",
+    runs = api.pages(f"/actions/workflows/{PR_WORKFLOW}/runs", key="workflow_runs",
                      event="pull_request")
     matches = []
     for run in runs:
@@ -116,25 +116,25 @@ def current_failed_job(api: GitHub, pr: dict) -> int | None:
             raise RerunError("Некорректный ID актуального run")
         matches.append(run)
     if not matches:
-        raise PendingCheck("Нет pr-fast run текущих head/base PR")
+        raise PendingCheck("Нет pr-check run текущих head/base PR")
     run = max(matches, key=lambda item: item["id"])
     if run.get("status") != "completed":
-        raise PendingCheck("Актуальный pr-fast run ещё не завершён")
+        raise PendingCheck("Актуальный pr-check run ещё не завершён")
     jobs = api.pages(f"/actions/runs/{run['id']}/jobs", key="jobs", filter="latest")
-    selected = [job for job in jobs if isinstance(job, dict) and job.get("name") == "hotfix-deps"]
+    selected = [job for job in jobs if isinstance(job, dict) and job.get("name") == PR_MERGE_MAIN_CHECK]
     if not selected:
-        raise PendingCheck("Актуальный hotfix-deps ещё не появился в API")
+        raise PendingCheck("Актуальный pr-merge-main-check ещё не появился в API")
     if len(selected) != 1:
-        raise RerunError("Нужен ровно один завершённый failed hotfix-deps")
+        raise RerunError("Нужен ровно один завершённый failed pr-merge-main-check")
     if selected[0].get("status") != "completed":
-        raise PendingCheck("Актуальный hotfix-deps ещё не завершён")
+        raise PendingCheck("Актуальный pr-merge-main-check ещё не завершён")
     if selected[0].get("conclusion") == "success":
         return None
     if selected[0].get("conclusion") != "failure":
-        raise RerunError("Нужен ровно один завершённый failed hotfix-deps")
+        raise RerunError("Нужен ровно один завершённый failed pr-merge-main-check")
     job_id = selected[0].get("id")
     if not isinstance(job_id, int) or job_id < 1:
-        raise RerunError("Некорректный ID hotfix-deps")
+        raise RerunError("Некорректный ID pr-merge-main-check")
     return job_id
 
 
@@ -168,7 +168,7 @@ def rerun_job(api: GitHub, job_id: int) -> None:
             if response.status != 201:
                 raise RerunError(f"GitHub не принял rerun: HTTP {response.status}")
     except Exception as error:
-        raise RerunError(f"Не подтверждён rerun hotfix-deps: {error}") from error
+        raise RerunError(f"Не подтверждён rerun pr-merge-main-check: {error}") from error
 
 
 def main() -> None:
@@ -192,7 +192,7 @@ def main() -> None:
                     fresh = _unchanged_pull(api, target)
                     job_id = current_failed_job(api, fresh)
                     if job_id is None:
-                        print(f"PR #{target['number']}: hotfix-deps успешен; rerun не нужен")
+                        print(f"PR #{target['number']}: pr-merge-main-check успешен; rerun не нужен")
                         continue
                     check_pr(api, target["number"], target["base"]["ref"])
                     # Проверка ссылок обращается к API: после неё снова сверяем
@@ -201,7 +201,7 @@ def main() -> None:
                     if current_failed_job(api, fresh) != job_id:
                         raise PendingCheck("Актуальный job изменился перед rerun")
                     rerun_job(api, job_id)
-                    print(f"Запрошен rerun hotfix-deps job {job_id} для PR #{target['number']}")
+                    print(f"Запрошен rerun pr-merge-main-check job {job_id} для PR #{target['number']}")
                 except PendingCheck:
                     waiting.append(target)
                 except (ControllerError, HotfixError, RerunError, KeyError, TypeError, ValueError) as error:
@@ -210,7 +210,7 @@ def main() -> None:
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                failed.extend(f"PR #{target['number']}: истёк срок ожидания актуального pr-fast"
+                failed.extend(f"PR #{target['number']}: истёк срок ожидания актуального pr-check"
                               for target in waiting)
                 break
             # Все готовые линии обработаны до паузы: pending одной линии

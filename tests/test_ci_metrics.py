@@ -39,8 +39,8 @@ class MetricsTests(unittest.TestCase):
 
     def test_failed_suite_is_full_and_preserved(self):
         """Отказ полного набора остаётся полным типом с измеренными шагами."""
-        jobs = [job("main-full-controller", "success"),
-                job("main-full / full-suite", "failure")]
+        jobs = [job("pre-release-check-full-controller", "success"),
+                job("pre-release-check-full / check-full-suite", "failure")]
         report = ci_metrics.summarize(run(), jobs, "main-full.yml", REPO, 12, 2, SHA)
         self.assertEqual((report["kind"], report["result"], report["seconds"]),
                          ("full-main", "failure", 60))
@@ -48,15 +48,15 @@ class MetricsTests(unittest.TestCase):
 
     def test_skipped_suite_is_distinct(self):
         """Успешный controller с skipped suite не выглядит полным прогоном."""
-        jobs = [job("main-full-controller", "success"),
-                job("main-full", "skipped")]
+        jobs = [job("pre-release-check-full-controller", "success"),
+                job("pre-release-check-full", "skipped")]
         report = ci_metrics.summarize(run(), jobs, "main-full.yml", REPO, 12, 2, SHA)
         self.assertEqual((report["kind"], report["result"]), ("skipped", "success"))
 
     def test_wrong_attempt_or_sha_rejected(self):
         """История другой попытки и job другого SHA не загрязняют отчёт."""
-        jobs = [job("main-full-controller", "success"),
-                job("main-full / full-suite", "success")]
+        jobs = [job("pre-release-check-full-controller", "success"),
+                job("pre-release-check-full / check-full-suite", "success")]
         with self.assertRaises(ci_metrics.MetricsError):
             ci_metrics.summarize(run(1), jobs, "main-full.yml", REPO, 12, 2, SHA)
         jobs[0]["head_sha"] = "b" * 40
@@ -72,27 +72,33 @@ class MetricsTests(unittest.TestCase):
     def test_previous_uses_only_same_kind(self):
         """Сравнение пропускает skipped и выбирает успешный full-main."""
         current = ci_metrics.summarize(
-            run(), [job("main-full-controller", "success"),
-                    job("main-full / full-suite", "success")],
+            run(), [job("pre-release-check-full-controller", "success"),
+                    job("pre-release-check-full / check-full-suite", "success")],
             "main-full.yml", REPO, 12, 2, SHA)
+        with self.assertRaises(ci_metrics.MetricsError):
+            ci_metrics.summarize(run(), [job("main-full / full-suite", "success")],
+                                 "main-full.yml", REPO, 12, 2, SHA)
 
         class FakeApi:
-            """Возвращает две завершённые попытки разных типов."""
+            """Возвращает старое имя, пропущенный и полный прогоны."""
 
             def get(self, path, **params):
                 """Возвращает историю без обращения к сети."""
                 return {"workflow_runs": [
                     {**run(1), "id": 11, "run_number": 11, "status": "completed"},
-                    {**run(1), "id": 10, "run_number": 10, "status": "completed"}]}
+                    {**run(1), "id": 10, "run_number": 10, "status": "completed"},
+                    {**run(1), "id": 9, "run_number": 9, "status": "completed"}]}
 
             def jobs(self, run_id, attempt):
                 """Возвращает jobs заданного run."""
-                return [job("main-full-controller", "success", run_id=run_id, attempt=attempt),
-                        job("main-full" if run_id == 11 else "main-full / full-suite",
-                            "skipped" if run_id == 11 else "success", run_id=run_id, attempt=attempt)]
+                if run_id == 11:
+                    return [job("main-full / full-suite", "success", run_id=run_id, attempt=attempt)]
+                return [job("pre-release-check-full-controller", "success", run_id=run_id, attempt=attempt),
+                        job("pre-release-check-full" if run_id == 10 else "pre-release-check-full / check-full-suite",
+                            "skipped" if run_id == 10 else "success", run_id=run_id, attempt=attempt)]
 
         previous = ci_metrics.comparable_previous(FakeApi(), current)
-        self.assertEqual(previous["run_id"], 10)
+        self.assertEqual(previous["run_id"], 9)
         self.assertIn("+0 с", ci_metrics.render(current, previous))
 
     def test_api_error_does_not_echo_response_or_token(self):
@@ -106,12 +112,12 @@ class MetricsTests(unittest.TestCase):
 
     def test_previous_failure_is_not_compared_to_success(self):
         """Быстрый отказ нельзя выдавать за ускорение успешного полного набора."""
-        current = ci_metrics.summarize(run(), [job("main-full / full-suite", "success")],
+        current = ci_metrics.summarize(run(), [job("pre-release-check-full / check-full-suite", "success")],
                                        "main-full.yml", REPO, 12, 2, SHA)
         with patch.object(ci_metrics.GitHub, "get", return_value={"workflow_runs": [
             {**run(1), "id": 11, "run_number": 11, "status": "completed"},
         ]}), patch.object(ci_metrics.GitHub, "jobs", return_value=[
-            job("main-full / full-suite", "failure", run_id=11, attempt=1),
+            job("pre-release-check-full / check-full-suite", "failure", run_id=11, attempt=1),
         ]):
             self.assertIsNone(ci_metrics.comparable_previous(ci_metrics.GitHub(REPO, "token"), current))
 
@@ -127,7 +133,7 @@ class MetricsTests(unittest.TestCase):
             ]), patch.object(ci_metrics.GitHub, "get", side_effect=[
                 run(), ci_metrics.MetricsError("GitHub API: HTTP 403"),
             ]), patch.object(ci_metrics.GitHub, "jobs", return_value=[
-                job("main-full / full-suite", "failure"),
+                job("pre-release-check-full / check-full-suite", "failure"),
             ]):
                 with self.assertRaises(SystemExit) as caught:
                     ci_metrics.main()
@@ -140,13 +146,13 @@ class MetricsTests(unittest.TestCase):
     def test_pr_type_requires_pr_job(self):
         """Короткий тип не присваивается чужому набору jobs."""
         with self.assertRaises(ci_metrics.MetricsError):
-            ci_metrics.classify("pr-fast.yml", [job("hotfix-deps", "success")])
+            ci_metrics.classify("pr-fast.yml", [job("pr-merge-main-check", "success")])
 
 
     def test_pr_preserves_distinct_head_and_job_sha(self):
         """SHA merge не смешивается с head PR; чужая попытка отвергается."""
         pr_run = {**run(), "event": "pull_request", "path": ".github/workflows/pr-fast.yml"}
-        pr_job = {**job("pr-fast", "success"), "head_sha": "b" * 40}
+        pr_job = {**job("pr-check", "success"), "head_sha": "b" * 40}
         report = ci_metrics.summarize(pr_run, [pr_job], "pr-fast.yml", REPO, 12, 2, SHA)
         self.assertEqual(report["sha"], SHA)
         self.assertEqual(report["jobs"][0]["sha"], "b" * 40)
@@ -159,8 +165,8 @@ class MetricsTests(unittest.TestCase):
     def test_skipped_negative_timestamp_and_carried_over_job(self):
         """Особенности реальных skipped/rerun ответов не ломают отчёт."""
         pr_run = {**run(), "event": "pull_request", "path": ".github/workflows/pr-fast.yml"}
-        jobs = [job("pr-fast", "success"),
-                job("hotfix-deps", "skipped", end="2026-11-01T10:00:00Z")]
+        jobs = [job("pr-check", "success"),
+                job("pr-merge-main-check", "skipped", end="2026-11-01T10:00:00Z")]
         report = ci_metrics.summarize(pr_run, jobs, "pr-fast.yml", REPO, 12, 2, SHA)
         self.assertIsNone(report["jobs"][1]["seconds"])
         pr_run["run_started_at"] = "2026-11-01T10:02:00Z"
@@ -179,7 +185,7 @@ class MetricsTests(unittest.TestCase):
             with patch.dict(os.environ, env, clear=True), patch("sys.argv", [
                     "ci_metrics", "--output", str(output)]), patch.object(
                     ci_metrics.GitHub, "get", side_effect=[run(), {"workflow_runs": []}]) as get, patch.object(
-                    ci_metrics.GitHub, "jobs", return_value=[job("main-full / full-suite", "failure")]):
+                    ci_metrics.GitHub, "jobs", return_value=[job("pre-release-check-full / check-full-suite", "failure")]):
                 with self.assertRaises(SystemExit) as caught:
                     ci_metrics.main()
             self.assertEqual(caught.exception.code, 0)
@@ -212,13 +218,25 @@ class MetricsTests(unittest.TestCase):
     def test_workflows_collect_after_all_checks_even_on_failure(self):
         """Реальные YAML сохраняют отчёт после failed/skipped проверок."""
         root = Path(__file__).resolve().parents[1]
-        for workflow, dependencies in [("main-full", ["controller", "full-suite"]),
-                                       ("release-full", ["controller", "full-suite"]),
-                                       ("pr-fast", ["pr-fast", "hotfix-deps"])]:
+        workflows = root / ".github/workflows"
+        suite = yaml.safe_load((workflows / "full-suite.yml").read_text(encoding="utf-8"))
+        self.assertEqual(suite["name"], "check-full-suite")
+        self.assertEqual(suite["jobs"]["full-suite"]["name"], "check-full-suite")
+        self.assertEqual(suite["jobs"]["repository-compatibility"]["name"],
+                         "check-full-repository-compatibility-check")
+        for workflow, label, job_names in (
+            ("main-full", "pre-release-check-full", {"controller": "pre-release-check-full-controller",
+                                                      "full-suite": "pre-release-check-full"}),
+            ("release-full", "release-check-full", {"controller": "release-check-full-controller",
+                                                    "full-suite": "release-check-full"}),
+            ("pr-fast", "pr-check", {"pr-fast": "pr-check", "hotfix-deps": "pr-merge-main-check"}),
+        ):
             with self.subTest(workflow=workflow):
-                data = yaml.safe_load((root / ".github/workflows" / (workflow + ".yml")).read_text(encoding="utf-8"))
+                data = yaml.safe_load((workflows / (workflow + ".yml")).read_text(encoding="utf-8"))
+                self.assertEqual(data["name"], label)
+                self.assertEqual({job: data["jobs"][job]["name"] for job in job_names}, job_names)
                 metrics = data["jobs"]["ci-metrics"]
-                self.assertEqual(metrics["needs"], dependencies)
+                self.assertEqual(metrics["needs"], list(job_names))
                 self.assertEqual(metrics["if"], "${{ always() }}")
                 self.assertEqual(metrics["permissions"], {"actions": "read", "contents": "read"})
                 steps = {step["name"]: step for step in metrics["steps"]}

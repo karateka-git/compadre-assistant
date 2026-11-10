@@ -1,4 +1,4 @@
-name: Main full
+name: pre-release-check-full
 run-name: ${{ inputs.rotation_policy_sha && format('CI baseline {0}', inputs.rotation_policy_sha) || '' }}
 
 on:
@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   controller:
-    name: main-full-controller
+    name: pre-release-check-full-controller
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -47,7 +47,7 @@ jobs:
         run: python -m scripts.full_ci_controller main
 
   full-suite:
-    name: main-full
+    name: pre-release-check-full
     needs: controller
     if: needs.controller.outputs.run-full == 'true'
     permissions:

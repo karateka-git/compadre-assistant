@@ -1,4 +1,4 @@
-name: PR fast
+name: pr-check
 
 on:
   pull_request:
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   pr-fast:
-    name: pr-fast
+    name: pr-check
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -63,7 +63,7 @@ jobs:
           python -m scripts.ci_watch compose -- docker compose --env-file .env.example config --quiet
 
   hotfix-deps:
-    name: hotfix-deps
+    name: pr-merge-main-check
     if: startsWith(github.event.pull_request.base.ref, 'release/')
     runs-on: ubuntu-24.04
     timeout-minutes: 10

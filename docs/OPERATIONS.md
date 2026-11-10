@@ -71,8 +71,8 @@ sudo docker ps --filter label=com.docker.compose.project=obs-chat-bot \
 ```
 
 Обычный выпуск выполняется только для опубликованного GitHub Release с
-успешным полным CI точного коммита: `main-full` для новой линии из проверенного
-`main` либо `release-full` для нового SHA существующей релизной линии. После проверки текущего
+успешным полным CI точного коммита: `pre-release-check-full` для новой линии из проверенного
+`main` либо `release-check-full` для нового SHA существующей релизной линии. После проверки текущего
 состояния и согласования эксплуатационного окна команда
 `sudo deploy-prod vX.Y.Z` сама сверяет Release, закрепляет образ, создаёт backup, останавливает
 оба канала, при необходимости применяет миграции и проверяет запуск обоих.
@@ -389,14 +389,14 @@ python -m scripts.rotate_ci_baseline @installationArgs prepare
 Если объекта нет, получите его из GitHub. Если SQLite API изменился и
 матрица больше ему не соответствует, согласуйте изменения матрицы и её
 тестов до ротации. Просмотрите diff и проведите отдельный PR с review,
-зелёным `pr-fast` и merge commit. Для `git push` требуется явное согласие
+зелёным `pr-check` и merge commit. Для `git push` требуется явное согласие
 пользователя. После push перечитайте `AGENTS.md`.
 
 После слияния получите номер PR, полный SHA текущего `main` и прежнее
 значение `COMPATIBILITY_POLICY_SHA`. Команды `pin` и `dispatch` изменяют
 GitHub и выполняются оператором по явному согласованию владельца. `pin`
 переводит переменную на точный reviewed merge commit и читает её обратно.
-`dispatch` запускает отдельный полный `main-full` с новым pin для выбранного
+`dispatch` запускает отдельный полный `pre-release-check-full` с новым pin для выбранного
 SHA даже при старом зелёном CI того же коммита.
 
 ```powershell
@@ -565,7 +565,7 @@ marker и rollback действуют как обычно. Настоящий а
 пока не испытан.
 
 Действующий controller в режиме emergency не обходит
-`repository-compatibility`: нужны успешные steps этого
+`check-full-repository-compatibility-check`: нужны успешные steps этого
 job и доверенное evidence точного run/attempt, совпадающие с установленной
 базой. Ошибка API, pin/evidence или предварительной SQLite-копии даёт отказ
 до marker/остановки. Внешние `compatibility-policy.sha` и

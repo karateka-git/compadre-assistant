@@ -32,7 +32,7 @@ class FakeApi(GroupApi):
         self.pulls[10]["base"]["sha"] = BASE
         self.pulls[11].update({"state": "open", "head": {"sha": "2" * 40}})
         self.runs = [self.run(10, HEAD)]
-        self.jobs = [{"id": 77, "name": "hotfix-deps", "status": "completed",
+        self.jobs = [{"id": 77, "name": "pr-merge-main-check", "status": "completed",
                       "conclusion": "failure"}]
 
     def run(self, number: int, head: str) -> dict:
@@ -71,6 +71,7 @@ class RerunTests(unittest.TestCase):
         """Первый merge запускает код из merge SHA, а не прежнего base SHA."""
         workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
                     "hotfix-deps-rerun.yml").read_text(encoding="utf-8")
+        self.assertTrue(workflow.startswith("name: pr-merge-main-rerun\n"))
         self.assertIn("ref: ${{ github.event.pull_request.merge_commit_sha }}", workflow)
         self.assertNotIn("ref: ${{ github.event.pull_request.base.sha }}", workflow)
         self.assertIn("persist-credentials: false", workflow)
@@ -165,7 +166,7 @@ class RerunTests(unittest.TestCase):
         self.api.jobs = []
         with self.assertRaises(rerun.PendingCheck):
             rerun.current_failed_job(self.api, pr)
-        self.api.jobs = [{"name": "hotfix-deps", "status": "in_progress"}]
+        self.api.jobs = [{"name": "pr-merge-main-check", "status": "in_progress"}]
         with self.assertRaises(rerun.PendingCheck):
             rerun.current_failed_job(self.api, pr)
 

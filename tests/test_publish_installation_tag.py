@@ -265,7 +265,7 @@ class PublishInstallationTagTests(unittest.TestCase):
             "Причина: исправление\n"
             f"Полный CI: release-full.yml failure — https://github.com/{EXPECTED_REPOSITORY}/actions/runs/1/attempts/1\n"
             f"PR и состояние на момент merge:\n- PR #4 -> release/3.4; merge `{SHA}` "
-            "(release); pr-fast=success [ci]; bypass=no\nНеподтверждённые или неуспешные проверки:"
+            "(release); pr-check=success [ci]; bypass=no\nНеподтверждённые или неуспешные проверки:"
         )
         receipt = replace(RECEIPT, kind="emergency")
         self.assertIsNone(installation.summarize(api, VERSION, SHA)["run_id"])

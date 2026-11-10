@@ -13,7 +13,8 @@ from urllib.parse import quote
 from scripts.check_hotfix_pairs import HotfixError, check_release
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, checked_main_head
 from scripts.full_ci_admission import (
-    AdmissionError, MAIN_WORKFLOW, RELEASE_WORKFLOW, SHA_PATTERN, select_successful_run,
+    AdmissionError, MAIN_WORKFLOW, PR_CHECK, PR_WORKFLOW, RELEASE_WORKFLOW, SHA_PATTERN,
+    select_successful_run,
 )
 from scripts.full_ci_controller import ControllerError, GitHub, tag_commit
 from scripts.github_publishing import PublishingError, PublishingGitHub
@@ -123,23 +124,23 @@ def _pull(api: GitHub, number: int, expected_branch: str, candidate: str,
 
 
 def _fast_at_merge(api: GitHub, pr: dict) -> CheckSnapshot:
-    """Восстанавливает состояние job pr-fast на момент merge по попыткам workflow."""
+    """Восстанавливает состояние job pr-check на момент merge по попыткам workflow."""
     merged = _time(pr["merged_at"])
     assert merged is not None
-    metadata = api.get("/actions/workflows/pr-fast.yml")
+    metadata = api.get(f"/actions/workflows/{PR_WORKFLOW}")
     if (not isinstance(metadata, dict) or type(metadata.get("id")) is not int or
-            metadata.get("path") != ".github/workflows/pr-fast.yml"):
-        raise EmergencyPublishError("Workflow pr-fast нельзя идентифицировать")
+            metadata.get("path") != f".github/workflows/{PR_WORKFLOW}"):
+        raise EmergencyPublishError("Workflow pr-check нельзя идентифицировать")
     head = pr["head"]["sha"]
     # pull_request workflow проверяет синтетический merge commit: run.head_sha
     # не обязан совпадать с PR head. Связываем run по сохранённым данным PR.
-    runs = api.pages("/actions/workflows/pr-fast.yml/runs", key="workflow_runs", event="pull_request")
+    runs = api.pages(f"/actions/workflows/{PR_WORKFLOW}/runs", key="workflow_runs", event="pull_request")
     observed: list[tuple[datetime, int, int, CheckSnapshot]] = []
     relevant_run = False
     ambiguous_run = False
     for run in runs:
         if not isinstance(run, dict):
-            raise EmergencyPublishError("Некорректный run pr-fast")
+            raise EmergencyPublishError("Некорректный run pr-check")
         if run.get("workflow_id") != metadata["id"] or run.get("event") != "pull_request":
             continue
         pull_refs = run.get("pull_requests")
@@ -161,15 +162,15 @@ def _fast_at_merge(api: GitHub, pr: dict) -> CheckSnapshot:
         attempt_count = run.get("run_attempt")
         run_id = run.get("id")
         if created is None or type(attempt_count) is not int or attempt_count < 1 or type(run_id) is not int:
-            raise EmergencyPublishError("Некорректные метаданные run pr-fast")
+            raise EmergencyPublishError("Некорректные метаданные run pr-check")
         if created > merged:
             continue
         relevant_run = True
         for attempt in range(1, attempt_count + 1):
             jobs = api.pages(f"/actions/runs/{run_id}/attempts/{attempt}/jobs", key="jobs")
-            matching = [job for job in jobs if isinstance(job, dict) and job.get("name") == "pr-fast"]
+            matching = [job for job in jobs if isinstance(job, dict) and job.get("name") == PR_CHECK]
             if len(matching) > 1:
-                raise EmergencyPublishError("Неоднозначный job pr-fast")
+                raise EmergencyPublishError("Неоднозначный job pr-check")
             if not matching:
                 continue
             job = matching[0]
@@ -353,7 +354,7 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
     for item in pulls:
         suffix = f"; rule suite {item.rule_suite_id}" if item.rule_suite_id else ""
         lines.append(f"- PR #{item.number} -> {item.branch}; merge `{item.merge_sha}` "
-                     f"({item.merged_at}); pr-fast={item.fast.state} [{item.fast.source}]; "
+                     f"({item.merged_at}); {PR_CHECK}={item.fast.state} [{item.fast.source}]; "
                      f"bypass={item.bypass}{suffix}")
     if pairs:
         lines.extend(("", "Парные PR исправлений:"))
@@ -367,7 +368,7 @@ def prepare(api: PublishingGitHub, version: str, sha: str, change: str, reason: 
              "подтверждён в main")
             for release, main, main_sha in pairs
         )
-    missing = [f"pr-fast PR #{item.number}: {item.fast.state}" for item in pulls
+    missing = [f"{PR_CHECK} PR #{item.number}: {item.fast.state}" for item in pulls
                if item.fast.state != "success"]
     if full.state != "success":
         missing.append(f"{workflow}: {full.state}")

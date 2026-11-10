@@ -1,4 +1,4 @@
-name: Full suite
+name: check-full-suite
 
 on:
   workflow_call:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   repository-compatibility:
-    name: repository-compatibility
+    name: check-full-repository-compatibility-check
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -57,7 +57,7 @@ jobs:
           retention-days: 90
 
   full-suite:
-    name: full-suite
+    name: check-full-suite
     needs: repository-compatibility
     runs-on: ubuntu-24.04
     timeout-minutes: 45

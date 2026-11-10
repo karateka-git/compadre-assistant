@@ -1,4 +1,4 @@
-name: Release full
+name: release-check-full
 
 on:
   push:
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   controller:
-    name: release-full-controller
+    name: release-check-full-controller
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
@@ -37,7 +37,7 @@ jobs:
         run: python -m scripts.full_ci_controller release
 
   full-suite:
-    name: release-full
+    name: release-check-full
     needs: controller
     if: needs.controller.outputs.run-full == 'true'
     permissions:
