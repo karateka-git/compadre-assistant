@@ -4,7 +4,7 @@ from copy import deepcopy
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePath, PurePosixPath, PureWindowsPath
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -78,10 +78,8 @@ class CompatibilityContractTests(unittest.TestCase):
                 with self.subTest(kind=kind), self.assertRaises(ValueError):
                     load_policy(path)
 
-    def test_report_rejects_sql_import_baseline_and_result_substitution(self) -> None:
-        """Подмена evidence не скрывается за зелёным агрегированным passed."""
-        policy = load_policy()
-        checkout = Path.cwd().resolve() / "fixture"
+    @staticmethod
+    def _report(policy: dict, checkout: PurePath) -> dict:
         source = "compadre_assistant/fixture.py"
         old = {source: "old", f"{MIGRATIONS}/0001_initial.sql": "sql1"}
         new = dict(old, **{f"{MIGRATIONS}/0002_added.sql": "sql2"})
@@ -92,12 +90,41 @@ class CompatibilityContractTests(unittest.TestCase):
         candidate = dict(worker, candidate_tests=tests, fresh_fingerprint="schema", upgraded_fingerprint="schema")
         behavior = dict(worker, old_tests=tests, schema_fingerprints=["schema"],
                         candidate_schema_observations=1, schema_errors=[])
-        report = {"passed": True, "previous_sha": policy["previous_sha"],
-                  "source_verification": "passed", "source_changes": {"previous": [], "candidate": []},
-                  "sources": {"previous": old, "candidate": new}, "previous_with_candidate_sql": new,
-                  "previous_seed": worker, "candidate_migrations_data_integrity": candidate,
-                  "old_repository_behavior": behavior,
-                  "candidate_verified_previous_updates": dict(worker, schema_fingerprint="schema")}
+        return {"passed": True, "previous_sha": policy["previous_sha"],
+                "source_verification": "passed", "source_changes": {"previous": [], "candidate": []},
+                "sources": {"previous": old, "candidate": new}, "previous_with_candidate_sql": new,
+                "previous_seed": worker, "candidate_migrations_data_integrity": candidate,
+                "old_repository_behavior": behavior,
+                "candidate_verified_previous_updates": dict(worker, schema_fingerprint="schema")}
+
+    def test_report_accepts_worker_paths_from_linux_and_windows(self) -> None:
+        """Формат путей зависит от worker, который создал отчёт."""
+        policy = load_policy()
+        for checkout in (PurePosixPath("/tmp/ci/checkout"), PureWindowsPath(r"C:\Temp\ci\checkout")):
+            with self.subTest(checkout=checkout):
+                verify_report(self._report(policy, checkout), policy)
+
+    def test_report_requires_absolute_checkout_and_tracked_import_origin(self) -> None:
+        """Происхождение импортов проверяется в обоих форматах путей."""
+        policy = load_policy()
+        for checkout in (PurePosixPath("/tmp/ci/checkout"), PureWindowsPath(r"C:\Temp\ci\checkout")):
+            for origin in (checkout.parent / "other/compadre_assistant/fixture.py",
+                           checkout / "../checkout/compadre_assistant/fixture.py",
+                           checkout / "compadre_assistant/untracked.py",
+                           type(checkout)("compadre_assistant/fixture.py")):
+                with self.subTest(checkout=checkout, origin=origin), self.assertRaises(ValueError):
+                    report = self._report(policy, checkout)
+                    report["previous_seed"]["imports"] = {"compadre_assistant.fixture": str(origin)}
+                    verify_report(report, policy)
+            with self.subTest(checkout=checkout.name), self.assertRaises(ValueError):
+                verify_report(self._report(policy, type(checkout)(checkout.name)), policy)
+
+    def test_report_rejects_sql_import_baseline_and_result_substitution(self) -> None:
+        """Подмена evidence не скрывается за зелёным агрегированным passed."""
+        policy = load_policy()
+        report = self._report(policy, Path.cwd().resolve() / "fixture")
+        source = "compadre_assistant/fixture.py"
+        new = report["sources"]["candidate"]
         verify_report(report, policy)
         for kind in ("baseline", "sql", "import", "source", "candidate", "fingerprint", "manifest"):
             changed = deepcopy(report)
