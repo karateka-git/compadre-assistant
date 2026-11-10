@@ -126,8 +126,44 @@ checkout по журналу задачи. Родители и дерево test
 времени попытки остановить ротацию до записи pin.
 [Прогон PR № 87](https://github.com/karateka-git/compadre-assistant/actions/runs/42799033792/attempts/1)
 
-Реальные PR, замена статусов, проверка блокировки и живой rerun остаются
-частью согласованного переключения в GitHub.
+### Результат переключения в GitHub 10.11.2026
+
+- В `main` калибровочный PR № 89 с base `d624e72` и head `4229837` прошёл
+  `pr-check` и `ci-metrics` в `42814692656/1`. PR слит в `ed8f850`.
+  Активный ruleset `25067104` требует `pr-check`.
+  [PR № 89](https://github.com/karateka-git/compadre-assistant/pull/89) ·
+  [Прогон](https://github.com/karateka-git/compadre-assistant/actions/runs/42814692656/attempts/1)
+- В `release/99.0` обе проверки с новыми именами в PR № 90 прошли в
+  `42815001601/1`. После замены единственного контекста `hotfix-deps` на
+  `pr-merge-main-check` в ruleset `25404080` GitHub показал `CLEAN`.
+  PR закрыт без слияния.
+  [PR № 90](https://github.com/karateka-git/compadre-assistant/pull/90) ·
+  [Прогон](https://github.com/karateka-git/compadre-assistant/actions/runs/42815001601/attempts/1)
+- GitHub заблокировал PR № 92, пока PR № 91 в `main` был открыт.
+  Обязательная задача `pr-merge-main-check` завершилась ошибкой
+  в `42815546180/1` (job `129827770887`). После слияния исправления Windows
+  в `c285aa5` автоматический `pr-merge-main-rerun` запросил повтор именно
+  этой задачи. В `42815546180/2` она прошла, GitHub использовал прежний
+  результат `pr-check` и снова выполнил `ci-metrics`.
+  [PR № 91](https://github.com/karateka-git/compadre-assistant/pull/91) ·
+  [PR № 92](https://github.com/karateka-git/compadre-assistant/pull/92) ·
+  [Отказ](https://github.com/karateka-git/compadre-assistant/actions/runs/42815546180/job/129827770887) ·
+  [Запрос повтора](https://github.com/karateka-git/compadre-assistant/actions/runs/42815822062/attempts/1) ·
+  [Успешный повтор](https://github.com/karateka-git/compadre-assistant/actions/runs/42815546180/attempts/2)
+- PR № 92 штатно слит в `release/99.0` на SHA
+  `4c67656947b05e6b53be5d7202b026f0c2217d76`. GitHub зафиксировал `pass`
+  для rule suite `5019977687`. В `release-check-full` `42816088566/1`
+  прошли проверка контроллера, обратная совместимость с `v3.2.0` под pin
+  `3f63161`, полный набор (1204 теста `unittest`, три smoke-проверки,
+  сборка и healthcheck образа) и `ci-metrics`.
+  [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/42816088566/attempts/1)
+
+`release/99.0` использовалась для технической проверки перехода. Для
+следующего выпуска отдельно проверить совпадение GitHub и VPS pin и
+полный CI точного SHA выпуска. В `release/3.2` остались workflow с прежними
+именами. При возобновлении работы в этой линии сначала провести проверенный
+PR переноса. Старые прогоны доступны в истории GitHub.
+[Workflow в `release/3.2` на 10.11.2026](https://github.com/karateka-git/compadre-assistant/blob/cabc0e24d28947123868db8a60f6b55095feb63e/.github/workflows/pr-fast.yml)
 
 ## Проверить допуск и активацию pin
 
@@ -207,5 +243,4 @@ GitHub и VPS подтвердили pin `3f631612e355f02258d0de3a05edad4965f317
 с миграцией `0004`, те же запущенные контейнеры Telegram и VK в состоянии
 `healthy` без рестартов и активный включённый таймер резервных копий.
 
-Для закрытия перехода остаются [проверки на релизной ветке](#проверить-смену-обязательных-статусов).
-Первый выпуск открывать после сверки обоих pin и допуска полного CI его точного SHA.
+Переход подтверждён [проверками на релизной ветке](#результат-переключения-в-github-10112026).
