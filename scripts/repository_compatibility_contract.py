@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 POLICY_PATH = Path(__file__).with_name("repository_compatibility_policy.json")
@@ -111,10 +111,16 @@ def verify_report(report: dict, policy: dict) -> None:
                          ("candidate_migrations_data_integrity", new),
                          ("candidate_verified_previous_updates", new)):
         worker = report[name]
-        checkout = Path(worker["environment"]["sys_path"][0])
+        checkout_origin = worker["environment"]["sys_path"][0]
+        # Пути в артефакте принадлежат runner, а не машине оператора.
+        checkout = PureWindowsPath(checkout_origin)
+        if not checkout.is_absolute():
+            checkout = PurePosixPath(checkout_origin)
+        if not checkout.is_absolute() or ".." in checkout.parts:
+            raise ValueError("invalid import checkout path")
         for origin in worker["imports"].values():
-            path = Path(origin)
-            if not path.is_absolute() or not path.is_relative_to(checkout):
+            path = type(checkout)(origin)
+            if not path.is_absolute() or ".." in path.parts or not path.is_relative_to(checkout):
                 raise ValueError("import origin escaped checkout")
             if path.relative_to(checkout).as_posix() not in source:
                 raise ValueError("import origin missing from exact Git source")
