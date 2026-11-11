@@ -9,13 +9,15 @@ from enum import Enum
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import GitHub
 from scripts.publish_installation_tag import InstallationReceipt, _published_release
-from scripts.release_sqlite_summary import InstallationSchemaEvidence, expected_migration_at
+from scripts.release_sqlite_summary import InstallationSchemaEvidence, build_summary, expected_migration_at
 
 
 ENVIRONMENT = "production"
 TASK = "compadre:acceptance"
 OWNER_ID = 42288695
 OWNER_LOGIN = "karateka-git"
+# Единственный выпуск, принятый до появления записи Deployments.
+LEGACY_INSTALLATION_VERSION = "v3.2.0"
 
 
 class DeploymentAcceptanceError(RuntimeError):
@@ -159,3 +161,59 @@ def require_accepted_deployment(api: GitHub, receipt: InstallationReceipt) -> De
     if record is None or record.state is not DeploymentState.SUCCESS:
         raise DeploymentAcceptanceError("Текущая приёмка GitHub Deployments не подтверждена")
     return record
+
+
+def summarize_deployment(api: GitHub, version: str, sha: str, release_id: int,
+                         run_id: int | None, run_attempt: int | None,
+                         expected_migration: str) -> dict[str, object]:
+    """Показывает сведения SQLite из проверенной записи Deployments.
+
+    Args:
+        api: Читающий GitHub-клиент репозитория выпуска.
+        version: Каноническая версия опубликованного выпуска.
+        sha: Полный SHA этого выпуска.
+        release_id: ID проверенного immutable Release.
+        run_id: Прогон CI обычного выпуска или None для аварийного.
+        run_attempt: Попытка CI обычного выпуска или None для аварийного.
+        expected_migration: Последняя миграция в точном коммите.
+
+    Returns:
+        Сводка записи при текущем доверенном success. Она не удостоверяет
+        актуальное состояние VPS без свежей технической приёмки.
+
+    Raises:
+        DeploymentAcceptanceError: Запись, payload или источник расходятся.
+        ControllerError: GitHub не ответил на обязательное чтение.
+    """
+    try:
+        summary = build_summary(version, sha, release_id, run_id, run_attempt, expected_migration, None)
+    except ValueError as error:
+        raise DeploymentAcceptanceError("Исходные данные сводки SQLite не подтверждены") from error
+    records = api.pages("/deployments", sha=sha, task=TASK, environment=ENVIRONMENT)
+    if not records:
+        return summary | {"deployment_id": None, "deployment_status_id": None,
+                          "deployment_state": "absent"}
+    if len(records) != 1 or not isinstance(records[0], dict):
+        raise DeploymentAcceptanceError("Неоднозначная запись Deployments для сводки SQLite")
+    payload = records[0].get("payload")
+    if not isinstance(payload, dict):
+        raise DeploymentAcceptanceError("Некорректный payload Deployments для сводки SQLite")
+    try:
+        # Заглушка нужна только для общей проверки формы; VPS здесь не читается.
+        record_claim = InstallationReceipt(**payload, runtime_id="0" * 64)
+    except (TypeError, ValueError) as error:
+        raise DeploymentAcceptanceError("Некорректный payload Deployments для сводки SQLite") from error
+    if ((record_claim.version, record_claim.sha, record_claim.release_id, record_claim.migration)
+            != (version, sha, release_id, expected_migration)
+            or (run_id is not None and (record_claim.run_id, record_claim.run_attempt) != (run_id, run_attempt))):
+        raise DeploymentAcceptanceError("Запись Deployments расходится с опубликованным Release")
+    record = read_deployment_record(api, record_claim)
+    if record is None:
+        raise DeploymentAcceptanceError("Запись Deployments исчезла во время сверки")
+    result = summary | {"deployment_id": record.deployment_id, "deployment_status_id": record.status_id,
+                        "deployment_state": record.state.value}
+    if record.state is not DeploymentState.SUCCESS:
+        return result
+    return result | {"installation_status": "accepted", "run_id": record_claim.run_id,
+                     "run_attempt": record_claim.run_attempt, "generation_id": record_claim.generation_id,
+                     "applied_migration": record_claim.migration}

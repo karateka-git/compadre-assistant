@@ -12,6 +12,7 @@ from scripts import deploy_ci_baseline as baseline
 from scripts import deploy_prod as prod
 from scripts import predeploy_compatibility as gate
 from scripts import rotate_ci_baseline as rotation
+from scripts.deployment_acceptance import DeploymentAcceptanceError
 from scripts.publish_installation_tag import InstallationReceipt
 from tests.test_predeploy_compatibility import ArtifactAPI, CANDIDATE_SHA, POLICY_SHA
 
@@ -108,6 +109,14 @@ class DeployCIBaselineTest(unittest.TestCase):
         with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_IDENTITY"):
             self.activate()
         with patch.object(self.api, "get", side_effect=OSError("GitHub недоступен")), self.assertRaises(OSError):
+            self.activate()
+        self.write.assert_not_called()
+        self.assertEqual(self.pin.read_text(encoding="utf-8").strip(), OLD_PIN)
+
+    def test_missing_deployment_acceptance_keeps_old_pin(self):
+        """Активация на VPS закрыта до новой независимой приёмки."""
+        self.accepted.side_effect = DeploymentAcceptanceError("Нет текущего success")
+        with self.assertRaises(DeploymentAcceptanceError):
             self.activate()
         self.write.assert_not_called()
         self.assertEqual(self.pin.read_text(encoding="utf-8").strip(), OLD_PIN)

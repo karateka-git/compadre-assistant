@@ -1818,6 +1818,8 @@ def main() -> None:
             _report_acceptance(host, args.version, args.verify_installed, machine=True)
         elif args.activate_ci_baseline is not None:
             from scripts import deploy_ci_baseline
+            from scripts.deployment_acceptance import DeploymentAcceptanceError
+            from scripts.full_ci_controller import ControllerError
             from scripts.rotate_ci_baseline import RotationError
 
             sha, expected_old, pin, main_sha, run_id, attempt, runtime_id = args.activate_ci_baseline
@@ -1825,7 +1827,8 @@ def main() -> None:
                 deploy_ci_baseline.activate(host, args.version, sha, expected_old=expected_old, policy_sha=pin,
                                             main_sha=main_sha, run_id=int(run_id), attempt=int(attempt),
                                             runtime_id=runtime_id)
-            except (DeployError, deploy_ci_baseline.DeployError, RotationError, compatibility.PredeployError) as error:
+            except (DeployError, deploy_ci_baseline.DeployError, RotationError, DeploymentAcceptanceError,
+                    ControllerError, compatibility.PredeployError) as error:
                 raise DeployError(f"База CI не активирована ({error})") from error
             print(f"deploy-prod ci_baseline={pin}", flush=True)
         else:

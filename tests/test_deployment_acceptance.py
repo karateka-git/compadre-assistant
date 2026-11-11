@@ -1,6 +1,6 @@
 """Проверяет чтение приёмки Deployments на локальной модели GitHub API."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import unittest
 
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
@@ -10,6 +10,8 @@ from scripts.deployment_acceptance import (
 )
 from scripts.full_ci_controller import ControllerError, GitHub
 from scripts.publish_installation_tag import InstallationReceipt
+from scripts.publish_installation_tag import summarize
+from scripts.rotate_ci_baseline import require_accepted_installation
 from scripts.release_sqlite_summary import MIGRATIONS_PREFIX
 
 
@@ -198,6 +200,77 @@ class DeploymentAcceptanceTests(unittest.TestCase):
         api.fail_path = "/deployments/7/statuses"
         with self.assertRaises(ControllerError):
             require_accepted_deployment(api, RECEIPT)
+
+    def test_rotation_uses_deployment_for_new_last_good_and_forward_recovery(self) -> None:
+        """Теговый fallback не допускает новый выпуск после обычного или forward recovery."""
+        api = FakeGitHub()
+        require_accepted_installation(api, RECEIPT)
+        api.statuses = []
+        with self.assertRaises(DeploymentAcceptanceError):
+            require_accepted_installation(api, RECEIPT)
+        api.statuses = [{"id": 8, "state": "success", "environment": "production", "creator": OWNER,
+                         "created_at": "2026-01-02T01:00:00Z"}]
+        recovered = replace(RECEIPT, runtime_id="9" * 64)
+        require_accepted_installation(api, recovered)
+        self.assertFalse(any(path.startswith("/git/ref/tags/production/") for path, _ in api.calls))
+
+    def test_summary_reads_only_verified_deployment_for_new_release(self) -> None:
+        """Сводка показывает SQLite только при текущем success точной записи."""
+        api = FakeGitHub()
+        accepted = summarize(api, VERSION, SHA)
+        self.assertEqual(accepted["installation_status"], "accepted")
+        self.assertEqual(accepted["deployment_state"], "success")
+        self.assertEqual(accepted["generation_id"], RECEIPT.generation_id)
+        self.assertEqual(accepted["applied_migration"], RECEIPT.migration)
+        self.assertIsNone(accepted["installation_tag_object_sha"])
+        self.assertFalse(any(path.startswith("/git/ref/tags/production/") for path, _ in api.calls))
+
+        api = FakeGitHub()
+        api.deployments = []
+        pending = summarize(api, VERSION, SHA)
+        self.assertEqual((pending["installation_status"], pending["deployment_state"]), ("pending", "absent"))
+        self.assertIsNone(pending["generation_id"])
+
+        api = FakeGitHub()
+        api.statuses[0]["state"] = "failure"
+        failed = summarize(api, VERSION, SHA)
+        self.assertEqual((failed["installation_status"], failed["deployment_state"]), ("pending", "failure"))
+        self.assertIsNone(failed["generation_id"])
+
+        api = FakeGitHub()
+        api.deployments[0]["payload"]["generation_id"] = "wrong"
+        with self.assertRaises(DeploymentAcceptanceError):
+            summarize(api, VERSION, SHA)
+
+    def test_emergency_summary_uses_ci_attempt_from_accepted_payload(self) -> None:
+        """Аварийный Release не содержит успешную попытку в манифесте."""
+        class EmergencyGitHub(FakeGitHub):
+            """Подставляет прямой тег и аварийный манифест Release."""
+
+            def get(self, path: str, **parameters: str | int) -> object:
+                """Читает аварийный Release, сохраняя остальные ответы fake."""
+                if path == f"/releases/tags/{VERSION}":
+                    result = super().get(path, **parameters)
+                    result["body"] = (
+                        f"Тип выпуска: аварийный\nCommit: `{SHA}`\nВетка: `release/3.4`\n"
+                        "Причина: исправление\n"
+                        f"Полный CI: release-full.yml failure — https://github.com/{EXPECTED_REPOSITORY}/actions/runs/1/attempts/1\n"
+                        f"PR и состояние на момент merge:\n- PR #4 -> release/3.4; merge `{SHA}` "
+                        "(release); pr-check=success [ci]; bypass=no\n"
+                        "Неподтверждённые или неуспешные проверки:"
+                    )
+                    return result
+                if path == f"/git/ref/tags/{VERSION}":
+                    self.calls.append((path, parameters))
+                    return {"ref": f"refs/tags/{VERSION}", "object": {"type": "commit", "sha": SHA}}
+                return super().get(path, **parameters)
+
+        api = EmergencyGitHub()
+        api.deployments[0]["payload"]["kind"] = "emergency"
+        summary = summarize(api, VERSION, SHA)
+        self.assertEqual((summary["installation_status"], summary["run_id"], summary["run_attempt"]),
+                         ("accepted", RECEIPT.run_id, RECEIPT.run_attempt))
+        require_accepted_installation(api, replace(RECEIPT, kind="emergency"))
 
 
 if __name__ == "__main__":

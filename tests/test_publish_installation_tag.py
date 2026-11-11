@@ -25,7 +25,7 @@ from scripts.release_sqlite_summary import MIGRATIONS_PREFIX, InstallationSchema
 from tests import test_deploy_acceptance as acceptance_tests
 
 
-VERSION = "v3.4.1"
+VERSION = "v3.2.0"
 SHA = "1" * 40
 RUNTIME_ID = "2" * 64
 TAG_OBJECT = "3" * 40
@@ -53,7 +53,7 @@ class FakeGitHub:
             "prerelease": False, "immutable": True, "published_at": "2026-01-01T01:00:00Z",
             "target_commitish": SHA,
             "body": (
-                f"Тип выпуска: обычный\nCommit: `{SHA}`\nВетка: `release/3.4`\n"
+                f"Тип выпуска: обычный\nCommit: `{SHA}`\nВетка: `release/3.2`\n"
                 f"Полный CI: https://github.com/{EXPECTED_REPOSITORY}/actions/runs/2/attempts/3"
             ),
         }
@@ -114,6 +114,14 @@ class FakeGitHub:
 
 class PublishInstallationTagTests(unittest.TestCase):
     """Проверяет привязку решения владельца и отказ без перезаписи."""
+
+    def test_new_release_cannot_publish_installation_tag(self):
+        """Для следующего выпуска тег не подменяет запись Deployments."""
+        api = FakeGitHub()
+        newer = replace(RECEIPT, version="v3.4.1")
+        with self.assertRaisesRegex(installation.InstallationTagError, "GitHub Deployments"):
+            installation.publish(api, lambda: newer, RUNTIME_ID)
+        self.assertEqual(api.posts, [])
 
     def test_reads_the_machine_receipt_from_deploy_prod(self):
         """Принимает настоящий вывод повторной приёмки на тестовой SQLite v2."""
@@ -261,10 +269,10 @@ class PublishInstallationTagTests(unittest.TestCase):
         api = FakeGitHub()
         api.tag = tag_ref(VERSION, "commit", SHA)
         api.release["body"] = (
-            f"Тип выпуска: аварийный\nCommit: `{SHA}`\nВетка: `release/3.4`\n"
+            f"Тип выпуска: аварийный\nCommit: `{SHA}`\nВетка: `release/3.2`\n"
             "Причина: исправление\n"
-            f"Полный CI: release-full.yml failure — https://github.com/{EXPECTED_REPOSITORY}/actions/runs/1/attempts/1\n"
-            f"PR и состояние на момент merge:\n- PR #4 -> release/3.4; merge `{SHA}` "
+            f"Полный CI: main-full.yml failure — https://github.com/{EXPECTED_REPOSITORY}/actions/runs/1/attempts/1\n"
+            f"PR и состояние на момент merge:\n- PR #4 -> release/3.2; merge `{SHA}` "
             "(release); pr-check=success [ci]; bypass=no\nНеподтверждённые или неуспешные проверки:"
         )
         receipt = replace(RECEIPT, kind="emergency")
