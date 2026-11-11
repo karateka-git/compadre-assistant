@@ -35,8 +35,8 @@ class CurrentSchemaHost(AcceptanceHost):
 class CleanupContractTests(unittest.TestCase):
     """Проверяет, когда чтение может перестать требовать прежний файл."""
 
-    def _fixture(self, root: Path) -> tuple[AcceptanceHost, dict]:
-        """Строит успешный переход на БД с актуальными миграциями."""
+    def _fixture(self, root: Path, *, kind: str = "ordinary") -> tuple[AcceptanceHost, dict]:
+        """Строит успешный переход указанного вида на БД с миграциями."""
         host = CurrentSchemaHost(root)
         initial = host.checkout / "data/app.db"
         initial.unlink()
@@ -52,7 +52,9 @@ class CleanupContractTests(unittest.TestCase):
                  "timer_before": {"enabled": False, "active": False},
                  "candidate": {"image_id": IMAGE, "sha": SHA, "tag": prep.pinned_tag(SHA),
                                "version": VERSION, "release_id": 41, "run_id": 107, "run_attempt": 2,
-                               "tag_object_sha": TAG_OBJECT, "kind": "ordinary"}}
+                               "tag_object_sha": TAG_OBJECT, "kind": kind},
+                 "deployment": {"kind": "emergency", "reason": "срочное восстановление"}
+                 if kind == "emergency" else None}
 
         def record(stage: str, **changes: object) -> None:
             """Сохраняет очередную durable стадию тестового перехода."""
@@ -68,7 +70,7 @@ class CleanupContractTests(unittest.TestCase):
         record("success", boot=boot, last_good={
             "version": VERSION, "sha": SHA, "image_id": IMAGE, "tag": prep.pinned_tag(SHA),
             "backup_id": state["snapshot"]["path"], "ci_run_id": 107,
-            "ci_run_attempt": 2, "kind": "ordinary",
+            "ci_run_attempt": 2, "kind": kind,
         })
         return host, state
 
