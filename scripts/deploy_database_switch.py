@@ -127,6 +127,7 @@ def _require_cleaned_old(host, state: dict, selected: dict) -> None:
         record = old_cleanup_record(state)
         cleanup = state.get("old_generation_cleanup")
         valid = (isinstance(cleanup, dict) and cleanup.keys() == record.keys()
+                 and "old_generation_cleanup_intent" not in state
                  and type(cleanup["version"]) is int and cleanup == record
                  and type(cleanup["old_device"]) is int and type(cleanup["old_inode"]) is int
                  and type(old["device"]) is int and type(old["inode"]) is int
