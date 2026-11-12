@@ -1,10 +1,12 @@
 """Проверяет локальный путь от перехода SQLite до следующего выпуска."""
 
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, redirect_stdout
 from dataclasses import asdict
+from io import StringIO
 import json
 from pathlib import Path
 import sqlite3
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -152,16 +154,30 @@ class CleanupFullRouteTests(unittest.TestCase):
               patch.object(deployment_fixture, "SHA", SHA),
               patch.object(deployment_fixture, "RECEIPT", receipt),
               patch.object(publishing_fixture, "SHA", SHA),
-              patch.object(api, "get", side_effect=get)):
-            record = publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)))
-            self.assertEqual(record.state.value, "success")
+              patch.object(api, "get", side_effect=get),
+              patch.object(publisher, "repository_from_origin", return_value=api.repository),
+              patch.object(publisher, "PublishingGitHub", return_value=api),
+              patch.object(publisher, "run_vps_command") as deploy,
+              patch.object(publisher, "read_receipt", side_effect=lambda *args, **kwargs:
+                           InstallationReceipt(**self._receipt(host))) as read_receipt,
+              patch.object(sys, "argv", ["publish_deployment_acceptance", VERSION, SHA, "--publish",
+                                         "--ssh-host", "operator@vps.example.invalid",
+                                         "--known-hosts", "unused-by-local-vps-fixture"])):
+            with redirect_stdout(StringIO()) as output:
+                publisher.main()
+            record = json.loads(output.getvalue())
+            self.assertEqual(record, {"deployment_id": 7, "status_id": 8, "state": "success"})
             self.assertEqual([path for path, _ in api.posts],
                              ["/deployments", "/deployments/7/statuses"])
             self.assertEqual(api.posts[0][1]["ref"], SHA)
             self.assertEqual(api.posts[0][1]["payload"],
                              {key: value for key, value in asdict(receipt).items() if key != "runtime_id"})
-            self.assertEqual(publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host))), record)
+            with redirect_stdout(StringIO()) as repeated_output:
+                publisher.main()
+            self.assertEqual(json.loads(repeated_output.getvalue()), record)
             self.assertEqual(len(api.posts), 2)
+            self.assertEqual(read_receipt.call_count, 5)
+            deploy.assert_not_called()
 
     def test_ordinary_emergency_and_forward_route(self) -> None:
         """Все пути сохраняют runtime, новую БД и rebind следующего перехода."""
