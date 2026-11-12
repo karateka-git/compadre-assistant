@@ -1,10 +1,13 @@
 """Проверяет локальный путь от перехода SQLite до следующего выпуска."""
 
-from contextlib import closing, nullcontext
+from contextlib import closing, contextmanager, nullcontext, redirect_stdout
 from dataclasses import asdict
+from io import StringIO
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -18,6 +21,7 @@ from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts import deploy_runtime as runtime
 from scripts import publish_deployment_acceptance as publisher
+from scripts import release_production as production
 from scripts.publish_installation_tag import InstallationReceipt
 from tests import test_deployment_acceptance as deployment_fixture
 from tests import test_publish_deployment_acceptance as publishing_fixture
@@ -109,13 +113,14 @@ class CleanupFullRouteTests(unittest.TestCase):
             return acceptance.verify_installed(host, VERSION, SHA)
 
     def _cleanup(self, host, runtime_id: str) -> dict:
-        """Моделирует подтверждение владельцем двух живых ответов одного runtime."""
+        """Выполняет серверную очистку для точной технической приёмки."""
         with (patch.object(prep, "deploy_lock", return_value=nullcontext()),
               patch.object(prep, "require_exact_tag")):
             return cleanup.cleanup_old(host, VERSION, SHA, runtime_id)
 
-    def _publish(self, host, runtime_id: str) -> None:
-        """Публикует только в памяти fake GitHub с повторной приёмкой SQLite."""
+    @contextmanager
+    def _github(self, host):
+        """Предоставляет локальную модель GitHub для текущего выпуска и SQLite."""
         receipt = InstallationReceipt(**self._receipt(host))
         api = publishing_fixture.WritableGitHub()
         original_get = api.get
@@ -153,16 +158,98 @@ class CleanupFullRouteTests(unittest.TestCase):
               patch.object(deployment_fixture, "RECEIPT", receipt),
               patch.object(publishing_fixture, "SHA", SHA),
               patch.object(api, "get", side_effect=get)):
-            record = publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)), runtime_id)
-            self.assertEqual(record.state.value, "success")
+            yield api, receipt
+
+    def _publish(self, host) -> None:
+        """Публикует только в памяти fake GitHub с повторной приёмкой SQLite."""
+        with (self._github(host) as (api, receipt),
+              patch.object(publisher, "repository_from_origin", return_value=api.repository),
+              patch.object(publisher, "PublishingGitHub", return_value=api),
+              patch.object(publisher, "run_vps_command") as deploy,
+              patch.object(publisher, "read_receipt", side_effect=lambda *args, **kwargs:
+                           InstallationReceipt(**self._receipt(host))) as read_receipt,
+              patch.object(sys, "argv", ["publish_deployment_acceptance", VERSION, SHA, "--publish",
+                                         "--ssh-host", "operator@vps.example.invalid",
+                                         "--known-hosts", "unused-by-local-vps-fixture"])):
+            with redirect_stdout(StringIO()) as output:
+                publisher.main()
+            record = json.loads(output.getvalue())
+            self.assertEqual(record, {"deployment_id": 7, "status_id": 8, "state": "success"})
             self.assertEqual([path for path, _ in api.posts],
                              ["/deployments", "/deployments/7/statuses"])
             self.assertEqual(api.posts[0][1]["ref"], SHA)
             self.assertEqual(api.posts[0][1]["payload"],
                              {key: value for key, value in asdict(receipt).items() if key != "runtime_id"})
-            self.assertEqual(publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)),
-                                               runtime_id), record)
+            with redirect_stdout(StringIO()) as repeated_output:
+                publisher.main()
+            self.assertEqual(json.loads(repeated_output.getvalue()), record)
             self.assertEqual(len(api.posts), 2)
+            self.assertEqual(read_receipt.call_count, 5)
+            deploy.assert_not_called()
+
+    def test_production_resume_cleans_old_sqlite_before_finishing_deployment(self) -> None:
+        """Проверяет очистку до публикации с реальной временной SQLite."""
+        with TemporaryDirectory() as temporary:
+            host, state = contract_fixture.CleanupContractTests()._fixture(Path(temporary).resolve())
+            old = Path(state["old"]["host_path"])
+            active = Path(state["new"]["host_path"])
+            backup = Path(state["snapshot"]["path"])
+            selector = host.state_dir / "active-db.json"
+            protected = {path: path.read_bytes() for path in (active, backup, selector)}
+            old_sidecar = Path(str(old) + "-shm")
+            old_sidecar.write_bytes(b"closed sidecar")
+            command = ("sudo", "-n", "/usr/local/sbin/deploy-prod", VERSION)
+            remote_actions = []
+
+            with self._github(host) as (api, receipt):
+                def run_remote(args, **options):
+                    """Связывает модель SSH со штатной приёмкой и удалением на диске."""
+                    if args == command + ("--verify-installed", SHA):
+                        remote_actions.append("verify")
+                        result = self._receipt(host)
+                    else:
+                        self.assertEqual(args, command + ("--cleanup-old", SHA, receipt.runtime_id))
+                        remote_actions.append("cleanup")
+                        result = self._cleanup(host, receipt.runtime_id)
+                        # Модель SSH передаёт формат пути Linux и проверяет файлы локально.
+                        result = result | {"old_host_path": "/opt/obs-chat-bot/data/" + old.name}
+                    return subprocess.CompletedProcess(args, 0, stdout=json.dumps(result))
+
+                original_post = api.post
+
+                def post_after_cleanup(path, body):
+                    """Проверяет состояние файлов при записи в GitHub."""
+                    self.assertFalse(old.exists())
+                    self.assertFalse(old_sidecar.exists())
+                    self.assertEqual({path: path.read_bytes() for path in protected}, protected)
+                    return original_post(path, body)
+
+                selected = production.SelectedRelease(api.repository, VERSION, "release/3.3", SHA,
+                                                      receipt.release_id, "main-full.yml", receipt.run_id,
+                                                      receipt.run_attempt)
+                argv = ["release_production", VERSION, SHA, "--resume", "--ssh-host", "runner@vps.invalid",
+                        "--known-hosts", "unused-by-local-vps-fixture"]
+                with (patch.object(production, "repository_from_origin", return_value=api.repository),
+                      patch.object(production, "PublishingGitHub", return_value=api),
+                      patch.object(production, "select_release", return_value=selected),
+                      patch.object(production, "run_vps_command", side_effect=run_remote),
+                      patch.object(api, "post", side_effect=post_after_cleanup),
+                      patch.object(sys, "argv", argv)):
+                    for _ in range(2):
+                        with redirect_stdout(StringIO()) as output:
+                            production.main()
+                        self.assertEqual(json.loads(output.getvalue().splitlines()[-1]),
+                                         {"deployment_id": 7, "status_id": 8, "state": "success",
+                                          "cleanup": "completed"})
+                        self.assertNotIn(receipt.runtime_id, output.getvalue())
+                self.assertEqual([path for path, _ in api.posts], ["/deployments", "/deployments/7/statuses"])
+
+            self.assertEqual(remote_actions.count("cleanup"), 2)
+            self.assertEqual(remote_actions[:3], ["verify", "cleanup", "verify"])
+            self.assertFalse(old.exists())
+            self.assertFalse(old_sidecar.exists())
+            self.assertEqual({path: path.read_bytes() for path in protected}, protected)
+            self.assertEqual(self._receipt(host), asdict(receipt))
 
     def test_ordinary_emergency_and_forward_route(self) -> None:
         """Все пути сохраняют runtime, новую БД и rebind следующего перехода."""
@@ -194,7 +281,7 @@ class CleanupFullRouteTests(unittest.TestCase):
                 self.assertEqual({path: path.read_bytes() for path in protected}, protected)
                 self.assertEqual(self._receipt(host), receipt_before)
                 self._cleanup(host, receipt_before["runtime_id"])
-                self._publish(host, receipt_before["runtime_id"])
+                self._publish(host)
                 durable = prep.read_state(host.state_dir, host.checkout)
                 prod._recover(host, durable)
                 self.assertEqual(switch.read_selected(host, durable), "new")

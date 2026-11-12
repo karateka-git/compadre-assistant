@@ -1,11 +1,13 @@
 """Проверяет удаление только старой временной SQLite после приёмки."""
 
-from contextlib import closing, nullcontext
+from contextlib import closing, nullcontext, redirect_stderr, redirect_stdout
+from io import StringIO
 import json
 import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,7 @@ from scripts import deploy_acceptance as acceptance
 from scripts import deploy_cleanup_old as cleanup
 from scripts import deploy_database_switch as switch
 from scripts import deploy_prepare as prep
+from scripts import deploy_prod as prod
 from scripts.deploy_prod import DeployError
 from tests.test_deploy_acceptance import SHA, VERSION
 from tests.test_deploy_cleanup_contract import CleanupContractTests
@@ -83,6 +86,48 @@ class CleanupOldTests(unittest.TestCase):
             self.assertEqual(self._accepted(host), before)
             self.assertEqual(self._run(host, before), result)
 
+    def test_controller_cli_uses_technical_receipt_and_reports_cleanup(self) -> None:
+        """Контроллер удаляет только old, выводит JSON и сохраняет повторяемость."""
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            runtime_id = self._accepted(host)
+            argv = ["deploy-prod", VERSION, "--cleanup-old", SHA, runtime_id]
+            with (patch.object(prod.sys, "argv", argv),
+                  patch.object(prod, "os", SimpleNamespace(name="posix", geteuid=lambda: 0)),
+                  patch.object(prod, "Host", return_value=host),
+                  patch.object(prod, "deploy") as deploy,
+                  patch.object(prep, "deploy_lock", return_value=nullcontext()) as lock,
+                  patch.object(prep, "require_exact_tag")):
+                for _ in range(2):
+                    with redirect_stdout(StringIO()) as output:
+                        prod.main()
+                    self.assertEqual(json.loads(output.getvalue()), switch.old_cleanup_record(state))
+                deploy.assert_not_called()
+                lock.assert_called_with(host.state_dir, host.checkout)
+            self.assertFalse(Path(state["old"]["host_path"]).exists())
+            self.assertTrue(Path(state["snapshot"]["path"]).is_file())
+            self.assertEqual(self._accepted(host), runtime_id)
+
+    def test_controller_cleanup_rejects_unprivileged_and_conflicting_modes(self) -> None:
+        """Узкий режим не доходит до хоста без root или с другим действием."""
+        cleanup_args = [VERSION, "--cleanup-old", SHA, "f" * 64]
+        cases = [
+            (1000, cleanup_args, "через sudo"),
+            (0, cleanup_args + ["--emergency", "--reason", "incident"], "отдельной командой"),
+            (0, cleanup_args + ["--verify-installed", SHA], "not allowed with argument"),
+            (0, cleanup_args[:-1], "expected 2 arguments"),
+        ]
+        for uid, arguments, error in cases:
+            with (self.subTest(uid=uid, error=error),
+                  patch.object(prod.sys, "argv", ["deploy-prod", *arguments]),
+                  patch.object(prod, "os", SimpleNamespace(name="posix", geteuid=lambda: uid)),
+                  patch.object(prod, "Host") as host,
+                  redirect_stderr(StringIO()) as errors,
+                  self.assertRaises(SystemExit)):
+                prod.main()
+            host.assert_not_called()
+            self.assertIn(error, errors.getvalue())
+
     def test_resume_after_old_unlink_uses_exact_durable_intent(self) -> None:
         """Потеря завершения после unlink не удаляет новое поколение."""
         with TemporaryDirectory() as temporary:
@@ -108,13 +153,20 @@ class CleanupOldTests(unittest.TestCase):
                     cleanup.cleanup_old(host, VERSION, SHA, runtime_id)
             self.assertFalse(old.exists())
             durable = prep.read_state(host.state_dir, host.checkout)
-            self.assertIn("old_generation_cleanup_intent", durable)
+            self.assertEqual(durable["old_generation_cleanup_intent"]["runtime_id"], runtime_id)
             self.assertNotIn("old_generation_cleanup", durable)
+            with self.assertRaisesRegex(cleanup.CleanupError, "Intent очистки"):
+                self._run(host, "f" * 64)
+            channel_state = host.found[prep.CHANNELS[0]]["State"]
+            with patch.dict(channel_state, StartedAt="2026-11-09T12:00:01Z"):
+                with self.assertRaisesRegex(cleanup.CleanupError, "Runtime не совпадает"):
+                    self._run(host, runtime_id)
+            self.assertEqual(prep.read_state(host.state_dir, host.checkout), durable)
             self.assertEqual(self._run(host, runtime_id), switch.old_cleanup_record(state))
             self.assertTrue(Path(state["new"]["host_path"]).is_file())
 
     def test_wrong_runtime_stops_before_intent_and_unlink(self) -> None:
-        """Чужое живое подтверждение не создаёт запись и не удаляет old."""
+        """Чужой технический runtime_id не создаёт intent и не удаляет old."""
         with TemporaryDirectory() as temporary:
             host, state = self._fixture(Path(temporary).resolve())
             with self.assertRaises(cleanup.CleanupError):
