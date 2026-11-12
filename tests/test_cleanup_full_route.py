@@ -114,7 +114,7 @@ class CleanupFullRouteTests(unittest.TestCase):
               patch.object(prep, "require_exact_tag")):
             return cleanup.cleanup_old(host, VERSION, SHA, runtime_id)
 
-    def _publish(self, host, runtime_id: str) -> None:
+    def _publish(self, host) -> None:
         """Публикует только в памяти fake GitHub с повторной приёмкой SQLite."""
         receipt = InstallationReceipt(**self._receipt(host))
         api = publishing_fixture.WritableGitHub()
@@ -153,15 +153,14 @@ class CleanupFullRouteTests(unittest.TestCase):
               patch.object(deployment_fixture, "RECEIPT", receipt),
               patch.object(publishing_fixture, "SHA", SHA),
               patch.object(api, "get", side_effect=get)):
-            record = publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)), runtime_id)
+            record = publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)))
             self.assertEqual(record.state.value, "success")
             self.assertEqual([path for path, _ in api.posts],
                              ["/deployments", "/deployments/7/statuses"])
             self.assertEqual(api.posts[0][1]["ref"], SHA)
             self.assertEqual(api.posts[0][1]["payload"],
                              {key: value for key, value in asdict(receipt).items() if key != "runtime_id"})
-            self.assertEqual(publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host)),
-                                               runtime_id), record)
+            self.assertEqual(publisher.publish(api, lambda: InstallationReceipt(**self._receipt(host))), record)
             self.assertEqual(len(api.posts), 2)
 
     def test_ordinary_emergency_and_forward_route(self) -> None:
@@ -194,7 +193,7 @@ class CleanupFullRouteTests(unittest.TestCase):
                 self.assertEqual({path: path.read_bytes() for path in protected}, protected)
                 self.assertEqual(self._receipt(host), receipt_before)
                 self._cleanup(host, receipt_before["runtime_id"])
-                self._publish(host, receipt_before["runtime_id"])
+                self._publish(host)
                 durable = prep.read_state(host.state_dir, host.checkout)
                 prod._recover(host, durable)
                 self.assertEqual(switch.read_selected(host, durable), "new")

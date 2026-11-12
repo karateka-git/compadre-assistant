@@ -65,7 +65,7 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
     def test_creates_exact_deployment_and_status_then_confirms_repeat(self) -> None:
         """Первый сеанс создаёт два объекта, повтор только читает их."""
         api = WritableGitHub()
-        record = publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+        record = publisher.publish(api, lambda: RECEIPT)
         self.assertEqual((record.deployment_id, record.status_id, record.state),
                          (7, 8, DeploymentState.SUCCESS))
         self.assertEqual([path for path, _ in api.posts], ["/deployments", "/deployments/7/statuses"])
@@ -79,14 +79,14 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         self.assertEqual(api.posts[1][1]["log_url"],
                          f"https://github.com/{api.repository}/actions/runs/107")
         self.assertNotIn(RECEIPT.runtime_id, repr(api.posts))
-        self.assertEqual(publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id), record)
+        self.assertEqual(publisher.publish(api, lambda: RECEIPT), record)
         self.assertEqual(len(api.posts), 2)
 
     def test_finishes_existing_deployment_without_status(self) -> None:
         """После прерывания создаёт только недостающий статус."""
         api = WritableGitHub()
         api.deployments = FakeGitHub().deployments
-        record = publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+        record = publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(record.state, DeploymentState.SUCCESS)
         self.assertEqual([path for path, _ in api.posts], ["/deployments/7/statuses"])
 
@@ -94,7 +94,7 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         """Потерянный ответ на первый POST не создаёт дубликат."""
         api = WritableGitHub()
         api.lose_deployment = True
-        self.assertEqual(publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id).state,
+        self.assertEqual(publisher.publish(api, lambda: RECEIPT).state,
                          DeploymentState.SUCCESS)
         self.assertEqual(len([path for path, _ in api.posts if path == "/deployments"]), 1)
 
@@ -102,7 +102,7 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         """Потерянный ответ на status POST подтверждается новым чтением."""
         api = WritableGitHub()
         api.lose_status = True
-        self.assertEqual(publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id).state,
+        self.assertEqual(publisher.publish(api, lambda: RECEIPT).state,
                          DeploymentState.SUCCESS)
         self.assertEqual(len([path for path, _ in api.posts if path.endswith("/statuses")]), 1)
 
@@ -111,37 +111,38 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         api = WritableGitHub()
         api.lose_deployment, api.apply_deployment = True, False
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(len(api.posts), 1)
         api = WritableGitHub()
         api.lose_status, api.apply_status = True, False
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(len(api.posts), 2)
         api.lose_status, api.apply_status = False, True
-        self.assertEqual(publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id).state,
+        self.assertEqual(publisher.publish(api, lambda: RECEIPT).state,
                          DeploymentState.SUCCESS)
         self.assertEqual([path for path, _ in api.posts].count("/deployments"), 1)
 
     def test_rejects_owner_runtime_ci_and_conflicting_state(self) -> None:
-        """Разрешение записи не обходит живую проверку и существующий отказ."""
+        """Публикация учитывает автора, смену runtime, попытку CI и конфликт статуса."""
         api = WritableGitHub()
         api.actor = {"id": 1, "login": "other"}
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(api.posts, [])
         api.actor = OWNER
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, "0" * 64)
+            receipts = iter((RECEIPT, replace(RECEIPT, runtime_id="0" * 64)))
+            publisher.publish(api, lambda: next(receipts))
         api.run_url = "https://example.invalid/other"
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         api.run_url = f"https://github.com/{api.repository}/actions/runs/107"
         api.deployments = FakeGitHub().deployments
         api.statuses = [{"id": 8, "state": "failure", "environment": "production", "creator": OWNER,
                          "created_at": "2026-11-11T01:00:00Z"}]
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(api.posts, [])
 
     def test_duplicate_deployment_refuses_write(self) -> None:
@@ -149,7 +150,7 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         api = WritableGitHub()
         api.deployments = FakeGitHub().deployments * 2
         with self.assertRaises(DeploymentAcceptanceError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(api.posts, [])
 
     def test_historical_installation_is_not_backfilled(self) -> None:
@@ -157,7 +158,7 @@ class PublishDeploymentAcceptanceTests(unittest.TestCase):
         api = WritableGitHub()
         historical = replace(RECEIPT, version="v3.2.0")
         with self.assertRaises(publisher.DeploymentPublishError):
-            publisher.publish(api, lambda: historical, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: historical)
         self.assertEqual(api.posts, [])
 
 

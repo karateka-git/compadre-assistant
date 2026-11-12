@@ -74,11 +74,11 @@ class DeploymentTransitionTests(unittest.TestCase):
         """После неизвестного ответа следующий сеанс находит созданный Deployment."""
         api = InterruptedGitHub("/deployments")
         with self.assertRaises(ControllerError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(len(api.deployments), 1)
         self.assertEqual([path for path, _ in api.posts], ["/deployments"])
 
-        publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+        publisher.publish(api, lambda: RECEIPT)
         self.assertEqual([path for path, _ in api.posts], ["/deployments", "/deployments/7/statuses"])
         require_accepted_deployment(api, RECEIPT)
 
@@ -86,11 +86,11 @@ class DeploymentTransitionTests(unittest.TestCase):
         """После потери чтения уже записанный success подтверждается повтором."""
         api = InterruptedGitHub("/deployments/7/statuses")
         with self.assertRaises(ControllerError):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(len(api.statuses), 1)
         before = len(api.posts)
 
-        publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+        publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(len(api.posts), before)
         require_accepted_deployment(api, RECEIPT)
 
@@ -98,7 +98,7 @@ class DeploymentTransitionTests(unittest.TestCase):
         """403 при создании Deployment или статуса не даёт приёмку."""
         api = DeniedGitHub("/deployments")
         with self.assertRaisesRegex(publisher.DeploymentPublishError, "не подтверждено"):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(api.deployments, [])
         with self.assertRaises(DeploymentAcceptanceError):
             require_accepted_deployment(api, RECEIPT)
@@ -106,7 +106,7 @@ class DeploymentTransitionTests(unittest.TestCase):
         api = DeniedGitHub("/deployments/7/statuses")
         api.deployments = FakeGitHub().deployments
         with self.assertRaisesRegex(publisher.DeploymentPublishError, "не подтверждено"):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         self.assertEqual(api.statuses, [])
         with self.assertRaises(DeploymentAcceptanceError):
             require_accepted_deployment(api, RECEIPT)
@@ -115,7 +115,7 @@ class DeploymentTransitionTests(unittest.TestCase):
         """Без Deployments read нельзя подтвердить ни запись, ни ротацию."""
         api = DeniedReadGitHub()
         with self.assertRaisesRegex(ControllerError, "HTTP 403"):
-            publisher.publish(api, lambda: RECEIPT, RECEIPT.runtime_id)
+            publisher.publish(api, lambda: RECEIPT)
         with self.assertRaisesRegex(ControllerError, "HTTP 403"):
             require_accepted_installation(api, RECEIPT)
         self.assertEqual(api.posts, [])
@@ -131,7 +131,7 @@ class DeploymentTransitionTests(unittest.TestCase):
         with self.assertRaises(DeploymentAcceptanceError):
             require_accepted_installation(current, RECEIPT)
         self.assertFalse(any(path.startswith("/git/ref/tags/production/") for path, _ in current.calls))
-        publisher.publish(current, lambda: RECEIPT, RECEIPT.runtime_id)
+        publisher.publish(current, lambda: RECEIPT)
         require_accepted_installation(current, RECEIPT)
         self.assertEqual(legacy.ref, historical_ref)
         self.assertEqual(len(legacy.posts), 2)

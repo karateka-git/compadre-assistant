@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 from urllib.error import HTTPError
@@ -68,6 +69,53 @@ def _receipt(output: str, version: str, sha: str) -> InstallationReceipt:
     return receipt
 
 
+def run_vps_command(arguments: tuple[str, ...], *, ssh_host: str, known_hosts: Path,
+                    identity: Path | None = None, capture_output: bool,
+                    timeout: int) -> subprocess.CompletedProcess[str]:
+    """Выполняет команду на VPS по проверенному SSH-ключу хоста.
+
+    Args:
+        arguments: Аргументы команды на VPS до экранирования для POSIX shell.
+        ssh_host: Адрес SSH в форме host или user@host.
+        known_hosts: Локальный файл с ранее проверенным ключом VPS.
+        identity: Необязательный локальный SSH private key для подключения.
+        capture_output: Захватить вывод вместо передачи его на консоль.
+        timeout: Максимальное время ожидания в секундах.
+
+    Returns:
+        Результат успешной команды SSH.
+
+    Raises:
+        InstallationTagError: Адрес, ключ хоста или выполнение SSH не подтверждены.
+    """
+    if not re.fullmatch(r"(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*", ssh_host):
+        raise InstallationTagError("Некорректный адрес SSH")
+    try:
+        host_keys = known_hosts.resolve(strict=True)
+        host_keys_path = host_keys.as_posix()
+        if (not host_keys.is_file() or "${" in host_keys_path
+                or any(char in host_keys_path for char in '"%\r\n')):
+            raise InstallationTagError("Требуется файл с проверенным ключом VPS")
+        command = [
+            "ssh", "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
+            "-o", "GlobalKnownHostsFile=none", "-o", f'UserKnownHostsFile="{host_keys_path}"',
+            "-o", "ClearAllForwardings=yes", "-o", "UpdateHostKeys=no",
+            "-o", "ForwardAgent=no", "-T",
+        ]
+        if identity is not None:
+            command.extend(("-o", "IdentitiesOnly=yes", "-i", str(identity.resolve(strict=True))))
+        # OpenSSH соединяет аргументы удалённой команды и передаёт их shell VPS.
+        command.extend(("--", ssh_host, *(shlex.quote(argument) for argument in arguments)))
+        local_tokens = {"GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
+        return subprocess.run(
+            command, check=True, capture_output=capture_output, encoding="utf-8", timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env={key: value for key, value in os.environ.items() if key.upper() not in local_tokens},
+        )
+    except (OSError, subprocess.SubprocessError, UnicodeError) as error:
+        raise InstallationTagError("Команда на VPS через SSH не подтверждена") from error
+
+
 def read_receipt(version: str, sha: str, *, ssh_host: str, known_hosts: Path,
                  identity: Path | None = None) -> InstallationReceipt:
     """Читает свежую техническую приёмку с VPS по проверенному SSH-ключу хоста.
@@ -87,32 +135,12 @@ def read_receipt(version: str, sha: str, *, ssh_host: str, known_hosts: Path,
         PublishError: Версия не каноническая.
     """
     _version(version)
-    if not SHA_PATTERN.fullmatch(sha) or not re.fullmatch(
-        r"(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9][A-Za-z0-9.-]*", ssh_host,
-    ):
-        raise InstallationTagError("Некорректный SHA или адрес SSH")
-    try:
-        host_keys = known_hosts.resolve(strict=True)
-        host_keys_path = host_keys.as_posix()
-        if (not host_keys.is_file() or "${" in host_keys_path
-                or any(char in host_keys_path for char in '"%\r\n')):
-            raise InstallationTagError("Требуется файл с проверенным ключом VPS")
-        command = [
-            "ssh", "-F", "none", "-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes",
-            "-o", "GlobalKnownHostsFile=none", "-o", f'UserKnownHostsFile="{host_keys_path}"',
-            "-o", "ClearAllForwardings=yes", "-o", "UpdateHostKeys=no",
-            "-o", "ForwardAgent=no", "-T",
-        ]
-        if identity is not None:
-            command.extend(("-o", "IdentitiesOnly=yes", "-i", str(identity.resolve(strict=True))))
-        command.extend(("--", ssh_host, "sudo", "-n", "deploy-prod", version, "--verify-installed", sha))
-        local_tokens = {"GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
-        result = subprocess.run(
-            command, check=True, capture_output=True, encoding="utf-8", timeout=240,
-            env={key: value for key, value in os.environ.items() if key.upper() not in local_tokens},
-        )
-    except (OSError, subprocess.SubprocessError, UnicodeError) as error:
-        raise InstallationTagError("Не удалось подтвердить техническую приёмку через SSH") from error
+    if not SHA_PATTERN.fullmatch(sha):
+        raise InstallationTagError("Некорректный SHA приёмки")
+    result = run_vps_command(
+        ("sudo", "-n", "deploy-prod", version, "--verify-installed", sha),
+        ssh_host=ssh_host, known_hosts=known_hosts, identity=identity, capture_output=True, timeout=240,
+    )
     return _receipt(result.stdout, version, sha)
 
 
