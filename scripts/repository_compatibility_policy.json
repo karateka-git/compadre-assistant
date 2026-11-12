@@ -1,9 +1,9 @@
 {
   "version": 1,
   "repository": "karateka-git/compadre-assistant",
-  "previous_sha": "cabc0e24d28947123868db8a60f6b55095feb63e",
-  "release_tag": "v3.2.0",
-  "release_id": 436823646,
+  "previous_sha": "79a10440073a0cc50c136e96cf9870984730c824",
+  "release_tag": "v3.3.0",
+  "release_id": 442613054,
   "matrix": [
     {
       "class": "SQLiteArticleAnalysisResultRepository",
