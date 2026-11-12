@@ -1788,34 +1788,47 @@ def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> 
 
 
 def main() -> None:
-    """Обрабатывает установку, приёмку, проверку runtime или активацию базы CI."""
+    """Обрабатывает установку, технические проверки, очистку и активацию базы CI."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?")
     parser.add_argument("--emergency", action="store_true", help="явный аварийный выпуск")
     parser.add_argument("--reason", help="обязательная причина аварийного развёртывания")
-    parser.add_argument("--verify-pinned", action="store_true",
-                        help="контролируемый stop/start обоих каналов на текущем pin")
-    parser.add_argument("--verify-installed", metavar="SHA",
-                        help="техническая приёмка указанной версии и SHA без изменений")
-    parser.add_argument("--activate-ci-baseline", nargs=7,
-                        metavar=("SHA", "OLD_PIN", "NEW_PIN", "MAIN_SHA", "RUN", "ATTEMPT", "RUNTIME_ID"),
-                        help="после приёмки активировать новую базу CI на VPS")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--verify-pinned", action="store_true",
+                      help="контролируемый stop/start обоих каналов на текущем pin")
+    mode.add_argument("--verify-installed", metavar="SHA",
+                      help="техническая приёмка указанной версии и SHA без изменений")
+    mode.add_argument("--activate-ci-baseline", nargs=7,
+                      metavar=("SHA", "OLD_PIN", "NEW_PIN", "MAIN_SHA", "RUN", "ATTEMPT", "RUNTIME_ID"),
+                      help="после приёмки активировать новую базу CI на VPS")
+    mode.add_argument("--cleanup-old", nargs=2, metavar=("SHA", "RUNTIME_ID"),
+                      help="удалить прежнюю SQLite для технически принятого выпуска")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        if sum((args.verify_pinned, args.verify_installed is not None, args.activate_ci_baseline is not None)) > 1:
-            raise DeployError("Проверку и активацию базы CI выполняют отдельно")
-        if (args.verify_pinned or args.verify_installed is not None or args.activate_ci_baseline is not None) and (
-                args.emergency or args.reason is not None):
+        separate_mode = (args.verify_pinned or args.verify_installed is not None
+                         or args.activate_ci_baseline is not None or args.cleanup_old is not None)
+        if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
         if args.verify_pinned:
             verify_pinned(host)
         elif args.verify_installed is not None:
             _report_acceptance(host, args.version, args.verify_installed, machine=True)
+        elif args.cleanup_old is not None:
+            from scripts import deploy_cleanup_old
+
+            sha, runtime_id = args.cleanup_old
+            try:
+                result = deploy_cleanup_old.cleanup_old(host, args.version, sha, runtime_id)
+            except (DeployError, deploy_cleanup_old.DeployError, prep.PreparationError, ValueError) as error:
+                raise DeployError(f"Прежняя SQLite не очищена ({error})") from error
+            except OSError as error:
+                raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
         elif args.activate_ci_baseline is not None:
             from scripts import deploy_ci_baseline
             from scripts.deployment_acceptance import DeploymentAcceptanceError

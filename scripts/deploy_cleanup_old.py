@@ -80,7 +80,7 @@ def _snapshot(host: Host, state: dict) -> None:
         compatibility.require_copy_foreign_keys(connection)
 
 
-def _require_runtime(host: Host, state: dict, confirmed_runtime: str) -> dict:
+def _require_runtime(host: Host, state: dict, expected_runtime: str) -> dict:
     """Подтверждает завершённый runtime до первого удаления old."""
     if (state.get("stage") != "success" or state.get("protocol_version") != switch.PROTOCOL_VERSION
             or state.get("admission_may_have_started") is not True
@@ -99,12 +99,12 @@ def _require_runtime(host: Host, state: dict, confirmed_runtime: str) -> dict:
             or good.get("ci_run_attempt") != candidate.get("run_attempt")):
         raise CleanupError("Last good не совпадает с установленным выпуском")
     receipt = acceptance._verify_locked(host, good["version"], good["sha"])
-    if receipt.get("runtime_id") != confirmed_runtime:
-        raise CleanupError("Runtime изменился после живой приёмки")
+    if receipt.get("runtime_id") != expected_runtime:
+        raise CleanupError("Runtime не совпадает с технической приёмкой")
     return boot
 
 
-def _partial_runtime(host: Host, state: dict, confirmed_runtime: str) -> None:
+def _partial_runtime(host: Host, state: dict, expected_runtime: str) -> None:
     """Сверяет живой new runtime при частично удалённом old по durable intent.
 
     Обычная приёмка в этот момент намеренно не читает неполный old. Эта
@@ -191,11 +191,11 @@ def _partial_runtime(host: Host, state: dict, confirmed_runtime: str) -> None:
                 "tag_object_sha": candidate.get("tag_object_sha")}
     digest = hashlib.sha256(json.dumps(identity, sort_keys=True,
                                        separators=(",", ":")).encode()).hexdigest()
-    if digest != confirmed_runtime:
-        raise CleanupError("Runtime изменился после живой приёмки")
+    if digest != expected_runtime:
+        raise CleanupError("Runtime не совпадает с технической приёмкой")
 
 
-def _intent(host: Host, state: dict, confirmed_runtime: str) -> dict:
+def _intent(host: Host, state: dict, expected_runtime: str) -> dict:
     """Строит точный durable intent с inode каждого существующего sidecar."""
     path = _old_path(host, state)
     switch.require_identity(state["old"], host.checkout / "data")
@@ -204,16 +204,16 @@ def _intent(host: Host, state: dict, confirmed_runtime: str) -> dict:
         raise CleanupError("Прежняя БД сменилась после регистрации")
     sidecars = {suffix: _file_identity(Path(str(path) + suffix))
                 for suffix in _SIDECARS if os.path.lexists(str(path) + suffix)}
-    return switch.old_cleanup_record(state) | {"runtime_id": confirmed_runtime, "sidecars": sidecars}
+    return switch.old_cleanup_record(state) | {"runtime_id": expected_runtime, "sidecars": sidecars}
 
 
-def _verify_intent(host: Host, state: dict, confirmed_runtime: str) -> tuple[Path, dict]:
+def _verify_intent(host: Host, state: dict, expected_runtime: str) -> tuple[Path, dict]:
     """Сверяет intent и каждый ещё существующий inode перед unlink."""
     intent = state.get("old_generation_cleanup_intent")
     expected = switch.old_cleanup_record(state)
     if (not isinstance(intent, dict) or intent.keys() != expected.keys() | {"runtime_id", "sidecars"}
             or any(intent.get(key) != value for key, value in expected.items())
-            or intent.get("runtime_id") != confirmed_runtime
+            or intent.get("runtime_id") != expected_runtime
             or not isinstance(intent.get("sidecars"), dict)
             or not set(intent["sidecars"]).issubset(_SIDECARS)):
         raise CleanupError("Intent очистки не совпадает с принятым переходом")
@@ -271,14 +271,14 @@ def _require_no_open_old(state: dict) -> None:
         raise CleanupError("Не удалось исключить открытые дескрипторы old") from error
 
 
-def cleanup_old(host: Host, version: str, sha: str, confirmed_runtime: str) -> dict:
-    """Повторяемо удаляет только прежнюю SQLite после живой приёмки.
+def cleanup_old(host: Host, version: str, sha: str, expected_runtime: str) -> dict:
+    """Повторяемо удаляет только прежнюю SQLite после технической приёмки.
 
     Args:
         host: Доверенный адаптер установленного VPS или изолированного стенда.
         version: Точная установленная версия Release.
         sha: Полный SHA текущего last_good.
-        confirmed_runtime: Runtime, для которого владелец проверил оба канала.
+        expected_runtime: Точный runtime_id из технической приёмки.
 
     Returns:
         Состояние завершённой очистки, привязанное к исходному inode.
@@ -287,8 +287,10 @@ def cleanup_old(host: Host, version: str, sha: str, confirmed_runtime: str) -> d
         CleanupError: Приёмка, backup, intent или удаляемый файл расходятся.
         DeployError: Runtime, selector или контейнеры не подтверждены.
     """
-    if not isinstance(confirmed_runtime, str) or not _RUNTIME_ID.fullmatch(confirmed_runtime):
-        raise CleanupError("Нужно подтверждение живых ответов для точного runtime_id")
+    if not prep.VERSION_PATTERN.fullmatch(version) or not prep.SHA_PATTERN.fullmatch(sha):
+        raise CleanupError("Очистка требует точную версию и полный SHA")
+    if not isinstance(expected_runtime, str) or not _RUNTIME_ID.fullmatch(expected_runtime):
+        raise CleanupError("Очистка требует runtime_id из технической приёмки")
     with prep.deploy_lock(host.state_dir, host.checkout):
         state = prep.read_state(host.state_dir, host.checkout)
         if not isinstance(state, dict) or state.get("stage") != "success":
@@ -298,46 +300,46 @@ def cleanup_old(host: Host, version: str, sha: str, confirmed_runtime: str) -> d
             raise CleanupError("Установленный выпуск не совпадает с командой очистки")
         if "old_generation_cleanup" in state:
             receipt = acceptance._verify_locked(host, version, sha)
-            if receipt["runtime_id"] != confirmed_runtime:
-                raise CleanupError("Runtime изменился после живой приёмки")
+            if receipt["runtime_id"] != expected_runtime:
+                raise CleanupError("Runtime не совпадает с технической приёмкой")
             _snapshot(host, state)
             return state["old_generation_cleanup"]
         _snapshot(host, state)
         if "old_generation_cleanup_intent" not in state:
-            _require_runtime(host, state, confirmed_runtime)
-            state["old_generation_cleanup_intent"] = _intent(host, state, confirmed_runtime)
+            _require_runtime(host, state, expected_runtime)
+            state["old_generation_cleanup_intent"] = _intent(host, state, expected_runtime)
             _require_no_open_old(state)
             prep.write_state(host.state_dir, host.checkout, state)
             state = prep.read_state(host.state_dir, host.checkout)
-        path, intent = _verify_intent(host, state, confirmed_runtime)
+        path, intent = _verify_intent(host, state, expected_runtime)
         _require_no_open_old(state)
         remaining = {suffix for suffix in ("", *_SIDECARS)
                      if os.path.lexists(str(path) + suffix)}
         if "" in remaining and set(intent["sidecars"]).issubset(remaining):
-            _require_runtime(host, state, confirmed_runtime)
+            _require_runtime(host, state, expected_runtime)
         else:
-            _partial_runtime(host, state, confirmed_runtime)
+            _partial_runtime(host, state, expected_runtime)
         # Удаляем каждый sidecar раньше БД. После каждого unlink синхронизируем
         # каталог: повтор опирается на durable intent и оставшиеся inode.
         for suffix in _SIDECARS:
             if suffix in intent["sidecars"]:
                 item = Path(str(path) + suffix)
                 if os.path.lexists(item):
-                    _verify_intent(host, state, confirmed_runtime)
+                    _verify_intent(host, state, expected_runtime)
                     _require_no_open_old(state)
                     item.unlink()
                     _fsync_dir(item.parent)
         if os.path.lexists(path):
-            _verify_intent(host, state, confirmed_runtime)
+            _verify_intent(host, state, expected_runtime)
             _require_no_open_old(state)
             path.unlink()
             _fsync_dir(path.parent)
-        _verify_intent(host, state, confirmed_runtime)
+        _verify_intent(host, state, expected_runtime)
         state["old_generation_cleanup"] = switch.old_cleanup_record(state)
         del state["old_generation_cleanup_intent"]
         prep.write_state(host.state_dir, host.checkout, state)
         receipt = acceptance._verify_locked(host, version, sha)
-        if receipt["runtime_id"] != confirmed_runtime:
+        if receipt["runtime_id"] != expected_runtime:
             raise CleanupError("Runtime изменился после очистки")
         return state["old_generation_cleanup"]
 
@@ -352,21 +354,16 @@ def check_old(host: Host, version: str, sha: str) -> dict:
 
 
 def main() -> None:
-    """Запускает root-only проверку или очистку выбранного выпуска."""
+    """Запускает root-only диагностику очистки выбранного выпуска."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", help="точная установленная версия vMAJOR.MINOR.PATCH")
     parser.add_argument("sha", help="полный SHA установленного коммита")
-    parser.add_argument("--apply", action="store_true", help="удалить прежнее поколение")
-    parser.add_argument("--confirm-live", metavar="RUNTIME_ID", help="подтверждённая владельцем установка")
     args = parser.parse_args()
-    if args.apply != (args.confirm_live is not None):
-        parser.error("--confirm-live требуется только вместе с --apply")
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise CleanupError("Очистка предназначена для root на Linux")
         host = Host()
-        result = (cleanup_old(host, args.version, args.sha, args.confirm_live) if args.apply
-                  else check_old(host, args.version, args.sha))
+        result = check_old(host, args.version, args.sha)
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))
     except Exception as error:
         print(f"deploy-cleanup-old: отказ {type(error).__name__}: {error}", file=sys.stderr)

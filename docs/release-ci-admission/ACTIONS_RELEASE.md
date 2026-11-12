@@ -70,6 +70,12 @@ backup, зарегистрированные inode прежней БД и sideca
 продолжает только этот intent. После допуска writers возврат к прежнему
 поколению закрыт. [Технические условия очистки](SQLITE_CLEANUP.md)
 
+Для ручного разбора частичного удаления оператор с root-доступом читает
+только `old_generation_cleanup_intent.runtime_id` из
+`/var/lib/compadre-assistant-deploy/state.json` и использует его с теми же
+версией и SHA в `--cleanup-old`. Само состояние и runtime не выводят в
+журнал GitHub Actions.
+
 ## Подтвердить готовность
 
 Локальные испытания проходят на изолированных моделях GitHub и SSH и
