@@ -1299,6 +1299,24 @@ def _recover_v2_preflight(host: Host, state: dict[str, Any]) -> None:
     _state(host, state, "failed_preflight")
 
 
+def _recover_cleaned_preparation(host: Host, state: dict[str, Any]) -> None:
+    """Возвращает checkout после подготовки кандидата поверх принятой SQLite."""
+    from scripts import deploy_runtime
+
+    # Старый файл удалён после другого перехода. Здесь разрешён только
+    # возврат checkout к runtime, который уже работал до подготовки.
+    database_switch.read_selected(host, state)
+    boot = deploy_runtime.boot_record(state, "success")
+    if state.get("boot") != boot:
+        raise DeployError("Boot перед прерванной подготовкой не подтверждён")
+    host.restore_checkout(boot["sha"])
+    deploy_runtime.verify(host, state | {"stage": "success"}, require_running=True)
+    if not host.unit_active(SERVICE) or host.timer_snapshot() != state["timer_before"]:
+        raise DeployError("Сервис или таймер изменились во время подготовки")
+    _state(host, state, "success", error="Предыдущая подготовка прервана",
+           retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
+
+
 def _recover(host: Host, state: dict[str, Any]) -> None:
     """Восстанавливает runtime по границе v2 либо прежнему legacy-контракту."""
     stage = state.get("stage")
@@ -1311,6 +1329,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
                 return
             if stage == "failed_preflight":
                 _recover_v2_preflight(host, state)
+                return
+            if stage == "preparing" and "old_generation_cleanup" in state:
+                _recover_cleaned_preparation(host, state)
                 return
             if stage in ("finalization_intent", "runtime_adopted"):
                 host.finalize_database(state, state["boot"]["outcome"])
@@ -1531,12 +1552,14 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         except Exception as error:
             _preflight_failed(host, state, switch_state, error)
             raise DeployError("Исходное состояние production не прошло preflight") from error
-        state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
-                     failed_version=version)
-        state["deployment"] = ({"kind": "emergency", "initiator": initiator,
-                                "reason": reason.strip(), "version": version}
-                               if emergency else None)
-        _state(host, state, "preparing")
+        deployment = ({"kind": "emergency", "initiator": initiator,
+                       "reason": reason.strip(), "version": version}
+                      if emergency else None)
+        if "old_generation_cleanup" not in state:
+            state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag, deployment=deployment)
+        # После очистки прежние old_* по-прежнему принадлежат принятому
+        # boot и его schema admission. Новый переход получит их после preflight.
+        _state(host, state, "preparing", failed_version=version)
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
                 host, version, old_sha, old_id, old_tag, emergency=emergency, last_good=last_good,
@@ -1554,8 +1577,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                               retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
         database = host.selected_database()
-        if emergency:
-            state["deployment"].update({
+        if deployment is not None:
+            deployment.update({
                 "sha": selected.sha, "release_id": selected.release_id,
                 "published_reason": selected.reason, "workflow": selected.workflow,
                 "ci_state": selected.ci_state, "ci_source": selected.ci_source,
@@ -1572,7 +1595,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "schema_before": before, "schema_after": expected,
                 "migration_attempted": False, "last_good": last_good,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
-                "deployment": state.get("deployment"),
+                "deployment": deployment,
                 "controller_sha": host.controller_sha(),
             }
             if switch_state is not None:
