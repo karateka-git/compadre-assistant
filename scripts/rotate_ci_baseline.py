@@ -20,6 +20,9 @@ from scripts.create_release_branch import (
     EXPECTED_REPOSITORY, ReleaseBranchError, checked_main_head, git, repository_from_origin,
 )
 from scripts.deploy_prepare import PreparationError
+from scripts.deployment_acceptance import (
+    DeploymentAcceptanceError, LEGACY_INSTALLATION_VERSION, require_accepted_deployment,
+)
 from scripts.full_ci_admission import Admission, AdmissionError, MAIN_WORKFLOW, PR_CHECK, PR_WORKFLOW, SHA_PATTERN
 from scripts.full_ci_controller import ControllerError, GitHub
 from scripts.github_publishing import PublishingError, PublishingGitHub
@@ -156,19 +159,23 @@ class RotationGitHub(PublishingGitHub):
 
 
 def require_accepted_installation(api: GitHub, receipt: InstallationReceipt) -> None:
-    """Подтверждает immutable Release и существующий тег принятой установки.
+    """Подтверждает запись приёмки текущей установки по её эпохе.
 
     Args:
-        api: Клиент чтения Contents ожидаемого репозитория.
+        api: Клиент чтения Release, тега или Deployments ожидаемого репозитория.
         receipt: Свежая техническая приёмка текущей установки.
 
     Raises:
-        RotationError: Тег установки не опубликован.
-        InstallationTagError: Тег или Release не совпадает с VPS.
+        RotationError: Исторический тег установки не опубликован.
+        InstallationTagError: Исторический тег или Release не совпадает с VPS.
+        DeploymentAcceptanceError: Новая запись не подтверждена статусом success.
     """
-    require_published_release(api, receipt)
-    if not installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
-        raise RotationError("Для текущей приёмки отсутствует тег установки")
+    if receipt.version == LEGACY_INSTALLATION_VERSION:
+        require_published_release(api, receipt)
+        if not installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt):
+            raise RotationError("Для исторической приёмки отсутствует тег установки")
+    else:
+        require_accepted_deployment(api, receipt)
 
 
 def _fresh(read_fresh: Callable[[], InstallationReceipt], receipt: InstallationReceipt) -> None:
@@ -410,6 +417,7 @@ def pin(api: RotationGitHub, plan: RotationPlan, *, expected_old: str,
     _sha(expected_old, "прежний CI pin")
     _owner(api)
     _fresh(read_fresh, plan.receipt)
+    require_accepted_installation(api, plan.receipt)
     if _main_sha(api) != plan.main_sha:
         raise RotationError("Main изменился перед обновлением CI pin")
     current = _policy_pin(api)
@@ -442,6 +450,7 @@ def dispatch(api: RotationGitHub, plan: RotationPlan, *, read_fresh: Callable[[]
     """
     _owner(api)
     _fresh(read_fresh, plan.receipt)
+    require_accepted_installation(api, plan.receipt)
     if _main_sha(api) != plan.main_sha or _policy_pin(api) != plan.policy_sha:
         raise RotationError("Main или новый CI pin изменились перед запуском")
     runs = api.pages(f"/actions/workflows/{MAIN_WORKFLOW}/runs", key="workflow_runs", head_sha=plan.main_sha)
@@ -553,7 +562,8 @@ def main() -> None:
             print(json.dumps({"policy_sha": plan.policy_sha, "main_sha": plan.main_sha,
                               "run_id": args.run_id, "attempt": args.attempt,
                               "runtime_id": plan.receipt.runtime_id}, sort_keys=True))
-    except (AdmissionError, ControllerError, DeploySelectionError, EmergencyPublishError, InstallationTagError,
+    except (AdmissionError, ControllerError, DeploymentAcceptanceError, DeploySelectionError,
+            EmergencyPublishError, InstallationTagError,
             PreparationError, PublishError, PublishingError, ReleaseBranchError, RotationError,
             OSError, subprocess.CalledProcessError, KeyError, TypeError, ValueError) as error:
         print(f"Ротация CI policy: {error}", file=sys.stderr)

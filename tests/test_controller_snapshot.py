@@ -22,7 +22,7 @@ class ControllerSnapshotTests(unittest.TestCase):
         for name in (*snapshot.DEPENDENCIES, "deploy/deploy-prod", "scripts/deploy_backup.py",
                      "scripts/controller_snapshot.py", "scripts/deploy_prod.py", "scripts/deploy_runtime.py",
                      "scripts/deploy_schema_admission.py", "scripts/deploy_forward_recovery.py",
-                     "scripts/deploy_acceptance.py"):
+                     "scripts/deploy_acceptance.py", "scripts/deploy_cleanup_old.py"):
             path = repository / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"# fixture\n")
@@ -50,6 +50,7 @@ class ControllerSnapshotTests(unittest.TestCase):
             self.assertEqual(digest, snapshot.build(repository, sha, second))
             manifest = snapshot.unpack(first, sha, digest, root / "staging")
             self.assertEqual(sha, manifest["controller_sha"])
+            self.assertIn("scripts/deploy_cleanup_old.py", manifest["files"])
             self.assertNotIn("scripts/secret.py", manifest["files"])
             snapshot.check_imports(root / "staging")
 

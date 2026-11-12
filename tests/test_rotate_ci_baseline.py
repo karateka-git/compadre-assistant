@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from urllib.request import Request
 
 from scripts import rotate_ci_baseline as rotation
+from scripts.deployment_acceptance import DeploymentAcceptanceError
 from scripts.full_ci_admission import Admission
 from scripts.publish_installation_tag import InstallationReceipt
 
@@ -35,6 +36,7 @@ class RotateCIBaselineTest(unittest.TestCase):
         self.old_policy = json.loads(Path(rotation.POLICY_FILE).read_text(encoding="utf-8"))
         self.new_policy = {**self.old_policy, "previous_sha": INSTALLED_SHA,
                            "release_tag": RECEIPT.version, "release_id": RECEIPT.release_id}
+        self.accepted = self.enterContext(patch.object(rotation, "require_accepted_installation"))
 
     def test_prepare_changes_only_three_fields_after_fresh_receipt_and_inventory(self):
         """Подготовка меняет только поля принятой базы после повторной сверки."""
@@ -92,6 +94,17 @@ class RotateCIBaselineTest(unittest.TestCase):
                 patch.object(rotation, "_policy_pin", side_effect=[PREVIOUS_PIN, POLICY_SHA, POLICY_SHA]):
             rotation.pin(self.api, PLAN, expected_old=PREVIOUS_PIN, read_fresh=self.read_fresh)
         self.api.update_policy_pin.assert_called_once_with(POLICY_SHA)
+        self.accepted.assert_called_with(self.api, RECEIPT)
+
+    def test_revoked_acceptance_blocks_pin_and_dispatch(self):
+        """Смена текущего статуса после review не разрешает новые записи."""
+        self.accepted.side_effect = DeploymentAcceptanceError("Статус изменился")
+        with self.assertRaises(DeploymentAcceptanceError):
+            rotation.pin(self.api, PLAN, expected_old=PREVIOUS_PIN, read_fresh=self.read_fresh)
+        with self.assertRaises(DeploymentAcceptanceError):
+            rotation.dispatch(self.api, PLAN, read_fresh=self.read_fresh)
+        self.api.update_policy_pin.assert_not_called()
+        self.api.dispatch_rotation.assert_not_called()
 
     def test_pin_does_not_write_for_unrelated_pin_changed_receipt_or_non_owner(self):
         """Чужой pin, изменение VPS и чужой token не допускают запись."""
@@ -124,6 +137,7 @@ class RotateCIBaselineTest(unittest.TestCase):
             with self.assertRaisesRegex(rotation.RotationError, "Найдите точный run"):
                 rotation.dispatch(self.api, PLAN, read_fresh=self.read_fresh)
         self.api.dispatch_rotation.assert_called_once_with(PLAN)
+        self.accepted.assert_called_with(self.api, RECEIPT)
 
     def test_exact_run_refuses_wrong_attempt_failed_ci_and_pin_drift(self):
         """Успех другого CI или устаревшего pin не считается ротацией."""

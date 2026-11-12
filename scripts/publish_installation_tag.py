@@ -1,4 +1,4 @@
-"""Подтверждает приёмку на VPS и создаёт тег установки точного выпуска."""
+"""Читает сводку SQLite и обслуживает исторический тег установки."""
 
 from __future__ import annotations
 
@@ -213,7 +213,7 @@ def _expected_migration(api: GitHub, sha: str) -> str:
 
 
 def summarize(api: GitHub, version: str, sha: str) -> dict[str, object]:
-    """Собирает сводку SQLite из точного опубликованного коммита и тега установки.
+    """Собирает сводку SQLite из точного Release и записи приёмки.
 
     Args:
         api: Клиент GitHub ожидаемого репозитория с правом чтения.
@@ -221,15 +221,20 @@ def summarize(api: GitHub, version: str, sha: str) -> dict[str, object]:
         sha: Полный SHA релизного коммита.
 
     Returns:
-        Ожидаемая миграция и, при наличии аннотации, принятая SQLite.
+        Ожидаемая миграция и принятая SQLite из тега либо Deployments.
 
     Raises:
         InstallationTagError: Источники расходятся или не подтверждены.
+        DeploymentAcceptanceError: Новая запись приёмки не подтверждена.
         DeploySelectionError: Release или его релизный тег не подтверждён.
         ControllerError: GitHub не ответил на проверку.
     """
     release_id, run_id, run_attempt = _published_release(api, version, sha)
     expected = _expected_migration(api, sha)
+    from scripts.deployment_acceptance import LEGACY_INSTALLATION_VERSION, summarize_deployment
+
+    if version != LEGACY_INSTALLATION_VERSION:
+        return summarize_deployment(api, version, sha, release_id, run_id, run_attempt, expected)
     installation = _read_installation_tag(api, version, sha)
     try:
         return build_summary(version, sha, release_id, run_id, run_attempt, expected, installation)
@@ -247,7 +252,7 @@ def _sqlite_evidence(receipt: InstallationReceipt, version: str, sha: str) -> In
 
 def publish(api: PublishingGitHub, read_fresh: Callable[[], InstallationReceipt],
             confirmed_runtime: str) -> InstallationReceipt:
-    """Создаёт либо подтверждает тег установки после явного решения владельца.
+    """Создаёт либо подтверждает исторический тег после решения владельца.
 
     Args:
         api: Локальный GitHub-клиент с правом записи refs от имени владельца.
@@ -262,12 +267,16 @@ def publish(api: PublishingGitHub, read_fresh: Callable[[], InstallationReceipt]
         InstallationTagError: Приёмка, владелец или запись не подтверждены.
         ControllerError: GitHub не ответил на проверку.
     """
+    from scripts.deployment_acceptance import LEGACY_INSTALLATION_VERSION
+
     if api.repository != EXPECTED_REPOSITORY or not re.fullmatch(r"[0-9a-f]{64}", confirmed_runtime):
         raise InstallationTagError("Нужно подтвердить живые ответы для точного runtime VPS")
     actor = api.authenticated_user()
     if actor.get("id") != 42288695 or actor.get("login") != "karateka-git":
         raise InstallationTagError("Создание тега установки подтверждает владелец проекта")
     receipt = read_fresh()
+    if receipt.version != LEGACY_INSTALLATION_VERSION:
+        raise InstallationTagError("Новые выпуски фиксируют приёмку через GitHub Deployments")
     if receipt.runtime_id != confirmed_runtime:
         raise InstallationTagError("Runtime VPS изменился после проверки живых ответов")
     require_published_release(api, receipt)
@@ -326,6 +335,8 @@ def main() -> None:
         return read_receipt(args.version, args.sha, ssh_host=args.ssh_host,
                             known_hosts=args.known_hosts, identity=args.identity)
 
+    from scripts.deployment_acceptance import DeploymentAcceptanceError
+
     try:
         if repository_from_origin() != EXPECTED_REPOSITORY:
             raise InstallationTagError("Origin не совпадает с репозиторием проекта")
@@ -340,7 +351,8 @@ def main() -> None:
             require_published_release(api, receipt)
             installation_tag_exists(api, receipt.version, receipt.sha, receipt=receipt)
             print(json.dumps(asdict(receipt), ensure_ascii=False, separators=(",", ":")))
-    except (ControllerError, DeploySelectionError, InstallationTagError, PublishError, PublishingError,
+    except (ControllerError, DeploymentAcceptanceError, DeploySelectionError, InstallationTagError,
+            PublishError, PublishingError,
             ReleaseBranchError) as error:
         print(f"Тег установки: {error}", file=sys.stderr)
         raise SystemExit(1) from error

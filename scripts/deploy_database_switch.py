@@ -18,6 +18,9 @@ from scripts import predeploy_compatibility as compatibility
 # Версия отделяет новый протокол от legacy state без границы приёма.
 PROTOCOL_VERSION = 2
 
+# Формат записи о завершённой очистке прежнего поколения в durable state.
+OLD_CLEANUP_VERSION = 1
+
 # Только эти незавершённые стадии имеют определённый маршрут восстановления.
 RECOVERABLE_STAGES = frozenset({
     "ready", "critical", "writers_stopped", "snapshot_verified",
@@ -85,8 +88,86 @@ def require_boundary(state: dict) -> None:
         raise ValueError("Сохранённый admission противоречит границе false")
 
 
+def old_cleanup_record(state: dict) -> dict:
+    """Строит привязку результата очистки к точному переходу.
+
+    Сама привязка не разрешает удаление и не доказывает, что оно выполнено.
+
+    Args:
+        state: Durable состояние с зарегистрированными old и new.
+
+    Returns:
+        Версионированная запись для фиксации после проверенного удаления.
+
+    Raises:
+        KeyError: В состоянии отсутствует обязательная идентичность.
+    """
+    old, new = state["old"], state["new"]
+    return {"version": OLD_CLEANUP_VERSION, "transition_id": state["transition_id"],
+            "old_generation_id": old["generation_id"], "old_host_path": old["host_path"],
+            "old_device": old["device"], "old_inode": old["inode"],
+            "new_generation_id": new["generation_id"]}
+
+
+def _require_cleaned_old(host, state: dict, selected: dict) -> None:
+    """Подтверждает завершённую очистку без чтения удалённой SQLite.
+
+    Запись возникает только после отдельной процедуры очистки. До её
+    завершения отсутствие old остаётся отказом; активная new проверяется
+    вызывающим кодом через require_identity.
+    """
+    old, new = state.get("old"), state.get("new")
+    boot, candidate, good = state.get("boot"), state.get("candidate"), state.get("last_good")
+    if not all(isinstance(item, dict) for item in (old, new, boot, candidate, good)):
+        raise ValueError("Очистка не имеет полного состояния перехода")
+    try:
+        old_path = Path(old["host_path"])
+        expected_name = ("app.db" if old["generation_id"] == "legacy"
+                         else f'app-{old["generation_id"]}.db')
+        record = old_cleanup_record(state)
+        cleanup = state.get("old_generation_cleanup")
+        valid = (isinstance(cleanup, dict) and cleanup.keys() == record.keys()
+                 and "old_generation_cleanup_intent" not in state
+                 and type(cleanup["version"]) is int and cleanup == record
+                 and type(cleanup["old_device"]) is int and type(cleanup["old_inode"]) is int
+                 and type(old["device"]) is int and type(old["inode"]) is int
+                 and (old["generation_id"] == "legacy"
+                      or re.fullmatch(r"[0-9a-f]{32}", old["generation_id"]) is not None)
+                 and old_path.is_absolute() and old_path.resolve() == old_path
+                 and old_path.parent == host.checkout / "data" and old_path.name == expected_name
+                 and old["generation_id"] != new["generation_id"]
+                 and state.get("stage") == "success" and state["admission_may_have_started"] is True
+                 and selected == selector(state, "new")
+                 and state.get("switch_intent") == {"from": old["generation_id"],
+                                                     "to": new["generation_id"]}
+                 and boot.get("outcome") == "success"
+                 and boot.get("transition_id") == state["transition_id"]
+                 and boot.get("generation_id") == new["generation_id"]
+                 and boot.get("database_path") == new["container_path"]
+                 and boot.get("sha") == candidate.get("sha") == good.get("sha")
+                 and boot.get("image_id") == candidate.get("image_id") == good.get("image_id")
+                 and boot.get("tag") == candidate.get("tag") == good.get("tag")
+                 and good.get("version") == candidate.get("version"))
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Неполная запись очистки прежнего поколения") from error
+    if not valid or any(os.path.lexists(str(old_path) + suffix)
+                        for suffix in ("", "-wal", "-shm", "-journal")):
+        raise ValueError("Очистка прежнего поколения не подтверждена")
+
+
 def read_selected(host, state: dict) -> str:
-    """Определяет фактически выбранную БД без догадок по stage или runtime.env."""
+    """Определяет выбранную БД, учитывая доказанную очистку старого файла.
+
+    Args:
+        host: Адаптер приватного состояния и каталога данных.
+        state: Durable переход с selector и возможной записью очистки.
+
+    Returns:
+        Имя выбранной стороны: old или new.
+
+    Raises:
+        ValueError: Selector, поколение или запись очистки расходятся.
+    """
     require_boundary(state)
     path = host.state_dir / "active-db.json"
     info = path.lstat()
@@ -97,9 +178,13 @@ def read_selected(host, state: dict) -> str:
     value = prep.parse_state_object(path.read_text(encoding="utf-8"))
     if "new" in state and state["new"]["generation_id"] == state["old"]["generation_id"]:
         raise ValueError("Новое поколение повторяет прежнее имя")
-    for side in ("old", "new"):
-        if side in state:
-            require_identity(state[side], host.checkout / "data")
+    if "old_generation_cleanup" in state:
+        _require_cleaned_old(host, state, value)
+        require_identity(state["new"], host.checkout / "data")
+    else:
+        for side in ("old", "new"):
+            if side in state:
+                require_identity(state[side], host.checkout / "data")
     for side in ("old", "new"):
         if side in state and value == selector(state, side):
             if side == "new" and state.get("switch_intent") != {
