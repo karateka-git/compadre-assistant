@@ -2,6 +2,7 @@
 
 from contextlib import closing, nullcontext
 import json
+import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -17,8 +18,32 @@ from tests.test_deploy_acceptance import SHA, VERSION
 from tests.test_deploy_cleanup_contract import CleanupContractTests
 
 
+def _can_scan_linux_fds() -> bool:
+    """Проверяет доступ к FD всех видимых процессов для real-gate теста."""
+    if os.name != "posix" or not Path("/proc/self/fd").is_dir() or os.geteuid() != 0:
+        return False
+    try:
+        with os.scandir("/proc") as processes:
+            for process in processes:
+                if process.name.isdigit():
+                    try:
+                        with os.scandir(Path(process.path) / "fd"):
+                            pass
+                    except FileNotFoundError:
+                        continue
+    except OSError:
+        return False
+    return True
+
+
 class CleanupOldTests(unittest.TestCase):
     """Испытывает адресный успешный маршрут и безопасный повтор."""
+
+    def setUp(self) -> None:
+        """Изолирует системный `/proc` gate от остальных проверок fixture."""
+        self._fd_gate = patch.object(cleanup, "_require_no_open_old")
+        self._fd_gate.start()
+        self.addCleanup(self._fd_gate.stop)
 
     def _fixture(self, root: Path):
         """Создаёт два настоящих поколения SQLite и принятую установку."""
@@ -141,6 +166,31 @@ class CleanupOldTests(unittest.TestCase):
             self.assertTrue(new.is_file())
             self.assertNotIn("old_generation_cleanup_intent",
                              prep.read_state(host.state_dir, host.checkout))
+
+    @unittest.skipUnless(_can_scan_linux_fds(),
+                         "Нужен Linux /proc с правами для просмотра чужих FD")
+    def test_linux_open_old_fd_refuses_before_intent_then_retries(self) -> None:
+        """Открытый old FD запрещает intent и допускает повтор после закрытия."""
+        self._fd_gate.stop()
+        with TemporaryDirectory() as temporary:
+            host, state = self._fixture(Path(temporary).resolve())
+            runtime_id = self._accepted(host)
+            old = Path(state["old"]["host_path"])
+            new = Path(state["new"]["host_path"])
+            backup = Path(state["snapshot"]["path"])
+            new_before, backup_before = new.read_bytes(), backup.read_bytes()
+            with old.open("rb"):
+                with self.assertRaisesRegex(cleanup.CleanupError, "SQLite ещё открыта"):
+                    self._run(host, runtime_id)
+                self.assertTrue(old.is_file())
+                self.assertNotIn("old_generation_cleanup_intent",
+                                 prep.read_state(host.state_dir, host.checkout))
+                self.assertEqual(new.read_bytes(), new_before)
+                self.assertEqual(backup.read_bytes(), backup_before)
+            self.assertEqual(self._run(host, runtime_id), switch.old_cleanup_record(state))
+            self.assertFalse(old.exists())
+            self.assertEqual(new.read_bytes(), new_before)
+            self.assertEqual(backup.read_bytes(), backup_before)
 
     def test_failure_after_unlink_before_directory_sync_resumes(self) -> None:
         """Повтор после unlink без подтверждённого fsync читает точный intent."""

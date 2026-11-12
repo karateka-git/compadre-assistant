@@ -306,6 +306,7 @@ def cleanup_old(host: Host, version: str, sha: str, confirmed_runtime: str) -> d
         if "old_generation_cleanup_intent" not in state:
             _require_runtime(host, state, confirmed_runtime)
             state["old_generation_cleanup_intent"] = _intent(host, state, confirmed_runtime)
+            _require_no_open_old(state)
             prep.write_state(host.state_dir, host.checkout, state)
             state = prep.read_state(host.state_dir, host.checkout)
         path, intent = _verify_intent(host, state, confirmed_runtime)

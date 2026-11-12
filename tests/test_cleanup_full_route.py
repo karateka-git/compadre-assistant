@@ -53,6 +53,12 @@ class ReceiptForwardHost(ForwardHost):
 class CleanupFullRouteTests(unittest.TestCase):
     """Испытывает приёмку, очистку, публикацию и следующий selector rebind."""
 
+    def setUp(self) -> None:
+        """Изолирует `/proc` gate в проверках сценариев перехода SQLite."""
+        fd_gate = patch.object(cleanup, "_require_no_open_old")
+        fd_gate.start()
+        self.addCleanup(fd_gate.stop)
+
     def _forward_fixture(self, root: Path) -> ReceiptForwardHost:
         """Строит degraded финализацию на отдельной SQLite с миграциями."""
         host = ReceiptForwardHost(root)
