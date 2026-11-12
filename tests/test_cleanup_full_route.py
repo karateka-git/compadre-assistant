@@ -187,8 +187,8 @@ class CleanupFullRouteTests(unittest.TestCase):
             self.assertEqual(read_receipt.call_count, 5)
             deploy.assert_not_called()
 
-    def test_production_resume_finishes_deployment_and_cleans_old_sqlite(self) -> None:
-        """Проверяет порядок публикации и удаления с реальной временной SQLite."""
+    def test_production_resume_cleans_old_sqlite_before_finishing_deployment(self) -> None:
+        """Проверяет очистку до публикации с реальной временной SQLite."""
         with TemporaryDirectory() as temporary:
             host, state = contract_fixture.CleanupContractTests()._fixture(Path(temporary).resolve())
             old = Path(state["old"]["host_path"])
@@ -210,11 +210,19 @@ class CleanupFullRouteTests(unittest.TestCase):
                     else:
                         self.assertEqual(args, command + ("--cleanup-old", SHA, receipt.runtime_id))
                         remote_actions.append("cleanup")
-                        self.assertEqual([status["state"] for status in api.statuses], ["success"])
                         result = self._cleanup(host, receipt.runtime_id)
                         # Модель SSH передаёт формат пути Linux и проверяет файлы локально.
                         result = result | {"old_host_path": "/opt/obs-chat-bot/data/" + old.name}
                     return subprocess.CompletedProcess(args, 0, stdout=json.dumps(result))
+
+                original_post = api.post
+
+                def post_after_cleanup(path, body):
+                    """Проверяет состояние файлов при записи в GitHub."""
+                    self.assertFalse(old.exists())
+                    self.assertFalse(old_sidecar.exists())
+                    self.assertEqual({path: path.read_bytes() for path in protected}, protected)
+                    return original_post(path, body)
 
                 selected = production.SelectedRelease(api.repository, VERSION, "release/3.3", SHA,
                                                       receipt.release_id, "main-full.yml", receipt.run_id,
@@ -225,6 +233,7 @@ class CleanupFullRouteTests(unittest.TestCase):
                       patch.object(production, "PublishingGitHub", return_value=api),
                       patch.object(production, "select_release", return_value=selected),
                       patch.object(production, "run_vps_command", side_effect=run_remote),
+                      patch.object(api, "post", side_effect=post_after_cleanup),
                       patch.object(sys, "argv", argv)):
                     for _ in range(2):
                         with redirect_stdout(StringIO()) as output:
@@ -236,7 +245,7 @@ class CleanupFullRouteTests(unittest.TestCase):
                 self.assertEqual([path for path, _ in api.posts], ["/deployments", "/deployments/7/statuses"])
 
             self.assertEqual(remote_actions.count("cleanup"), 2)
-            self.assertEqual(remote_actions[-2:], ["cleanup", "verify"])
+            self.assertEqual(remote_actions[:3], ["verify", "cleanup", "verify"])
             self.assertFalse(old.exists())
             self.assertFalse(old_sidecar.exists())
             self.assertEqual({path: path.read_bytes() for path in protected}, protected)

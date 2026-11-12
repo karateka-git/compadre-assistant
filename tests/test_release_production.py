@@ -15,6 +15,7 @@ from urllib.error import HTTPError
 
 from scripts import release_production as production
 from scripts.full_ci_controller import ControllerError
+from scripts.github_publishing import PublishingError
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_deployment_acceptance import RECEIPT, SHA, VERSION
 from tests.test_publish_deployment_acceptance import WritableGitHub
@@ -31,7 +32,7 @@ _REMOVE = _DEPLOY + ("--cleanup-old", SHA, RECEIPT.runtime_id)
 
 
 class ProductionReleaseTests(unittest.TestCase):
-    """Проверяет порядок установки, записи и удаления через CLI."""
+    """Проверяет порядок установки, удаления и записи через CLI."""
 
     def setUp(self) -> None:
         """Подставляет модели API и SSH перед запуском основной функции."""
@@ -48,7 +49,7 @@ class ProductionReleaseTests(unittest.TestCase):
         self.ssh = self.enterContext(patch.object(production, "run_vps_command", side_effect=self._vps))
 
     def _vps(self, args, *, capture_output, **options):
-        """Возвращает машинные данные и сверяет наличие success перед удалением."""
+        """Возвращает машинные данные установки, приёмки и очистки."""
         self.assertTrue(capture_output)
         self.remote.append(args)
         if args == _DEPLOY:
@@ -56,7 +57,6 @@ class ProductionReleaseTests(unittest.TestCase):
         if args == _VERIFY:
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(asdict(RECEIPT)))
         self.assertEqual(args, _REMOVE)
-        self.assertEqual(self.api.statuses[-1]["state"], "success")
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(_CLEANUP))
 
     def _run(self, *flags, error=None, version=VERSION, sha=SHA):
@@ -101,8 +101,7 @@ class ProductionReleaseTests(unittest.TestCase):
         self.publish.assert_called_once_with(self.api, self.prepare.return_value)
         self.client.assert_called_once_with(self.api.repository, "production-test-token")
         self.assertEqual([path for path, _ in self.api.posts], ["/deployments", "/deployments/7/statuses"])
-        self.assertEqual(self.remote[0], _DEPLOY)
-        self.assertEqual(self.remote[-2:], [_REMOVE, _VERIFY])
+        self.assertEqual(self.remote[:4], [_DEPLOY, _VERIFY, _REMOVE, _VERIFY])
 
     def test_reuses_exact_release_and_resumes_without_installing(self) -> None:
         """Точный Release и уже записанный success повторно не создаются."""
@@ -112,7 +111,7 @@ class ProductionReleaseTests(unittest.TestCase):
         self.prepare.assert_not_called()
         self.publish.assert_not_called()
         self.assertNotIn(_DEPLOY, self.remote)
-        self.assertEqual(self.remote[-2:], [_REMOVE, _VERIFY])
+        self.assertEqual(self.remote[:3], [_VERIFY, _REMOVE, _VERIFY])
         self.assertEqual(len(self.api.posts), 2)
 
     def test_fails_closed_on_api_error_or_release_mismatch(self) -> None:
@@ -138,34 +137,57 @@ class ProductionReleaseTests(unittest.TestCase):
         self.assertEqual(self.api.posts, [])
         self.ssh.assert_not_called()
 
-    def test_does_not_clean_until_deployment_is_confirmed(self) -> None:
-        """Отказ GitHub после установки сохраняет старую SQLite для повтора."""
-        self.api.lose_status = True
-        self.api.apply_status = False
-        self._release(error="повторите --resume")
-        self.assertIn(_DEPLOY, self.remote)
-        self.assertNotIn(_REMOVE, self.remote)
-        self.api.lose_status = False
-        self.api.apply_status = True
-        self.remote.clear()
-        self._run("--resume")
-        self.assertNotIn(_DEPLOY, self.remote)
-        self.assertEqual(self.remote[-2:], [_REMOVE, _VERIFY])
+    def test_finishes_cleanup_before_github_failure_and_resumes(self) -> None:
+        """Отказ GitHub при записи не блокирует очистку завершённой установки."""
+        original_post = self.api.post
 
-    def test_refuses_changed_runtime_after_deployment(self) -> None:
-        """Успех Deployments не разрешает удаление после замены runtime."""
+        def post(path, body):
+            self.assertIn(_REMOVE, self.remote)
+            self.assertEqual(self.remote[self.remote.index(_REMOVE) + 1], _VERIFY)
+            return original_post(path, body)
+
+        with patch.object(self.api, "post", side_effect=post):
+            self.api.lose_status = True
+            self.api.apply_status = False
+            self._release(error="Очистка SQLite подтверждена, Deployment не подтверждён")
+            self.assertEqual(self.remote[:4], [_DEPLOY, _VERIFY, _REMOVE, _VERIFY])
+            self.api.lose_status = False
+            self.api.apply_status = True
+            self.remote.clear()
+            self._run("--resume")
+        self.assertNotIn(_DEPLOY, self.remote)
+        self.assertEqual([path for path, _ in self.api.posts],
+                         ["/deployments", "/deployments/7/statuses", "/deployments/7/statuses"])
+
+    def test_github_authentication_failure_after_cleanup_points_to_resume(self) -> None:
+        """Отказ чтения автора после очистки предлагает повтор без установки."""
+        authenticated_user = self.api.authenticated_user
+
+        def github_user():
+            if _REMOVE in self.remote:
+                raise PublishingError("GitHub недоступен")
+            return authenticated_user()
+
+        with patch.object(self.api, "authenticated_user", side_effect=github_user):
+            self._release(error="Очистка SQLite подтверждена, Deployment не подтверждён. Для записи повторите --resume.")
+        self.assertEqual(self.remote, [_DEPLOY, _VERIFY, _REMOVE])
+        self.assertEqual(self.api.posts, [])
+
+    def test_refuses_changed_runtime_after_cleanup(self) -> None:
+        """Смена runtime после очистки блокирует запись в GitHub."""
         original = self.ssh.side_effect
 
         def changed_runtime(args, **options):
             result = original(args, **options)
-            if args == _VERIFY and self.api.statuses:
+            if args == _VERIFY and _REMOVE in self.remote:
                 changed = replace(RECEIPT, runtime_id="8" * 64)
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps(asdict(changed)))
             return result
 
         self.ssh.side_effect = changed_runtime
-        self._release(error="Очистка SQLite не подтверждена")
-        self.assertNotIn(_REMOVE, self.remote)
+        self._release(error="Очистка SQLite подтверждена, Deployment не подтверждён")
+        self.assertEqual(self.remote, [_DEPLOY, _VERIFY, _REMOVE, _VERIFY])
+        self.assertEqual(self.api.posts, [])
 
     def test_rejects_cleanup_record_for_another_generation(self) -> None:
         """Ответ об очистке должен относиться к тому же принятому поколению."""
@@ -181,6 +203,7 @@ class ProductionReleaseTests(unittest.TestCase):
         self.ssh.side_effect = wrong_cleanup
         self._release(error="Очистка SQLite не подтверждена")
         self.assertEqual(self.remote[-1], _REMOVE)
+        self.assertEqual(self.api.posts, [])
 
 
 if __name__ == "__main__":

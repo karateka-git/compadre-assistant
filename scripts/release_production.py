@@ -1,4 +1,4 @@
-"""Публикует обычный выпуск, устанавливает его и завершает очистку SQLite."""
+"""Устанавливает обычный выпуск, очищает прежнюю SQLite и записывает приёмку."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from scripts.check_hotfix_pairs import HotfixError
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.deploy_database_switch import OLD_CLEANUP_VERSION
 from scripts.deploy_prepare import PreparationError, parse_state_object
-from scripts.deployment_acceptance import DeploymentAcceptanceError, DeploymentRecord, require_accepted_deployment
+from scripts.deployment_acceptance import DeploymentAcceptanceError, DeploymentRecord
 from scripts.full_ci_admission import AdmissionError, SHA_PATTERN
 from scripts.full_ci_controller import ControllerError
 from scripts.github_publishing import PublishingError, PublishingGitHub
@@ -112,8 +112,9 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
         accepted = receipt
         return receipt
 
-    def deploy() -> None:
-        """Устанавливает Release через штатный контроллер VPS."""
+    if change is None:
+        print("Продолжение с установленного Release", flush=True)
+    else:
         print("Установка Release на VPS", flush=True)
         try:
             run_vps_command(
@@ -127,37 +128,27 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
             ) from error
 
     try:
-        if change is None:
-            print("Продолжение с установленного Release", flush=True)
-            record = deployments.publish(api, read_fresh)
-        else:
-            record = deployments.deploy_and_publish(api, version, sha, kind="ordinary",
-                                                    deploy=deploy, read_fresh=read_fresh)
-    except (deployments.DeploymentPublishError, InstallationTagError, DeploymentAcceptanceError,
-            ControllerError, DeploySelectionError) as error:
-        raise ProductionReleaseError(
-            "Deployment не подтверждён. Для принятой установки повторите --resume. "
-            "При частичном удалении SQLite продолжите сохранённую операцию на VPS."
-        ) from error
-    print(f"Deployment {record.deployment_id}, статус {record.status_id} ({record.state.value})", flush=True)
-
-    try:
         receipt = read_fresh()
-        if require_accepted_deployment(api, receipt) != record:
-            raise ProductionReleaseError("Текущий Deployment изменился перед очисткой")
         print("Очистка прежнего поколения SQLite", flush=True)
         result = run_vps_command(
             (*_CONTROLLER, version, "--cleanup-old", sha, receipt.runtime_id),
             ssh_host=ssh_host, known_hosts=known_hosts, identity=identity, capture_output=True, timeout=240,
         )
         _require_cleanup(result.stdout, receipt)
-        read_fresh()
-    except (InstallationTagError, ProductionReleaseError, DeploymentAcceptanceError, ControllerError,
-            DeploySelectionError) as error:
+    except (InstallationTagError, ProductionReleaseError) as error:
         raise ProductionReleaseError(
             "Очистка SQLite не подтверждена. Проверьте состояние VPS. "
             "Повторите --resume либо продолжите сохранённую операцию очистки."
         ) from error
+    print("Очистка прежнего поколения SQLite подтверждена", flush=True)
+    try:
+        record = deployments.publish(api, read_fresh)
+    except (deployments.DeploymentPublishError, InstallationTagError, DeploymentAcceptanceError,
+            ControllerError, DeploySelectionError, PublishingError) as error:
+        raise ProductionReleaseError(
+            "Очистка SQLite подтверждена, Deployment не подтверждён. Для записи повторите --resume."
+        ) from error
+    print(f"Deployment {record.deployment_id}, статус {record.status_id} ({record.state.value})", flush=True)
     return record
 
 
@@ -171,7 +162,7 @@ def main() -> None:
     parser.add_argument("--identity", type=Path, help="локальный путь к ключу SSH")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--release", action="store_true", help="опубликовать и установить Release")
-    mode.add_argument("--resume", action="store_true", help="завершить Deployment и очистку после установки")
+    mode.add_argument("--resume", action="store_true", help="завершить очистку и запись Deployment после установки")
     parser.add_argument("--change", choices=("initial", "major", "minor", "patch"), help="тип нового выпуска")
     parser.add_argument("--notes-file", type=Path, help="файл release notes в UTF-8")
     args = parser.parse_args()
