@@ -64,10 +64,22 @@ Runner подключается по выделенному SSH-ключу и з
 
 | Тип | Имя | Значение |
 | --- | --- | --- |
-| Secret | `PRODUCTION_RELEASE_TOKEN` | Выделенный fine-grained PAT доверенного автора `karateka-git` для этого репозитория. Подтвердите запись Contents и Deployments, чтение Actions, Variables, Pull requests и необходимых настроек immutable Release и защиты тега. |
+| Secret | `PRODUCTION_RELEASE_TOKEN` | Выделенный fine-grained PAT доверенного автора `karateka-git` для этого репозитория. |
 | Secret | `PRODUCTION_VPS_SSH_PRIVATE_KEY` | Закрытый выделенный ключ доступа runner к штатному контроллеру VPS. |
 | Variable | `PRODUCTION_VPS_HOST` | Адрес VPS в формате `user@host`. |
 | Variable | `PRODUCTION_VPS_KNOWN_HOSTS` | Строка `known_hosts` с предварительно проверенным ключом хоста VPS. |
+
+Для PAT нужны `Contents: write`, `Deployments: write`, чтение Actions,
+Variables и Pull requests, а также `Administration: read` для проверки
+immutable releases. GitHub указывает дополнительное `Workflows: write`
+для создания Release, если целевой коммит изменяет файлы workflow. При
+проверке tag ruleset подтвердите, что тот же PAT видит пустой
+`bypass_actors`. GitHub показывает это поле вызывающему с доступом на запись
+ruleset. Сверьте фактический ответ до выпуска. При отсутствии поля команда
+останавливается до публикации.
+[Права fine-grained PAT](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens)
+· [Создание Release](https://docs.github.com/en/rest/releases/releases#create-a-release)
+· [Проверка ruleset](https://docs.github.com/en/rest/repos/rules#get-a-repository-ruleset)
 
 В **Actions → Production release → Run workflow** выберите ветку `main`.
 Для `release` укажите `version`, полный `sha`, `change` и `notes`.
@@ -129,8 +141,10 @@ backup, зарегистрированные inode прежней БД и sideca
 
 ## Подтвердить готовность
 
-Локальные испытания проходят на изолированных моделях GitHub и SSH и
-временной SQLite с проверкой сохранности данных и backup. На будущем
+Локальная цепочка `--resume` прошла на моделях GitHub и SSH и временной
+SQLite с проверкой сохранности активной БД, selector и backup. Перед первым
+запуском отдельно подтвердите доступ к защищённому окружению, права PAT,
+узкий SSH-доступ и версию установленного controller snapshot. На будущем
 согласованном выпуске сверить SHA в полном CI, Release, технической
 приёмке VPS и текущем Deployment `success`. Проверить, что очистка
 завершилась для прежнего поколения того же перехода, а техническая
