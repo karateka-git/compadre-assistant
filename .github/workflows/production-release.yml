@@ -1,0 +1,100 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Publish and deploy a release, or resume an installed release
+        required: true
+        type: choice
+        options: [release, resume]
+      version:
+        description: Exact release version (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      sha:
+        description: Full 40-character SHA of the release
+        required: true
+        type: string
+      change:
+        description: Required in release mode (initial, major, minor, patch)
+        type: string
+      notes:
+        description: Release notes, required in release mode
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    if: ${{
+      github.repository == 'karateka-git/compadre-assistant' &&
+      github.ref == 'refs/heads/main'
+      }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment:
+      name: production-release
+      deployment: false
+    concurrency:
+      group: production-release
+      cancel-in-progress: false
+    steps:
+      - name: Checkout exact main commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.12'
+      - name: Run production release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_VPS_SSH_PRIVATE_KEY }}
+          VPS_HOST: ${{ vars.PRODUCTION_VPS_HOST }}
+          VPS_KNOWN_HOSTS: ${{ vars.PRODUCTION_VPS_KNOWN_HOSTS }}
+          RELEASE_MODE: ${{ inputs.mode }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_CHANGE: ${{ inputs.change }}
+          RELEASE_NOTES: ${{ inputs.notes }}
+        run: |
+          set -u
+          : "${GITHUB_TOKEN:?Missing PRODUCTION_RELEASE_TOKEN}"
+          : "${VPS_SSH_PRIVATE_KEY:?Missing PRODUCTION_VPS_SSH_PRIVATE_KEY}"
+          : "${VPS_HOST:?Missing PRODUCTION_VPS_HOST}"
+          : "${VPS_KNOWN_HOSTS:?Missing PRODUCTION_VPS_KNOWN_HOSTS}"
+
+          umask 077
+          run_dir="$(mktemp -d "$RUNNER_TEMP/production-release.XXXXXX")"
+          trap 'rm -f -- "$run_dir/identity" "$run_dir/known_hosts" "$run_dir/notes.md"; rmdir -- "$run_dir"' EXIT
+          trap 'exit 1' HUP INT TERM
+
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$run_dir/identity"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$run_dir/known_hosts"
+          unset VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS
+
+          case "$RELEASE_MODE" in
+            release)
+              : "${RELEASE_CHANGE:?Specify change in release mode}"
+              : "${RELEASE_NOTES:?Specify notes in release mode}"
+              printf '%s' "$RELEASE_NOTES" > "$run_dir/notes.md"
+              mode_args=(--release --change "$RELEASE_CHANGE" --notes-file "$run_dir/notes.md")
+              ;;
+            resume)
+              mode_args=(--resume)
+              ;;
+            *)
+              printf '%s\n' 'Invalid release mode' >&2
+              exit 1
+              ;;
+          esac
+          unset RELEASE_NOTES
+
+          python3 -m scripts.release_production "$RELEASE_VERSION" "$RELEASE_SHA" \
+            --ssh-host "$VPS_HOST" --known-hosts "$run_dir/known_hosts" --identity "$run_dir/identity" \
+            "${mode_args[@]}"

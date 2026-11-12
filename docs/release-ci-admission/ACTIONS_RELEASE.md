@@ -51,6 +51,32 @@ Runner подключается по выделенному SSH-ключу и з
 параметры. Порядок выбора будущих автоматических версии и SHA в этот этап
 не входит.
 
+## Запустить workflow из GitHub Actions
+
+В настройках репозитория создайте GitHub Environment `production-release`.
+Для **Deployment branches and tags** выберите **Selected branches and tags**
+и добавьте единственное правило типа **Branch** с именем `main`.
+Храните полномочия в этом окружении. Workflow исполняется на точном SHA
+защищённой `main`. `deployment: false` оставляет запись о приёмке за
+оркестратором, который публикует её после сверки VPS.
+[Настройка окружения GitHub](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments),
+[окружение без автоматической записи Deployment](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/control-deployments#using-environments-without-deployments).
+
+| Тип | Имя | Значение |
+| --- | --- | --- |
+| Secret | `PRODUCTION_RELEASE_TOKEN` | Выделенный fine-grained PAT доверенного автора `karateka-git` для этого репозитория. Подтвердите запись Contents и Deployments, чтение Actions, Variables, Pull requests и необходимых настроек immutable Release и защиты тега. |
+| Secret | `PRODUCTION_VPS_SSH_PRIVATE_KEY` | Закрытый выделенный ключ доступа runner к штатному контроллеру VPS. |
+| Variable | `PRODUCTION_VPS_HOST` | Адрес VPS в формате `user@host`. |
+| Variable | `PRODUCTION_VPS_KNOWN_HOSTS` | Строка `known_hosts` с предварительно проверенным ключом хоста VPS. |
+
+В **Actions → Production release → Run workflow** выберите ветку `main`.
+Для `release` укажите `version`, полный `sha`, `change` и `notes`.
+Для `resume` достаточно той же версии и SHA уже установленного выпуска.
+Оба режима используют одну группу concurrency `production-release`.
+Новый запуск не отменяет активный сеанс. Не запускайте параллельно выпуск
+с рабочей станции, где это ограничение GitHub не действует.
+[Файл workflow](../../.github/workflows/production-release.yml).
+
 ## Вызвать команду с runner
 
 Передайте токен через `GITHUB_TOKEN`, а ключ и проверенный `known_hosts`
