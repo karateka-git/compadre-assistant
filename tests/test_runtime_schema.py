@@ -73,16 +73,19 @@ class RuntimeSchemaTest(unittest.TestCase):
         with connect_database(self.database) as db:
             apply_migrations(db)
             base = [list(row) for row in db.execute("SELECT version, name FROM schema_migrations ORDER BY version")]
+            self.future_version = base[-1][0] + 1
+            future_name = f"{self.future_version:04d}_future.sql"
             db.execute("CREATE TABLE future_data (value TEXT)")
             db.execute("INSERT INTO future_data VALUES ('preserve')")
-            db.execute("INSERT INTO schema_migrations (version, name) VALUES (5, '0005_future.sql')")
+            db.execute("INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
+                       (self.future_version, future_name))
             db.commit()
             fingerprint = schema_fingerprint(db)
         self.context = dict(base_sha="a" * 40, base_image_id="sha256:" + "b" * 64,
                             candidate_sha="c" * 40, candidate_image_id="sha256:" + "d" * 64,
                             controller_sha="e" * 40, verification_id="f" * 64)
         self.admission = dict(self.context, format_version=1, base_journal=base,
-                              target_journal=base + [[5, "0005_future.sql"]],
+                              target_journal=base + [[self.future_version, future_name]],
                               base_sql_sha256=migration_sql_fingerprint(), schema_sha256=fingerprint)
         self.admission_path = self.root / "admission.json"
         self.launch_path = self.root / "launch.json"
@@ -109,8 +112,10 @@ class RuntimeSchemaTest(unittest.TestCase):
         changes += [("base_image_id", "sha256:" + "0" * 64), ("candidate_image_id", "sha256:" + "0" * 64),
                     ("schema_sha256", "0" * 64), ("base_sql_sha256", "0" * 64), ("format_version", True),
                     ("target_journal", self.admission["base_journal"]),
-                    ("target_journal", self.admission["base_journal"] + [[6, "0006_future.sql"]]),
-                    ("target_journal", self.admission["base_journal"] + [[5, "0005_other.sql"]]),
+                    ("target_journal", self.admission["base_journal"] + [
+                        [self.future_version + 1, f"{self.future_version + 1:04d}_future.sql"]]),
+                    ("target_journal", self.admission["base_journal"] + [
+                        [self.future_version, f"{self.future_version:04d}_other.sql"]]),
                     ("base_journal", [[1, "0001_other.sql"]])]
         for key, value in changes:
             with self.subTest(key=key, value=value), connect_database(self.database) as db:
