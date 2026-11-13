@@ -1,0 +1,23 @@
+{
+  "id": "sample-text-response",
+  "model": "gemini/gemini-3.1-flash-lite",
+  "choices": [
+    {
+      "message": {
+        "content": "43"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "completion_tokens": 2,
+    "prompt_tokens": 19,
+    "total_tokens": 21,
+    "completion_tokens_details": {
+      "text_tokens": 2
+    },
+    "prompt_tokens_details": {
+      "text_tokens": 19
+    }
+  }
+}
