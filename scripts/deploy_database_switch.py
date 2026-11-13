@@ -126,6 +126,13 @@ def _require_cleaned_old(host, state: dict, selected: dict) -> None:
                          else f'app-{old["generation_id"]}.db')
         record = old_cleanup_record(state)
         cleanup = state.get("old_generation_cleanup")
+        next_version = state.get("failed_version")
+        # Подготовка кандидата сохраняет завершённый переход до критического marker.
+        preparing = (state.get("stage") == "preparing" and isinstance(next_version, str)
+                     and prep.VERSION_PATTERN.fullmatch(next_version) is not None
+                     and next_version != good.get("version")
+                     and not any(os.path.lexists(host.state_dir / marker)
+                                 for marker in ("deploy-in-progress", "recovery-blocked.json")))
         valid = (isinstance(cleanup, dict) and cleanup.keys() == record.keys()
                  and "old_generation_cleanup_intent" not in state
                  and type(cleanup["version"]) is int and cleanup == record
@@ -136,7 +143,8 @@ def _require_cleaned_old(host, state: dict, selected: dict) -> None:
                  and old_path.is_absolute() and old_path.resolve() == old_path
                  and old_path.parent == host.checkout / "data" and old_path.name == expected_name
                  and old["generation_id"] != new["generation_id"]
-                 and state.get("stage") == "success" and state["admission_may_have_started"] is True
+                 and (state.get("stage") == "success" or preparing)
+                 and state["admission_may_have_started"] is True
                  and selected == selector(state, "new")
                  and state.get("switch_intent") == {"from": old["generation_id"],
                                                      "to": new["generation_id"]}

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from collections import Counter
 from contextlib import closing, contextmanager
+from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -19,22 +20,21 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 from scripts import deploy_prepare as prep
-from scripts.ci_repository_compatibility import ReleaseTagEvidence, verify_baseline
+from scripts.ci_repository_compatibility import (
+    DYNAMIC_HARNESS, LEGACY_HARNESS, WORKFLOWS, DeploymentReleaseTagEvidence, ReleaseTagEvidence, verify_baseline,
+)
 from scripts.full_ci_admission import (
     Admission, COMPATIBILITY_CHECK, COMPATIBILITY_STEPS, FULL_CALLERS, MAIN_WORKFLOW,
     RELEASE_WORKFLOW, select_successful_run,
 )
 from scripts.full_ci_controller import GitHub
-from scripts.repository_compatibility_contract import load_policy, verify_report, verify_tests
+from scripts.repository_compatibility_contract import DYNAMIC_POLICY_VERSION, load_policy, verify_report, verify_tests
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
 
 
 # Лимиты защищают контроллер от чрезмерного artifact и распаковки ZIP.
 MAX_ARTIFACT = 64 * 1024 * 1024
-HARNESS = ("ci_repository_compatibility.py", "repository_compatibility_contract.py",
-           "repository_compatibility_policy.json", "check_repository_compatibility.py",
-           "repository_compatibility_worker.py", "repository_compatibility_cases.py")
-WORKFLOWS = ("full-suite.yml", MAIN_WORKFLOW, RELEASE_WORKFLOW)
+POLICY_PATH = "scripts/repository_compatibility_policy.json"
 
 
 class PredeployError(ValueError):
@@ -161,17 +161,53 @@ def tag_evidence_record(checkout: Path, selected, policy_sha: str, previous_sha:
         raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
     if evidence.policy_sha != policy_sha:
         raise PredeployError("SAFE_POLICY_PIN")
-    return {"tag_object_sha": selected.tag_object_sha, "policy_sha": policy_sha,
+    dynamic = isinstance(evidence, DeploymentReleaseTagEvidence)
+    domain = b"compadre-release-tag-v2\0" if dynamic else b"compadre-release-tag-v1\0"
+    record = {"tag_object_sha": selected.tag_object_sha, "policy_sha": policy_sha,
             "schema_fingerprint": evidence.schema_fingerprint,
-            "verification_id": hashlib.sha256(b"compadre-release-tag-v1\0" + raw).hexdigest()}
+            "verification_id": hashlib.sha256(domain + raw).hexdigest()}
+    if dynamic:
+        record["baseline"] = asdict(evidence.baseline)
+    return record
+
+
+def verify_deployment_base(api: GitHub, baseline: dict, previous_sha: str | None, *,
+                           frozen: bool = False) -> dict:
+    """Сверяет реквизиты принятого выпуска с GitHub Deployments.
+
+    Args:
+        api: Читающий API ожидаемого репозитория.
+        baseline: Данные базы из аннотации или артефакта точной попытки CI.
+        previous_sha: Ожидаемый SHA установленного выпуска, если он известен.
+        frozen: Проверить именно сохранённую запись при recovery.
+
+    Returns:
+        Сверенные реквизиты той же базы.
+
+    Raises:
+        PredeployError: Запись, текущая приёмка или установленная база расходятся.
+    """
+    from scripts.deployment_acceptance import (
+        AcceptedBaseline, resolve_accepted_baseline, verify_accepted_baseline,
+    )
+
+    with check("SAFE_BASELINE_DEPLOYMENT"):
+        claimed = AcceptedBaseline(**baseline)
+        actual = (verify_accepted_baseline(api, claimed.deployment_id, claimed.status_id)
+                  if frozen else resolve_accepted_baseline(api))
+        if actual != claimed:
+            raise PredeployError("SAFE_BASELINE_DEPLOYMENT")
+    if previous_sha is not None and actual.sha != previous_sha:
+        raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
+    return asdict(actual)
 
 
 def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
-                        previous_sha: str) -> dict:
+                        previous_sha: str, *, frozen: bool = False) -> dict:
     """Проверяет аннотацию и независимо сверяет workflow с reviewed policy.
 
     Селектор уже доказал успешный job точной попытки, которой принадлежит
-    аннотация. На VPS используются только GitHub Contents и локальные blobs.
+    аннотация. Исторические теги сверяются со своей policy v1.
 
     Args:
         api: Читающий GitHub API выбранного репозитория.
@@ -179,6 +215,7 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
         selected: Результат селектора опубликованного immutable Release.
         policy_sha: Внешний reviewed pin установленного контроллера.
         previous_sha: SHA фактически установленного last_good.
+        frozen: Проверить базу, сохранённую в состоянии recovery.
 
     Returns:
         Идентификатор доказательства, pin и ожидаемый отпечаток схемы.
@@ -189,8 +226,14 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
     if api.repository != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
     record = tag_evidence_record(checkout, selected, policy_sha, previous_sha)
-    policy = _trusted_policy(_blob(api, policy_sha, "scripts/repository_compatibility_policy.json"))
-    if policy["repository"] != selected.repository or policy["previous_sha"] != previous_sha:
+    policy = _trusted_policy(_blob(api, policy_sha, POLICY_PATH))
+    if policy["repository"] != selected.repository:
+        raise PredeployError("SAFE_CI_PROVENANCE")
+    if policy["version"] == DYNAMIC_POLICY_VERSION:
+        if "baseline" not in record:
+            raise PredeployError("SAFE_TAG_EVIDENCE")
+        verify_deployment_base(api, record["baseline"], previous_sha, frozen=frozen)
+    elif "baseline" in record or policy["previous_sha"] != previous_sha:
         raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
     with check("SAFE_WORKFLOW_BYTES"):
         for name in WORKFLOWS:
@@ -216,14 +259,17 @@ def _files(payload: bytes) -> dict[str, bytes]:
     return result
 
 
-def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: str) -> dict:
+def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: str | None, *,
+                    frozen: bool = False) -> dict:
     """Проверяет происхождение, bytes policy/workflows и полноту результатов CI.
 
     Args:
-        api: Независимый GitHub API с actions/contents read.
+        api: Независимый GitHub API с Actions, Contents и Deployments read.
         selected: Закреплённый Release или допуск точной попытки обычного CI.
         policy_sha: Внешний reviewed pin контроллера, не поле artifact.
-        previous_sha: SHA фактически установленного last_good.
+        previous_sha: SHA last_good на VPS. Публикация передаёт None и требует
+            действующую базу из Deployments.
+        frozen: Проверить базу из артефакта для ранее начатого восстановления.
 
     Returns:
         Безопасные идентификаторы artifact и fingerprint candidate-схемы.
@@ -266,14 +312,25 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     elif select_successful_run(api, selected.repository, selected.workflow, selected.sha,
                                branch, selected.run_id, selected.run_attempt) is None:
         raise PredeployError("SAFE_CI_ATTEMPT")
-    trusted = {name: _blob(api, policy_sha, f"scripts/{name}") for name in HARNESS}
-    policy = _trusted_policy(trusted["repository_compatibility_policy.json"])
-    if policy["repository"] != selected.repository or policy["previous_sha"] != previous_sha:
-        raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
-    with check("SAFE_BASELINE_RELEASE"):
-        verify_baseline(policy, api.get(f"/releases/tags/{policy['release_tag']}"),
-                        api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha,
-                        lambda sha: api.get(f"/git/tags/{sha}"))
+    policy_data = _blob(api, policy_sha, POLICY_PATH)
+    policy = _trusted_policy(policy_data)
+    if policy["repository"] != selected.repository or api.repository != selected.repository:
+        raise PredeployError("SAFE_CI_PROVENANCE")
+    dynamic = policy["version"] == DYNAMIC_POLICY_VERSION
+    if dynamic:
+        trusted = {path: policy_data if path == POLICY_PATH else _blob(api, policy_sha, path)
+                   for path in DYNAMIC_HARNESS}
+    else:
+        if previous_sha is None:
+            raise PredeployError("SAFE_POLICY_PIN")
+        if policy["previous_sha"] != previous_sha:
+            raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
+        trusted = {name: policy_data if f"scripts/{name}" == POLICY_PATH else
+                   _blob(api, policy_sha, f"scripts/{name}") for name in LEGACY_HARNESS}
+        with check("SAFE_BASELINE_RELEASE"):
+            verify_baseline(policy, api.get(f"/releases/tags/{policy['release_tag']}"),
+                            api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha,
+                            lambda sha: api.get(f"/git/tags/{sha}"))
     for name in WORKFLOWS:
         path = f".github/workflows/{name}"
         if _blob(api, policy_sha, path) != _blob(api, selected.sha, path):
@@ -298,11 +355,18 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     with check("SAFE_ARTIFACT_FORMAT"):
         files = _files(payload)
         evidence = json.loads(files.pop("evidence.json"))
-    expected = {"version": 1, "repository": selected.repository, "candidate_sha": selected.sha,
+        if type(evidence.get("version")) is not int or evidence["version"] != policy["version"]:
+            raise PredeployError("SAFE_EVIDENCE_IDENTITY")
+    if dynamic:
+        baseline = verify_deployment_base(api, evidence.get("baseline"), previous_sha, frozen=frozen)
+        previous_sha = baseline["sha"]
+    else:
+        baseline = {"release_id": policy["release_id"], "tag": policy["release_tag"], "immutable": True}
+    expected = {"version": policy["version"], "repository": selected.repository, "candidate_sha": selected.sha,
                 "previous_sha": previous_sha, "policy_sha": policy_sha,
                 "run_id": selected.run_id, "run_attempt": selected.run_attempt,
                 "workflow_ref": f"{selected.repository}/.github/workflows/{selected.workflow}@refs/heads/{branch}",
-                "baseline": {"release_id": policy["release_id"], "tag": policy["release_tag"], "immutable": True},
+                "baseline": baseline,
                 "results": {key: True for key in ("candidate_migrations_data_integrity",
                             "old_repository_behavior", "candidate_verified_previous_updates")},
                 "policy_files": {name: hashlib.sha256(data).hexdigest() for name, data in trusted.items()},
@@ -313,11 +377,14 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
         report = json.loads(files["report.json"])
         with check("SAFE_TEST_MANIFEST"):
             verify_tests(report["old_repository_behavior"]["old_tests"], policy["test_ids"])
-        verify_report(report, policy)
+        verify_report(report, policy, previous_sha=previous_sha)
     if report["candidate_sha"] != selected.sha:
         raise PredeployError("SAFE_CANDIDATE_SHA")
-    return {"artifact_id": artifact["id"], "artifact_digest": digest, "policy_sha": policy_sha,
+    record = {"artifact_id": artifact["id"], "artifact_digest": digest, "policy_sha": policy_sha,
             "schema_fingerprint": report["candidate_migrations_data_integrity"]["fresh_fingerprint"]}
+    if dynamic:
+        record["baseline"] = baseline
+    return record
 
 
 def verify_copy(source: Path, directory: Path, before: list[str], expected: list[str],

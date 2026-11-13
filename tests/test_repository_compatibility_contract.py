@@ -1,6 +1,7 @@
 """Проверяет полноту policy и реальные отказы старых записей на новом SQL."""
 
 from copy import deepcopy
+from dataclasses import asdict, replace
 import hashlib
 import json
 import os
@@ -16,8 +17,13 @@ from scripts.check_repository_compatibility import (
 )
 from scripts.ci_repository_compatibility import verify_baseline
 from scripts import ci_repository_compatibility as ci
+from scripts.deployment_acceptance import AcceptedBaseline
 from scripts.repository_compatibility_contract import load_policy, verify_inventory, verify_report, verify_tests
 from tests.compatibility_test_environment import worker_python
+
+
+BASELINE = AcceptedBaseline("22c01936c58d0cd7c99df334465f4562f9e3ca4e", "v3.4.0",
+                            442821807, 7736620585, 22029591001)
 
 
 class CompatibilityContractTests(unittest.TestCase):
@@ -25,7 +31,8 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_baseline_requires_pinned_immutable_release_and_commit(self) -> None:
         """Произвольные input, tag и Release не заменяют закреплённую базу."""
-        policy = load_policy()
+        policy = {"previous_sha": BASELINE.sha, "release_id": BASELINE.release_id,
+                  "release_tag": BASELINE.version}
         release = {"id": policy["release_id"], "tag_name": policy["release_tag"],
                    "immutable": True, "draft": False, "prerelease": False, "published_at": "2026-11-02"}
         reference = {"object": {"type": "commit", "sha": policy["previous_sha"]}}
@@ -64,14 +71,16 @@ class CompatibilityContractTests(unittest.TestCase):
     def test_policy_rejects_missing_duplicate_or_unmapped_operation(self) -> None:
         """Удалённый метод и неизвестный test ID не проходят в новой policy."""
         policy = load_policy()
-        for kind in ("missing", "duplicate", "unknown"):
+        for kind in ("missing", "duplicate", "unknown", "stale-baseline"):
             altered = deepcopy(policy)
             if kind == "missing":
                 altered["matrix"].pop()
             elif kind == "duplicate":
                 altered["matrix"][0] = altered["matrix"][1]
-            else:
+            elif kind == "unknown":
                 altered["matrix"][0]["test_id"] = "missing.test"
+            else:
+                altered["previous_sha"] = BASELINE.sha
             with TemporaryDirectory() as temporary:
                 path = Path(temporary) / "policy.json"
                 path.write_text(json.dumps(altered), encoding="utf-8")
@@ -90,7 +99,7 @@ class CompatibilityContractTests(unittest.TestCase):
         candidate = dict(worker, candidate_tests=tests, fresh_fingerprint="schema", upgraded_fingerprint="schema")
         behavior = dict(worker, old_tests=tests, schema_fingerprints=["schema"],
                         candidate_schema_observations=1, schema_errors=[])
-        return {"passed": True, "previous_sha": policy["previous_sha"],
+        return {"passed": True, "previous_sha": BASELINE.sha,
                 "source_verification": "passed", "source_changes": {"previous": [], "candidate": []},
                 "sources": {"previous": old, "candidate": new}, "previous_with_candidate_sql": new,
                 "previous_seed": worker, "candidate_migrations_data_integrity": candidate,
@@ -102,7 +111,7 @@ class CompatibilityContractTests(unittest.TestCase):
         policy = load_policy()
         for checkout in (PurePosixPath("/tmp/ci/checkout"), PureWindowsPath(r"C:\Temp\ci\checkout")):
             with self.subTest(checkout=checkout):
-                verify_report(self._report(policy, checkout), policy)
+                verify_report(self._report(policy, checkout), policy, previous_sha=BASELINE.sha)
 
     def test_report_requires_absolute_checkout_and_tracked_import_origin(self) -> None:
         """Происхождение импортов проверяется в обоих форматах путей."""
@@ -115,9 +124,9 @@ class CompatibilityContractTests(unittest.TestCase):
                 with self.subTest(checkout=checkout, origin=origin), self.assertRaises(ValueError):
                     report = self._report(policy, checkout)
                     report["previous_seed"]["imports"] = {"compadre_assistant.fixture": str(origin)}
-                    verify_report(report, policy)
+                    verify_report(report, policy, previous_sha=BASELINE.sha)
             with self.subTest(checkout=checkout.name), self.assertRaises(ValueError):
-                verify_report(self._report(policy, type(checkout)(checkout.name)), policy)
+                verify_report(self._report(policy, type(checkout)(checkout.name)), policy, previous_sha=BASELINE.sha)
 
     def test_report_rejects_sql_import_baseline_and_result_substitution(self) -> None:
         """Подмена evidence не скрывается за зелёным агрегированным passed."""
@@ -125,7 +134,9 @@ class CompatibilityContractTests(unittest.TestCase):
         report = self._report(policy, Path.cwd().resolve() / "fixture")
         source = "compadre_assistant/fixture.py"
         new = report["sources"]["candidate"]
-        verify_report(report, policy)
+        verify_report(report, policy, previous_sha=BASELINE.sha)
+        with self.assertRaisesRegex(ValueError, "verified previous SHA"):
+            verify_report(report, policy)
         for kind in ("baseline", "sql", "import", "source", "candidate", "fingerprint", "manifest"):
             changed = deepcopy(report)
             if kind == "baseline":
@@ -145,7 +156,7 @@ class CompatibilityContractTests(unittest.TestCase):
             else:
                 changed["old_repository_behavior"]["old_tests"]["test_ids"] = policy["test_ids"][:-1]
             with self.subTest(kind=kind), self.assertRaises(ValueError):
-                verify_report(changed, policy)
+                verify_report(changed, policy, previous_sha=BASELINE.sha)
 
     def test_ci_evidence_binds_pair_policy_attempt_and_exact_report_bytes(self) -> None:
         """Orchestrator скрывает token от worker и хеширует результаты одной попытки."""
@@ -153,15 +164,13 @@ class CompatibilityContractTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             policy_root = root / "policy"
-            (policy_root / "scripts").mkdir(parents=True)
-            names = ("ci_repository_compatibility.py", "repository_compatibility_contract.py",
-                     "repository_compatibility_policy.json", "check_repository_compatibility.py",
-                     "repository_compatibility_worker.py", "repository_compatibility_cases.py")
             trusted = {}
-            for name in names:
+            for name in ci.DYNAMIC_HARNESS:
+                path = policy_root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
                 content = name.encode()
-                (policy_root / "scripts" / name).write_bytes(content)
-                trusted[f"scripts/{name}"] = hashlib.sha256(content).hexdigest()
+                path.write_bytes(content)
+                trusted[name] = hashlib.sha256(content).hexdigest()
             workflows = {f".github/workflows/{name}.yml": "workflow" for name in
                          ("full-suite", "main-full", "release-full")}
             trusted.update(workflows)
@@ -177,35 +186,41 @@ class CompatibilityContractTests(unittest.TestCase):
                            "GITHUB_RUN_ATTEMPT": "3", "GITHUB_TOKEN": "must-not-leak",
                            "GITHUB_OUTPUT": "must-not-write", "ACTIONS_RUNTIME_TOKEN": "must-not-leak",
                            "GITHUB_WORKFLOW_REF": f"{policy['repository']}/.github/workflows/main-full.yml@refs/heads/main"}
-            release = {"id": policy["release_id"], "tag_name": policy["release_tag"],
-                       "immutable": True, "draft": False, "prerelease": False, "published_at": "date"}
-            reference = {"object": {"type": "commit", "sha": policy["previous_sha"]}}
             with patch.dict(os.environ, environment, clear=True), \
                     patch.object(ci, "__file__", str(policy_root / "scripts/ci_repository_compatibility.py")), \
                     patch.object(sys, "argv", ["ci", "--repository", str(root), "--previous-sha",
-                                              policy["previous_sha"], "--output", str(output)]), \
-                    patch.object(ci, "_get", side_effect=[release, reference]) as get, \
+                                              BASELINE.sha, "--accepted-baseline", json.dumps(asdict(BASELINE)),
+                                              "--output", str(output)]), \
+                    patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE) as resolve, \
                     patch.object(ci, "export_commit", side_effect=[trusted, workflows, {"old": "hash"}]) as export, \
                     patch.object(ci, "verify_inventory"), patch.object(ci, "verify_report"), \
                     patch.object(ci.subprocess, "run") as run:
                 run.return_value.returncode = 0
                 self.assertEqual(ci.main(), 0)
                 self.assertFalse(any(key.startswith(("GITHUB_", "ACTIONS_")) for key in run.call_args.kwargs["env"]))
-                for kind in ("matrix", "workflow"):
-                    get.side_effect = [release, reference]
+                for kind in ("matrix", "resolver", "workflow", "baseline"):
                     export.side_effect = [trusted, workflows, {"old": "hash"}]
                     run.reset_mock()
                     if kind == "matrix":
                         (policy_root / "scripts/repository_compatibility_policy.json").write_bytes(b"substituted matrix")
-                    else:
-                        (policy_root / "scripts/repository_compatibility_policy.json").write_bytes(b"repository_compatibility_policy.json")
+                    elif kind == "resolver":
+                        (policy_root / "scripts/deployment_acceptance.py").write_bytes(b"substituted resolver")
+                    elif kind == "workflow":
                         export.side_effect = [trusted, dict(workflows, **{".github/workflows/full-suite.yml": "substituted"})]
-                    with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "policy checkout|trusted workflow"):
+                    else:
+                        resolve.return_value = replace(BASELINE, status_id=BASELINE.status_id + 1)
+                    with self.subTest(kind=kind), self.assertRaisesRegex(
+                            ValueError, "policy checkout|trusted workflow|latest accepted baseline"):
                         ci.main()
                     run.assert_not_called()
+                    for path in ("scripts/repository_compatibility_policy.json", "scripts/deployment_acceptance.py"):
+                        (policy_root / path).write_bytes(path.encode())
             evidence = json.loads((output / "evidence.json").read_text())
             self.assertEqual((evidence["candidate_sha"], evidence["previous_sha"], evidence["policy_sha"]),
-                             ("a" * 40, policy["previous_sha"], "b" * 40))
+                             ("a" * 40, BASELINE.sha, "b" * 40))
+            self.assertEqual(evidence["version"], 2)
+            self.assertEqual(evidence["baseline"], asdict(BASELINE))
+            self.assertEqual(set(evidence["policy_files"]), set(ci.DYNAMIC_HARNESS))
             self.assertEqual((evidence["run_id"], evidence["run_attempt"]), (12, 3))
             self.assertEqual(evidence["files"]["report.json"], hashlib.sha256((output / "report.json").read_bytes()).hexdigest())
             (output / "report.json").write_text("{}", encoding="utf-8")
@@ -217,7 +232,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        """Получает v3.1.0 один раз без checkout рабочего дерева."""
+        """Получает принятую v3.4.0 один раз без checkout рабочего дерева."""
         cls.temporary = TemporaryDirectory(prefix="compatibility-mutations-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name).resolve()
@@ -225,7 +240,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         cls.repository = Path(__file__).resolve().parents[1]
         subprocess.run(["git", "status", "--short"], cwd=cls.repository, check=True, capture_output=True)
         cls.checkout = cls.root / "previous"
-        cls.original = export_commit(cls.repository, cls.policy["previous_sha"], cls.checkout)
+        cls.original = export_commit(cls.repository, BASELINE.sha, cls.checkout)
 
     def _run(self, name: str, sql: str, *, full: bool = False) -> dict:
         source = self.root / name / "source"

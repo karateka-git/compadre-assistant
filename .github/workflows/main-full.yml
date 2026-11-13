@@ -1,21 +1,23 @@
 name: pre-release-check-full
-run-name: ${{ inputs.rotation_policy_sha && format('CI baseline {0}', inputs.rotation_policy_sha) || '' }}
+run-name: ${{ inputs.expected_policy_sha && format('CI policy {0}', inputs.expected_policy_sha) || '' }}
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
     inputs:
-      rotation_policy_sha:
-        description: Reviewed policy SHA for a baseline rotation
+      expected_sha:
+        description: Full commit SHA at the selected branch tip
+        required: true
         type: string
-      rotation_main_sha:
-        description: Exact main SHA for a baseline rotation
+      expected_policy_sha:
+        description: Optional expected reviewed policy SHA
         type: string
 
 permissions:
   actions: read
   contents: read
+  deployments: read
   pull-requests: read
 
 concurrency:
@@ -30,6 +32,8 @@ jobs:
     outputs:
       run-full: ${{ steps.decide.outputs.run-full }}
       previous-release-sha: ${{ steps.decide.outputs.previous-release-sha }}
+      accepted-baseline: ${{ steps.decide.outputs.accepted-baseline }}
+      policy-sha: ${{ steps.decide.outputs.policy-sha }}
     steps:
       - name: Checkout exact main commit
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -42,8 +46,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
-          ROTATION_POLICY_SHA: ${{ inputs.rotation_policy_sha }}
-          ROTATION_MAIN_SHA: ${{ inputs.rotation_main_sha }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_POLICY_SHA: ${{ inputs.expected_policy_sha }}
         run: python -m scripts.full_ci_controller main
 
   full-suite:
@@ -52,9 +56,12 @@ jobs:
     if: needs.controller.outputs.run-full == 'true'
     permissions:
       contents: read
+      deployments: read
     uses: ./.github/workflows/full-suite.yml
     with:
       previous-release-sha: ${{ needs.controller.outputs.previous-release-sha }}
+      accepted-baseline: ${{ needs.controller.outputs.accepted-baseline }}
+      policy-sha: ${{ needs.controller.outputs.policy-sha }}
 
   ci-metrics:
     name: ci-metrics

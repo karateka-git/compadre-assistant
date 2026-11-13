@@ -16,7 +16,6 @@ from scripts import deploy_acceptance as acceptance
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts import publish_installation_tag as installation
-from scripts import rotate_ci_baseline as rotation
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.full_ci_controller import ControllerError
@@ -217,9 +216,9 @@ class PublishInstallationTagTests(unittest.TestCase):
         """Принятое поколение и прогон нельзя заменить новым POST."""
         api = FakeGitHub()
         installation.publish(api, lambda: RECEIPT, RUNTIME_ID)
-        rotation.require_accepted_installation(api, RECEIPT)
+        self.assertTrue(installation.installation_tag_exists(api, VERSION, SHA, receipt=RECEIPT))
         with self.assertRaisesRegex(installation.InstallationTagError, "расходятся"):
-            rotation.require_accepted_installation(api, replace(RECEIPT, generation_id="f" * 32))
+            installation.installation_tag_exists(api, VERSION, SHA, receipt=replace(RECEIPT, generation_id="f" * 32))
         with self.assertRaisesRegex(installation.InstallationTagError, "расходятся"):
             installation.publish(api, lambda: replace(RECEIPT, generation_id="f" * 32), RUNTIME_ID)
         conflicting = replace(InstallationSchemaEvidence.from_receipt(asdict(RECEIPT), VERSION, SHA), run_attempt=5)

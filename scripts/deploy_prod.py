@@ -522,7 +522,7 @@ class Host:
         candidate = state["candidate"]
         selection = {field.name: candidate[field.name] for field in fields(SelectedRelease) if field.name in candidate}
         if selection.get("compatibility") is not None:
-            selection["compatibility"] = ReleaseTagEvidence(**selection["compatibility"])
+            selection["compatibility"] = ReleaseTagEvidence.from_record(selection["compatibility"])
         selected = SelectedRelease(**selection)
         verified = state["compatibility_evidence"]
         annotated = "tag_object_sha" in verified
@@ -537,6 +537,8 @@ class Host:
         if annotated:
             prep.require_clean_checkout(self.checkout, candidate["sha"])
             evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
+            if "baseline" in evidence:
+                compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"])
         else:
             token = compatibility.private_text(self.state_dir / "github-read-token")
             evidence = compatibility.verify_evidence(
@@ -803,10 +805,10 @@ class Host:
         verified = state["compatibility_evidence"]
         if "tag_object_sha" in verified:
             evidence = compatibility.verify_tag_evidence(
-                GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy, state["old_sha"])
+                GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy, state["old_sha"], frozen=True)
         else:
             evidence = compatibility.verify_evidence(
-                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"])
+                compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token), selected, policy, state["old_sha"], frozen=True)
         if (evidence != verified
                 or evidence["schema_fingerprint"] != state["new"]["fingerprint"]
                 or compatibility.private_text(self.state_dir / "compatibility-policy.sha") != policy):
@@ -1095,6 +1097,8 @@ class Host:
                         or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
                     raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
         self.require_baseline(good, old_sha, old_id)
+        if "baseline" in evidence and good.get("version") != evidence["baseline"]["version"]:
+            raise compatibility.PredeployError("SAFE_INSTALLED_LAST_GOOD")
         self.compatibility_evidence = evidence
 
     def require_snapshot_quiescence(self) -> None:
@@ -1299,6 +1303,24 @@ def _recover_v2_preflight(host: Host, state: dict[str, Any]) -> None:
     _state(host, state, "failed_preflight")
 
 
+def _recover_cleaned_preparation(host: Host, state: dict[str, Any]) -> None:
+    """Возвращает checkout после подготовки кандидата поверх принятой SQLite."""
+    from scripts import deploy_runtime
+
+    # Старый файл удалён после другого перехода. Здесь разрешён только
+    # возврат checkout к runtime, который уже работал до подготовки.
+    database_switch.read_selected(host, state)
+    boot = deploy_runtime.boot_record(state, "success")
+    if state.get("boot") != boot:
+        raise DeployError("Boot перед прерванной подготовкой не подтверждён")
+    host.restore_checkout(boot["sha"])
+    deploy_runtime.verify(host, state | {"stage": "success"}, require_running=True)
+    if not host.unit_active(SERVICE) or host.timer_snapshot() != state["timer_before"]:
+        raise DeployError("Сервис или таймер изменились во время подготовки")
+    _state(host, state, "success", error="Предыдущая подготовка прервана",
+           retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
+
+
 def _recover(host: Host, state: dict[str, Any]) -> None:
     """Восстанавливает runtime по границе v2 либо прежнему legacy-контракту."""
     stage = state.get("stage")
@@ -1311,6 +1333,9 @@ def _recover(host: Host, state: dict[str, Any]) -> None:
                 return
             if stage == "failed_preflight":
                 _recover_v2_preflight(host, state)
+                return
+            if stage == "preparing" and "old_generation_cleanup" in state:
+                _recover_cleaned_preparation(host, state)
                 return
             if stage in ("finalization_intent", "runtime_adopted"):
                 host.finalize_database(state, state["boot"]["outcome"])
@@ -1531,12 +1556,14 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         except Exception as error:
             _preflight_failed(host, state, switch_state, error)
             raise DeployError("Исходное состояние production не прошло preflight") from error
-        state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag,
-                     failed_version=version)
-        state["deployment"] = ({"kind": "emergency", "initiator": initiator,
-                                "reason": reason.strip(), "version": version}
-                               if emergency else None)
-        _state(host, state, "preparing")
+        deployment = ({"kind": "emergency", "initiator": initiator,
+                       "reason": reason.strip(), "version": version}
+                      if emergency else None)
+        if "old_generation_cleanup" not in state:
+            state.update(old_sha=old_sha, old_image_id=old_id, old_tag=old_tag, deployment=deployment)
+        # После очистки прежние old_* по-прежнему принадлежат принятому
+        # boot и его schema admission. Новый переход получит их после preflight.
+        _state(host, state, "preparing", failed_version=version)
         try:
             selected, tag, candidate_id, before, expected = _prepare_candidate(
                 host, version, old_sha, old_id, old_tag, emergency=emergency, last_good=last_good,
@@ -1554,8 +1581,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                               retry_after=(datetime.now(timezone.utc) + COOLDOWN).isoformat())
             raise
         database = host.selected_database()
-        if emergency:
-            state["deployment"].update({
+        if deployment is not None:
+            deployment.update({
                 "sha": selected.sha, "release_id": selected.release_id,
                 "published_reason": selected.reason, "workflow": selected.workflow,
                 "ci_state": selected.ci_state, "ci_source": selected.ci_source,
@@ -1572,7 +1599,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 "schema_before": before, "schema_after": expected,
                 "migration_attempted": False, "last_good": last_good,
                 "timer_before": host.timer_snapshot(), "failed_version": version,
-                "deployment": state.get("deployment"),
+                "deployment": deployment,
                 "controller_sha": host.controller_sha(),
             }
             if switch_state is not None:
@@ -1788,7 +1815,7 @@ def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> 
 
 
 def main() -> None:
-    """Обрабатывает установку, технические проверки, очистку и активацию базы CI."""
+    """Обрабатывает установку, технические проверки и очистку прежней SQLite."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("version", nargs="?")
     parser.add_argument("--emergency", action="store_true", help="явный аварийный выпуск")
@@ -1798,9 +1825,6 @@ def main() -> None:
                       help="контролируемый stop/start обоих каналов на текущем pin")
     mode.add_argument("--verify-installed", metavar="SHA",
                       help="техническая приёмка указанной версии и SHA без изменений")
-    mode.add_argument("--activate-ci-baseline", nargs=7,
-                      metavar=("SHA", "OLD_PIN", "NEW_PIN", "MAIN_SHA", "RUN", "ATTEMPT", "RUNTIME_ID"),
-                      help="после приёмки активировать новую базу CI на VPS")
     mode.add_argument("--cleanup-old", nargs=2, metavar=("SHA", "RUNTIME_ID"),
                       help="удалить прежнюю SQLite для технически принятого выпуска")
     args = parser.parse_args()
@@ -1809,8 +1833,7 @@ def main() -> None:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        separate_mode = (args.verify_pinned or args.verify_installed is not None
-                         or args.activate_ci_baseline is not None or args.cleanup_old is not None)
+        separate_mode = args.verify_pinned or args.verify_installed is not None or args.cleanup_old is not None
         if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
@@ -1829,21 +1852,6 @@ def main() -> None:
             except OSError as error:
                 raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
             print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
-        elif args.activate_ci_baseline is not None:
-            from scripts import deploy_ci_baseline
-            from scripts.deployment_acceptance import DeploymentAcceptanceError
-            from scripts.full_ci_controller import ControllerError
-            from scripts.rotate_ci_baseline import RotationError
-
-            sha, expected_old, pin, main_sha, run_id, attempt, runtime_id = args.activate_ci_baseline
-            try:
-                deploy_ci_baseline.activate(host, args.version, sha, expected_old=expected_old, policy_sha=pin,
-                                            main_sha=main_sha, run_id=int(run_id), attempt=int(attempt),
-                                            runtime_id=runtime_id)
-            except (DeployError, deploy_ci_baseline.DeployError, RotationError, DeploymentAcceptanceError,
-                    ControllerError, compatibility.PredeployError) as error:
-                raise DeployError(f"База CI не активирована ({error})") from error
-            print(f"deploy-prod ci_baseline={pin}", flush=True)
         else:
             installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
             if installed_sha is not None:
