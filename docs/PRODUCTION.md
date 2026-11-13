@@ -79,10 +79,12 @@ Release selector. Исправленный controller использует пр�
 
 Ротация базы полного CI после этого выпуска была отменена: repository variable
 `COMPATIBILITY_POLICY_SHA` возвращена к `09f15a5b3c01ec73d02379b918104e8cf697b4b2`,
-хотя на VPS установлен v3.2.0. Успешный [main-full 42344876362/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42344876362)
-проверил SHA `a44cd3c73afefc30b832051fc95fff0e5555142a` после возврата policy;
-он **не является допуском будущего deploy** от установленной v3.2.0.
-Разбор и автоматизация перенесены в [бэклог](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
+хотя на VPS уже работала v3.2.0. Успешный [main-full 42344876362/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42344876362)
+проверил SHA `a44cd3c73afefc30b832051fc95fff0e5555142a` после возврата policy.
+Для следующего deploy от установленной v3.2.0 требовался новый точный CI.
+Действующий порядок описан в
+[допуске полного CI](RELEASES.md#2-получить-полный-ci-для-точного-коммита) и
+[инструкции выпуска](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 Reboot и потеря питания VPS не проверялись.
 
 Перед дальнейшими действиями повторно прочитать фактический state, selector,
