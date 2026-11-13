@@ -347,7 +347,7 @@ fine-grained PAT доверенного владельца. Проверьте, 
    Идентификаторы Deployment и статуса указывают на ту же запись приёмки.
    На VPS подтвердите сохранность active SQLite, selector и backup по
    [проверке результата очистки](#удалить-прежнее-поколение-sqlite-после-приёмки).
-   Для базы CI выполните [отдельную ротацию](#закрепить-базу-полного-ci-после-установки).
+   Следующий полный CI выберет принятый выпуск из Deployments.
 
 Если установка уже завершилась, а очистка или запись Deployment требуют
 повтора, выберите `resume` с теми же `version` и `sha`. Он перечитывает приёмку,
@@ -483,93 +483,78 @@ python -m scripts.publish_installation_tag @installationArgs --publish --confirm
 python -m scripts.publish_installation_tag vX.Y.Z <полный-SHA> --summary
 ```
 
-В JSON `expected_migration` берётся из точного Git-коммита. При `pending`
-тега установки ещё нет. При `accepted` доступны `generation_id`,
-`applied_migration` и SHA объекта аннотированного тега. `legacy_tag` означает,
-что сохранился прежний прямой тег и сведения о поколении и миграции
-отсутствуют. Для аварийного выпуска номер прогона в сводке появляется после
-приёмки и берётся из её тега. При конфликте источников разберите его с
-владельцем. Сводка показывает состояние на момент приёмки. Для ротации базы
-CI заново подтвердите актуальный `last_good` на VPS.
+В JSON `expected_migration` берётся из точного Git-коммита. Для `v3.2.0`
+сводка читает исторический тег установки. Для более новых выпусков сводка
+читает GitHub Deployments. При `accepted` доступны `generation_id` и
+`applied_migration`. Для аварийного выпуска номер прогона появляется после
+приёмки и берётся из подтверждённой записи. Сводка показывает состояние на
+момент приёмки. При расхождении с текущим VPS отдельно проверьте
+`last_good`, запись и состояние runtime.
 
-### Закрепить базу полного CI после установки
+### Повторить полный CI для точного SHA
 
-Начинайте после независимой приёмки установки SQLite v2. Для исторического
-`v3.2.0` требуется `production/v3.2.0`. Для остальных выпусков требуется
-единственный текущий доверенный `success` в
-[GitHub Deployments](#установить-выпуск-и-записать-deployment). После forward
-recovery отдельно зафиксируйте его результат и запустите `--publish`.
-Источник новой базы — свежий `last_good` на VPS, подтверждённый immutable
-Release и соответствующей записью приёмки. Тег следующей версии не заменяет
-отсутствующий Deployment.
+Если изменилась принятая база или прежняя попытка завершилась отказом,
+откройте **Actions → Run workflow**. Выберите `pre-release-check-full` для
+`main` или `release-check-full` для нужной `release/X.Y`. Получите полный SHA
+текущей вершины выбранной ветки и передайте его в `expected_sha`. Вручную
+можно запустить новый полный CI того же SHA даже при старом успешном
+результате. При движении ветки получите её новый SHA и повторите запуск.
 
-```powershell
-python -m scripts.rotate_ci_baseline @installationArgs prepare
-```
+В успешной точной попытке проверьте `check-full-repository-compatibility-check`,
+`check-full-suite` и сводку с SHA и ID Release, Deployment и статуса принятой
+базы. Если база изменилась во время проверки, запустите новый полный CI на
+актуальной базе до публикации. Если VPS уже обновлён, а запись о его
+приёмке не подтверждена, сначала завершите приёмку установленного выпуска.
+Для обычного выпуска используйте
+[режим resume](#выпустить-обычную-версию-из-github-actions).
 
-Для аргументов команды используйте точные версию, SHA и SSH-параметры из
-[проверки тега установки](#зафиксировать-приёмку-тегом-установки); имя
-`$installationArgs` историческое и не означает публикацию нового тега.
-Команда в чистой ветке на основе `main` сверяет матрицу repository API
-с локальным Git-объектом принятого SHA и меняет только `previous_sha`,
-`release_tag` и `release_id` в `scripts/repository_compatibility_policy.json`.
-Если объекта нет, получите его из GitHub. Если SQLite API изменился и
-матрица больше ему не соответствует, согласуйте изменения матрицы и её
-тестов до ротации. Просмотрите diff и проведите отдельный PR с review,
-зелёным `pr-check` и merge commit. Для `git push` требуется явное согласие
-пользователя. После push перечитайте `AGENTS.md`.
+### Обновить доверенную политику полного CI
 
-После слияния получите номер PR, полный SHA текущего `main` и прежнее
-значение `COMPATIBILITY_POLICY_SHA`. Команды `pin` и `dispatch` изменяют
-GitHub и выполняются оператором по явному согласованию владельца. `pin`
-переводит переменную на точный reviewed merge commit и читает её обратно.
-`dispatch` запускает отдельный полный `pre-release-check-full` с новым pin для выбранного
-SHA даже при старом зелёном CI того же коммита.
+`COMPATIBILITY_POLICY_SHA` в GitHub и файл
+`/var/lib/compadre-assistant-deploy/compatibility-policy.sha` на VPS
+закрепляют проверенный коммит с матрицей, скриптами и байтами workflow.
+Обновляйте оба значения при изменении этого контракта, включая разовый
+переход на policy v2. Следующие установки автоматически меняют базу
+через доверенный `success` в Deployments.
 
-```powershell
-python -m scripts.rotate_ci_baseline @installationArgs pin --pr <номер-PR> --main-sha <SHA-main> --expected-old-pin <прежний-GitHub-pin>
-python -m scripts.rotate_ci_baseline @installationArgs dispatch --pr <номер-PR> --main-sha <SHA-main>
-python -m scripts.rotate_ci_baseline @installationArgs finish --pr <номер-PR> --main-sha <SHA-main-прогона> --run-id <run> --attempt <attempt>
-```
+1. Подготовьте PR в защищённую `main` с новой policy и связанными файлами.
+   Проверьте точные изменения, обязательный `pr-check` и полный набор
+   проверок в Linux. Получите точный merge SHA с новой policy. Если
+   существующая релизная линия использует старые workflow, перенесите туда
+   проверенные изменения по обычному
+   [порядку связанных PR](RELEASES.md#исправления-поддерживаемых-линий)
+   до следующего выпуска из этой линии.
+2. Согласуйте окно изменения и поставьте выпуск на паузу. Сохраните оба
+   прежних pin и проверьте на VPS чистый checkout, завершённый `last_good`,
+   marker, оба канала и backup. Текущий `success` в Deployments должен
+   совпадать с точным immutable Release и технической приёмкой
+   установленной версии. Существующий `github-read-token` должен читать
+   Deployments и их статусы. Для штатной работы токен VPS читает Actions,
+   Contents и Deployments. Храните токен и pin вне checkout с правами
+   root:root/0600. Токен оператора в SSH не передаётся.
+3. Установите GitHub repository variable `COMPATIBILITY_POLICY_SHA` в
+   reviewed merge SHA и прочитайте её обратно. Запустите
+   `pre-release-check-full` для `main` с `expected_sha`, равным полному SHA
+   текущей вершины, и `expected_policy_sha`, равным новому pin. При отказе
+   перечитайте переменную GitHub. Возвращайте прежнее значение, если
+   переменная всё ещё указывает на новый pin этой операции. При другом
+   значении остановитесь для сверки изменений. При успехе сверьте точные SHA,
+   run/attempt и идентификаторы принятой базы из артефакта CI с состоянием VPS.
+4. Установите проверенный
+   [controller snapshot](#обновить-отдельно-установленный-controller-snapshot)
+   из точного SHA прошедшего прогона. Под тем же существующим deploy lock
+   переключите локальный pin на подтверждённый GitHub pin. Проверьте
+   байты и изолированный import snapshot, новый локальный pin, принятое
+   CI evidence на том же `last_good`, отсутствие marker, состояние
+   обоих каналов и backup timer. При отказе верните предыдущие snapshot,
+   wrapper, `controller.sha` и локальный pin под lock. Затем проверьте
+   текущее значение GitHub pin по правилу из предыдущего шага и верните
+   прежнее значение, если оно всё ещё закреплено за этой операцией.
+   Возобновляйте выпуски после подтверждения согласованного состояния.
 
-Если ответ `dispatch` потерялся, найдите в Actions запуск `CI baseline <новый-pin>`
-с тем же SHA и проверьте номер попытки. Для известного запуска используйте
-`finish` или повторите его попытку в GitHub после разбора причины отказа.
-Если `main` успел продвинуться, `finish` принимает уже прошедший прогон по
-его исходному SHA, пока этот SHA остаётся в истории `main` и policy совпадает.
-Если исходная попытка остановилась из-за движения `main`, выберите новый SHA
-для отдельного запуска с той же reviewed policy. `finish` подтверждает
-полные jobs и evidence точного run/attempt с новой базой и возвращает
-`policy_sha`, `main_sha`, `run_id`, `attempt` и свежий `runtime_id`.
-
-Согласуйте отдельную активацию на VPS. Узнайте прежний локальный pin из
-`/var/lib/compadre-assistant-deploy/compatibility-policy.sha`. Он может
-отличаться от прежней переменной GitHub. Передайте его и реквизиты `finish`.
-
-```bash
-sudo deploy-prod vX.Y.Z --activate-ci-baseline <установленный-SHA> <прежний-VPS-pin> <policy_sha> <main_sha> <run_id> <attempt> <runtime_id>
-```
-
-Под блокировкой выпуска контроллер сверяет принятую установку, актуальный
-GitHub pin и успешную новую попытку. После сверки он атомарно меняет только
-локальный pin. Повтор с тем же подтверждённым состоянием допустим. При
-частичной ротации, ошибке API или неуспехе новой попытки локальный pin
-остаётся прежним, поэтому допуск следующей версии закрыт до сверки новой
-базы. Работающие каналы продолжают обслуживать текущий выпуск.
-
-Для подготовки достаточно чтения Contents. Для проверки PR, переменной и
-результатов нужны Contents, Pull requests, Variables и Actions на чтение.
-Для `pin` нужен токен владельца с Variables write, для `dispatch` —
-с Actions write. GitHub-токен оператора не передаётся в SSH. VPS использует
-отдельный `github-read-token` с Actions, Contents и Variables read для
-активации. Токен и локальный pin хранятся вне checkout с правами root:root/0600.
-Скрипт ротации не публикует Release и не выполняет `git push`.
-
-Перед первым выпуском с изменёнными workflow установите совместимый
-controller snapshot и завершите ротацию на reviewed merge, в котором уже
-присутствуют эти workflow. Если база уже совпадает с установленной версией,
-согласуйте отдельный reviewed pin для новых байтов workflow. Последнее
-документированное состояние приведено в [PRODUCTION.md](PRODUCTION.md).
+Для изменения переменной нужен доступ Variables write, для запуска прогона
+через API — Actions write. На VPS переход касается только snapshot и pin.
+Уже установленный выпуск служит проверкой без переустановки.
 
 ### Проверить живое переключение двух каналов
 
@@ -696,8 +681,9 @@ python -m scripts.publish_deployment_acceptance @deploymentArgs --deploy --emerg
 проверки backup, migration, pin, health, marker и rollback. Для записи
 Deployment по-прежнему нужна доверенная успешная попытка полного CI
 точного SHA. Если её нет, установленный выпуск продолжает работать, а
-публикация `success` и ротация базы CI закрыты. Настоящий аварийный выпуск
-на VPS пока не испытан.
+публикация `success` закрыта. До подтверждения записи текущая база CI
+остаётся прежней, а расхождение с `last_good` закрывает следующую установку.
+Настоящий аварийный выпуск на VPS пока не испытан.
 
 Действующий controller в режиме emergency не обходит
 `check-full-repository-compatibility-check`: нужны успешные steps этого
@@ -723,7 +709,8 @@ Controller записывает статический `SAFE_*` в stderr и п�
 | `SAFE_POLICY_PIN`, `SAFE_POLICY_CONTENT` | Проверить полный SHA внешнего reviewed pin и полноту policy. |
 | `SAFE_POLICY_BLOB_MISSING`, `SAFE_POLICY_BLOB_DIGEST` | Получить заново точные Git blobs; проверить доступ API и закреплённый commit. |
 | `SAFE_CI_PROVENANCE`, `SAFE_CI_ATTEMPT`, `SAFE_CI_JOB_MISSING`, `SAFE_CI_JOB_FAILED` | Проверить точный run/attempt, repo/ref/SHA и все обязательные steps; исправить CI и rerun. |
-| `SAFE_INSTALLED_PREVIOUS_SHA`, `SAFE_BASELINE_RELEASE` | Сопоставить installed SHA с reviewed baseline и immutable Release/tag; новый baseline требует review policy. |
+| `SAFE_BASELINE_DEPLOYMENT`, `SAFE_INSTALLED_PREVIOUS_SHA` | Сопоставить установленный SHA с текущим доверенным Deployment, его статусом и immutable Release. При изменении базы повторить полный CI точного SHA кандидата. |
+| `SAFE_BASELINE_RELEASE` | Для исторического evidence policy v1 сверить прежний immutable Release и тег с сохранённой policy. |
 | `SAFE_INSTALLED_LAST_GOOD`, `SAFE_INSTALLED_RUNTIME`, `SAFE_INSTALLED_IMAGE`, `SAFE_INSTALLED_REVISION` | Проверить last_good, systemd/pin, оба контейнера и OCI revision; не продолжать установку при drift. |
 | `SAFE_WORKFLOW_BYTES` | Сверить три workflow с внешним policy commit; изменение требует нового reviewed pin. |
 | `SAFE_TAG_EVIDENCE` | Сверить объект аннотированного тега, Release и точную попытку CI. Если они расходятся, остановить установку и проверить происхождение выпуска. |
