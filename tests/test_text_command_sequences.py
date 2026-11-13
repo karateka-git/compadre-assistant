@@ -60,7 +60,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         )
         self.model = Mock()
         self.model.answer.return_value = "Ответ модели"
-        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=80))
+        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=80), Mock())
         self.now = datetime.now(timezone.utc)
         self.sequence = 0
         self.restart()
@@ -306,14 +306,14 @@ class TextCommandSequencesTest(unittest.TestCase):
         event = IncomingEvent("telegram", "1001", "callback", "выбор", "1001")
 
         entered = self.send("/ai", **address)
-        button, = entered.bound_actions
+        button = next(action for action in entered.bound_actions if action.label == "Задать вопрос")
         selected = self.processor.select_action(event, button.token)
         self.assertIn("Введи один вопрос", response_text(selected))
         self.assertEqual(self.say("Вопрос из кнопки", **address), "Ответ модели")
         self.assertEqual(self.model.answer.call_args.kwargs["question"], "Вопрос из кнопки")
 
         entered = self.send("/ai", **address)
-        button, = entered.bound_actions
+        button = next(action for action in entered.bound_actions if action.label == "Задать вопрос")
         self.say("/exit", **address)
         rejected = self.processor.select_action(event, button.token)
         self.assertIn("больше недоступна", response_text(rejected))

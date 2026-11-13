@@ -11,13 +11,15 @@ from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQL
 from compadre_assistant.capabilities.ask.domain.usage import UsageTotalsReader
 from compadre_assistant.capabilities.ask.domain.usage_pricing import UsagePricing
 from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import ExtractImageText
+from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 
 
 @contextmanager
 def create_ask_runtime(
     *, enabled: bool, database_path: Path, config: AskConfig | None = None,
-) -> Iterator[AskQuestion | None]:
-    """Собирает сценарий Ask, клиент и фоновую запись на время работы канала.
+) -> Iterator[AskCapability | None]:
+    """Собирает режим ИИ с одним клиентом и фоновой очередью на время работы канала.
 
     Args:
         enabled: Явный выбор composition root; при False окружение не читается.
@@ -25,7 +27,7 @@ def create_ask_runtime(
         config: Готовый профиль либо None для загрузки ASK_* из окружения.
 
     Yields:
-        Сценарий одного вопроса либо None, если Ask отключён.
+        Обработчик режима ИИ либо None, если Ask отключён.
 
     Raises:
         AskConfigError: Настройки включённого Ask некорректны.
@@ -41,7 +43,10 @@ def create_ask_runtime(
         resources.callback(recorder.close)
         model = OpenAIAskModel(profile, usage_recorder=recorder)
         resources.callback(model.close)
-        yield AskQuestion(model=model, max_question_chars=profile.max_question_chars)
+        yield AskCapability(
+            question=AskQuestion(model=model, max_question_chars=profile.max_question_chars),
+            extract_image_text=ExtractImageText(model=model),
+        )
 
 
 def create_usage_totals_reader(database_path: Path) -> UsageTotalsReader:

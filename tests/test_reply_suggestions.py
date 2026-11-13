@@ -45,7 +45,7 @@ class ReplySuggestionsTest(unittest.TestCase):
         """Слишком длинный вопрос можно ввести заново без аргумента-заполнителя."""
         question = Mock()
         question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
-        ask = AskCapability(question)
+        ask = AskCapability(question, Mock())
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
@@ -62,7 +62,7 @@ class ReplySuggestionsTest(unittest.TestCase):
         """Без хранилища ожиданий голая команда не предлагается."""
         question = Mock()
         question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
-        response = AskCapability(question).handle(
+        response = AskCapability(question, Mock()).handle(
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
         self.assertEqual(response.suggested_actions, ())

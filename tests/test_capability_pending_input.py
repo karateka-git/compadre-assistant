@@ -31,7 +31,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.identity = FakeIdentity()
         self.model = Mock()
         self.model.answer.return_value = 'Ответ'
-        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=40))
+        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=40), Mock())
         self.articles = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()
         self.obsidian = ObsidianMessageHandler(

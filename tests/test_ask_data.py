@@ -26,6 +26,7 @@ from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text imp
     ExtractImageText, OCR_INSTRUCTION,
 )
 from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageRecorder
+from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 
 
 def _config() -> AskConfig:
@@ -360,7 +361,7 @@ class AskBootstrapTest(unittest.TestCase):
                 patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI") as sdk:
             with self.assertRaisesRegex(RuntimeError, "consumer"):
                 with create_ask_runtime(enabled=True, config=_config(), database_path=Path(temporary) / "app.db") as runtime:
-                    self.assertIsInstance(runtime, AskQuestion)
+                    self.assertIsInstance(runtime, AskCapability)
                     raise RuntimeError("consumer")
             sdk.assert_called_once_with(base_url="https://ask.example/v1", api_key="ask-secret",
                                         timeout=60.0, max_retries=0)

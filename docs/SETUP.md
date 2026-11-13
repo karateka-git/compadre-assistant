@@ -165,6 +165,13 @@ healthcheck. Отключённый Ask не читает профиль, не �
 LLM API; успешная проверка не доказывает доступность модели или достаточный
 баланс провайдера.
 
+Для `/get_text_from_image` модель в том же профиле Ask должна принимать
+`image_url` с JPEG и PNG в виде data URL через Chat Completions. Такой запрос
+подтверждён на `gemini/gemini-3.1-flash-lite` через Timeweb AI Gateway.
+Ограничение загрузки одного фото в Telegram и VK составляет 10 МиБ и 15 секунд.
+Загрузка VK принимает HTTPS на порту 443 с `userapi.com`, `vkuserphoto.ru`
+и их поддоменов. Telegram загружает фото через SDK бота.
+
 ### Настроить тарифы Ask
 
 Для оценки расходов укажите `ASK_USAGE_TARIFFS_JSON` одной строкой в `.env`

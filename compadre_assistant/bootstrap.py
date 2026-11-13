@@ -443,7 +443,7 @@ def create_channel_message_processor(
                 obsidian_descriptor(),
             )
             if ask is not None:
-                capabilities += (AskCapability(ask),)
+                capabilities += (ask,)
             else:
                 disabled += (AskCapability.descriptor,)
             yield ChannelMessageProcessor(
