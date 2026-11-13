@@ -7,10 +7,14 @@ import threading
 from types import SimpleNamespace
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from io import BytesIO
 from typing import Any
 
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import (
+    ImageAttachment, ImageLoadError, IncomingEvent,
+)
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
     CommandMenuUpdateHandler, IncomingResponse,
@@ -30,6 +34,9 @@ TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
 TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
 TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
+# Ограничения действуют на загруженное фото и на оба запроса к Telegram.
+_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_PHOTO_TIMEOUT_SECONDS = 15
 # Кнопки разрешены вместе с зарегистрированным ниже callback-handler.
 TELEGRAM_INLINE_ACTIONS_ENABLED = True
 IncomingMessageProcessor = Callable[
@@ -75,7 +82,7 @@ def run_telegram_bot(
         proxy_url: Адрес прокси для Bot API или `None` для прямого подключения.
         incoming_message_processor: Обработчик входящих сообщений.
         logger: Логгер безопасных runtime-событий.
-        empty_message_reply: Ответ на сообщение без текста.
+        empty_message_reply: Ответ на сообщение без текста и фото.
     """
     try:
         asyncio.run(
@@ -281,9 +288,10 @@ def _register_handlers(
     router = aiogram.Router()
 
     @router.message()
-    async def handle_text(message: Any) -> None:
-        """Передаёт текстовое сообщение общему входу приложения."""
-        if not message.text:
+    async def handle_message(message: Any) -> None:
+        """Передаёт текст или ленивое вложение общему входу приложения."""
+        photo = getattr(message, "photo", None)
+        if photo is None and not message.text:
             await safe_send_telegram_reply(
                 message,
                 IncomingResponse(text_content(empty_message_reply)),
@@ -291,10 +299,14 @@ def _register_handlers(
             )
             return
 
-        incoming_message = _incoming_message_from_telegram(message)
+        loop = asyncio.get_running_loop()
+        images = ()
+        if photo is not None:
+            images = (_telegram_photo_attachment(message.bot, photo, loop),)
+        incoming_message = _incoming_message_from_telegram(message, images=images)
         completion_handler = _create_telegram_completion_handler(
             message,
-            loop=asyncio.get_running_loop(),
+            loop=loop,
             logger=logger,
         )
         if menu_update_handler is None:
@@ -488,7 +500,112 @@ class _TelegramReplyTarget:
         await self._bot.send_message(**kwargs)
 
 
-def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
+class _PhotoBuffer(BytesIO):
+    """Останавливает чтение Telegram-файла при превышении лимита."""
+
+    def write(self, data: bytes) -> int:
+        """Записывает очередной блок SDK в пределах лимита.
+
+        Args:
+            data: Блок байтов в порядке чтения файла.
+
+        Returns:
+            Число записанных байтов.
+
+        Raises:
+            ImageLoadError: Блок не помещается в оставшийся объём.
+        """
+        if self.tell() + len(data) > _PHOTO_MAX_BYTES:
+            raise ImageLoadError()
+        return super().write(data)
+
+
+def _telegram_photo_attachment(
+    bot: Any, variants: list[Any], loop: asyncio.AbstractEventLoop,
+) -> ImageAttachment:
+    """Сохраняет ленивый доступ к лучшему по разрешению варианту фото."""
+    eligible = (
+        size for size in variants
+        if size.file_id and (size.file_size is None or 0 < size.file_size <= _PHOTO_MAX_BYTES)
+    )
+    photo = max(
+        eligible,
+        key=lambda size: size.width * size.height,
+        default=None,
+    )
+    file_id = photo.file_id if photo is not None else None
+
+    async def download() -> bytes:
+        """Ограничивает getFile и потоковую загрузку одним таймаутом."""
+        try:
+            with _PhotoBuffer() as destination:
+                async with asyncio.timeout(_PHOTO_TIMEOUT_SECONDS):
+                    await bot.download(file_id, destination=destination, seek=False)
+                return destination.getvalue()
+        except _FatalPollingError:
+            # Этот тип предназначен для polling retry и наследуется от BaseException.
+            raise ImageLoadError() from None
+
+    def load() -> bytes:
+        """Запрашивает загрузку в цикле SDK из синхронного worker."""
+        if file_id is None or not loop.is_running():
+            raise ImageLoadError()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            raise ImageLoadError()
+
+        result: Future[bytes] = Future()
+
+        def start() -> None:
+            """Связывает задачу SDK и ожидание worker после входа в loop."""
+            if result.cancelled():
+                return
+            # Создаём корутину здесь, чтобы при закрытии loop в очереди
+            # остался только callback и не потребовалось закрывать корутину.
+            task = loop.create_task(download())
+
+            def forward_cancellation(completed: Future[bytes]) -> None:
+                if completed.cancelled():
+                    try:
+                        loop.call_soon_threadsafe(task.cancel)
+                    except RuntimeError:
+                        pass  # Цикл уже закрыт.
+
+            def finish(completed: asyncio.Task[bytes]) -> None:
+                if completed.cancelled():
+                    result.cancel()
+                    return
+                try:
+                    if completed.exception() is None:
+                        result.set_result(completed.result())
+                    else:
+                        result.set_exception(ImageLoadError())
+                except InvalidStateError:
+                    pass  # Worker уже отменил ожидание по таймауту.
+
+            result.add_done_callback(forward_cancellation)
+            task.add_done_callback(finish)
+
+        try:
+            loop.call_soon_threadsafe(start)
+        except RuntimeError:
+            raise ImageLoadError() from None
+        try:
+            # Ограничивает ожидание worker и в случае остановки event loop.
+            return result.result(timeout=_PHOTO_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            result.cancel()
+            raise ImageLoadError() from None
+
+    return ImageAttachment(load)
+
+
+def _incoming_message_from_telegram(
+    message: Any, *, images: tuple[ImageAttachment, ...] = (),
+) -> IncomingEvent:
     """Преобразует Telegram message в application-модель."""
     telegram_user = getattr(message, "from_user", None)
     display_name = None
@@ -502,7 +619,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
         channel="telegram",
         chat_id=str(message.chat.id),
         message_id=str(message.message_id),
-        text=message.text or "",
+        text="" if images else (message.text or ""),
         external_user_id=(
             str(telegram_user.id)
             if telegram_user is not None and getattr(telegram_user, "id", None) is not None
@@ -514,6 +631,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
             else None
         ),
         display_name=display_name,
+        images=images,
     )
 
 
