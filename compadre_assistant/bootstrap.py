@@ -436,7 +436,8 @@ def create_channel_message_processor(
             embedding_config=obsidian_config.embedding,
             created_note_tag=obsidian_config.obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
-        with create_ask_runtime(enabled="ask" in enabled_capabilities, config=ask_config) as ask:
+        with create_ask_runtime(enabled="ask" in enabled_capabilities,
+                                database_path=database_path, config=ask_config) as ask:
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
                 obsidian_descriptor(),

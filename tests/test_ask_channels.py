@@ -3,8 +3,10 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 import logging
 from html import escape
+import sqlite3
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,11 +14,17 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import httpx
+from openai import OpenAI
+
 from compadre_assistant.bootstrap import create_channel_message_processor
+from compadre_assistant.capabilities.ask.bootstrap import create_usage_totals_reader
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig
 from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError,
 )
+from compadre_assistant.capabilities.ask.domain.usage import UsagePeriod, UsageTotals
+from compadre_assistant.capabilities.ask.domain.usage_pricing import UsageTariff
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
@@ -273,6 +281,89 @@ class AskChannelsTest(unittest.TestCase):
                 self.assertEqual(command(database_path=self.path, token="123456:ABCDEF_test_token_123456789", logger=self.logger, enabled_capabilities=("ask",), **extra), 0)
                 loader.assert_called_once_with()
                 model_type.return_value.close.assert_called_once_with()
+
+    def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
+        """Учитывает ответы, пустые choices и отказ API после выхода каждого канала."""
+        started = datetime.now(UTC) - timedelta(seconds=1)
+        profile = replace(self.config, usage_provider="test-gateway", usage_tariffs=(
+            UsageTariff("test-gateway", "fallback", "synthetic", started, None, 11, 13),
+        ))
+        success = {"model": "fallback", "choices": [{"message": {"content": "Ответ"}}],
+                   "usage": {"prompt_tokens": 19, "completion_tokens": 2}}
+        period = UsagePeriod(started, started + timedelta(minutes=5))
+        for index, (channel, command, extra) in enumerate((
+            ("telegram", run_telegram_bot_command, {}), ("vk", run_vk_bot_command, {"group_id": 123}),
+        ), start=1):
+            with self.subTest(channel=channel):
+                responses = iter((
+                    httpx.Response(200, json=success),
+                    httpx.Response(200, json={**success, "choices": []}),
+                    httpx.Response(500, json={"error": {"message": "synthetic failure"}}),
+                    httpx.Response(200, json={"model": "fallback", "choices": success["choices"]}),
+                ))
+                requests = []
+
+                def handle(request):
+                    requests.append(request)
+                    return next(responses)
+
+                def polling(*, incoming_message_processor, **_kwargs):
+                    self.send(channel, incoming_message_processor, "/register")
+                    self.send(channel, incoming_message_processor, "Тест")
+                    self.send(channel, incoming_message_processor, "/ai")
+                    self.send(channel, incoming_message_processor, "/ask")
+                    self.assertIn("Сократи вопрос", self.send(channel, incoming_message_processor, "x" * 101))
+                    self.assertEqual(requests, [])
+                    self.assertEqual(self.send(channel, incoming_message_processor, "ожидаемый вопрос"), "Ответ")
+                    self.assertIn("Не удалось получить ответ", self.send(channel, incoming_message_processor, "/ask пустой"))
+                    self.assertIn("Не удалось получить ответ", self.send(channel, incoming_message_processor, "/ask сбой"))
+                    self.assertEqual(self.send(channel, incoming_message_processor, "/ask без учёта"), "Ответ")
+
+                with httpx.Client(transport=httpx.MockTransport(handle)) as transport, \
+                        OpenAI(base_url=profile.base_url, api_key=profile.api_key,
+                               max_retries=0, http_client=transport) as client, \
+                        patch("compadre_assistant.bootstrap.load_ask_config", return_value=profile), \
+                        patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config", return_value=profile), \
+                        patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=client), \
+                        patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot", side_effect=polling):
+                    self.assertEqual(command(database_path=self.path, token="123456:ABCDEF_test_token_123456789",
+                                             logger=self.logger, enabled_capabilities=("ask",), **extra), 0)
+                self.assertEqual(len(requests), 4)
+                self.assertEqual(create_usage_totals_reader(self.path).read_totals((period,)), (
+                    UsageTotals(index * 470, index * 2),
+                ))
+
+    def test_usage_write_error_preserves_answer_and_later_observations(self) -> None:
+        """Ошибка реальной SQLite-записи не влияет на доставку и следующий вопрос."""
+        with connect_database(self.path) as connection, connection:
+            connection.execute("""
+                CREATE TRIGGER reject_usage BEFORE INSERT ON ask_usage
+                BEGIN SELECT RAISE(ABORT, 'private error'); END
+            """)
+        started = datetime.now(UTC) - timedelta(seconds=1)
+        sdk_path = "compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI"
+        with patch(sdk_path) as sdk:
+            sdk.return_value.chat.completions.create.return_value = SimpleNamespace(
+                model="untargeted", choices=[SimpleNamespace(message=SimpleNamespace(content="Ответ"))],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+            )
+            with self.assertLogs("compadre_assistant.capabilities.ask.data.background_usage_recorder", "ERROR") as logs:
+                with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                      ask_config=self.config) as processor:
+                    self.send("telegram", processor, "/register")
+                    self.send("telegram", processor, "Тест")
+                    self.send("telegram", processor, "/ai")
+                    self.assertEqual(self.send("telegram", processor, "/ask первый"), "Ответ")
+            self.assertEqual([record.getMessage() for record in logs.records], [
+                f"AI usage recording failed: error_type={sqlite3.IntegrityError.__name__}",
+            ])
+            with connect_database(self.path) as connection, connection:
+                connection.execute("DROP TRIGGER reject_usage")
+            with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                  ask_config=self.config) as processor:
+                self.assertEqual(self.send("telegram", processor, "/ask второй"), "Ответ")
+        period = UsagePeriod(started, started + timedelta(minutes=5))
+        self.assertEqual(create_usage_totals_reader(self.path).read_totals((period,)), (UsageTotals(0, 1),))
 
     def test_registry_failure_closes_created_ask_client(self) -> None:
         """Сбой регистрации после сборки Ask освобождает принадлежащий ему клиент."""

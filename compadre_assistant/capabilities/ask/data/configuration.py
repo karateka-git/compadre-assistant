@@ -1,10 +1,14 @@
 """Независимый профиль окружения для запросов Ask."""
 
+import json
 import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from urllib.parse import urlsplit
+
+from compadre_assistant.capabilities.ask.domain.usage_pricing import UsageDetail, UsagePricing, UsageTariff
 
 
 class AskConfigError(ValueError):
@@ -26,6 +30,8 @@ class AskConfig:
         max_question_chars: Максимальная длина нормализованного вопроса.
         max_response_tokens: Лимит генерации, передаваемый API.
         max_response_chars: Максимальная допустимая длина текста ответа.
+        usage_provider: Стабильное имя профиля для сопоставления с каталогом.
+        usage_tariffs: Снимки настроенных оператором тарифов.
 
     Raises:
         AskConfigError: Параметры профиля некорректны.
@@ -38,6 +44,8 @@ class AskConfig:
     max_question_chars: int = 12_000
     max_response_tokens: int = 2_000
     max_response_chars: int = 16_000
+    usage_provider: str = "ask"
+    usage_tariffs: tuple[UsageTariff, ...] = ()
 
     def __post_init__(self) -> None:
         """Проверяет профиль, включая программную сборку без окружения."""
@@ -63,6 +71,12 @@ class AskConfig:
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise AskConfigError(f"ASK_{name.upper()} должен быть положительным целым.")
+        if not isinstance(self.usage_provider, str) or not self.usage_provider.strip():
+            raise AskConfigError("ASK_USAGE_PROVIDER должен содержать имя профиля.")
+        try:
+            UsagePricing(self.usage_tariffs)
+        except ValueError as error:
+            raise AskConfigError(str(error)) from None
 
 
 def load_ask_config(environ: Mapping[str, str] | None = None) -> AskConfig:
@@ -94,5 +108,63 @@ def load_ask_config(environ: Mapping[str, str] | None = None) -> AskConfig:
         base_url=source.get("ASK_BASE_URL", "").strip(),
         api_key=source.get("ASK_API_KEY", "").strip(),
         model=source.get("ASK_MODEL", "").strip(),
+        usage_provider=source.get("ASK_USAGE_PROVIDER", "ask").strip() or "ask",
+        usage_tariffs=_load_usage_tariffs(source.get("ASK_USAGE_TARIFFS_JSON", "")),
         **values,
+    )
+
+
+def _load_usage_tariffs(raw: str) -> tuple[UsageTariff, ...]:
+    if not raw.strip():
+        return ()
+    try:
+        catalog = json.loads(raw, object_pairs_hook=_unique_object)
+    except (ValueError, RecursionError):
+        raise AskConfigError("ASK_USAGE_TARIFFS_JSON должен содержать корректный JSON без повторов полей.") from None
+    if (not isinstance(catalog, dict) or catalog.keys() != {"version", "tariffs"}
+            or type(catalog["version"]) is not int or catalog["version"] != 1
+            or not isinstance(catalog["tariffs"], list)):
+        raise AskConfigError("В ASK_USAGE_TARIFFS_JSON ожидаются version=1 и список tariffs.")
+    tariffs = []
+    for index, entry in enumerate(catalog["tariffs"], start=1):
+        try:
+            tariffs.append(_parse_usage_tariff(entry))
+        except (TypeError, ValueError):
+            raise AskConfigError(f"Запись {index} в ASK_USAGE_TARIFFS_JSON некорректна.") from None
+    return tuple(tariffs)
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Повтор поля JSON.")
+        result[key] = value
+    return result
+
+
+def _parse_usage_tariff(entry: object) -> UsageTariff:
+    required = {"provider", "model", "source", "effective_from", "prompt_rate", "completion_rate"}
+    optional = {"effective_until", "image_rate", "cached_rate", "reasoning_rate",
+                "unpriced_details", "image_cache_disjoint"}
+    if not isinstance(entry, dict) or not required <= entry.keys() <= required | optional:
+        raise ValueError("Некорректные поля тарифа.")
+    if not all(isinstance(entry[key], str) for key in ("provider", "model", "source", "effective_from")):
+        raise ValueError("Идентификаторы, источник и время начала должны быть строками.")
+    until = entry.get("effective_until")
+    details = entry.get("unpriced_details", [])
+    disjoint = entry.get("image_cache_disjoint", False)
+    if not isinstance(details, list) or type(disjoint) is not bool:
+        raise ValueError("Некорректны правила детализации.")
+    parsed_details = frozenset(UsageDetail(detail) for detail in details)
+    if len(parsed_details) != len(details):
+        raise ValueError("Категории детализации дублируются.")
+    return UsageTariff(
+        provider=entry["provider"].strip(), model=entry["model"].strip(), source=entry["source"].strip(),
+        effective_from=datetime.fromisoformat(entry["effective_from"]),
+        effective_until=datetime.fromisoformat(until) if until is not None else None,
+        prompt_rate=entry["prompt_rate"], completion_rate=entry["completion_rate"],
+        image_rate=entry.get("image_rate"), cached_rate=entry.get("cached_rate"),
+        reasoning_rate=entry.get("reasoning_rate"), unpriced_details=parsed_details,
+        image_cache_disjoint=disjoint,
     )
