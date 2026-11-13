@@ -1,7 +1,7 @@
 # Production VPS
 
 Здесь находятся доступ, ограничения и **последний документированный снимок** VPS.
-Он зафиксирован 06.11.2026 и не доказывает состояние сервера сегодня. Перед
+Он зафиксирован 13.11.2026. Перед
 любой работой повторно проверьте факты на VPS. Установка, диагностика, backup и
 восстановление описаны в [OPERATIONS.md](OPERATIONS.md), допуск версии — в
 [RELEASES.md](RELEASES.md).
@@ -31,7 +31,25 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок — 06.11.2026, после 20:17:13 UTC
+## Последний проверенный снимок 13.11.2026
+
+При разовом переходе на policy v2 контроллер VPS подтвердил evidence полного
+CI на актуальной принятой базе `v3.4.0`. Обновили snapshot контроллера и
+локальный policy pin. Checkout приложения сохранили, а state и selector
+SQLite сверили побайтно. Установку приложения не повторяли.
+
+| Область | Наблюдение 13.11.2026 |
+| --- | --- |
+| Установленный выпуск | `stage=success`, `last_good=v3.4.0`, SHA `22c01936c58d0cd7c99df334465f4562f9e3ca4e`. Checkout чистый, detached HEAD, marker отсутствует. [Immutable Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v3.4.0) |
+| База CI | Deployment `7736620585` и его текущий доверенный статус `22029591001` (`success`) совпали с `last_good` и Release `442821807`. [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7736620585/statuses) |
+| Контроллер и policy | Snapshot `792ae2fd81ce20a7e61ce9d27dc30451c6d19e0e`. GitHub variable `COMPATIBILITY_POLICY_SHA` и локальный `compatibility-policy.sha` закреплены на `9845ca2a106494c660df943c8d803da6e421ca03`. Проверены байты 71 файла snapshot, изолированный импорт и systemd guards. |
+| Полный CI | `main` на SHA `792ae2fd81ce20a7e61ce9d27dc30451c6d19e0e` и `release/3.4` на SHA `efe22a4f019e68a0436ee3d5e1825ab9248934e0` подтвердили базу `v3.4.0`. VPS проверил артефакт `14014894610` для точной попытки `main`. [CI main](https://github.com/karateka-git/compadre-assistant/actions/runs/43378302919/attempts/1) · [CI release/3.4](https://github.com/karateka-git/compadre-assistant/actions/runs/43378457266/attempts/1) |
+| Каналы и backup | Оба контейнера Telegram и VK `healthy`, перезапусков 0. Основной unit и backup timer `active`, backup service `inactive` с результатом `success`. |
+
+Перед следующим эксплуатационным действием повторите
+[проверку состояния VPS](OPERATIONS.md#подготовка-и-запуск-версии).
+
+## Исторический снимок — 06.11.2026, после 20:17:13 UTC
 
 Штатный `deploy-prod v3.2.0` завершился `degraded` при возврате основного
 systemd unit: Python загрузил `scripts` из release checkout вместо
@@ -61,10 +79,12 @@ Release selector. Исправленный controller использует пр�
 
 Ротация базы полного CI после этого выпуска была отменена: repository variable
 `COMPATIBILITY_POLICY_SHA` возвращена к `09f15a5b3c01ec73d02379b918104e8cf697b4b2`,
-хотя на VPS установлен v3.2.0. Успешный [main-full 42344876362/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42344876362)
-проверил SHA `a44cd3c73afefc30b832051fc95fff0e5555142a` после возврата policy;
-он **не является допуском будущего deploy** от установленной v3.2.0.
-Разбор и автоматизация перенесены в [бэклог](BACKLOG.md#автоматизировать-сопровождение-выпуска-и-проверить-допуск-ci).
+хотя на VPS уже работала v3.2.0. Успешный [main-full 42344876362/1](https://github.com/karateka-git/compadre-assistant/actions/runs/42344876362)
+проверил SHA `a44cd3c73afefc30b832051fc95fff0e5555142a` после возврата policy.
+Для следующего deploy от установленной v3.2.0 требовался новый точный CI.
+Действующий порядок описан в
+[допуске полного CI](RELEASES.md#2-получить-полный-ci-для-точного-коммита) и
+[инструкции выпуска](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 Reboot и потеря питания VPS не проверялись.
 
 Перед дальнейшими действиями повторно прочитать фактический state, selector,
