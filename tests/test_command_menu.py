@@ -58,8 +58,9 @@ class CommandMenuTest(unittest.TestCase):
         """Параметры не становятся заполнителями, недоступные входы скрыты."""
         fixture = self.fixture
         commands = self.commands()
-        for command in ("/name", "/enable", "/disable", "/link", "/ask", "/obsidian", "/other"):
+        for command in ("/name", "/enable", "/disable", "/link", "/ai", "/obsidian", "/other"):
             self.assertIn(command, commands)
+        self.assertNotIn("/ask", commands)
         self.assertNotIn("/reanalyze", commands)
         self.assertNotIn("/confirm", commands)
         self.assertNotIn("/cancel", commands)
@@ -73,17 +74,19 @@ class CommandMenuTest(unittest.TestCase):
         self.assertNotIn("/other", self.commands())
         fixture.registry = CapabilityRegistry((fixture.obsidian,), (fixture.ask.descriptor,))
         fixture.dispatcher = fixture.build()
-        self.assertNotIn("/ask", self.commands())
+        self.assertNotIn("/ai", self.commands())
 
-    def test_active_mode_is_subject_commands_exit_and_effective_ask(self):
+    def test_active_mode_is_subject_commands_and_exit(self):
         """Меню режима не копирует общие указатели справки или другие входы."""
         fixture = self.fixture
         fixture.modes.save(ChatMode(fixture.key, "obsidian"))
-        self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/exit", "/ask"))
+        self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/exit"))
         self.assertEqual(fixture.modes.get(fixture.key).capability_id, "obsidian")
+        fixture.send("/ai")
+        self.assertEqual(self.commands(), ("/ask", "/exit"))
         fixture.send("/ask")
         self.assertIn("/cancel", self.commands())
-        self.assertEqual(self.menu().pending_input_label, "вопрос для Ask")
+        self.assertEqual(self.menu().pending_input_label, "вопрос для модели")
         self.assertNotIn("/cancel", self.commands(chat="other"))
         self.assertNotIn("/reanalyze", self.commands(channel="vk"))
         fixture.preferences.rows[(23, "ask")] = False
@@ -97,7 +100,8 @@ class CommandMenuTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 fixture.modes.save(ChatMode(fixture.key, mode))
                 fixture.preferences.rows[(23, "obsidian")] = False
-                expected = ("/exit", "/other") if mode == "ask" else ("/exit", "/ask", "/other")
+                fixture.preferences.rows[(23, "ask")] = mode != "ask"
+                expected = ("/exit", "/other") if mode == "ask" else ("/exit", "/ai", "/other")
                 self.assertEqual(self.commands(), expected)
 
     def test_pending_expiration_and_context_validation_match_help(self):
@@ -192,10 +196,12 @@ class CommandMenuUpdateTest(unittest.TestCase):
         self.send("/cancel")
         self.assertEqual(len(self.updates), 3)
         self.assertNotIn("/cancel", [item.command for item in self.updates[-1].menu.items])
-        self.send("/ask")
+        self.send("/ai")
         self.assertEqual(len(self.updates), 4)
-        self.send("вопрос")
+        self.send("/ask")
         self.assertEqual(len(self.updates), 5)
+        self.send("вопрос")
+        self.assertEqual(len(self.updates), 6)
 
     def test_mode_and_preference_update_only_source_chat(self):
         """Режим и личный выбор передают адрес исходного чата без соседнего."""
@@ -205,7 +211,7 @@ class CommandMenuUpdateTest(unittest.TestCase):
         self.assertNotIn("/name", [item.command for item in self.updates[-1].menu.items])
         self.send("/exit")
         self.send("/disable ask")
-        self.assertNotIn("/ask", [item.command for item in self.updates[-1].menu.items])
+        self.assertNotIn("/ai", [item.command for item in self.updates[-1].menu.items])
         count = len(self.updates)
         self.send("/status", chat="other")
         self.assertEqual(len(self.updates), count)

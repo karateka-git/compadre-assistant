@@ -49,9 +49,9 @@ def build_command_menu(
                 for command in section.commands:
                     capability(command)
             common(ChatCommand.EXIT)
-            ask = personal.by_id("ask")
-            if ask is not None and not ask.descriptor.persistent_mode:
-                capability(ask.descriptor.entry)
+            for access in personal.access:
+                if access.effective and not access.descriptor.persistent_mode:
+                    capability(access.descriptor.entry)
         else:
             if mode_id:
                 common(ChatCommand.EXIT)

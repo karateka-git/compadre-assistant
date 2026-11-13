@@ -8,19 +8,22 @@ from compadre_assistant.capabilities.ask.domain.errors import (
 from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityMode, CapabilityResult, HandlerContext,
+    CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
+    HelpSection,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
     PendingInputResult, PendingInputOutcome, PendingInput, ReplyAction,
 )
 
 
 class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
-    """Выполняет один вопрос без установки длительного режима чата."""
+    """Открывает режим ИИ и выполняет в нём отдельные вопросы без истории."""
 
     descriptor = CapabilityDescriptor(
-        "ask", CapabilityCommand("/ask", (CommandParameter("вопрос", "<question>", False),),
-                                 "один вопрос модели без истории"),
-        persistent_mode=False,
+        "ask", CapabilityCommand("/ai", (), "войти в режим ИИ"),
+        CapabilityHelp(sections=(HelpSection("Режим ИИ", (
+            CapabilityCommand("/ask", (CommandParameter("вопрос", "<question>", False),),
+                              "задать один вопрос модели без истории"),
+        )),)),
         enabled_by_default=True,
     )
 
@@ -31,23 +34,58 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
     def enter(
         self, context: HandlerContext, event: IncomingEvent, arguments: str
     ) -> CapabilityResult:
-        """Отвечает на аргументы команды и сохраняет прежний режим чата.
+        """Открывает режим ИИ в текущем чате.
 
         Args:
             context: Проверенный ядром пользователь.
             event: Исходное событие команды.
-            arguments: Вопрос без имени команды.
+            arguments: Аргументы команды входа, которая вызывается без них.
 
         Returns:
-            Ответ либо безопасное описание ожидаемой ошибки без перехода режима.
+            Приветствие режима либо ошибка аргумента без перехода режима.
         """
-        if not arguments.strip() and context.pending_inputs is not None:
-            context.pending_inputs.begin(event.reply_address, "ask", "ask_question",
-                                         app_user_id=context.app_user.id, value_label="вопрос для Ask", retry_command="/ask")
+        if arguments.strip():
+            return CapabilityResult(IncomingResponse(text_content(
+                "Используй /ai без аргументов. Затем отправь /ask отдельным сообщением."
+            ), ValueError("Аргументы команды входа в режим ИИ")))
+        return CapabilityResult(IncomingResponse(compose_content(
+            "Режим ИИ включён. Чтобы задать один вопрос, отправь ",
+            code_span("/ask <question>"), " или ", code_span("/ask"),
+            ". Чтобы выйти из режима, вызови ", code_span("/exit"), ".",
+        ), suggested_actions=(ReplyAction("Задать вопрос", "/ask"),)))
+
+    def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
+        """Принимает команду вопроса в активном режиме или подсказывает её.
+
+        Args:
+            context: Допущенный пользователь и сервисы текущего чата.
+            event: Сообщение в активном режиме ИИ.
+
+        Returns:
+            Ответ, запрос ожидаемого ввода или подсказка с сохранением режима.
+        """
+        parts = event.text.split(maxsplit=1)
+        if not parts or parts[0] != "/ask":
+            return CapabilityResult(IncomingResponse(compose_content(
+                "Чтобы задать вопрос модели, отправь ", code_span("/ask <question>"),
+                " или ", code_span("/ask"), ".",
+            ), suggested_actions=(ReplyAction("Задать вопрос", "/ask"),)))
+
+        question = parts[1] if len(parts) > 1 else ""
+        if not question.strip() and context.pending_inputs is not None:
+            context.pending_inputs.begin(
+                event.reply_address, "ask", "ask_question",
+                app_user_id=context.app_user.id, required_mode="ask",
+                value_label="вопрос для модели", retry_command="/ask",
+            )
             return CapabilityResult(IncomingResponse(text_content(
                 "Введи один вопрос для модели следующим сообщением. "
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
-            )), CapabilityMode.COMPLETE)
+            )))
+        return CapabilityResult(self._answer(context, event, question))
+
+    def _answer(self, context: HandlerContext, event: IncomingEvent, question: str) -> IncomingResponse:
+        """Выполняет один вопрос и преобразует ошибки модели в ответы чата."""
         def notify() -> None:
             """Подтверждает приём перед сетевым запросом через общий delivery port."""
             if context.delivery is not None:
@@ -56,7 +94,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
                 )
 
         try:
-            response = IncomingResponse(text_content(self._question.execute(arguments, on_request=notify)))
+            response = IncomingResponse(text_content(self._question.execute(question, on_request=notify)))
         except EmptyQuestionError as error:
             response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <question>.'), error)
         except QuestionTooLongError as error:
@@ -82,7 +120,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             response = IncomingResponse(compose_content(
                 'Не удалось получить ответ модели. Попробуй /ask позже.',
             ), error)
-        return CapabilityResult(response, CapabilityMode.COMPLETE)
+        return response
 
     def continue_input(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent
@@ -112,15 +150,4 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
                 str(error) + " Сократи вопрос и отправь его ещё раз или введи /cancel."
             ), error), PendingInputOutcome.RETRY)
         return PendingInputResult(IncomingResponse(text_content("")), PendingInputOutcome.COMPLETE,
-                                  lambda: self.enter(context, event, question).response)
-
-    def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
-        """Предлагает явную команду при устаревшем сохранённом режиме Ask."""
-        return CapabilityResult(
-            IncomingResponse(compose_content(
-                "Ask не является режимом чата. Чтобы задать один вопрос, вызови ",
-                code_span("/ask <question>"),
-                ". Текущий режим не изменится.",
-            )),
-            CapabilityMode.COMPLETE,
-        )
+                                  lambda: self._answer(context, event, question))

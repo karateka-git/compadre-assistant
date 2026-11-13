@@ -1,4 +1,4 @@
-"""Проверяет одноразовый Ask через настоящие входы Telegram и VK без сети."""
+"""Проверяет режим ИИ через настоящие входы Telegram и VK без сети."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -84,8 +84,8 @@ class AskChannelsTest(unittest.TestCase):
         self.delivered = [item[1] for item in client.messages]
         return "\n".join(text for text in self.delivered if text != "Вопрос принят. Готовлю ответ…")
 
-    def test_registered_questions_are_independent_and_do_not_select_mode(self) -> None:
-        """Оба канала требуют завершённую регистрацию и выполняют только /ask."""
+    def test_registered_questions_require_ai_mode_and_remain_independent(self) -> None:
+        """Оба канала требуют регистрацию и явный вход в режим ИИ."""
         for channel in ("telegram", "vk"):
             with self.subTest(channel=channel), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
                 model = model_type.return_value
@@ -97,6 +97,12 @@ class AskChannelsTest(unittest.TestCase):
                     model.answer.assert_not_called()
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
+                    denied = self.send(channel, processor, "/ask до входа")
+                    self.assertIn("войди в режим через", denied)
+                    self.assertIn("/ai", denied)
+                    self.assertIn("/ai без аргументов", self.send(channel, processor, "/ai /ask вопрос"))
+                    model.answer.assert_not_called()
+                    self.assertIn("Режим ИИ включён", self.send(channel, processor, "/ai"))
                     for question in ("первый", "https://example.com/article"):
                         self.assertEqual(self.send(channel, processor, "/ask " + question), "Ответ: " + question)
                     self.assertEqual([call.kwargs["question"] for call in model.answer.call_args_list], ["первый", "https://example.com/article"])
@@ -107,7 +113,14 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertIn("100", self.send(channel, processor, "/ask " + "я" * 101))
                     self.assertEqual(model.answer.call_count, 2)
                     with connect_database(self.path) as connection:
-                        self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
+                        self.assertEqual(connection.execute(
+                            "SELECT capability_id FROM active_chat_modes WHERE channel = ?", (channel,)
+                        ).fetchone()[0], "ask")
+                    self.send(channel, processor, "/exit")
+                    denied = self.send(channel, processor, "/ask после выхода")
+                    self.assertIn("войди в режим через", denied)
+                    self.assertIn("/ai", denied)
+                    self.assertEqual(model.answer.call_count, 2)
                 model.close.assert_called_once_with()
 
     def test_pending_question_accepts_retry_from_both_channels(self) -> None:
@@ -120,6 +133,7 @@ class AskChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.assertIn("Пришли текстовое", self.send(channel, processor, "  "))
+                    self.send(channel, processor, "/ai")
                     self.send(channel, processor, "/ask")
                     self.assertIn("Вопрос пуст", self.send(channel, processor, "  "))
                     self.assertIn("Сократи вопрос", self.send(channel, processor, "x" * 101))
@@ -140,6 +154,7 @@ class AskChannelsTest(unittest.TestCase):
                 self.assertIn("/enable ask", self.send("telegram", processor, "/ask вопрос"))
                 model_type.return_value.answer.assert_not_called()
                 self.assertIn("включена", self.send("telegram", processor, "/enable ask"))
+                self.send("telegram", processor, "/ai")
                 self.assertEqual(self.send("telegram", processor, "/ask вопрос"), "Ответ")
 
     def test_inflight_ask_delivers_after_disable_and_keeps_model_open(self) -> None:
@@ -166,6 +181,7 @@ class AskChannelsTest(unittest.TestCase):
                 ) as processor:
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
+                    self.send(channel, processor, "/ai")
                     with ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(self.send, channel, processor, "/ask долгий")
                         try:
@@ -182,7 +198,7 @@ class AskChannelsTest(unittest.TestCase):
                 model.close.assert_called_once_with()
 
     def test_pending_obsidian_and_each_chat_mode_survive_answers_and_errors(self) -> None:
-        """Ask обходит настоящий Obsidian handler, не применяя pending и ссылки."""
+        """Смена режима сохраняет подтверждения Obsidian и изолирует другие чаты."""
         for channel in ("telegram", "vk"):
             proposal = replace(_proposal(), origin=PendingOrigin(channel, "42"))
             confirmation = FakeConfirmationService(proposal)
@@ -203,6 +219,9 @@ class AskChannelsTest(unittest.TestCase):
                             UserCapabilityPreference(owner, "obsidian", True)
                         )
                     self.assertIn("да", self.send(channel, processor, "/obsidian"))
+                    self.assertIn("/ai", self.send(channel, processor, "/ask вопрос"))
+                    model.answer.assert_not_called()
+                    self.send(channel, processor, "/ai")
                     with connect_database(self.path) as connection:
                         before = tuple(connection.execute("SELECT * FROM active_chat_modes").fetchall())
                     self.assertEqual(self.send(channel, processor, "/ask https://example.com/article"), model.answer.return_value)
@@ -246,6 +265,7 @@ class AskChannelsTest(unittest.TestCase):
                 """Проверяет вход из CLI вместо реального сетевого polling."""
                 self.send(channel, incoming_message_processor, "/register")
                 self.send(channel, incoming_message_processor, "Тест")
+                self.send(channel, incoming_message_processor, "/ai")
                 self.assertEqual(self.send(channel, incoming_message_processor, "/ask вопрос"), "Ответ")
 
             with self.subTest(channel=channel), patch("compadre_assistant.bootstrap.load_ask_config", return_value=self.config), patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config", return_value=self.config) as loader, patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot", side_effect=polling):
@@ -275,6 +295,7 @@ class AskChannelsTest(unittest.TestCase):
                 with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config) as processor:
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
+                    self.send(channel, processor, "/ai")
                     self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == "Вопрос принят. Готовлю ответ…" else None)
                     self.assertEqual(self.delivered[0], "Вопрос принят. Готовлю ответ…")
                     self.assertGreater(len(self.delivered), 2)
@@ -300,11 +321,15 @@ class AskChannelsTest(unittest.TestCase):
                                 SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                                     UserCapabilityPreference(owner, "obsidian", True)
                                 )
+                        self.send(channel, processor, "/exit")
                         help_text = self.send(channel, processor, "/help")
-                        self.assertEqual("/ask" in help_text, "ask" in enabled)
+                        self.assertNotIn("/ask", help_text)
+                        self.assertEqual("/ai" in help_text, "ask" in enabled)
                         self.assertEqual("/obsidian" in help_text, "obsidian" in enabled)
-                        for line in help_text.splitlines():
-                            if "/ask" in line:
-                                self.assertNotIn("/exit", line)
+                        if "ask" in enabled:
+                            self.send(channel, processor, "/ai")
+                            mode_help = self.send(channel, processor, "/help")
+                            self.assertIn("/ask", mode_help)
+                            self.assertIn("/exit", mode_help)
                 if "ask" not in enabled:
                     model_type.assert_not_called()

@@ -150,19 +150,24 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertFalse(self.fetcher.calls)
 
     def test_ask_and_reanalyze_keep_subject_pipeline_and_mode(self):
-        """Оба способа ввода используют сохранённую статью, Ask не перехватывает режим."""
+        """Ask требует явной смены режима, а повторный анализ сохраняет сценарий."""
         self.register()
         self.say("/enable obsidian")
         self.say("/obsidian")
         self.assertIn("Анализ готов", self.say("https://example.com/article"))
         self.assertIn("Использую сохранённый анализ", self.say("https://example.com/article"))
         self.assertEqual(len(self.fetcher.calls), 1)
+        self.assertIn("войди в режим через /ai", self.say("/ask"))
+        self.model.answer.assert_not_called()
+        self.say("/ai")
         self.say("/ask")
         self.assertEqual(self.say("  "), "Вопрос пуст. Отправь непустой вопрос ещё раз или введи /cancel.")
         self.assertIn("/cancel", self.say("x" * 81))
         self.assertEqual(self.say("Вопрос"), "Ответ модели")
         self.assertEqual(self.say("/ask Второй"), "Ответ модели")
         self.assertEqual(self.model.answer.call_count, 2)
+        self.assertIn("войди в режим через /obsidian", self.say("/reanalyze"))
+        self.say("/obsidian")
         self.assertIn("числовой ID", self.say("/reanalyze"))
         self.assertIn("Ожидание ID продолжается", self.say("abc"))
         self.assertIn("недоступна", self.say("999"))
@@ -183,18 +188,21 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/obsidian")
         for command in ("/name", "/link", "/disable", "/ask", "/reanalyze"):
             with self.subTest(command=command):
+                if command in ("/ask", "/reanalyze"):
+                    self.say("/ai" if command == "/ask" else "/obsidian")
                 self.say(command)
                 self.now += timedelta(minutes=10)
                 self.assertEqual(self.say("позднее значение"),
                     f"Срок ожидания ввода истёк. Повтори {command}, чтобы начать заново.")
                 self.assertNotIn("/cancel", self.say("/help"))
+        self.say("/ai")
         self.say("/ask")
         self.say("/cancel")
         self.assertEqual(self.say("/cancel"),
             "В этом чате нечего отменять. Продолжай текущий режим или вызови нужную команду.")
         self.say("/name")
         self.restart()
-        self.assertIn("Команды режима obsidian", self.say("/help"))
+        self.assertIn("Команды режима ask", self.say("/help"))
         self.say("Не новое имя")
         self.assertEqual(self.profile_names(), ["Первый"])
         self.model.answer.assert_not_called()
@@ -204,6 +212,8 @@ class TextCommandSequencesTest(unittest.TestCase):
         """Один чат отменяется отдельно; отключение во втором канале запрещает ввод."""
         self.register()
         self.say("/link " + self.code(), channel="vk")
+        self.say("/ai")
+        self.say("/ai", channel="vk")
         self.say("/ask")
         self.say("/ask", channel="vk")
         self.say("/cancel")
@@ -276,6 +286,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.register(name)
         model_text = ('Ответ <b>модели</b> &amp; `код` 👩‍💻 е\u0301\n' * 220)
         self.model.answer.return_value = model_text
+        self.say("/ai")
         responses = (self.send("/status"), self.send("/ask Вопрос"))
         self.assertIn(name, response_text(responses[0]))
         self.assertEqual(response_text(responses[1]), model_text)
@@ -287,6 +298,26 @@ class TextCommandSequencesTest(unittest.TestCase):
             self.assertEqual("".join(part.text for part in vk), expected)
         self.assertGreater(len(telegram), 1)
         self.assertGreater(len(vk), 1)
+
+    def test_ai_entry_offers_ask_button_only_while_mode_is_active(self) -> None:
+        """Кнопка входного ответа начинает ввод, а после выхода становится недоступной."""
+        address = {"chat": "1001", "user": "1001"}
+        self.register(**address)
+        event = IncomingEvent("telegram", "1001", "callback", "выбор", "1001")
+
+        entered = self.send("/ai", **address)
+        button, = entered.bound_actions
+        selected = self.processor.select_action(event, button.token)
+        self.assertIn("Введи один вопрос", response_text(selected))
+        self.assertEqual(self.say("Вопрос из кнопки", **address), "Ответ модели")
+        self.assertEqual(self.model.answer.call_args.kwargs["question"], "Вопрос из кнопки")
+
+        entered = self.send("/ai", **address)
+        button, = entered.bound_actions
+        self.say("/exit", **address)
+        rejected = self.processor.select_action(event, button.token)
+        self.assertIn("больше недоступна", response_text(rejected))
+        self.assertEqual(self.model.answer.call_count, 1)
 
     def test_text_confirmation_makes_visible_old_button_unusable(self):
         """Текстовый отказ закрывает ожидание; старая кнопка не отключает хранилище."""

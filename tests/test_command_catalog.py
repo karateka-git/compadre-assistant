@@ -87,7 +87,10 @@ class CommandCatalogTest(unittest.TestCase):
         """Отключённая сборка сохраняет полный каталог без создания клиентов."""
         obsidian = obsidian_descriptor()
         ask = AskCapability.descriptor
-        self.assertEqual(ask.entry.parameters, (CommandParameter("вопрос", "<question>", False),))
+        self.assertEqual(ask.entry.name, "/ai")
+        self.assertEqual(ask.entry.parameters, ())
+        self.assertEqual(ask.help.sections[0].commands[0].parameters,
+                         (CommandParameter("вопрос", "<question>", False),))
         self.assertEqual(obsidian.entry.parameters[0].name, "текст или URL")
         commands = [command for section in obsidian.help.sections for command in section.commands]
         self.assertEqual([command.name for command in commands],

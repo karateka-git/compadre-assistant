@@ -46,24 +46,24 @@ class ReplySuggestionsTest(unittest.TestCase):
         question = Mock()
         question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
         ask = AskCapability(question)
-        response = ask.enter(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
-                             _event("/ask вопрос"), "вопрос").response
+        response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
+                              _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
         self.assertIn("вызови /ask", content_text(response.content))
         self._assert_command_visible_in_channels(response, "/ask")
 
         question.execute.side_effect = None
         question.execute.return_value = "Ответ модели"
-        answered = ask.enter(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
-                             _event("/ask вопрос"), "вопрос").response
+        answered = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
+                              _event("/ask вопрос")).response
         self.assertEqual(answered.suggested_actions, ())
 
     def test_ask_without_pending_input_keeps_only_direct_retry(self) -> None:
         """Без хранилища ожиданий голая команда не предлагается."""
         question = Mock()
         question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
-        response = AskCapability(question).enter(
-            HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"), "вопрос",
+        response = AskCapability(question).handle(
+            HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
         self.assertEqual(response.suggested_actions, ())
         self.assertIn("/ask <question>", content_text(response.content))

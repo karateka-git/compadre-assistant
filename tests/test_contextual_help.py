@@ -82,20 +82,19 @@ class ContextualHelpTest(unittest.TestCase):
     def test_main_lists_entries_without_subject_commands(self):
         """Основной режим показывает входы, но не внутренние команды возможностей."""
         text = self.send()
-        for command in ("/name", "/capabilities", "/link_code", "/obsidian", "/ask", "/other"):
+        for command in ("/name", "/capabilities", "/link_code", "/obsidian", "/ai", "/other"):
             self.assertIn(command, text)
-        for command in ("/vault_sync", "/reanalyze", "/cancel", "/confirm"):
+        for command in ("/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
-        self.assertIn("одноразовый", text)
         self.assertFalse(self.other.entries)
 
     def test_active_mode_hides_other_entries_but_preserves_manual_access(self):
         """Активный каталог не расширяет общую справку; скрытый вход остаётся рабочим."""
         self.modes.save(ChatMode(self.key, "obsidian"))
         text = self.send()
-        for command in ("/vault_sync", "/reanalyze", "/exit", "/status", "/capabilities", "/link_code", "/help", "/ask"):
+        for command in ("/vault_sync", "/reanalyze", "/exit", "/status", "/capabilities", "/link_code", "/help"):
             self.assertIn(command, text)
-        for command in ("/name", "/register", "/enable", "/other", "/confirm", "/cancel"):
+        for command in ("/ask", "/name", "/register", "/enable", "/other", "/confirm", "/cancel"):
             self.assertNotIn(command, text)
         self.assertIn("/other", self.send(chat="other"))
         self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")
@@ -115,7 +114,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIn("недоступен", text)
                 self.assertIn("лично выключена" if reason == "personal" else "недоступна на сервере", text)
                 self.assertIn("/exit", text)
-                self.assertIn("/ask", text)
+                self.assertIn("/ai", text)
                 self.assertNotIn("/vault_sync", text)
                 self.assertNotIn("/obsidian", text)
                 self.assertIn("/name", text)
@@ -142,15 +141,16 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIsNone(self.store.get(pending.chat_key))
         self.assertFalse(self.obsidian.values)
 
-    def test_ask_overlay_and_unknown_link_keep_base_context(self):
-        """Ask поверх режима и код до регистрации показывают конкретное ожидаемое значение."""
-        self.modes.save(ChatMode(self.key, "obsidian"))
+    def test_ask_and_unknown_link_keep_base_context(self):
+        """Вопрос в режиме ИИ и код до регистрации показывают ожидаемое значение."""
+        self.send("/ai")
         self.send("/ask")
         text = self.send()
-        self.assertIn("Ожидается вопрос для Ask", text)
-        self.assertIn("/vault_sync", text)
+        self.assertIn("Ожидается вопрос для модели", text)
+        self.assertIn("/ask", text)
+        self.assertNotIn("/vault_sync", text)
         self.assertIn("/cancel", text)
-        self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")
+        self.assertEqual(self.modes.get(self.key).capability_id, "ask")
         self.identity.resolve.return_value = None
         self.send("/link")
         text = self.send()
@@ -182,8 +182,8 @@ class ContextualHelpTest(unittest.TestCase):
         self.assertFalse(self.other.entries)
 
     def test_active_ask_disabled_and_no_available_entries(self):
-        """Личный запрет скрывает одноразовый Ask, пустой каталог даёт явный следующий шаг."""
-        self.modes.save(ChatMode(self.key, "obsidian"))
+        """Личный запрет скрывает команды режима, пустой каталог даёт следующий шаг."""
+        self.modes.save(ChatMode(self.key, "ask"))
         self.preferences.rows[(23, "ask")] = False
         self.assertNotIn("/ask", self.send())
         self.modes.clear(self.key)
@@ -215,15 +215,19 @@ class ContextualHelpTest(unittest.TestCase):
         self.assertNotIn("/confirm", text)
 
     def test_saved_one_shot_is_not_an_active_mode(self):
-        """Старый режим Ask даёт выход и рабочие входы без ложной ошибки источника."""
-        self.modes.save(ChatMode(self.key, "ask"))
+        """Сохранённый одноразовый режим даёт выход и рабочие входы."""
+        one_shot = FakeCapability("one_shot", "/once")
+        one_shot._descriptor = replace(one_shot.descriptor, persistent_mode=False)
+        self.registry = CapabilityRegistry((self.ask, self.obsidian, one_shot))
+        self.dispatcher = self.build()
+        self.modes.save(ChatMode(self.key, "one_shot"))
         text = self.send()
-        self.assertIn("Сохранённый режим ask устарел", text)
+        self.assertIn("Сохранённый режим one_shot устарел", text)
         self.assertIn("/exit", text)
-        self.assertIn("/ask", text)
+        self.assertIn("/ai", text)
         self.assertIn("/obsidian", text)
         self.assertIn("/name", text)
-        self.assertNotIn("Команды режима ask", text)
+        self.assertNotIn("Команды режима one_shot", text)
         self.assertNotIn("Не удалось получить", text)
         self.assertNotIn("/confirm", text)
-        self.assertEqual(self.modes.get(self.key).capability_id, "ask")
+        self.assertEqual(self.modes.get(self.key).capability_id, "one_shot")
