@@ -97,7 +97,8 @@ class FinalSnapshotTests(unittest.TestCase):
                             if mode == "data":
                                 copy.execute("UPDATE app_users SET display_name='changed'")
                             if mode == "journal":
-                                copy.execute("DELETE FROM schema_migrations WHERE version=4")
+                                copy.execute("DELETE FROM schema_migrations WHERE version = "
+                                             "(SELECT MAX(version) FROM schema_migrations)")
                             if mode == "foreign":
                                 copy.execute("INSERT INTO user_capability_preferences "
                                              "(app_user_id, capability_id, enabled) VALUES (999, 'ask', 1)")

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
+from typing import Protocol
 
 from compadre_assistant.capabilities.ask.domain.usage import (
     MAX_USAGE_INTEGER,
@@ -112,6 +113,20 @@ class UsageEstimate:
             raise ValueError("Для рассчитанной стоимости требуется тариф без причины отказа.")
         else:
             _require_usage_integer(self.cost_nanorubles)
+
+
+class UsageEstimateWriter(Protocol):
+    """Сохраняет рассчитанное обращение с защитой от повторной записи."""
+
+    def store(self, estimate: UsageEstimate) -> bool:
+        """Атомарно сохраняет первый результат обращения.
+
+        Args:
+            estimate: Наблюдение и результат расчёта с исходным ключом вызова.
+
+        Returns:
+            True для новой записи или False, если этот ключ уже сохранён.
+        """
 
 
 class UsagePricing:
