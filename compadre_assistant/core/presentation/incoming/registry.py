@@ -35,6 +35,7 @@ class CapabilityRegistry:
         self._by_id: dict[str, IncomingCapabilityPort] = {}
         self._by_command: dict[str, IncomingCapabilityPort] = {}
         self._disabled_by_command: dict[str, CapabilityDescriptor] = {}
+        self._mode_command_owners: dict[str, CapabilityDescriptor] = {}
         identifiers: set[str] = set()
         command_names = {item.value for item in ChatCommand}
 
@@ -46,11 +47,10 @@ class CapabilityRegistry:
             if identifier in identifiers:
                 raise ValueError(f"Конфликт ID возможностей: {identifier}")
             identifiers.add(identifier)
-            commands = (
-                descriptor.entry,
-                *(command for section in descriptor.help.sections for command in section.commands),
+            mode_commands = tuple(
+                command for section in descriptor.help.sections for command in section.commands
             )
-            for command in commands:
+            for command in (descriptor.entry, *mode_commands):
                 if re.fullmatch(r"/[a-z][a-z0-9_]*", command.name) is None:
                     raise ValueError(f"Некорректная команда возможности {identifier}: {command.name!r}")
                 if command.name in command_names:
@@ -58,6 +58,8 @@ class CapabilityRegistry:
                 if not command.description.strip():
                     raise ValueError(f"Нет описания команды: {command.name}")
                 command_names.add(command.name)
+            for command in mode_commands:
+                self._mode_command_owners[command.name] = descriptor
 
         for capability in capabilities:
             descriptor = capability.descriptor
@@ -105,6 +107,18 @@ class CapabilityRegistry:
         """Возвращает метаданные явно отключённого входа, сохраняя аргументы."""
         parts = text.strip().split(maxsplit=1)
         return self._disabled_by_command.get(parts[0]) if parts else None
+
+    def mode_command_owner(self, command: str) -> CapabilityDescriptor | None:
+        """Находит владельца точного имени команды режима.
+
+        Args:
+            command: Имя команды без аргументов.
+
+        Returns:
+            Описание владельца, в том числе отключённого на сервере, либо
+            None для входов, общих и неизвестных команд.
+        """
+        return self._mode_command_owners.get(command)
 
     def entry_hint(self) -> str:
         """Предлагает доступные команды входа без предметного анализа сообщения."""

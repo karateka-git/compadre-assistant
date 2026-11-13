@@ -233,6 +233,35 @@ class ProfileObsidianTest(unittest.TestCase):
                     self.assertEqual(SQLiteChatModeRepository(connection).get(key).capability_id, "previous")
         self.assertFalse(self.article.commands)
 
+    def test_entry_argument_cannot_execute_vault_command_or_confirmation(self) -> None:
+        """Команда и решение выполняются отдельными сообщениями в активном режиме."""
+        self.register()
+        manager = FakeVaultSelectionManager(selected=_test_vault(1))
+        runtime = ObsidianProcessRuntime(None, object())
+        with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
+            reply = self.process("/obsidian /vault_disconnect", runtime=runtime)
+            self.assertIn("отдельным сообщением", response_text(reply))
+            self.assertIsNotNone(reply.error)
+            self.assertFalse(manager.disconnect_pending)
+            self.assertIn("войди в режим через /obsidian", response_text(self.process("/vault_disconnect", runtime=runtime)))
+
+            self.process("/obsidian", runtime=runtime)
+            pending = self.process("/vault_disconnect", runtime=runtime)
+            confirmation = next(action.command for action in pending.actions if action.command.endswith(" yes"))
+            self.process("/exit", runtime=runtime)
+            for decision in (confirmation, "да"):
+                reply = self.process(f"/obsidian {decision}", runtime=runtime)
+                self.assertIn("отдельным сообщением", response_text(reply))
+                self.assertIsNotNone(reply.error)
+                self.assertTrue(manager.disconnect_pending)
+                self.assertIsNotNone(manager.selected)
+            self.process(confirmation, runtime=runtime)
+            self.assertTrue(manager.disconnect_pending)
+            self.process("/obsidian", runtime=runtime)
+            self.process(confirmation, runtime=runtime)
+            self.assertFalse(manager.disconnect_pending)
+            self.assertIsNone(manager.selected)
+
 
 if __name__ == "__main__":
     unittest.main()

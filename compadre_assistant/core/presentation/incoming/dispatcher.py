@@ -239,15 +239,11 @@ class IncomingMessageDispatcher:
         if command in {item.value for item in ChatCommand}:
             return True
         effective = {owner for owner, server, enabled in context.access if server and enabled}
-        for descriptor in self._registry.descriptors():
-            if descriptor.capability_id not in effective:
-                continue
-            if command == descriptor.entry.name:
-                return True
-            if descriptor.capability_id == context.mode_id and any(
-                    command == item.name for section in descriptor.help.sections for item in section.commands):
-                return True
-        return False
+        entry = self._registry.by_command(command)
+        if entry is not None:
+            return entry.descriptor.capability_id in effective
+        owner = self._registry.mode_command_owner(command)
+        return owner is not None and owner.capability_id == context.mode_id and owner.capability_id in effective
 
     def _action_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Читает ожидания проверенного адреса без touch исходной identity."""
@@ -911,6 +907,22 @@ class IncomingMessageDispatcher:
                 )
             return result.response
         state = self._chat_mode_repository.get_state(key)
+        parts = event.text.split(maxsplit=1)
+        owner = self._registry.mode_command_owner(parts[0]) if parts else None
+        if owner is not None:
+            access = personal.status(owner.capability_id)
+            if access is not None and not access.effective:
+                return ProcessIncomingMessageResult(
+                    type=IncomingMessageResultType.CAPABILITY_DISABLED,
+                    app_user=user,
+                    capability_reply=self._blocked_reply(access),
+                )
+            if state.capability_id != owner.capability_id:
+                return IncomingResponse(compose_content(
+                    "Чтобы выполнить команду, войди в режим через ",
+                    code_span(owner.entry.name),
+                    ".",
+                ))
         if state.capability_id is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
