@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import asdict
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,12 +13,20 @@ from unittest.mock import ANY, patch
 from scripts import check_full_migrations
 from scripts import full_ci_controller as controller
 from scripts import full_ci_admission as admission
+from scripts.deployment_acceptance import AcceptedBaseline, DeploymentAcceptanceError
 
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_C = "c" * 40
 SHA_D = "d" * 40
+BASELINE = AcceptedBaseline(SHA_B, "v3.4.0", 10, 20, 30)
+
+
+def baseline_outputs() -> dict[str, str]:
+    """Возвращает ожидаемые outputs полного CI с принятой базой."""
+    return {"run-full": "true", "previous-release-sha": SHA_B, "policy-sha": SHA_A,
+            "accepted-baseline": json.dumps(asdict(BASELINE), separators=(",", ":"), sort_keys=True)}
 
 
 def admission_run(sha: str) -> dict:
@@ -204,40 +213,48 @@ class FullCiControllerTests(unittest.TestCase):
         self.assertEqual(controller.previous_release_sha(api, "release/3.3"), SHA_B)
         self.assertEqual(api.contents_refs, [SHA_A, SHA_A])
 
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A,
-                            "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "push"})
     @patch.object(controller, "git", return_value=SHA_D)
     @patch.object(controller, "merged_since_last_success", return_value=(3, SHA_A))
     @patch.object(controller, "prior_full_attempt", return_value=False)
     @patch.object(controller, "full_success", return_value=False)
-    def test_decide_uses_pinned_previous_for_main_and_release(
-        self, _success, _attempt, _merged, _git,
+    @patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE)
+    def test_decide_uses_accepted_baseline_for_main_and_release(
+        self, resolve, _success, _attempt, _merged, _git,
     ) -> None:
-        """Оба caller передают full-suite базу внешней policy."""
+        """Оба caller передают full-suite принятую production базу."""
         api = FakeGitHub(releases=[{"tag_name": "v3.2.0"}])
         for mode, branch in (("main", "main"), ("release", "release/3.3")):
             with self.subTest(mode=mode):
                 self.assertEqual(controller.decide(api, mode, SHA_D, branch, False),
-                                 {"run-full": "true", "previous-release-sha": SHA_B})
+                                 baseline_outputs())
+        self.assertEqual(resolve.call_count, 2)
+        self.assertEqual(api.contents_refs, [])
 
     @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
     @patch.object(controller, "git", return_value=SHA_D)
-    @patch.object(controller, "full_success", side_effect=AssertionError("ротация не ищет старый CI"))
-    def test_rotation_forces_full_with_exact_new_pin_and_main(self, _old, _git) -> None:
-        """При ротации прежняя зелёная попытка не подменяет запуск с новым pin."""
+    @patch.object(controller, "full_success", side_effect=AssertionError("dispatch не ищет старый CI"))
+    @patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE)
+    def test_dispatch_forces_full_with_exact_branch_and_optional_pin(self, resolve, _old, _git) -> None:
+        """Прежняя зелёная попытка не подменяет ручной запуск с новой базой."""
         api = FakeGitHub()
-        self.assertEqual(controller.decide(api, "main", SHA_D, "main", False,
-                                          rotation_policy_sha=SHA_A, rotation_main_sha=SHA_D),
-                         {"run-full": "true", "previous-release-sha": SHA_B})
-        self.assertEqual(api.contents_refs, [SHA_A])
-        for mode, branch, pin, main in (("main", "main", SHA_C, SHA_D), ("main", "main", SHA_A, SHA_C),
-                                        ("main", "main", "", SHA_D), ("release", "release/3.2", SHA_A, SHA_D)):
-            with self.subTest(mode=mode, pin=pin, main=main), self.assertRaises(controller.ControllerError):
-                controller.decide(api, mode, SHA_D, branch, False, rotation_policy_sha=pin, rotation_main_sha=main)
-        with patch.dict("os.environ", {"GITHUB_EVENT_NAME": "push"}), self.assertRaises(controller.ControllerError):
-            controller.decide(api, "main", SHA_D, "main", False,
-                              rotation_policy_sha=SHA_A, rotation_main_sha=SHA_D)
-        self.assertEqual(api.contents_refs, [SHA_A])
+        for mode, branch, pin in (("main", "main", SHA_A), ("release", "release/3.2", "")):
+            with self.subTest(mode=mode):
+                self.assertEqual(controller.decide(api, mode, SHA_D, branch, False,
+                                                   expected_sha=SHA_D, expected_policy_sha=pin), baseline_outputs())
+        for mode, branch, pin, head in (("main", "main", SHA_C, SHA_D), ("main", "main", SHA_A, SHA_C),
+                                        ("main", "main", "", ""), ("release", "main", SHA_A, SHA_D)):
+            with self.subTest(mode=mode, pin=pin, head=head), self.assertRaises(controller.ControllerError):
+                controller.decide(api, mode, SHA_D, branch, False, expected_sha=head, expected_policy_sha=pin)
+        self.assertEqual(resolve.call_count, 2)
+
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.object(controller, "git", return_value=SHA_D)
+    @patch("scripts.deployment_acceptance.resolve_accepted_baseline", side_effect=DeploymentAcceptanceError("missing"))
+    def test_dispatch_rejects_unconfirmed_base(self, _resolve, _git) -> None:
+        """Ручной запуск завершает проверку при недоказанной приёмке."""
+        with self.assertRaisesRegex(controller.ControllerError, "missing"):
+            controller.decide(FakeGitHub(), "main", SHA_D, "main", False, expected_sha=SHA_D)
 
     def test_missing_or_invalid_external_pin_fails_closed(self) -> None:
         """Без внешнего полного SHA кандидат не может выбрать свою policy."""
@@ -314,15 +331,16 @@ class FullCiControllerTests(unittest.TestCase):
             controller.decide(FakeGitHub(), "release", SHA_D, "release/1.0", True)
 
     @patch.object(controller, "git", return_value=SHA_D)
-    @patch.object(controller, "previous_release_sha", return_value=SHA_A)
+    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "push"})
+    @patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE)
     @patch.object(controller, "prior_full_attempt", return_value=False)
     @patch.object(controller, "full_success", return_value=False)
     def test_changed_release_does_not_query_main_workflow(
-        self, success, _attempt, _previous, _git,
+        self, success, _attempt, _baseline, _git,
     ) -> None:
         """PR merge release запускает suite даже до регистрации main-full."""
         result = controller.decide(FakeGitHub(), "release", SHA_D, "release/0.0", False)
-        self.assertEqual(result, {"run-full": "true", "previous-release-sha": SHA_A})
+        self.assertEqual(result, baseline_outputs())
         success.assert_called_once_with(ANY, controller.RELEASE_WORKFLOW, SHA_D, "release/0.0")
 
     @patch.object(controller, "git", return_value=SHA_C)

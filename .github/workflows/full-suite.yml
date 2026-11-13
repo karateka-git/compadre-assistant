@@ -4,7 +4,15 @@ on:
   workflow_call:
     inputs:
       previous-release-sha:
-        description: Full commit SHA of the previous published release (bootstrap production SHA before v1.0.0)
+        description: Full commit SHA of the accepted production release
+        required: true
+        type: string
+      accepted-baseline:
+        description: Frozen JSON identity of the accepted production deployment
+        required: true
+        type: string
+      policy-sha:
+        description: Reviewed policy SHA used by the controller
         required: true
         type: string
 
@@ -16,13 +24,17 @@ jobs:
     name: check-full-repository-compatibility-check
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      deployments: read
     outputs:
       artifact-digest: ${{ steps.upload.outputs.artifact-digest }}
     steps:
       - name: Validate external policy pin
         env:
           POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
-        run: '[[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ ]]'
+          CONTROLLER_POLICY_SHA: ${{ inputs.policy-sha }}
+        run: '[[ "$POLICY_SHA" =~ ^[0-9a-f]{40}$ && "$POLICY_SHA" == "$CONTROLLER_POLICY_SHA" ]]'
       - name: Checkout trusted compatibility policy
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -45,7 +57,11 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
           PREVIOUS_SHA: ${{ inputs.previous-release-sha }}
-        run: python -B policy/scripts/ci_repository_compatibility.py --repository "$GITHUB_WORKSPACE/candidate" --previous-sha "$PREVIOUS_SHA" --output "$RUNNER_TEMP/repository-compatibility"
+          ACCEPTED_BASELINE: ${{ inputs.accepted-baseline }}
+        run: >-
+          python -B policy/scripts/ci_repository_compatibility.py
+          --repository "$GITHUB_WORKSPACE/candidate" --previous-sha "$PREVIOUS_SHA"
+          --accepted-baseline "$ACCEPTED_BASELINE" --output "$RUNNER_TEMP/repository-compatibility"
       - name: Upload repository compatibility evidence
         id: upload
         if: always()
@@ -116,6 +132,8 @@ jobs:
         if: always()
         env:
           PREVIOUS_SHA: ${{ inputs.previous-release-sha }}
+          ACCEPTED_BASELINE: ${{ inputs.accepted-baseline }}
+          COMPATIBILITY_POLICY_SHA: ${{ inputs.policy-sha }}
           COMPATIBILITY_ARTIFACT_DIGEST: ${{ needs.repository-compatibility.outputs.artifact-digest }}
           CHECK_COMPATIBILITY: ${{ needs.repository-compatibility.result }}
           CHECK_CHECKOUT: ${{ steps.checkout.outcome }}

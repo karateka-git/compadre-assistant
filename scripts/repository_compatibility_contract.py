@@ -8,15 +8,26 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 
 
 POLICY_PATH = Path(__file__).with_name("repository_compatibility_policy.json")
+# V2 закрепляет только политику проверок. База хранится в Deployments.
+DYNAMIC_POLICY_VERSION = 2
+_MATRIX_FIELDS = {"version", "repository", "matrix", "test_ids"}
+_LEGACY_BASELINE_FIELDS = {"previous_sha", "release_tag", "release_id"}
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict:
     """Читает policy из доверенного checkout, отвергая неполную матрицу."""
     policy = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(policy, dict) or type(policy.get("version")) is not int:
+        raise ValueError("unknown compatibility policy")
+    version = policy["version"]
+    if ((version == 1 and policy.keys() != _MATRIX_FIELDS | _LEGACY_BASELINE_FIELDS)
+            or (version == DYNAMIC_POLICY_VERSION and policy.keys() != _MATRIX_FIELDS)
+            or version not in (1, DYNAMIC_POLICY_VERSION)):
+        raise ValueError("unknown compatibility policy")
     rows = policy["matrix"]
     keys = {(row["source"], row["class"], row["method"]) for row in rows}
     ids = policy["test_ids"]
-    if (policy["version"] != 1 or len(rows) != 107 or len(keys) != 107
+    if (len(rows) != 107 or len(keys) != 107
             or len({row["class"] for row in rows}) != 26
             or len(ids) != 173 or len(set(ids)) != len(ids)
             or any(row["test_id"] not in ids for row in rows)):
@@ -68,19 +79,21 @@ def verify_tests(result: dict, expected_ids: list[str] | None = None) -> None:
         raise ValueError("incomplete or unsuccessful compatibility tests")
 
 
-def verify_report(report: dict, policy: dict) -> None:
+def verify_report(report: dict, policy: dict, *, previous_sha: str | None = None) -> None:
     """Проверяет оба обязательных набора, обмен, schema fingerprint и sources.
 
     Args:
         report: Полный runner report, ещё не считающийся доверенным admission.
-        policy: Manifest закреплённой previous базы и всех её tests.
+        policy: Доверенная матрица и список проверяемых tests.
+        previous_sha: Подтверждённый SHA принятой базы, обязательный для policy v2.
 
     Raises:
         ValueError: Результаты, sources, SQL либо imports не согласованы.
         KeyError: В отчёте отсутствует обязательное свидетельство.
     """
-    if report.get("previous_sha") != policy["previous_sha"]:
-        raise ValueError("baseline differs from trusted policy")
+    expected_sha = policy.get("previous_sha") if previous_sha is None else previous_sha
+    if not expected_sha or report.get("previous_sha") != expected_sha:
+        raise ValueError("baseline differs from verified previous SHA")
     if report.get("passed") is not True or report.get("source_verification") != "passed":
         raise ValueError("compatibility runner did not verify sources/results")
     if report.get("source_changes") != {"previous": [], "candidate": []}:

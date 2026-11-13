@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+from dataclasses import asdict
 import json
 import os
 import re
@@ -209,9 +210,24 @@ def previous_release_sha(api: GitHub, branch: str, *, policy_sha: str | None = N
     return previous
 
 
+def _baseline_outputs(api: GitHub) -> dict[str, str]:
+    """Закрепляет одну принятую базу для всех jobs полного CI."""
+    from scripts.deployment_acceptance import DeploymentAcceptanceError, resolve_accepted_baseline
+
+    policy_sha = os.environ.get("COMPATIBILITY_POLICY_SHA", "")
+    if not SHA_PATTERN.fullmatch(policy_sha):
+        raise ControllerError("Не задан точный внешний SHA CI policy")
+    try:
+        baseline = resolve_accepted_baseline(api)
+    except DeploymentAcceptanceError as error:
+        raise ControllerError(str(error)) from error
+    return {"run-full": "true", "previous-release-sha": baseline.sha, "policy-sha": policy_sha,
+            "accepted-baseline": json.dumps(asdict(baseline), separators=(",", ":"), sort_keys=True)}
+
+
 def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool, *,
-           rotation_policy_sha: str = "", rotation_main_sha: str = "") -> dict[str, str]:
-    """Возвращает решение caller и SHA схемы прежнего выпуска.
+           expected_sha: str = "", expected_policy_sha: str = "") -> dict[str, str]:
+    """Возвращает решение caller и точную приёмку предыдущего выпуска.
 
     Args:
         api: GitHub-клиент для проверки точной ветки и закреплённой базы.
@@ -219,56 +235,47 @@ def decide(api: GitHub, mode: str, sha: str, branch: str, created: bool, *,
         sha: Полный SHA события CI.
         branch: Ветка события CI.
         created: Признак создания release-ветки.
-        rotation_policy_sha: Ожидаемый новый внешний pin при ротации.
-        rotation_main_sha: Ожидаемый точный SHA main при ротации.
+        expected_sha: Ожидаемый SHA ветки для ручного запуска.
+        expected_policy_sha: Необязательный ожидаемый pin для ручного запуска.
 
     Returns:
         Outputs caller для запуска полного набора и выбора его базы.
 
     Raises:
-        ControllerError: Checkout, ref, предыдущая попытка или ротация не подтверждены.
+        ControllerError: Checkout, ref, предыдущая попытка или база не подтверждены.
     """
     if not SHA_PATTERN.fullmatch(sha) or git("rev-parse", "HEAD") != sha:
         raise ControllerError("Checkout не соответствует полному GITHUB_SHA")
+    if mode == "main" and branch == "main":
+        workflow = MAIN_WORKFLOW
+    elif mode == "release" and RELEASE_BRANCH_PATTERN.fullmatch(branch):
+        workflow = RELEASE_WORKFLOW
+    else:
+        raise ControllerError("Caller разрешён только для своей ветки main или release/X.Y")
     ref = api.get(f"/git/ref/heads/{quote(branch, safe='/')}")
     if ref["object"]["sha"] != sha:
         raise ControllerError("Ветка ушла с SHA события; устаревший run нельзя продолжать")
-    if rotation_policy_sha or rotation_main_sha:
-        if (mode != "main" or branch != "main" or os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
-                or rotation_main_sha != sha or not SHA_PATTERN.fullmatch(rotation_policy_sha)
-                or rotation_policy_sha != os.environ.get("COMPATIBILITY_POLICY_SHA")):
-            raise ControllerError("Ротация требует точные SHA текущего main и нового внешнего CI pin")
-        # Прежний успешный run мог проверять другую базу на том же SHA.
-        previous = previous_release_sha(api, branch, policy_sha=rotation_policy_sha)
-        return {"run-full": "true", "previous-release-sha": previous}
+    if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+        if expected_sha != sha:
+            raise ControllerError("Ручной запуск требует точный SHA текущей ветки")
+        if expected_policy_sha and expected_policy_sha != os.environ.get("COMPATIBILITY_POLICY_SHA"):
+            raise ControllerError("Внешний CI policy pin изменился перед ручным запуском")
+        # Прежний успешный CI того же SHA мог проверять другую production базу.
+        return _baseline_outputs(api)
     if mode == "main":
-        if branch != "main":
-            raise ControllerError("Ручной pre-release-check-full разрешён только для main")
         count, anchor = merged_since_last_success(api, sha)
         print(f"main bootstrap={anchor}, PR since success={count}")
-        if count < 3 and os.environ.get("GITHUB_EVENT_NAME") != "workflow_dispatch":
-            return {"run-full": "false", "previous-release-sha": ""}
-        if full_success(api, MAIN_WORKFLOW, sha, "main"):
-            return {"run-full": "false", "previous-release-sha": ""}
-        if prior_full_attempt(api, MAIN_WORKFLOW, sha, "main"):
-            raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный rerun")
-    elif mode == "release":
-        if not RELEASE_BRANCH_PATTERN.fullmatch(branch):
-            raise ControllerError("release-check-full разрешён только для release/X.Y")
-        if created:
-            if not full_success(api, MAIN_WORKFLOW, sha, "main"):
-                raise ControllerError("Созданная release ветка не имеет успешного pre-release-check-full этого SHA")
-            return {"run-full": "false", "previous-release-sha": ""}
-        # После PR merge в существующую release-ветку появляется новый SHA:
-        # результат main для него невозможен при разрешённом merge commit.
-        if full_success(api, RELEASE_WORKFLOW, sha, branch):
-            return {"run-full": "false", "previous-release-sha": ""}
-        if prior_full_attempt(api, RELEASE_WORKFLOW, sha, branch):
-            raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный rerun")
-    else:
-        raise ControllerError(f"Неизвестный режим: {mode}")
-    previous = previous_release_sha(api, branch)
-    return {"run-full": "true", "previous-release-sha": previous}
+        if count < 3:
+            return {"run-full": "false"}
+    elif created:
+        if not full_success(api, MAIN_WORKFLOW, sha, "main"):
+            raise ControllerError("Созданная release ветка не имеет успешного pre-release-check-full этого SHA")
+        return {"run-full": "false"}
+    if full_success(api, workflow, sha, branch):
+        return {"run-full": "false"}
+    if prior_full_attempt(api, workflow, sha, branch):
+        raise ControllerError("Для прежней неуспешной проверки этого SHA требуется явный ручной запуск")
+    return _baseline_outputs(api)
 
 
 def main() -> None:
@@ -282,8 +289,8 @@ def main() -> None:
         result = decide(
             api, arguments.mode, os.environ.get("GITHUB_SHA", ""), branch,
             os.environ.get("BRANCH_CREATED") == "true",
-            rotation_policy_sha=os.environ.get("ROTATION_POLICY_SHA", ""),
-            rotation_main_sha=os.environ.get("ROTATION_MAIN_SHA", ""),
+            expected_sha=os.environ.get("EXPECTED_SHA", ""),
+            expected_policy_sha=os.environ.get("EXPECTED_POLICY_SHA", ""),
         )
         print(result)
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
