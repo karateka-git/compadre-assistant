@@ -19,6 +19,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CommandMenuUpdateHandler, IncomingResponse,
 )
 from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.presentation.vk.photos import vk_photo_attachments
 from compadre_assistant.presentation.vk.rendering import render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
@@ -453,12 +454,13 @@ def _handle_update(
     message = object_data.get("message")
     if not isinstance(message, dict):
         return
-    text = str(message.get("text") or "")
+    images = vk_photo_attachments(message.get("attachments"))
+    text = "" if images else str(message.get("text") or "")
     peer_id = _require_int(message.get("peer_id"), "peer_id")
     message_id = _require_int(message.get("id"), "id")
     from_id = _require_int(message.get("from_id"), "from_id")
 
-    if not text:
+    if not text and not images:
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
@@ -472,6 +474,7 @@ def _handle_update(
         message_id=str(message_id),
         text=text,
         external_user_id=str(from_id),
+        images=images,
     )
     completion_handler = _create_vk_completion_handler(
         client,
