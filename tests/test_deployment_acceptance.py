@@ -3,7 +3,7 @@
 from dataclasses import asdict, replace
 import unittest
 
-from scripts.ci_repository_compatibility import ReleaseTagEvidence
+from scripts.ci_repository_compatibility import DeploymentReleaseTagEvidence, ReleaseTagEvidence
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.deployment_acceptance import (
     AcceptedBaseline, DeploymentAcceptanceError, DeploymentState, read_deployment_record,
@@ -12,7 +12,6 @@ from scripts.deployment_acceptance import (
 from scripts.full_ci_controller import ControllerError, GitHub
 from scripts.publish_installation_tag import InstallationReceipt
 from scripts.publish_installation_tag import summarize
-from scripts.rotate_ci_baseline import require_accepted_installation
 from scripts.release_sqlite_summary import MIGRATIONS_PREFIX
 
 
@@ -43,6 +42,7 @@ class FakeGitHub:
                           "created_at": "2026-01-02T01:00:00Z"}]
         self.statuses_by_deployment: dict[int, list[dict]] = {}
         self.fail_path: str | None = None
+        self.annotation = ReleaseTagEvidence("5" * 40, "6" * 40, 107, 2, "7" * 64)
 
     def get(self, path: str, **parameters: str | int) -> object:
         """Считает каждый REST GET и имитирует серверную пагинацию."""
@@ -62,7 +62,7 @@ class FakeGitHub:
         if path == f"/git/tags/{TAG_SHA}":
             return {
                 "sha": TAG_SHA, "tag": VERSION, "object": {"type": "commit", "sha": SHA},
-                "message": ReleaseTagEvidence("5" * 40, "6" * 40, 107, 2, "7" * 64).message(),
+                "message": self.annotation.message(),
             }
         if path == f"/contents/{MIGRATIONS_PREFIX.rstrip('/')}":
             if parameters != {"ref": SHA}:
@@ -99,6 +99,16 @@ class DeploymentAcceptanceTests(unittest.TestCase):
         self.assertEqual((record.deployment_id, record.status_id, record.state),
                          (7, 8, DeploymentState.SUCCESS))
         self.assertEqual(len(api.calls), 6)
+
+    def test_current_release_v2_is_accepted_without_requiring_its_previous_deployment(self) -> None:
+        """Resume установленного выпуска может перечитать свой success после перехода базы."""
+        api = FakeGitHub()
+        old = AcceptedBaseline("5" * 40, "v3.4.0", 4, 5, 6)
+        api.annotation = DeploymentReleaseTagEvidence(old.sha, "6" * 40, 107, 2, "7" * 64, old)
+        record = require_accepted_deployment(api, RECEIPT)
+        self.assertEqual((record.deployment_id, record.status_id), (7, 8))
+        self.assertEqual(resolve_accepted_baseline(api), AcceptedBaseline(SHA, VERSION, 41, 7, 8))
+        self.assertNotIn("/deployments/5", [path for path, _ in api.calls])
 
     def test_missing_and_unfinished_status_do_not_grant_acceptance(self) -> None:
         """Отсутствие записи или статуса доступно для будущего безопасного повтора."""
@@ -211,14 +221,14 @@ class DeploymentAcceptanceTests(unittest.TestCase):
     def test_rotation_uses_deployment_for_new_last_good_and_forward_recovery(self) -> None:
         """Теговый fallback не допускает новый выпуск после обычного или forward recovery."""
         api = FakeGitHub()
-        require_accepted_installation(api, RECEIPT)
+        require_accepted_deployment(api, RECEIPT)
         api.statuses = []
         with self.assertRaises(DeploymentAcceptanceError):
-            require_accepted_installation(api, RECEIPT)
+            require_accepted_deployment(api, RECEIPT)
         api.statuses = [{"id": 8, "state": "success", "environment": "production", "creator": OWNER,
                          "created_at": "2026-01-02T01:00:00Z"}]
         recovered = replace(RECEIPT, runtime_id="9" * 64)
-        require_accepted_installation(api, recovered)
+        require_accepted_deployment(api, recovered)
         self.assertFalse(any(path.startswith("/git/ref/tags/production/") for path, _ in api.calls))
 
     def test_summary_reads_only_verified_deployment_for_new_release(self) -> None:
@@ -277,7 +287,7 @@ class DeploymentAcceptanceTests(unittest.TestCase):
         summary = summarize(api, VERSION, SHA)
         self.assertEqual((summary["installation_status"], summary["run_id"], summary["run_attempt"]),
                          ("accepted", RECEIPT.run_id, RECEIPT.run_attempt))
-        require_accepted_installation(api, replace(RECEIPT, kind="emergency"))
+        require_accepted_deployment(api, replace(RECEIPT, kind="emergency"))
         self.assertEqual(resolve_accepted_baseline(api), AcceptedBaseline(SHA, VERSION, 41, 7, 8))
 
 

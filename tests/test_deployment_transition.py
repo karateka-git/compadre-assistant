@@ -8,7 +8,6 @@ from scripts import publish_installation_tag as installation
 from scripts.deployment_acceptance import DeploymentAcceptanceError, require_accepted_deployment
 from scripts.full_ci_controller import ControllerError
 from scripts.github_publishing import PublishingError
-from scripts.rotate_ci_baseline import require_accepted_installation
 from tests.test_deployment_acceptance import FakeGitHub, RECEIPT
 from tests.test_publish_deployment_acceptance import WritableGitHub
 from tests.test_publish_installation_tag import FakeGitHub as LegacyGitHub
@@ -117,22 +116,23 @@ class DeploymentTransitionTests(unittest.TestCase):
         with self.assertRaisesRegex(ControllerError, "HTTP 403"):
             publisher.publish(api, lambda: RECEIPT)
         with self.assertRaisesRegex(ControllerError, "HTTP 403"):
-            require_accepted_installation(api, RECEIPT)
+            require_accepted_deployment(api, RECEIPT)
         self.assertEqual(api.posts, [])
 
     def test_legacy_tag_remains_and_new_release_requires_success(self) -> None:
         """Тег v3.2.0 остаётся, а следующий last_good не получает fallback."""
         legacy = LegacyGitHub()
         installation.publish(legacy, lambda: LEGACY_RECEIPT, LEGACY_RECEIPT.runtime_id)
-        require_accepted_installation(legacy, LEGACY_RECEIPT)
+        self.assertTrue(installation.installation_tag_exists(
+            legacy, LEGACY_RECEIPT.version, LEGACY_RECEIPT.sha, receipt=LEGACY_RECEIPT))
         historical_ref = legacy.ref
 
         current = WritableGitHub()
         with self.assertRaises(DeploymentAcceptanceError):
-            require_accepted_installation(current, RECEIPT)
+            require_accepted_deployment(current, RECEIPT)
         self.assertFalse(any(path.startswith("/git/ref/tags/production/") for path, _ in current.calls))
         publisher.publish(current, lambda: RECEIPT)
-        require_accepted_installation(current, RECEIPT)
+        require_accepted_deployment(current, RECEIPT)
         self.assertEqual(legacy.ref, historical_ref)
         self.assertEqual(len(legacy.posts), 2)
 

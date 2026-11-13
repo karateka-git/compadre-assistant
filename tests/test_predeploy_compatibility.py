@@ -20,7 +20,10 @@ import zipfile
 
 from scripts import predeploy_compatibility as gate
 from scripts import deploy_prod as prod
-from scripts.ci_repository_compatibility import ReleaseTagEvidence
+from scripts.ci_repository_compatibility import (
+    DYNAMIC_HARNESS, LEGACY_HARNESS, DeploymentReleaseTagEvidence, ReleaseTagEvidence,
+)
+from scripts.deployment_acceptance import AcceptedBaseline
 from scripts.repository_compatibility_contract import load_policy
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
@@ -31,6 +34,8 @@ from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR,
 
 POLICY_SHA = "a" * 40
 CANDIDATE_SHA = "b" * 40
+PREVIOUS_SHA = "1" * 40
+ACCEPTED = AcceptedBaseline(PREVIOUS_SHA, "v3.1.0", 42, 51, 61)
 
 
 class ArtifactAPI:
@@ -38,7 +43,9 @@ class ArtifactAPI:
 
     def __init__(self):
         """Создаёт полное evidence с настоящей policy и согласованным manifest."""
-        self.policy = load_policy()
+        self.policy = load_policy() | {
+            "version": 1, "previous_sha": PREVIOUS_SHA, "release_id": 42, "release_tag": "v3.1.0",
+        }
         self.repository = self.policy["repository"]
         self.selected = SelectedRelease(self.repository, "v3.2.0", "release/3.2", CANDIDATE_SHA,
                                         10, "main-full.yml", 1, 1)
@@ -46,7 +53,7 @@ class ArtifactAPI:
         self.run["repository"] = self.run["head_repository"] = {"full_name": self.repository}
         self.jobs = admission_jobs(CANDIDATE_SHA)
         self.workflow = {"id": 1, "path": ".github/workflows/main-full.yml"}
-        self.trusted = {name: name.encode() for name in gate.HARNESS}
+        self.trusted = {name: name.encode() for name in LEGACY_HARNESS}
         self.trusted["repository_compatibility_policy.json"] = json.dumps(self.policy).encode()
         self.workflow_bytes = b"trusted workflow"
         self.candidate_workflow_bytes = self.workflow_bytes
@@ -93,9 +100,11 @@ class ArtifactAPI:
     def get(self, path, **parameters):
         """Возвращает только ожидаемые GitHub endpoints."""
         if path.startswith("/contents/"):
-            name = path.rsplit("/", 1)[1]
-            data = self.trusted[name] if "/scripts/" in path else (
-                self.workflow_bytes if parameters["ref"] == POLICY_SHA else self.candidate_workflow_bytes)
+            name = path.removeprefix("/contents/")
+            if name.startswith(".github/workflows/"):
+                data = self.workflow_bytes if parameters["ref"] == POLICY_SHA else self.candidate_workflow_bytes
+            else:
+                data = self.trusted[name if self.policy["version"] == 2 else name.rsplit("/", 1)[1]]
             return {"type": "file", "encoding": "base64", "content": base64.b64encode(data).decode(),
                     "sha": hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()}
         if path.startswith("/releases/tags/"):
@@ -124,6 +133,15 @@ class ArtifactAPI:
         assert artifact_id == 22
         return self.payload
 
+    def use_dynamic_policy(self) -> None:
+        """Переводит fixture на формат policy и evidence с Deployment."""
+        self.policy = {key: self.policy[key] for key in ("repository", "matrix", "test_ids")} | {"version": 2}
+        self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}
+        self.trusted[gate.POLICY_PATH] = json.dumps(self.policy).encode()
+        self.evidence.update(version=2, baseline=asdict(ACCEPTED), policy_files={
+            name: hashlib.sha256(data).hexdigest() for name, data in self.trusted.items()})
+        self.pack()
+
 
 class EvidenceTests(unittest.TestCase):
     """Проверяет успешную цепочку и fail-closed повреждения на её границах."""
@@ -143,6 +161,38 @@ class EvidenceTests(unittest.TestCase):
         api.jobs[2]["conclusion"] = "failure"
         with self.assertRaises(ValueError):
             self.verify(api)
+
+    def test_dynamic_evidence_requires_current_deployment_and_real_installed_sha(self) -> None:
+        """Публикация и VPS доверяют одной проверенной базе точного CI."""
+        api = ArtifactAPI()
+        api.use_dynamic_policy()
+        with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED) as latest:
+            result = gate.verify_evidence(api, api.selected, POLICY_SHA, None)
+            self.assertEqual(result["baseline"], asdict(ACCEPTED))
+            latest.assert_called_once_with(api)
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_INSTALLED_PREVIOUS_SHA"):
+                gate.verify_evidence(api, api.selected, POLICY_SHA, "e" * 40)
+            api.evidence["version"] = 1
+            api.pack()
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_IDENTITY"):
+                gate.verify_evidence(api, api.selected, POLICY_SHA, None)
+
+    def test_dynamic_emergency_recovery_uses_frozen_deployment(self) -> None:
+        """Recovery сохраняет прежнюю пару, даже если последний Deployment сменился."""
+        api = ArtifactAPI()
+        api.use_dynamic_policy()
+        api.selected = replace(api.selected, kind="emergency")
+        api.run["conclusion"] = "failure"
+        api.jobs[1]["conclusion"] = "failure"
+        newer = replace(ACCEPTED, status_id=ACCEPTED.status_id + 1)
+        with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=newer), patch(
+            "scripts.deployment_acceptance.verify_accepted_baseline", return_value=ACCEPTED,
+        ) as frozen:
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_BASELINE_DEPLOYMENT"):
+                gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
+            result = gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA, frozen=True)
+            frozen.assert_called_once_with(api, ACCEPTED.deployment_id, ACCEPTED.status_id)
+            self.assertEqual(result["baseline"], asdict(ACCEPTED))
 
     def test_annotated_evidence_reads_four_pinned_files_without_artifact(self):
         """Считает запросы по fixture и сверяет точные bytes локального Git."""
@@ -542,6 +592,48 @@ class AdmissionBoundaryTests(unittest.TestCase):
                 self.assertNotIn("marker_on", host.actions)
                 self.assertNotIn("stop_both", host.actions)
                 self.assertEqual(host.head, OLD_SHA)
+
+    def test_changed_deployment_before_marker_keeps_old_writers(self) -> None:
+        """После миграции копии новая приёмка отзывает допуск исходной пары."""
+        with TemporaryDirectory() as temporary:
+            host = FakeHost(Path(temporary))
+            api = ArtifactAPI()
+            api.use_dynamic_policy()
+            with closing(sqlite3.connect(host.selected_database())) as connection:
+                fingerprint = gate.schema_fingerprint(connection)
+            last_good = prod.prep.read_state(host.state_dir, host.checkout)["last_good"]
+            accepted = replace(ACCEPTED, sha=OLD_SHA, version=last_good["version"])
+            proof = DeploymentReleaseTagEvidence(OLD_SHA, POLICY_SHA, 1, 1, fingerprint, accepted)
+            selected = replace(api.selected, compatibility=proof, tag_object_sha="d" * 40)
+            newer = replace(accepted, status_id=accepted.status_id + 1)
+
+            def local_object(checkout, kind, ref):
+                return b"tag fixture\n\n" + proof.message().encode() if kind == "tag" else api.workflow_bytes
+
+            real_predeploy = prod.Host.predeploy
+            with ExitStack() as stack:
+                for patcher in deploy_tests.DeployProdTests()._patches():
+                    stack.enter_context(patcher)
+                stack.enter_context(patch.object(host, "select", return_value=selected))
+                stack.enter_context(patch.object(host, "release_api", return_value=api))
+                stack.enter_context(patch.object(host, "uses_selector_runtime", return_value=True))
+                stack.enter_context(patch.object(host, "require_switch_rollout"))
+                stack.enter_context(patch.object(host, "predeploy", side_effect=lambda *args, **kwargs:
+                                                real_predeploy(host, *args, **kwargs)))
+                migrate = stack.enter_context(patch.object(host, "migrate_copy"))
+                stack.enter_context(patch.object(gate, "_local_git_object", side_effect=local_object))
+                stack.enter_context(patch.object(gate, "private_text", return_value=POLICY_SHA))
+                stack.enter_context(patch.object(prod, "GitHub", return_value=api))
+                latest = stack.enter_context(patch("scripts.deployment_acceptance.resolve_accepted_baseline",
+                                                   side_effect=[accepted, newer]))
+                with self.assertRaisesRegex(prod.DeployError, "SAFE_BASELINE_DEPLOYMENT"):
+                    prod.deploy(host, selected.version)
+            self.assertEqual(latest.call_count, 2)
+            migrate.assert_called_once()
+            self.assertTrue(host.running)
+            self.assertNotIn("marker_on", host.actions)
+            self.assertNotIn("stop_both", host.actions)
+            self.assertEqual(host.head, OLD_SHA)
 
     def test_preparation_schema_and_image_checks_have_safe_codes(self):
         """Ранние проверки до evidence сохраняют код вместо generic DeployError."""

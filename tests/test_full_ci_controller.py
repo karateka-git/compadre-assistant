@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -58,28 +57,15 @@ def admission_jobs(sha: str) -> list[dict]:
 class FakeGitHub:
     """Отдаёт предсказуемые ответы для сценариев контроллера."""
 
-    def __init__(self, releases=None, runs=None, jobs=None, prs=None, policy=None,
-                 release=None, reference=None, content=None, tag_object=None) -> None:
+    def __init__(self, runs=None, jobs=None, prs=None) -> None:
         """Сохраняет наборы ответов REST API для теста."""
-        self.releases = releases or []
         self.runs = runs or {}
         self.jobs = jobs or {}
         self.prs = prs or {}
         self.repository = "owner/repo"
-        self.policy = policy if policy is not None else {
-            "version": 1, "repository": self.repository, "previous_sha": SHA_B,
-            "release_tag": "v3.1.0", "release_id": 10,
-        }
-        self.release = release
-        self.reference = reference
-        self.tag_object = tag_object
-        self.content = content
-        self.contents_refs = []
 
     def pages(self, path, key=None, **parameters):
         """Возвращает одну подготовленную страницу API."""
-        if path == "/releases":
-            return self.releases
         if path.endswith("/runs"):
             return self.runs.get((path, parameters.get("head_sha"), parameters.get("status")), [])
         if path.endswith("/jobs"):
@@ -96,19 +82,6 @@ class FakeGitHub:
             return {"id": 2, "path": ".github/workflows/release-full.yml"}
         if path.startswith("/git/ref/heads/"):
             return {"object": {"sha": SHA_D}}
-        if path.startswith("/git/ref/tags/"):
-            return self.reference if self.reference is not None else {
-                "object": {"type": "commit", "sha": SHA_B}}
-        if path.startswith("/git/tags/"):
-            return self.tag_object
-        if path == "/contents/scripts/repository_compatibility_policy.json":
-            self.contents_refs.append(parameters.get("ref"))
-            return self.content if self.content is not None else {"encoding": "base64", "content": base64.b64encode(
-                json.dumps(self.policy).encode()).decode()}
-        if path.startswith("/releases/tags/"):
-            return self.release if self.release is not None else {
-                "id": 10, "tag_name": "v3.1.0", "immutable": True,
-                "draft": False, "prerelease": False, "published_at": "2026-11-02T00:00:00Z"}
         raise AssertionError(path)
 
 
@@ -202,17 +175,6 @@ class FullCiControllerTests(unittest.TestCase):
         }] for sha in (SHA_D, SHA_C, SHA_B)}
         self.assertEqual(controller.merged_since_last_success(FakeGitHub(prs=prs), SHA_D), (3, SHA_A))
 
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
-    def test_published_but_not_installed_uses_pinned_baseline_in_both_lines(self) -> None:
-        """Публикация v3.2.0 не меняет базу установленной v3.1.0."""
-        api = FakeGitHub(releases=[{
-            "tag_name": "v3.2.0", "draft": False, "prerelease": False,
-            "published_at": "2026-11-06T00:00:00Z",
-        }])
-        self.assertEqual(controller.previous_release_sha(api, "main"), SHA_B)
-        self.assertEqual(controller.previous_release_sha(api, "release/3.3"), SHA_B)
-        self.assertEqual(api.contents_refs, [SHA_A, SHA_A])
-
     @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "push"})
     @patch.object(controller, "git", return_value=SHA_D)
     @patch.object(controller, "merged_since_last_success", return_value=(3, SHA_A))
@@ -223,13 +185,12 @@ class FullCiControllerTests(unittest.TestCase):
         self, resolve, _success, _attempt, _merged, _git,
     ) -> None:
         """Оба caller передают full-suite принятую production базу."""
-        api = FakeGitHub(releases=[{"tag_name": "v3.2.0"}])
+        api = FakeGitHub()
         for mode, branch in (("main", "main"), ("release", "release/3.3")):
             with self.subTest(mode=mode):
                 self.assertEqual(controller.decide(api, mode, SHA_D, branch, False),
                                  baseline_outputs())
         self.assertEqual(resolve.call_count, 2)
-        self.assertEqual(api.contents_refs, [])
 
     @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
     @patch.object(controller, "git", return_value=SHA_D)
@@ -256,46 +217,16 @@ class FullCiControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(controller.ControllerError, "missing"):
             controller.decide(FakeGitHub(), "main", SHA_D, "main", False, expected_sha=SHA_D)
 
-    def test_missing_or_invalid_external_pin_fails_closed(self) -> None:
-        """Без внешнего полного SHA кандидат не может выбрать свою policy."""
+    @patch.dict("os.environ", {"GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.object(controller, "git", return_value=SHA_D)
+    @patch("scripts.deployment_acceptance.resolve_accepted_baseline")
+    def test_missing_or_invalid_external_pin_fails_closed(self, resolve, _git) -> None:
+        """Без точного внешнего pin запуск не выбирает policy кандидата."""
         for pin in ("", "bad", SHA_A.upper()):
             with self.subTest(pin=pin), patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": pin}):
                 with self.assertRaisesRegex(controller.ControllerError, "внешний SHA"):
-                    controller.previous_release_sha(FakeGitHub(), "main")
-
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
-    def test_wrong_repository_release_or_tag_fails_closed(self) -> None:
-        """Доверенный pin не разрешает чужую базу и mutable Release/tag."""
-        for change in ({"repository": "other/repo"}, {"release_id": 11},
-                       {"release_tag": "v3.2.0"}, {"previous_sha": SHA_C}):
-            with self.subTest(change=change):
-                api = FakeGitHub(policy={**FakeGitHub().policy, **change})
-                with self.assertRaises((controller.ControllerError, ValueError)):
-                    controller.previous_release_sha(api, "main")
-        for api in (FakeGitHub(release={**FakeGitHub().get("/releases/tags/v3.1.0"),
-                                        "immutable": False}),
-                    FakeGitHub(reference={"object": {"type": "tag", "sha": SHA_B}})):
-            with self.assertRaises(ValueError):
-                controller.previous_release_sha(api, "release/3.3")
-
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
-    def test_ci_accepts_annotated_production_baseline(self) -> None:
-        """После ротации CI использует commit аннотированного immutable тега."""
-        api = FakeGitHub(
-            reference={"object": {"type": "tag", "sha": SHA_C}},
-            tag_object={"sha": SHA_C, "tag": "v3.1.0", "message": "evidence",
-                        "object": {"type": "commit", "sha": SHA_B}},
-        )
-        self.assertEqual(controller.previous_release_sha(api, "release/3.3"), SHA_B)
-
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A})
-    def test_corrupt_external_policy_bytes_fail_closed(self) -> None:
-        """Пустой или повреждённый ответ Contents не заменяется локальным JSON."""
-        for content in ({"encoding": "none", "content": ""},
-                        {"encoding": "base64", "content": "%%%"}):
-            with self.subTest(content=content):
-                with self.assertRaises(controller.ControllerError):
-                    controller.previous_release_sha(FakeGitHub(content=content), "main")
+                    controller.decide(FakeGitHub(), "main", SHA_D, "main", False, expected_sha=SHA_D)
+        resolve.assert_not_called()
 
     def test_sibling_schema_prefix_mismatch_fails_closed(self) -> None:
         """Несовпадающие имена и SQL соседней линии останавливают набор."""

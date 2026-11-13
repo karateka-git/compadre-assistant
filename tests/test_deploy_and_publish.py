@@ -14,8 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from scripts import publish_deployment_acceptance as publisher
-from scripts.deployment_acceptance import DeploymentAcceptanceError
-from scripts.rotate_ci_baseline import require_accepted_installation
+from scripts.deployment_acceptance import DeploymentAcceptanceError, require_accepted_deployment
 from tests.test_deployment_acceptance import OWNER, RECEIPT, SHA, VERSION
 from tests.test_publish_deployment_acceptance import WritableGitHub
 
@@ -129,7 +128,7 @@ class DeployAndPublishTests(unittest.TestCase):
                 self.assertEqual(commands[0], ["sudo", "-n", "deploy-prod", VERSION, *flags])
                 self.assertEqual([path for path, _ in api.posts], POSTS)
                 self.assertEqual(api.posts[0][1]["payload"]["kind"], kind)
-                require_accepted_installation(api, receipt)
+                require_accepted_deployment(api, receipt)
 
     def test_preflight_rejects_wrong_version_sha_kind_and_author_before_ssh(self) -> None:
         """Расхождение с GitHub останавливает операцию до первой команды на VPS."""
@@ -177,7 +176,7 @@ class DeployAndPublishTests(unittest.TestCase):
         run, _ = self._run_ssh(api, iter([RECEIPT] * 3))
         self.assertEqual(self._invoke(api, run, "--publish"), 3)
         self.assertEqual([path for path, _ in api.posts], POSTS)
-        require_accepted_installation(api, RECEIPT)
+        require_accepted_deployment(api, RECEIPT)
 
     def test_runtime_change_stops_before_next_write(self) -> None:
         """Смена runtime блокирует создание записи или присвоение статуса."""
@@ -189,12 +188,12 @@ class DeployAndPublishTests(unittest.TestCase):
                 self._invoke(api, run, "--deploy", error="runtime VPS изменились")
                 self.assertEqual([path for path, _ in api.posts], expected_posts)
                 with self.assertRaises(DeploymentAcceptanceError):
-                    require_accepted_installation(api, changed)
+                    require_accepted_deployment(api, changed)
                 if expected_posts:
                     run, _ = self._run_ssh(api, iter([changed] * 2))
                     self.assertEqual(self._invoke(api, run, "--publish"), 2)
                     self.assertEqual([path for path, _ in api.posts], POSTS)
-                    require_accepted_installation(api, changed)
+                    require_accepted_deployment(api, changed)
 
     def test_emergency_without_exact_success_does_not_open_rotation(self) -> None:
         """Техническая приёмка аварийной установки не заменяет успешный точный CI."""
@@ -208,4 +207,4 @@ class DeployAndPublishTests(unittest.TestCase):
                 self.assertEqual(self._invoke(api, run, "--deploy", *EMERGENCY, error=error), 2)
                 self.assertEqual(api.posts, [])
                 with self.assertRaises(DeploymentAcceptanceError):
-                    require_accepted_installation(api, receipt)
+                    require_accepted_deployment(api, receipt)

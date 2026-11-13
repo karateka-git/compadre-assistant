@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import binascii
 from dataclasses import asdict
 import json
 import os
@@ -14,7 +12,6 @@ import sys
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from scripts.ci_repository_compatibility import verify_baseline
 from scripts.full_ci_admission import (
     AdmissionError, COMPATIBILITY_CHECK, FULL_CALLERS, FULL_SUITE_CHECK,
     MAIN_WORKFLOW, RELEASE_BRANCH_PATTERN, RELEASE_WORKFLOW,
@@ -167,47 +164,6 @@ def tag_commit(api: GitHub, tag: str) -> str:
             break
         obj = api.get(f"/git/tags/{obj['sha']}")["object"]
     raise ControllerError(f"Тег {tag} не указывает на commit")
-
-
-def previous_release_sha(api: GitHub, branch: str, *, policy_sha: str | None = None) -> str:
-    """Читает прежний выпуск из внешне закреплённой CI policy.
-
-    Args:
-        api: Читающий GitHub API клиент.
-        branch: Имя main либо release/X.Y.
-        policy_sha: Уже прочитанный внешний pin. CI по умолчанию берёт его из окружения.
-
-    Returns:
-        SHA выпуска, закреплённого в policy для установленной production базы.
-
-    Raises:
-        ControllerError: Pin, policy или immutable Release/tag недействительны.
-    """
-    if branch != "main" and not RELEASE_BRANCH_PATTERN.fullmatch(branch):
-        raise ControllerError(f"Недопустимая ветка: {branch}")
-    pin = os.environ.get("COMPATIBILITY_POLICY_SHA", "") if policy_sha is None else policy_sha
-    if not SHA_PATTERN.fullmatch(pin):
-        raise ControllerError("Не задан точный внешний SHA CI policy")
-    response = api.get("/contents/scripts/repository_compatibility_policy.json", ref=pin)
-    if (not isinstance(response, dict) or response.get("encoding") != "base64"
-            or not isinstance(response.get("content"), str)):
-        raise ControllerError("Некорректный ответ GitHub Contents для CI policy")
-    try:
-        content = base64.b64decode("".join(response["content"].split()), validate=True)
-        policy = json.loads(content)
-    except (ValueError, TypeError, binascii.Error) as error:
-        raise ControllerError("Недействительные байты CI policy") from error
-    if (not isinstance(policy, dict) or policy.get("version") != 1
-            or policy.get("repository") != api.repository
-            or not SHA_PATTERN.fullmatch(policy.get("previous_sha", ""))
-            or not VERSION_PATTERN.fullmatch(policy.get("release_tag", ""))
-            or type(policy.get("release_id")) is not int or policy["release_id"] <= 0):
-        raise ControllerError("CI policy не задаёт допустимую production базу")
-    previous = policy["previous_sha"]
-    tag = quote(policy["release_tag"], safe="")
-    verify_baseline(policy, api.get(f"/releases/tags/{tag}"),
-                    api.get(f"/git/ref/tags/{tag}"), previous, lambda sha: api.get(f"/git/tags/{sha}"))
-    return previous
 
 
 def _baseline_outputs(api: GitHub) -> dict[str, str]:

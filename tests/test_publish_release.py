@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stdout
+from dataclasses import asdict
 from io import StringIO
 
 from scripts import publish_release as publisher
@@ -17,6 +18,7 @@ OLD = "b" * 40
 PIN = "c" * 40
 OBJECT_SHA = "d" * 40
 FINGERPRINT = "e" * 64
+BASELINE = {"sha": OLD, "version": "v3.4.0", "release_id": 8, "deployment_id": 9, "status_id": 10}
 
 
 class FakeApi:
@@ -121,10 +123,11 @@ class PublishTests(unittest.TestCase):
         self.admission = patch.object(publisher, "select_successful_run", side_effect=self.admit)
         self.admission.start()
         self.addCleanup(self.admission.stop)
-        self.previous = self.enterContext(patch.object(publisher, "previous_release_sha", return_value=OLD))
         self.evidence = self.enterContext(patch.object(
-            publisher, "verify_evidence", return_value={"policy_sha": PIN, "schema_fingerprint": FINGERPRINT},
+            publisher, "verify_evidence",
+            return_value={"policy_sha": PIN, "schema_fingerprint": FINGERPRINT, "baseline": BASELINE},
         ))
+        self.base = self.enterContext(patch.object(publisher, "verify_deployment_base", return_value=BASELINE))
 
     def admit(self, api, repository, workflow, sha, branch):
         """Создаёт положительный результат для запрошенного caller."""
@@ -208,13 +211,14 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(url, "https://github.com/release")
         self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs", "/releases"])
         annotation = publisher.ReleaseTagEvidence.from_message(self.api.posts[0][1]["message"])
-        self.assertEqual(annotation, publisher.ReleaseTagEvidence(OLD, PIN, 123, 1, FINGERPRINT))
+        self.assertEqual(annotation, prepared.compatibility)
+        self.assertEqual(asdict(annotation.baseline), BASELINE)
         self.assertEqual(self.api.posts[0][1]["object"], SHA)
         self.assertEqual(self.api.posts[1][1]["sha"], OBJECT_SHA)
         self.assertEqual(self.api.posts[2][1]["target_commitish"], SHA)
         self.assertIn("Ожидаемая миграция SQLite: `0002_new_table.sql`", self.api.posts[2][1]["body"])
-        self.previous.assert_called_with(self.api, "main", policy_sha=PIN)
-        self.assertEqual(self.evidence.call_args.args[1:], (prepared.admission, PIN, OLD))
+        self.assertEqual(self.evidence.call_args.args[1:], (prepared.admission, PIN, None))
+        self.base.assert_called_once_with(self.api, BASELINE, OLD)
 
     def test_missing_candidate_migration_and_operator_label_fail_before_publication(self) -> None:
         """Последняя миграция вычисляется по SHA и имеет зарезервированную строку."""
@@ -261,6 +265,14 @@ class PublishTests(unittest.TestCase):
         with patch.object(publisher, "_candidate", side_effect=[None, None, publisher.PublishError("tip")]):
             with self.assertRaisesRegex(publisher.PublishError, "tip"):
                 publisher.publish(self.api, prepared)
+        self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
+
+    def test_new_base_after_tag_ref_stops_release_publication(self) -> None:
+        """Повторная сверка Deployments закрывает гонку публикации Release."""
+        prepared = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        self.base.side_effect = ValueError("SAFE_BASELINE_DEPLOYMENT")
+        with self.assertRaisesRegex(ValueError, "SAFE_BASELINE_DEPLOYMENT"):
+            publisher.publish(self.api, prepared)
         self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
 
     def test_check_and_dry_run_never_post(self) -> None:

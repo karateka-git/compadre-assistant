@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 # Прямой запуск из workflow использует только package закреплённого checkout.
 if __package__ in (None, ""):
@@ -22,6 +23,9 @@ from scripts.check_repository_compatibility import export_commit, snapshot
 from scripts.repository_compatibility_contract import (
     DYNAMIC_POLICY_VERSION, load_policy, verify_inventory, verify_report,
 )
+
+if TYPE_CHECKING:
+    from scripts.deployment_acceptance import AcceptedBaseline
 
 
 # Имена в evidence v1 сохраняются для проверки уже опубликованных выпусков.
@@ -70,21 +74,75 @@ class ReleaseTagEvidence:
         return json.dumps({"version": 1, **asdict(self)}, sort_keys=True, separators=(",", ":"))
 
     @classmethod
+    def from_record(cls, data: dict) -> ReleaseTagEvidence:
+        """Восстанавливает evidence из полей durable state.
+
+        Args:
+            data: Поля сохранённой аннотации, без номера её формата.
+
+        Returns:
+            Аннотация в форме, соответствующей сохранённому состоянию.
+
+        Raises:
+            ValueError: Набор полей или значения evidence недопустимы.
+        """
+        if not isinstance(data, dict):
+            raise ValueError("Некорректные сохранённые поля evidence")
+        try:
+            if "baseline" in data:
+                from scripts.deployment_acceptance import AcceptedBaseline, DeploymentAcceptanceError
+
+                try:
+                    baseline = AcceptedBaseline(**data["baseline"])
+                except DeploymentAcceptanceError as error:
+                    raise ValueError("Некорректный Deployment в аннотации тега") from error
+                return DeploymentReleaseTagEvidence(**(data | {"baseline": baseline}))
+            return cls(**data)
+        except TypeError as error:
+            raise ValueError("Неполная аннотация тега") from error
+
+    @classmethod
     def from_message(cls, message: str) -> ReleaseTagEvidence:
-        """Читает аннотацию версии 1 и отвергает неоднозначные поля."""
+        """Читает аннотацию версий 1 и 2 и отвергает неоднозначные поля.
+
+        Args:
+            message: Текст аннотации immutable Git-тега.
+
+        Returns:
+            Сверенные канонические реквизиты CI.
+
+        Raises:
+            ValueError: Формат, версия или значения аннотации недопустимы.
+        """
         if not isinstance(message, str) or len(message) > 1024:
             raise ValueError("Некорректный размер или формат аннотации тега")
         body = message.rstrip("\n")
         data = json.loads(body)
-        if not isinstance(data, dict) or data.pop("version", None) != 1:
+        if not isinstance(data, dict) or type(data.get("version")) is not int or data.pop("version") not in (1, 2):
             raise ValueError("Неизвестная версия аннотации тега")
-        try:
-            evidence = cls(**data)
-        except TypeError as error:
-            raise ValueError("Неполная аннотация тега") from error
+        evidence = cls.from_record(data)
         if evidence.message() != body:
             raise ValueError("Аннотация тега не каноническая")
         return evidence
+
+
+@dataclass(frozen=True)
+class DeploymentReleaseTagEvidence(ReleaseTagEvidence):
+    """Хранит аннотацию нового выпуска с реквизитами принятого Deployment."""
+
+    baseline: AcceptedBaseline
+
+    def __post_init__(self) -> None:
+        """Сверяет форму реквизитов Deployment и SHA аннотации."""
+        from scripts.deployment_acceptance import AcceptedBaseline
+
+        super().__post_init__()
+        if not isinstance(self.baseline, AcceptedBaseline) or self.baseline.sha != self.previous_sha:
+            raise ValueError("Deployment не совпадает с SHA базы в аннотации тега")
+
+    def message(self) -> str:
+        """Возвращает каноническую аннотацию версии 2."""
+        return json.dumps({"version": 2, **asdict(self)}, sort_keys=True, separators=(",", ":"))
 
 
 def resolve_release_tag(reference: dict, version: str,
