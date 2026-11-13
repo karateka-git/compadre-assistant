@@ -88,6 +88,14 @@ class FakeGitHub:
 class FullCiControllerTests(unittest.TestCase):
     """Проверяет границы счётчика и идентичность полного job."""
 
+    def setUp(self) -> None:
+        """Задаёт событие push и ID тестового запуска независимо от среды Actions."""
+        self.enterContext(patch.dict("os.environ", {
+            "GITHUB_EVENT_NAME": "push",
+            "GITHUB_RUN_ID": "900",
+            "COMPATIBILITY_POLICY_SHA": SHA_A,
+        }))
+
     def test_light_controller_success_does_not_count_as_full_success(self) -> None:
         """Run без полного job не сбрасывает счётчик PR."""
         run = admission_run(SHA_D)
@@ -175,7 +183,6 @@ class FullCiControllerTests(unittest.TestCase):
         }] for sha in (SHA_D, SHA_C, SHA_B)}
         self.assertEqual(controller.merged_since_last_success(FakeGitHub(prs=prs), SHA_D), (3, SHA_A))
 
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "push"})
     @patch.object(controller, "git", return_value=SHA_D)
     @patch.object(controller, "merged_since_last_success", return_value=(3, SHA_A))
     @patch.object(controller, "prior_full_attempt", return_value=False)
@@ -192,7 +199,7 @@ class FullCiControllerTests(unittest.TestCase):
                                  baseline_outputs())
         self.assertEqual(resolve.call_count, 2)
 
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.dict("os.environ", {"GITHUB_EVENT_NAME": "workflow_dispatch"})
     @patch.object(controller, "git", return_value=SHA_D)
     @patch.object(controller, "full_success", side_effect=AssertionError("dispatch не ищет старый CI"))
     @patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE)
@@ -209,7 +216,7 @@ class FullCiControllerTests(unittest.TestCase):
                 controller.decide(api, mode, SHA_D, branch, False, expected_sha=head, expected_policy_sha=pin)
         self.assertEqual(resolve.call_count, 2)
 
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "workflow_dispatch"})
+    @patch.dict("os.environ", {"GITHUB_EVENT_NAME": "workflow_dispatch"})
     @patch.object(controller, "git", return_value=SHA_D)
     @patch("scripts.deployment_acceptance.resolve_accepted_baseline", side_effect=DeploymentAcceptanceError("missing"))
     def test_dispatch_rejects_unconfirmed_base(self, _resolve, _git) -> None:
@@ -262,7 +269,6 @@ class FullCiControllerTests(unittest.TestCase):
             controller.decide(FakeGitHub(), "release", SHA_D, "release/1.0", True)
 
     @patch.object(controller, "git", return_value=SHA_D)
-    @patch.dict("os.environ", {"COMPATIBILITY_POLICY_SHA": SHA_A, "GITHUB_EVENT_NAME": "push"})
     @patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE)
     @patch.object(controller, "prior_full_attempt", return_value=False)
     @patch.object(controller, "full_success", return_value=False)
