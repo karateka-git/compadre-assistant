@@ -14,11 +14,14 @@ CHECKS = ("compatibility", "checkout", "unit", "smokes", "migrations", "candidat
 def main() -> None:
     """Пишет JSON-манифест и job summary из итогов обязательных шагов."""
     checks = {name: os.environ.get(f"CHECK_{name.upper()}", "unknown") for name in CHECKS}
+    baseline = json.loads(os.environ["ACCEPTED_BASELINE"])
     manifest = {
         "repository": os.environ.get("GITHUB_REPOSITORY", ""),
         "ref": os.environ.get("GITHUB_REF", ""),
         "sha": os.environ.get("GITHUB_SHA", ""),
         "previous_sha": os.environ.get("PREVIOUS_SHA", ""),
+        "baseline": baseline,
+        "policy_sha": os.environ["COMPATIBILITY_POLICY_SHA"],
         "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF", ""),
         "run_id": os.environ.get("GITHUB_RUN_ID", ""),
         "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT", ""),
@@ -36,6 +39,9 @@ def main() -> None:
         f"- Ref: `{manifest['ref']}`",
         f"- SHA: `{manifest['sha']}`",
         f"- Previous SHA: `{manifest['previous_sha']}`",
+        f"- Baseline: `{baseline['version']}`, Release `{baseline['release_id']}`, "
+        f"Deployment `{baseline['deployment_id']}`, status `{baseline['status_id']}`",
+        f"- Policy SHA: `{manifest['policy_sha']}`",
         f"- Workflow: `{manifest['workflow_ref']}`",
         f"- Run: `{manifest['run_id']}` attempt `{manifest['run_attempt']}`",
         f"- Result: **{manifest['result']}**",

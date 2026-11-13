@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import os
 from pathlib import Path
 import sys
 from urllib.parse import quote
 
-from scripts.ci_repository_compatibility import ReleaseTagEvidence, resolve_release_tag
+from scripts.ci_repository_compatibility import DeploymentReleaseTagEvidence, ReleaseTagEvidence, resolve_release_tag
 from scripts.check_hotfix_pairs import HotfixError, check_release
 from scripts.create_release_branch import (
     EXPECTED_REPOSITORY, ReleaseBranchError, checked_main_head, repository_from_origin,
@@ -18,9 +18,9 @@ from scripts.full_ci_admission import (
     Admission, AdmissionError, MAIN_WORKFLOW, RELEASE_WORKFLOW, SHA_PATTERN,
     select_successful_run,
 )
-from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, previous_release_sha, tag_commit
+from scripts.full_ci_controller import ControllerError, GitHub, VERSION_PATTERN, tag_commit
 from scripts.github_publishing import PublishingError, PublishingGitHub
-from scripts.predeploy_compatibility import EvidenceAPI, check, verify_evidence
+from scripts.predeploy_compatibility import EvidenceAPI, check, verify_deployment_base, verify_evidence
 from scripts.release_sqlite_summary import EXPECTED_MIGRATION_LABEL, expected_migration_at
 
 
@@ -41,7 +41,7 @@ class PreparedRelease:
     change: str
     notes: str
     make_latest: str
-    compatibility: ReleaseTagEvidence
+    compatibility: DeploymentReleaseTagEvidence
 
 
 def _sha(value: object, label: str) -> str:
@@ -184,14 +184,16 @@ def _policy_pin(api: GitHub) -> str:
     return _sha(variable.get("value"), name)
 
 
-def _compatibility(api: GitHub, admission: Admission) -> ReleaseTagEvidence:
+def _compatibility(api: GitHub, admission: Admission) -> DeploymentReleaseTagEvidence:
     """Берёт данные аннотации только из полного доказательства точной попытки CI."""
+    from scripts.deployment_acceptance import AcceptedBaseline
+
     pin = _policy_pin(api)
     with check("SAFE_PUBLICATION_EVIDENCE"):
-        previous = previous_release_sha(api, admission.branch, policy_sha=pin)
-        result = verify_evidence(EvidenceAPI(api.repository, api.token), admission, pin, previous)
-        return ReleaseTagEvidence(previous, result["policy_sha"], admission.run_id,
-                                  admission.run_attempt, result["schema_fingerprint"])
+        result = verify_evidence(EvidenceAPI(api.repository, api.token), admission, pin, None)
+        baseline = AcceptedBaseline(**result["baseline"])
+        return DeploymentReleaseTagEvidence(baseline.sha, result["policy_sha"], admission.run_id,
+                                            admission.run_attempt, result["schema_fingerprint"], baseline)
 
 
 def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> PreparedRelease:
@@ -322,6 +324,7 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
         raise PublishError("Допуск CI изменился после создания тега")
     if _policy_pin(api) != prepared.compatibility.policy_sha:
         raise PublishError("Внешний CI policy pin изменился после создания тега")
+    verify_deployment_base(api, asdict(prepared.compatibility.baseline), prepared.compatibility.previous_sha)
     release = api.post("/releases", {
         "tag_name": prepared.version, "target_commitish": prepared.sha,
         "name": prepared.version, "body": prepared.body,

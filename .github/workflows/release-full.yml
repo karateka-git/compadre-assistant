@@ -4,10 +4,20 @@ on:
   push:
     branches:
       - 'release/*'
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Full commit SHA at the selected branch tip
+        required: true
+        type: string
+      expected_policy_sha:
+        description: Optional expected reviewed policy SHA
+        type: string
 
 permissions:
   actions: read
   contents: read
+  deployments: read
 
 concurrency:
   group: release-full-${{ github.ref }}
@@ -21,6 +31,8 @@ jobs:
     outputs:
       run-full: ${{ steps.decide.outputs.run-full }}
       previous-release-sha: ${{ steps.decide.outputs.previous-release-sha }}
+      accepted-baseline: ${{ steps.decide.outputs.accepted-baseline }}
+      policy-sha: ${{ steps.decide.outputs.policy-sha }}
     steps:
       - name: Checkout exact release commit
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -34,6 +46,8 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
           BRANCH_CREATED: ${{ github.event.created }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          EXPECTED_POLICY_SHA: ${{ inputs.expected_policy_sha }}
         run: python -m scripts.full_ci_controller release
 
   full-suite:
@@ -42,9 +56,12 @@ jobs:
     if: needs.controller.outputs.run-full == 'true'
     permissions:
       contents: read
+      deployments: read
     uses: ./.github/workflows/full-suite.yml
     with:
       previous-release-sha: ${{ needs.controller.outputs.previous-release-sha }}
+      accepted-baseline: ${{ needs.controller.outputs.accepted-baseline }}
+      policy-sha: ${{ needs.controller.outputs.policy-sha }}
 
   ci-metrics:
     name: ci-metrics
