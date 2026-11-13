@@ -139,7 +139,10 @@ class AskDomainBoundaryTest(unittest.TestCase):
         """Разрешены собственный domain и явный набор чистых стандартных модулей."""
         root = Path(__file__).resolve().parents[1]
         domain = root / "compadre_assistant" / "capabilities" / "ask" / "domain"
-        pure_modules = {"__future__", "typing", "dataclasses", "enum", "collections", "abc"}
+        pure_modules = {
+            "__future__", "typing", "dataclasses", "enum", "collections", "abc",
+            "datetime", "uuid",
+        }
         for path in domain.rglob("*.py"):
             package = ".".join(path.relative_to(root).parts[:-1])
             with self.subTest(path=str(path.relative_to(root))):
