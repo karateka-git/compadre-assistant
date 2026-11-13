@@ -83,7 +83,7 @@ class CommandMenuTest(unittest.TestCase):
         self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/exit"))
         self.assertEqual(fixture.modes.get(fixture.key).capability_id, "obsidian")
         fixture.send("/ai")
-        self.assertEqual(self.commands(), ("/ask", "/exit"))
+        self.assertEqual(self.commands(), ("/ask", "/get_text_from_image", "/exit"))
         fixture.send("/ask")
         self.assertIn("/cancel", self.commands())
         self.assertEqual(self.menu().pending_input_label, "вопрос для модели")
@@ -91,6 +91,7 @@ class CommandMenuTest(unittest.TestCase):
         self.assertNotIn("/reanalyze", self.commands(channel="vk"))
         fixture.preferences.rows[(23, "ask")] = False
         self.assertNotIn("/ask", self.commands())
+        self.assertNotIn("/get_text_from_image", self.commands())
         self.assertNotIn("/cancel", self.commands())
 
     def test_unavailable_modes_only_offer_exit_and_alternatives(self):
