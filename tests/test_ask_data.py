@@ -1,5 +1,6 @@
 """Проверки профиля, API adapter и жизненного цикла Ask без внешней сети."""
 
+from base64 import b64decode
 from dataclasses import replace
 from datetime import UTC, datetime
 import json
@@ -16,9 +17,14 @@ from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, AskConfigError, load_ask_config
 from compadre_assistant.capabilities.ask.data.llm.openai_ask_model import OpenAIAskModel
 from compadre_assistant.capabilities.ask.domain.errors import (
-    AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError, QuestionTooLongError,
+    AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError,
+    InvalidOcrAnswerError, InvalidOcrImageError, QuestionTooLongError,
 )
+from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
 from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
+from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import (
+    ExtractImageText, OCR_INSTRUCTION,
+)
 from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageRecorder
 
 
@@ -116,7 +122,7 @@ class AskConfigurationTest(unittest.TestCase):
 class AskApiTest(unittest.TestCase):
     """Использует настоящий OpenAI SDK с подменным HTTP transport."""
 
-    def _run(self, handler, *, config=None, questions=("Вопрос",), recorder=None):
+    def _run(self, handler, *, config=None, questions=("Вопрос",), recorder=None, image=None):
         profile = config or _config()
         with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
             with OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0,
@@ -124,7 +130,10 @@ class AskApiTest(unittest.TestCase):
                 adapter = OpenAIAskModel(profile, client=client,
                                          usage_recorder=recorder if recorder is not None else Mock(spec=UsageRecorder))
                 use_case = AskQuestion(model=adapter, max_question_chars=profile.max_question_chars)
-                return [use_case.execute(question) for question in questions]
+                answers = [use_case.execute(question) for question in questions]
+                if image is not None:
+                    answers.append(ExtractImageText(model=adapter).execute(image))
+                return answers
 
     def test_requests_are_independent_and_use_ask_profile(self) -> None:
         """На проводе видны только инструкция и текущий вопрос, без tools."""
@@ -223,6 +232,114 @@ class AskApiTest(unittest.TestCase):
         self.assertEqual([record.getMessage() for record in logs.records], [
             "AI usage observation failed: error_type=RuntimeError",
         ])
+
+    def test_mixed_ask_and_ocr_share_sdk_and_usage(self) -> None:
+        """Общий адаптер сохраняет одно наблюдение для каждого обращения."""
+        image = b"\x89PNG\r\n\x1a\nsynthetic-png"
+        text = "Тест OCR\r\n  Код [неразборчиво]\r\nFinish"
+        # Поля usage соответствуют обезличенной пробе PNG в Timeweb.
+        payload = {
+            "model": "gemini/gemini-3.1-flash-lite",
+            "choices": [{"message": {"content": f"TEXT\r\n{text}"}, "finish_reason": "stop"}],
+            "usage": {
+                "completion_tokens": 13, "prompt_tokens": 1088, "total_tokens": 1101,
+                "completion_tokens_details": {"text_tokens": 13},
+                "prompt_tokens_details": {"text_tokens": 24, "image_tokens": 1064},
+            },
+        }
+        requests = []
+
+        def handler(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                return httpx.Response(200, json={"choices": [{"message": {"content": "Ответ"}}]})
+            return httpx.Response(200, json=payload)
+
+        recorder = Mock(spec=UsageRecorder)
+        self.assertEqual(self._run(handler, image=image, recorder=recorder), [
+            "Ответ", OcrResult(text=text.replace("\r\n", "\n")),
+        ])
+        self.assertEqual(recorder.submit.call_count, 2)
+        first, second = (call.args[0] for call in recorder.submit.call_args_list)
+        self.assertNotEqual(first.call_id, second.call_id)
+        self.assertEqual(first.provider, second.provider)
+        self.assertIsNone(first.tokens)
+        self.assertEqual(second.actual_model, payload["model"])
+        self.assertEqual(second.tokens.image_tokens, 1064)
+        self.assertNotIn("Тест OCR", repr(second))
+        self.assertNotIn("base64", repr(second))
+        self.assertEqual(requests[0]["model"], requests[1]["model"])
+        body = requests[1]["messages"]
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["role"], "user")
+        instruction, picture = body[0]["content"]
+        self.assertEqual(instruction, {"type": "text", "text": OCR_INSTRUCTION})
+        self.assertEqual(picture["type"], "image_url")
+        details, data = picture["image_url"]["url"].split(",", 1)
+        self.assertEqual(details, "data:image/png;base64")
+        self.assertEqual(b64decode(data), image)
+
+    def test_ocr_explicitly_distinguishes_absence_from_text(self) -> None:
+        """Служебные слова после заголовка остаются частью транскрипции."""
+        for content, expected in [
+            ("NO_TEXT", None), ("TEXT\nNO_TEXT", "NO_TEXT"), ("TEXT\nTEXT\n  NO_TEXT", "TEXT\n  NO_TEXT"),
+        ]:
+            with self.subTest(content=content):
+                image = b"\xff\xd8\xffsynthetic-image"
+
+                def handler(request):
+                    data_url = json.loads(request.content)["messages"][0]["content"][1]["image_url"]["url"]
+                    prefix, data = data_url.split(",", 1)
+                    self.assertEqual(prefix, "data:image/jpeg;base64")
+                    self.assertEqual(b64decode(data), image)
+                    return httpx.Response(200, json={"choices": [{
+                        "message": {"content": content}, "finish_reason": "stop",
+                    }]})
+
+                self.assertEqual(self._run(handler, questions=(), image=image), [OcrResult(text=expected)])
+                self.assertNotIn("synthetic-image", repr(OcrImage(image)))
+
+    def test_unusable_ocr_answer_still_counts_once(self) -> None:
+        """Пустой, обрезанный и недопустимый OCR сохраняют доступный usage."""
+        cases = [(None, "stop", None), ("", "stop", None), ("TEXT\n  ", "stop", None),
+                 ("TEXT\nдлинная строка", "stop", None), ("TEXT\nКод", "length", None),
+                 ("TEXT\nКод", "stop", "private refusal"), ("без формата", "stop", None),
+                 ("NO_TEXT", "provider-new-reason", None)]
+        for content, finish_reason, refusal in cases:
+            recorder = Mock(spec=UsageRecorder)
+            payload = {"model": "fallback", "choices": [{
+                "message": {"content": content, "refusal": refusal}, "finish_reason": finish_reason,
+            }], "usage": {"prompt_tokens_details": {"image_tokens": 42}}}
+            with self.subTest(content=content, finish_reason=finish_reason), self.assertRaises(InvalidOcrAnswerError):
+                self._run(lambda _: httpx.Response(200, json=payload), questions=(), recorder=recorder,
+                          config=replace(_config(), max_response_chars=10), image=b"\xff\xd8\xffsample")
+            recorder.submit.assert_called_once()
+            observation = recorder.submit.call_args.args[0]
+            self.assertEqual(observation.actual_model, "fallback")
+            self.assertEqual(observation.tokens.image_tokens, 42)
+
+    def test_ocr_api_failure_observes_unknown_cost_and_hides_payload(self) -> None:
+        """Отказ API учитывается без usage, ключа и тела ответа в traceback."""
+        recorder = Mock(spec=UsageRecorder)
+        with self.assertRaises(AskModelUnavailableError) as caught:
+            self._run(lambda _: httpx.Response(403, json={"error": {"message": "provider-private"}}),
+                      questions=(), recorder=recorder, image=b"\xff\xd8\xffsample")
+        recorder.submit.assert_called_once()
+        observation = recorder.submit.call_args.args[0]
+        self.assertIsNone(observation.actual_model)
+        self.assertIsNone(observation.tokens)
+        formatted = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn("provider-private", formatted)
+        self.assertNotIn("data:image", formatted)
+
+    def test_invalid_ocr_image_has_no_api_call_or_usage(self) -> None:
+        """Размер и сигнатура проверяются до отправки изображения."""
+        recorder = Mock(spec=UsageRecorder)
+        for image in (b"", b"\xff\xd8\xff", b"GIF89a", b"\x89PNG\r\n\x1a\n" + b"x" * (10 * 1024 * 1024)):
+            with self.assertRaises(InvalidOcrImageError):
+                self._run(lambda _: self.fail("Неожиданный HTTP запрос"),
+                          questions=(), recorder=recorder, image=image)
+        recorder.submit.assert_not_called()
 
 
 class AskBootstrapTest(unittest.TestCase):

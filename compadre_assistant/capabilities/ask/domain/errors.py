@@ -27,3 +27,11 @@ class AskModelUnavailableError(AskModelError):
 
 class InvalidAskAnswerError(AskModelError):
     """Модель вернула пустой ответ или результат неподдерживаемого формата."""
+
+
+class InvalidOcrImageError(AskError):
+    """Байты изображения пусты, имеют неизвестную сигнатуру или превышают лимит."""
+
+
+class InvalidOcrAnswerError(AskModelError):
+    """Модель вернула незавершённый ответ либо нарушила формат распознавания."""

@@ -1,5 +1,6 @@
-"""Adapter Ask к OpenAI-compatible Chat Completions API."""
+"""Адаптер сценариев ИИ к OpenAI-compatible Chat Completions API."""
 
+from base64 import b64encode
 from collections.abc import Mapping
 from datetime import UTC, datetime
 import logging
@@ -7,14 +8,18 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from openai import APITimeoutError, OpenAI
+from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig
 from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelTimeoutError,
     AskModelUnavailableError,
     InvalidAskAnswerError,
+    InvalidOcrAnswerError,
 )
-from compadre_assistant.capabilities.ask.domain.ports.model import AskModel
+from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ask.domain.ports.model import AskModel, OcrModel
+from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import OCR_NO_TEXT, OCR_TEXT_HEADER
 from compadre_assistant.capabilities.ask.domain.usage import (
     MAX_USAGE_INTEGER, TokenUsage, UsageObservation, UsageRecorder,
 )
@@ -23,7 +28,7 @@ from compadre_assistant.capabilities.ask.domain.usage import (
 _logger = logging.getLogger(__name__)
 
 
-class OpenAIAskModel(AskModel):
+class OpenAIAskModel(AskModel, OcrModel):
     """Отправляет независимые запросы и скрывает детали ошибок провайдера.
 
     Args:
@@ -57,14 +62,60 @@ class OpenAIAskModel(AskModel):
             AskModelUnavailableError: Запрос API завершился ошибкой.
             InvalidAskAnswerError: Ответ пуст, некорректен или превышает лимит.
         """
+        response = self._complete([{"role": "system", "content": instruction},
+                                   {"role": "user", "content": question}])
+        try:
+            text = response.choices[0].message.content
+        except (AttributeError, IndexError, TypeError):
+            raise InvalidAskAnswerError("Модель вернула некорректный ответ.") from None
+        if (not isinstance(text, str) or not text.strip()
+                or len(text) > self._config.max_response_chars):
+            raise InvalidAskAnswerError("Модель вернула пустой или недопустимый текст ответа.")
+        return text
+
+    def recognize_text(self, *, image: OcrImage, instruction: str) -> OcrResult:
+        """Передаёт изображение и возвращает только результат транскрипции.
+
+        Args:
+            image: Изображение с определённым по байтам MIME.
+            instruction: Фиксированная инструкция сценария распознавания.
+
+        Returns:
+            Транскрипция с исходным форматированием либо результат без текста.
+
+        Raises:
+            AskModelTimeoutError: Если истёк таймаут модели.
+            AskModelUnavailableError: Если провайдер недоступен.
+            InvalidOcrAnswerError: Если ответ оборван или нарушает формат.
+        """
+        encoded = b64encode(image.data).decode("ascii")
+        response = self._complete([{"role": "user", "content": [
+            {"type": "text", "text": instruction},
+            {"type": "image_url", "image_url": {"url": f"data:{image.mime_type};base64,{encoded}"}},
+        ]}])
+        try:
+            choice = response.choices[0]
+            answer = choice.message.content
+            finished = choice.finish_reason == "stop" and not getattr(choice.message, "refusal", None)
+        except (AttributeError, IndexError, TypeError):
+            raise InvalidOcrAnswerError("Модель вернула некорректный результат распознавания.") from None
+        if finished and isinstance(answer, str):
+            if answer.strip() == OCR_NO_TEXT:
+                return OcrResult(text=None)
+            header, _, text = answer.replace("\r\n", "\n").partition("\n")
+            if header.strip() == OCR_TEXT_HEADER and text.strip() and len(text) <= self._config.max_response_chars:
+                return OcrResult(text=text)
+        raise InvalidOcrAnswerError("Модель вернула некорректный результат распознавания.")
+
+    def _complete(self, messages: list[ChatCompletionMessageParam]) -> ChatCompletion:
+        """Отправляет один запрос и передаёт метаданные до проверки ответа."""
         response = None
         call_id = uuid4()
         started_at = datetime.now(UTC)
         try:
             response = self._client.chat.completions.create(
                 model=self._config.model,
-                messages=[{"role": "system", "content": instruction},
-                          {"role": "user", "content": question}],
+                messages=messages,
                 max_tokens=self._config.max_response_tokens,
                 timeout=self._config.timeout_seconds,
             )
@@ -76,14 +127,7 @@ class OpenAIAskModel(AskModel):
             raise AskModelUnavailableError("Не удалось получить ответ модели.") from None
         finally:
             self._submit_usage(call_id, started_at, response)
-        try:
-            text = response.choices[0].message.content
-        except (AttributeError, IndexError, TypeError):
-            raise InvalidAskAnswerError("Модель вернула некорректный ответ.") from None
-        if (not isinstance(text, str) or not text.strip()
-                or len(text) > self._config.max_response_chars):
-            raise InvalidAskAnswerError("Модель вернула пустой или недопустимый текст ответа.")
-        return text
+        return response
 
     def _submit_usage(self, call_id: UUID, started_at: datetime, response: object) -> None:
         try:
