@@ -26,7 +26,7 @@ flowchart LR
     IN --> MODE[(Режим пользователя в чате канала)]
     IN --> OP[Obsidian presentation: команды, URL и ответы]
     OP --> OD
-    IN --> AP[Ask presentation: одноразовый вопрос]
+    IN --> AP[Ask presentation: вход в режим ИИ и команда вопроса]
     AP --> AD[Ask domain: use case и port]
     AM[Ask data: LLM adapter] -. реализует port .-> AD
     ODATA[Obsidian data: SQLite, HTTP, GitHub, LLM и embeddings] -. реализует ports .-> OD
@@ -53,7 +53,7 @@ Obsidian. Адаптеры Telegram и VK преобразуют события 
 | `capabilities/obsidian/data/` | Профиль настроек Obsidian, предметные SQLite DTO, mappers и repositories; HTTP, GitHub, LLM, embeddings, extraction, YAML-конфигурация vault и adapter `document_chunker`. |
 | `capabilities/obsidian/presentation/` | Команды, обработка текста и подтверждений, форматирование ответов Obsidian и статический пример правил vault. |
 | `capabilities/obsidian/bootstrap.py` | Сборка зависимостей возможности и её публичного входа. |
-| `capabilities/ask/` | Одноразовый вопрос: собственные domain port и use case, data adapter LLM и presentation-вход. |
+| `capabilities/ask/` | Режим ИИ: domain port и use case одного вопроса, data adapter LLM и presentation команд режима. |
 | `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне presentation возможностей. |
 
 ## Как проходит сообщение
@@ -150,7 +150,8 @@ Telegram и VK отображают общий ответ, включая пол
 `/help` собирается заново из личного и серверного допуска, режима данного
 чата, проверенного ожидания ввода и снимка подтверждений. До регистрации он
 предлагает `/register` и `/link`, при вводе имени оставляет шаг регистрации и
-`/cancel`, в активном Obsidian показывает команды режима и доступный Ask.
+`/cancel`. В активном режиме показывает команды этого режима. Доступные
+зарегистрированные одноразовые входы также видны в справке.
 Неполный снимок подтверждений явно назван неполным; `/confirm` без аргументов
 показывает актуальные действия и не выбирает решение.
 
@@ -258,7 +259,6 @@ Obsidian выключен. Фактический допуск требует о
 и отсутствующего vault пользователя. Проверка vault выполняется только внутри
 Obsidian. Отсутствующая LLM-конфигурация не создаёт adapters при сборке входа.
 `да`/`нет` относится только к однозначной локальной операции Obsidian.
-Ask — одноразовая возможность.
 
 `load_config` читает только настройки выбранных каналов и включённых
 возможностей. `ENABLED_CHANNELS` выбирает Telegram/VK для scripts и общей
@@ -488,20 +488,22 @@ remote Markdown с ожидаемым: если commit уже создан, ло
 завершается без повторной записи. После удачного commit запускается
 синхронизация vault, чтобы SQLite, FTS и embeddings соответствовали GitHub.
 
-### Одноразовый Ask
+### Режим ИИ и вопросы Ask
 
 `capabilities/ask` содержит domain port `AskModel`, use case `AskQuestion`,
 отдельный data adapter OpenAI-compatible API и presentation `AskCapability`.
 Composition root управляет клиентом и регистрирует вход только при глобальной
 доступности; личный выбор проверяется на каждом событии.
-Ask возвращает `COMPLETE`: диспетчер сохраняет прежний режим. Общий descriptor
-помечает одноразовый вход `persistent_mode=False`, чтобы справка не предлагала
-выход. Этот признак описывает справку; фактический переход задаёт `CapabilityResult`.
+Вход `/ai` сохраняет ID `ask` как активный режим этого чата. Диспетчер
+допускает `/ask` только в активном режиме ИИ с действующим доступом. Если
+вопрос опущен, presentation открывает ожидание ввода с обязательным режимом
+`ask`. Ядро проверяет режим и доступ перед продолжением. После ответа
+`CapabilityResult` сохраняет активный режим. `/exit` очищает его в текущем чате.
 
 После валидации вопроса use case уведомляет вызывающую сторону через callback.
 Presentation отправляет раннее подтверждение через существующий `ReplyDeliveryPort`.
 Адаптеры TG/VK доставляют общий ответ; предметных ветвлений Ask в них нет.
-Новые таблицы и универсальная очередь не нужны, ответы не становятся командами.
+Режим использует общее хранилище режимов чатов. Ответ модели передаётся как текст.
 
 ## Гарантии и ограничения
 
