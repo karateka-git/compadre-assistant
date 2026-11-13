@@ -13,7 +13,7 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import ImageAttachment, IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityHelp, ConfirmationAction, ConfirmationQueryResult, HelpSection,
     IncomingResponse, PendingConfirmation, ReplyAction,
@@ -55,6 +55,15 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.assertEqual(len(button.token), 32)
         self.assertNotIn("name", button.token)
         self.processor.select_action(replace(self.event, text="/name Подмена"), button.token)
+        self.assertEqual(self.name(), "Выбрано")
+
+    def test_callback_never_carries_image_into_the_registered_command(self):
+        """Точная команда выполняется даже при ошибочной передаче вложения адаптером."""
+        button = self.issue().bound_actions[0]
+        with patch.object(ImageAttachment, "read_bytes", side_effect=AssertionError("unexpected download")) as read:
+            event = replace(self.event, images=(ImageAttachment(lambda: b"photo"),))
+            self.processor.select_action(event, button.token)
+        read.assert_not_called()
         self.assertEqual(self.name(), "Выбрано")
 
     def test_foreign_chat_user_channel_and_missing_sender_cannot_consume_token(self):

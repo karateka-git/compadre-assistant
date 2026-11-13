@@ -36,6 +36,7 @@ from compadre_assistant.core.presentation.incoming.action_selection import Actio
 
 
 LOGGER = logging.getLogger(__name__)
+_TEXT_INPUT_HINT = "Пришли текстовое сообщение или выбери возможность через /help."
 
 
 class IncomingMessageResultType(StrEnum):
@@ -230,7 +231,7 @@ class IncomingMessageDispatcher:
             LOGGER.exception("Could not validate selected response action")
             return rejected
         # Команда берётся только из серверной записи, никогда из callback/подписи.
-        return self.execute(replace(event, text=entry.command), completion_handler, menu_update_handler)
+        return self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
 
     def _suggestion_allowed(self, command: str, context: ActionContext) -> bool:
         """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
@@ -398,10 +399,8 @@ class IncomingMessageDispatcher:
         """Сериализует ожидание чата, затем запускает независимый обычный маршрут."""
         with self._pending_inputs.lock(event.reply_address):
             result = self._route_pending_input(event, completion_handler)
-            if result is None and not event.text.strip():
-                return IncomingResponse(text_content(
-                    "Пришли текстовое сообщение или выбери возможность через /help."
-                ))
+            if result is None and not event.text.strip() and not event.images:
+                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
             parsed = ParsedChatCommand.parse(event.text.strip())
             if result is None and parsed is not None:
                 command = parsed.command
@@ -450,6 +449,8 @@ class IncomingMessageDispatcher:
                 f"Срок ожидания ввода истёк. Повтори {command_hint}, чтобы начать заново."
             ))
         elif pending is not None:
+            if event.images and (pending.owner_id == "core" or not pending.accepts_images):
+                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
             return self._continue_input(pending, event, completion_handler)
         return None
 
@@ -458,7 +459,7 @@ class IncomingMessageDispatcher:
         event: IncomingEvent,
         completion_handler: ChannelCompletionHandler | None = None,
     ) -> ProcessIncomingMessageResult | IncomingResponse:
-        """Обрабатывает общую часть сообщения и передаёт предметный текст.
+        """Обрабатывает общую часть сообщения и передаёт предметный ввод.
 
         Args:
             event: Нормализованное событие канала без внутреннего ID пользователя.
@@ -574,6 +575,8 @@ class IncomingMessageDispatcher:
 
         user = self._user_identity_service.resolve(identity)
         if user is None:
+            if event.images:
+                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
             return ProcessIncomingMessageResult(type=IncomingMessageResultType.UNKNOWN_IDENTITY)
         if command is ChatCommand.EXIT:
             personal = self._personal_registry(user)
@@ -701,6 +704,8 @@ class IncomingMessageDispatcher:
                 self._blocked_reply(access) if access is not None and not access.effective
                 else "Владелец ввода недоступен. Повтори команду."
             ))
+        if event.images and not owner.descriptor.accepts_images:
+            return IncomingResponse(text_content(_TEXT_INPUT_HINT))
         mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
         if ((pending.app_user_id is not None and pending.app_user_id != user.id)
                 or (pending.required_mode is not None
@@ -924,12 +929,16 @@ class IncomingMessageDispatcher:
                     ".",
                 ))
         if state.capability_id is None:
+            if event.images:
+                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
                 app_user=user,
                 capability_reply=personal.entry_hint(),
             )
         capability = personal.by_id(state.capability_id)
+        if event.images and (capability is None or not capability.descriptor.accepts_images):
+            return IncomingResponse(text_content(_TEXT_INPUT_HINT))
         if capability is None:
             access = personal.status(state.capability_id)
             return ProcessIncomingMessageResult(
