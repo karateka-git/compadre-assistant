@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import os
 import unittest
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfoNotFoundError
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -158,6 +159,38 @@ class RuntimeConfigurationTest(unittest.TestCase):
                         diagnostic = str(logger.method_calls)
                         self.assertNotIn("llm-secret", diagnostic)
                         self.assertNotIn("embedding-secret", diagnostic)
+
+    def test_admin_startup_and_healthcheck_validate_profile_only_when_enabled(self) -> None:
+        """Оба канала независимо запускают admin без Ask и закрывают невалидное состояние."""
+        for channel in ("telegram", "vk"):
+            for enabled, value, health_code, bot_code in (
+                (False, "secret-invalid-id", 0, 0),
+                (True, "", 0, 0),
+                (True, "42", 0, 0),
+                (True, "secret-invalid-id", 1, 2),
+            ):
+                with self.subTest(channel=channel, enabled=enabled, value=value), patch(
+                    f"compadre_assistant.presentation.cli.main.run_{channel}_bot"
+                ) as runner, patch("compadre_assistant.bootstrap.load_ask_config") as load_ask:
+                    env = self.env(channel, False, "absent") | {
+                        "ENABLED_CAPABILITIES": "admin" if enabled else "",
+                        "ADMIN_TRUSTED_APP_USER_IDS": value,
+                    }
+                    self.assertEqual(self.run_cli(["--healthcheck", "--channels", channel], env)[0], health_code)
+                    result, logger = self.run_cli([f"--{channel}-bot"], env)
+                    self.assertEqual(result, bot_code)
+                    self.assertEqual(runner.call_count, int(bot_code == 0))
+                    self.assertNotIn("secret-invalid-id", str(logger.method_calls))
+                    load_ask.assert_not_called()
+
+    def test_admin_healthcheck_fails_without_default_zone_data(self) -> None:
+        """Отсутствие IANA данных даёт ошибку настройки вместо запуска сломанного режима."""
+        env = self.env("telegram", False, "absent") | {"ENABLED_CAPABILITIES": "admin"}
+        with patch("compadre_assistant.capabilities.admin.data.configuration.ZoneInfo",
+                   side_effect=ZoneInfoNotFoundError):
+            result, logger = self.run_cli(["--healthcheck", "--channels", "telegram"], env)
+        self.assertEqual(result, 1)
+        self.assertIn("Asia/Omsk", str(logger.method_calls))
 
     def test_selected_channel_missing_settings_blocks_polling(self) -> None:
         """Незаполненный выбранный канал не открывает polling или рабочую SQLite."""

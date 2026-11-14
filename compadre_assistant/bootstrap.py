@@ -12,7 +12,10 @@ from collections.abc import Callable, Iterator, Mapping
 
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
-from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
+from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile
+from compadre_assistant.capabilities.admin.domain.cost_report import GetLlmCostReport
+from compadre_assistant.capabilities.admin.presentation.handler import AdminCapability
+from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime, create_usage_totals_reader
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 
@@ -133,7 +136,7 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
     """
     if len(set(enabled_capabilities)) != len(enabled_capabilities):
         raise ValueError("Конфликт ID включённых возможностей")
-    unknown = set(enabled_capabilities) - {"obsidian", "ask"}
+    unknown = set(enabled_capabilities) - {"obsidian", "ask", AdminCapability.descriptor.capability_id}
     if unknown:
         raise ValueError(
             f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
@@ -424,9 +427,15 @@ def create_channel_message_processor(
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
+
+    Raises:
+        ValueError: Список включённых ID или профиль возможности некорректен.
     """
     try:
         validate_enabled_capabilities(enabled_capabilities)
+        admin_id = AdminCapability.descriptor.capability_id
+        admin_enabled = admin_id in enabled_capabilities
+        trusted_admin_ids = load_admin_profile() if admin_enabled else frozenset()
         if "obsidian" in enabled_capabilities and obsidian_config is None:
             raise ValueError("Для включённого Obsidian требуется его профиль настроек")
         entry = ObsidianCapability(
@@ -450,10 +459,15 @@ def create_channel_message_processor(
                 capabilities += (ask,)
             else:
                 disabled += (AskCapability.descriptor,)
+            if admin_enabled:
+                capabilities += (AdminCapability(GetLlmCostReport(create_usage_totals_reader(database_path))),)
+            else:
+                disabled += (AdminCapability.descriptor,)
             yield ChannelMessageProcessor(
                 database_path=database_path,
                 capabilities=capabilities,
                 disabled_capabilities=disabled,
+                profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,
             )
     finally:
         if runtime is not None:
