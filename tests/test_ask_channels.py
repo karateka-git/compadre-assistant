@@ -141,6 +141,49 @@ class AskChannelsTest(unittest.TestCase):
         self.keyboard = client.keyboards[-1]
         return "\n".join(text for text in self.delivered if text not in progress)
 
+    def test_vk_mode_entry_and_exit_send_changed_menu_with_reply_and_keep_inline_actions(self) -> None:
+        """Переходы доставляют нижнее меню с основным ответом и сохраняют callback."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=self.logger)
+        with create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config,
+        ) as processor:
+            def send(text: str) -> None:
+                _handle_update({"type": "message_new", "object": {"message": {
+                    "peer_id": 7, "from_id": 7, "id": 1, "text": text,
+                }}}, incoming_message_processor=processor, client=client,
+                    logger=self.logger, menu_update_handler=publish)
+
+            send("/register")
+            send("Тест")
+            for command, text, expected_commands, expected_labels in (
+                ("/ai", "Режим ИИ включён", {"/ask", "/get_text_from_image", "/exit"},
+                 ["Задать вопрос", "Извлечь текст с фото"]),
+                ("/exit", "Режим этого чата завершён", {"/help", "/ai"},
+                 ["Посмотреть команды"]),
+            ):
+                with self.subTest(command=command):
+                    start = len(client.messages)
+                    send(command)
+                    main_reply, hint = [item[1] for item in client.messages[start:]]
+                    self.assertIn(text, main_reply)
+                    self.assertEqual(hint, "Что сделать дальше?")
+                    menu, inline = map(json.loads, client.keyboards[start:])
+                    self.assertFalse(menu["inline"])
+                    self.assertTrue(inline["inline"])
+                    commands = {button["action"]["label"] for row in menu["buttons"] for button in row}
+                    actions = [button["action"] for row in inline["buttons"] for button in row]
+                    self.assertLessEqual(expected_commands, commands)
+                    self.assertEqual([action["label"] for action in actions], expected_labels)
+
+            _handle_update({"type": "message_event", "object": {
+                "peer_id": 7, "user_id": 7, "event_id": "help-button",
+                "conversation_message_id": 42, "payload": actions[0]["payload"],
+            }}, incoming_message_processor=processor, client=client,
+                logger=self.logger, menu_update_handler=publish)
+            self.assertIn("/capabilities", client.messages[-1][1])
+            self.assertEqual(client.cleared, [(7, 42)])
+
     def test_registered_questions_require_ai_mode_and_remain_independent(self) -> None:
         """Оба канала требуют регистрацию и явный вход в режим ИИ."""
         for channel in ("telegram", "vk"):

@@ -11,7 +11,8 @@ from urllib.error import URLError
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BackgroundReply, BoundReplyAction, CommandMenu, CommandMenuUpdate, CommandSuggestion, IncomingResponse,
+    BackgroundReply, BoundReplyAction, CommandMenu, CommandMenuUpdate, CommandSuggestion,
+    ConfirmationAction, IncomingResponse,
 )
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.presentation.vk.bot import (
@@ -749,13 +750,13 @@ class VkBotTest(unittest.TestCase):
         self.assertNotEqual(client.random_ids[0], client.random_ids[2])
         self.assertEqual(client.random_ids[2], client.random_ids[3])
 
-    def test_reply_menu_preserves_inline_and_falls_back_only_without_available_chunk(self) -> None:
-        """Адресная публикация нужна для пустого ответа и единственной inline-части."""
+    def test_reply_menu_preserves_inline_and_falls_back_only_without_reply(self) -> None:
+        """Основной ответ несёт меню, а отдельная подсказка — кнопки короткого ответа."""
         logger = logging.getLogger("test.vk.menu.inline-fallback")
         update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
         for content, limit, expected_texts, expected_inline in (
             ("", 20, ["Меню команд обновлено."], [False]),
-            ("Готово", 20, ["Готово", "Меню команд обновлено."], [True, False]),
+            ("Готово", 20, ["Готово", "Что сделать дальше?"], [False, True]),
             ("abcdefghij", 4, ["abcd", "efgh", "ij"], [None, False, True]),
         ):
             with self.subTest(content=content):
@@ -775,6 +776,57 @@ class VkBotTest(unittest.TestCase):
                 self.assertEqual([text for _, text in client.messages], expected_texts)
                 self.assertEqual([json.loads(k)["inline"] if k is not None else None for k in client.keyboards],
                                  expected_inline)
+
+    def test_inline_hint_failure_keeps_main_reply_and_menu_delivered(self) -> None:
+        """Сбой сообщения с кнопками не превращает доставленное меню в ошибку."""
+        logger = logging.getLogger("test.vk.menu.inline-failure")
+        update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
+        deliveries = []
+        receipts = []
+
+        class HintFailingClient(FakeVkClient):
+            def send_message(self, **kwargs):
+                if json.loads(kwargs["keyboard"])["inline"]:
+                    raise VkBotError("send failed")
+                super().send_message(**kwargs)
+
+        def deliver(send):
+            result = send(update)
+            deliveries.append(result)
+            return result[0]
+
+        client = HintFailingClient()
+        with self.assertLogs(logger, level="ERROR"):
+            _safe_send_vk_message(
+                client, peer_id=22, logger=logger, deliver_menu=deliver,
+                response=IncomingResponse(
+                    text_content("Готово"), bound_actions=(BoundReplyAction("Да", "opaque", "response"),),
+                    after_delivery=receipts.append,
+                ),
+            )
+        self.assertEqual(client.messages, [(22, "Готово")])
+        self.assertEqual(deliveries, [(True, True)])
+        self.assertEqual(receipts, [True])
+
+    def test_short_confirmation_reply_keeps_text_command_and_inline_token(self) -> None:
+        """Кнопка подтверждения сохраняет токен и ручную команду."""
+        client = FakeVkClient()
+        update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
+        command = "/confirm obsidian disconnect 7 2 yes"
+        _safe_send_vk_message(
+            client, peer_id=22, logger=logging.getLogger("test.vk.menu.confirmation"),
+            deliver_menu=lambda send: send(update)[0],
+            response=IncomingResponse(
+                text_content("Отключить хранилище?"), actions=(ConfirmationAction("yes", "Да", command),),
+                bound_actions=(BoundReplyAction("Да", "opaque-confirmation", "response"),),
+            ),
+        )
+        self.assertIn(command, client.messages[0][1])
+        self.assertEqual(client.messages[1], (22, "Выбери действие."))
+        menu, inline = map(json.loads, client.keyboards)
+        self.assertFalse(menu["inline"])
+        self.assertEqual(json.loads(inline["buttons"][0][0]["action"]["payload"]),
+                         {"token": "opaque-confirmation"})
 
     def test_vk_runtime_starts_and_stops_menu_reconciliation_without_changing_replies(self) -> None:
         """Runtime запускает сверку и сохраняет штатную доставку текстового ответа."""

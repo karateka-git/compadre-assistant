@@ -756,8 +756,15 @@ def _send_vk_message(
             # Необязательная клавиатура не должна скрывать текстовые команды.
             # Решение принимается до API-вызова, поэтому повторной отправки нет.
             logger.warning("VK inline keyboard omitted: invalid action layout")
-    # Только одна клавиатура на сообщение: inline остаётся у последней части.
-    menu_index = len(chunks) - (2 if keyboard is not None else 1)
+    # VK принимает одну клавиатуру на сообщение. У короткого ответа
+    # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.
+    reply_chunk_count = len(chunks)
+    if menu_keyboard is not None and keyboard is not None and reply_chunk_count == 1:
+        hint = "Выбери действие." if response.actions else "Что сделать дальше?"
+        chunks += render_vk_content(text_content(hint), limit=limit)
+        menu_index = 0
+    else:
+        menu_index = len(chunks) - (2 if keyboard is not None else 1)
     has_menu = menu_keyboard is not None and menu_index >= 0
     menu_delivered = False if has_menu else None
     started_at = time.monotonic()
@@ -790,7 +797,8 @@ def _send_vk_message(
                 peer_id,
                 time.monotonic() - started_at,
             )
-            return False, menu_delivered
+            # Сбой отдельной подсказки не отменяет уже доставленный ответ.
+            return index >= reply_chunk_count, menu_delivered
         if has_menu and index == menu_index:
             menu_delivered = True
     logger.info(
