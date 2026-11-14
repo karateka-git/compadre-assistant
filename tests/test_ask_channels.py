@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import aiogram
 import httpx
 from openai import OpenAI
 
@@ -33,11 +34,11 @@ from compadre_assistant.core.domain.capability_preferences import UserCapability
 from compadre_assistant.core.presentation.incoming.events import ImageAttachment, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
-from compadre_assistant.presentation.telegram.bot import _register_handlers
-from compadre_assistant.presentation.vk.bot import _VkUpdateWorkers, _handle_update
+from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
+from compadre_assistant.presentation.vk.bot import _VkUpdateWorkers, _create_vk_menu_update_handler, _handle_update
 from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
 from tests.response_assertions import response_text
-from tests.test_telegram_bot import FakeAiogram, TelegramMessage
+from tests.test_telegram_bot import FakeAiogram, MenuTelegramBot, TelegramMessage
 from tests.test_vk_bot import FakeVkClient
 from tests.test_process_incoming_message import FakeArticleUrlUseCase, FakeConfirmationService, _proposal
 
@@ -495,7 +496,16 @@ class AskChannelsTest(unittest.TestCase):
                 stages = []
                 entered_download, entered_model = threading.Event(), threading.Event()
                 release_download, release_model = threading.Event(), threading.Event()
+                first_finished = threading.Event()
+                restored = threading.Event()
+                result_delivered = threading.Event()
                 messages = []
+                menu_calls = []
+
+                def record_menu(chat, commands):
+                    menu_calls.append((chat, commands))
+                    if chat == 7 and "/ask" in commands and "/cancel" not in commands:
+                        restored.set()
 
                 def download(file_id):
                     stages.append(f"download:{file_id}")
@@ -503,6 +513,8 @@ class AskChannelsTest(unittest.TestCase):
                         entered_download.set()
                         if not release_download.wait(5):
                             raise TimeoutError("Тест не освободил загрузчик")
+                    if file_id == "broken":
+                        return b"invalid image"
                     return b"\xff\xd8\xffsample"
 
                 def model(_request):
@@ -520,6 +532,8 @@ class AskChannelsTest(unittest.TestCase):
                     messages.append((int(chat), answer))
                     if answer == receipt:
                         stages.append("receipt")
+                    if marker in answer or "Не удалось прочитать фото" in answer:
+                        result_delivered.set()
 
                 with httpx.Client(transport=httpx.MockTransport(model)) as transport, \
                         OpenAI(base_url=self.config.base_url, api_key=self.config.api_key,
@@ -527,48 +541,86 @@ class AskChannelsTest(unittest.TestCase):
                         patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=sdk), \
                         create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
                                                          ask_config=self.config) as processor:
-                    async def exercise(send, choose):
+                    async def exercise(send, choose, publish):
                         await send("/register")
                         await send("Тест")
                         keyboard = await send("/ai")
+                        normal = menu_calls[-1]
+                        self.assertIn("/ask", normal[1])
+                        await send("/register", chat=43)
+                        await send("Другой профиль", chat=43)
+                        await send("/ai", chat=43)
+                        self.assertEqual(menu_calls[-1], (43, normal[1]))
                         await send(command)
                         await send("", photo="undelivered", fail_receipt=True)
                         self.assertEqual(stages, [])
+                        self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
                         await send(command)
                         self.assertIn("Пришли одно фото", messages[-1][1])
                         await send("/exit", photo="first")
                         self.assertTrue(await asyncio.to_thread(entered_download.wait, 5))
                         self.assertEqual(stages, ["receipt", "download:first"])
+                        self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                        call_count = len(menu_calls)
+                        await asyncio.to_thread(processor.reconcile_menus, publish)
                         for text, photo in (("/exit", None), ("/disable ask", None), ("текст", None),
                                             ("", "ignored"), ("", None)):
                             await send(text, photo=photo)
                             self.assertIn("Обработка уже идёт", messages[-1][1])
                         await choose(keyboard)
                         self.assertIn("Обработка уже идёт", messages[-1][1])
+                        self.assertEqual(len(menu_calls), call_count)
                         await send("/ai", chat=43)
                         self.assertIn("Режим ИИ включён", messages[-1][1])
                         await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
-                        release_download.set()
+                        self.assertEqual(menu_calls[-1], normal)
                         await send(command)
                         await send("", photo="second")
                         self.assertTrue(await asyncio.to_thread(entered_model.wait, 5))
+                        call_count = len(menu_calls)
+                        release_download.set()
+                        self.assertTrue(await asyncio.to_thread(first_finished.wait, 5))
+                        await asyncio.to_thread(processor.reconcile_menus, publish)
+                        self.assertEqual(len(menu_calls), call_count)
+                        self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                        self.assertEqual([commands for chat, commands in menu_calls if chat == 43][-1], normal[1])
                         await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
-                        await send(command)
-                        self.assertIn("Пришли одно фото", messages[-1][1])
+                        release_model.set()
+                        for photo, expected in (("broken", "Не удалось прочитать фото"), ("fast", marker)):
+                            restored.clear()
+                            result_delivered.clear()
+                            await send(command)
+                            self.assertIn("Пришли одно фото", messages[-1][1])
+                            await send("", photo=photo)
+                            self.assertTrue(await asyncio.to_thread(restored.wait, 5))
+                            self.assertTrue(await asyncio.to_thread(result_delivered.wait, 5))
+                            self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
+                            self.assertIn(expected, messages[-1][1])
 
                     async def telegram():
                         fake = FakeAiogram()
+                        menu_bot = MenuTelegramBot()
+                        original_set = menu_bot.set_my_commands
+
+                        async def set_my_commands(*, commands, scope):
+                            await original_set(commands=commands, scope=scope)
+                            record_menu(scope.chat_id, tuple(f"/{item.command}" for item in commands))
+
+                        menu_bot.set_my_commands = set_my_commands
+                        publish = _create_telegram_menu_update_handler(
+                            menu_bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=self.logger,
+                        )
                         _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor,
-                                           logger=self.logger)
+                                           logger=self.logger, menu_update_handler=publish)
                         router = fake.dispatcher.included_router
 
                         async def send(text, *, photo=None, chat=7, fail_receipt=False):
                             message = TelegramMessage()
                             message.chat = SimpleNamespace(id=chat)
                             message.message_id = 1
-                            message.from_user = SimpleNamespace(id=7)
+                            message.from_user = SimpleNamespace(id=chat)
                             message.text = text if photo is None else None
                             message.caption = text if photo is not None else None
                             if photo is not None:
@@ -617,7 +669,7 @@ class AskChannelsTest(unittest.TestCase):
                             self.assertEqual(edits, [])
 
                         try:
-                            await exercise(send, choose)
+                            await exercise(send, choose, publish)
                         finally:
                             release_download.set()
                             release_model.set()
@@ -633,15 +685,21 @@ class AskChannelsTest(unittest.TestCase):
                             if fail_next_receipt and kwargs["text"] == receipt:
                                 raise RuntimeError("Канал не принял квитанцию")
                             result = original_send(**kwargs)
-                            record(kwargs["peer_id"], kwargs["text"])
+                            if kwargs["text"] == "Меню команд обновлено.":
+                                keyboard = json.loads(kwargs["keyboard"])
+                                record_menu(kwargs["peer_id"], tuple(button["action"]["label"]
+                                            for row in keyboard["buttons"] for button in row))
+                            else:
+                                record(kwargs["peer_id"], kwargs["text"])
                             return result
 
                         client.send_message = send_message
+                        publish = _create_vk_menu_update_handler(client, logger=self.logger)
 
                         def handle(update):
                             try:
                                 _handle_update(update, incoming_message_processor=processor,
-                                               client=client, logger=self.logger)
+                                               client=client, logger=self.logger, menu_update_handler=publish)
                             finally:
                                 handled.set()
 
@@ -659,9 +717,10 @@ class AskChannelsTest(unittest.TestCase):
                                 "url": f"https://sun1.userapi.com/{photo}", "width": 40, "height": 40,
                             }]}}]
                             await submit(chat, {"type": "message_new", "object": {"message": {
-                                "id": 1, "peer_id": chat, "from_id": 7, "text": text, "attachments": attachments,
+                                "id": 1, "peer_id": chat, "from_id": chat, "text": text, "attachments": attachments,
                             }}})
-                            return client.keyboards[-1]
+                            return next((keyboard for keyboard in reversed(client.keyboards)
+                                         if keyboard and json.loads(keyboard)["inline"]), None)
 
                         async def choose(keyboard):
                             button = next(button["action"] for row in json.loads(keyboard)["buttons"] for button in row
@@ -677,21 +736,33 @@ class AskChannelsTest(unittest.TestCase):
 
                         with patch("compadre_assistant.presentation.vk.photos._download", side_effect=vk_download):
                             try:
-                                await exercise(send, choose)
+                                await exercise(send, choose, publish)
                             finally:
                                 release_download.set()
                                 release_model.set()
                                 workers.close()
                                 processor.close_deferred_actions()
 
-                    asyncio.run(telegram() if channel == "telegram" else vk())
-                self.assertEqual(stages, ["receipt", "download:first", "receipt", "download:second", "model"])
-                self.assertFalse(any(marker in answer for _, answer in messages))
+                    execute_action = processor._deferred_actions._run
+
+                    def observe_worker_exit(action, *args):
+                        is_first = not entered_download.is_set()
+                        try:
+                            execute_action(action, *args)
+                        finally:
+                            if is_first:
+                                first_finished.set()
+
+                    with patch.object(processor._deferred_actions, "_run", side_effect=observe_worker_exit):
+                        asyncio.run(telegram() if channel == "telegram" else vk())
+                self.assertEqual(stages, ["receipt", "download:first", "receipt", "download:second", "model",
+                                         "receipt", "download:broken", "receipt", "download:fast", "model"])
+                self.assertEqual(sum(marker in answer for _, answer in messages), 1)
 
         with connect_database(self.path) as connection:
             rows = connection.execute("SELECT actual_model, tokens_json FROM ask_usage").fetchall()
         self.assertEqual([(name, json.loads(tokens)["prompt_tokens"]) for name, tokens in rows],
-                         [("test-ocr", 15), ("test-ocr", 15)])
+                         [("test-ocr", 15)] * 4)
 
     def test_linked_channel_disables_ocr_completion_in_origin_chat(self) -> None:
         """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
