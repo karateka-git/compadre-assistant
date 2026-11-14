@@ -61,11 +61,20 @@ class AskChannelsTest(unittest.TestCase):
     def send(self, channel, processor, text, chat_id=42, on_delivery=None, *, images=(), load=None):
         """Проводит сообщение через канал и возвращает доставленный текст."""
         receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
-        progress = ("Вопрос принят. Готовлю ответ…", receipt)
-        ocr_finished = threading.Event()
+        progress = ("Вопрос принят. Готовлю ответ… Для отмены введи /cancel.", receipt)
+        finished = threading.Event()
+
+        def process(event, completion):
+            def complete(reply):
+                completion(reply)
+                if channel == "vk":
+                    finished.set()
+
+            return processor(event, complete)
+
         if channel == "telegram":
             aiogram = FakeAiogram()
-            _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=processor, logger=self.logger)
+            _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=process, logger=self.logger)
             message = TelegramMessage()
             original_answer = message.answer
             async def answer(text, *, parse_mode, reply_markup=None):
@@ -75,7 +84,7 @@ class AskChannelsTest(unittest.TestCase):
             message.answer = answer
             async def send_message(*, chat_id, text, parse_mode, reply_markup=None):
                 await answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
-                ocr_finished.set()
+                finished.set()
             message.send_message = send_message
             message.chat = SimpleNamespace(id=chat_id)
             message.from_user = SimpleNamespace(id=7, username=None, full_name="Тест")
@@ -92,8 +101,8 @@ class AskChannelsTest(unittest.TestCase):
                 message.download = download
             async def handle():
                 await aiogram.dispatcher.included_router.handler(message)
-                if receipt in message.answers:
-                    self.assertTrue(await asyncio.to_thread(ocr_finished.wait, 5))
+                if message.answers and message.answers[0] in progress:
+                    self.assertTrue(await asyncio.to_thread(finished.wait, 5))
 
             asyncio.run(handle())
             self.delivered = message.answers
@@ -105,8 +114,6 @@ class AskChannelsTest(unittest.TestCase):
             result = original_send(**kwargs)
             if on_delivery:
                 on_delivery(kwargs["text"])
-            if client.messages and client.messages[0][1] == receipt and len(client.messages) > 1:
-                ocr_finished.set()
             return result
         client.send_message = send_message
         attachments = [{"type": "photo", "photo": {"sizes": [{
@@ -116,7 +123,7 @@ class AskChannelsTest(unittest.TestCase):
         def handle_update():
             _handle_update({"type": "message_new", "object": {"message": {
                 "peer_id": chat_id, "from_id": 7, "id": 1, "text": text, "attachments": attachments,
-            }}}, incoming_message_processor=processor, client=client, logger=self.logger)
+            }}}, incoming_message_processor=process, client=client, logger=self.logger)
 
         if images:
             async def download(url):
@@ -124,10 +131,12 @@ class AskChannelsTest(unittest.TestCase):
 
             with patch("compadre_assistant.presentation.vk.photos._download", side_effect=download):
                 handle_update()
-                if client.messages[0][1] == receipt:
-                    self.assertTrue(ocr_finished.wait(5))
+                if client.messages[0][1] in progress:
+                    self.assertTrue(finished.wait(5))
         else:
             handle_update()
+            if client.messages[0][1] in progress:
+                self.assertTrue(finished.wait(5))
         self.delivered = [item[1] for item in client.messages]
         self.keyboard = client.keyboards[-1]
         return "\n".join(text for text in self.delivered if text not in progress)
@@ -231,14 +240,14 @@ class AskChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "Тест")
                     self.send(channel, processor, "/ai")
                     with ThreadPoolExecutor(max_workers=1) as executor:
-                        future = executor.submit(self.send, channel, processor, "/ask долгий")
+                        future = executor.submit(processor, IncomingEvent(channel, "42", "direct", "/ask долгий", "7"))
                         try:
                             self.assertTrue(started.wait(5))
                             self.assertIn("выключена", self.send(channel, processor, "/disable ask"))
                             model.close.assert_not_called()
                         finally:
                             release.set()
-                        self.assertEqual(future.result(timeout=5), "Ответ: долгий")
+                        self.assertEqual(response_text(future.result(timeout=5)), "Ответ: долгий")
                     self.assertIn("/enable ask", self.send(channel, processor, "/ask следующий"))
                     self.assertEqual(model.answer.call_count, 1)
                     self.assertIn("включена", self.send(channel, processor, "/enable ask"))
@@ -485,6 +494,145 @@ class AskChannelsTest(unittest.TestCase):
                     release.set()
                 self.assertEqual(first.result(timeout=5), "Первое фото")
                 model_type.return_value.recognize_text.assert_called_once()
+
+    def test_questions_can_be_cancelled_in_both_channels_while_model_keeps_running(self) -> None:
+        """Обработчик чата принимает отмену, а начатые запросы сохраняют учёт."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                entered, release = threading.Event(), threading.Event()
+                completed = threading.Event()
+                sent, reports = [], []
+
+                def model(request):
+                    reports.append(json.loads(request.content)["messages"][1]["content"])
+                    entered.set()
+                    if not release.wait(5):
+                        raise TimeoutError("Тест не освободил модель")
+                    return httpx.Response(200, json={
+                        "model": "test-ask", "choices": [{"message": {"content": "Лишний итог"},
+                                                           "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 15, "completion_tokens": 3},
+                    })
+
+                with httpx.Client(transport=httpx.MockTransport(model)) as transport, \
+                        OpenAI(base_url=self.config.base_url, api_key=self.config.api_key,
+                               max_retries=0, http_client=transport) as sdk, \
+                        patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=sdk), \
+                        create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                         ask_config=self.config) as processor:
+                    run_action = processor._deferred_actions._run
+
+                    def observe_completion(*args):
+                        try:
+                            run_action(*args)
+                        finally:
+                            completed.set()
+
+                    async def exercise(send, commands):
+                        await send("/register")
+                        await send("Тест")
+                        await send("/ai")
+                        normal = commands()
+                        self.assertIn("/ask", normal)
+                        await send("/get_text_from_image")
+                        self.assertEqual(commands(), ("/cancel",))
+                        await send("/cancel")
+                        self.assertEqual(commands(), normal)
+                        if channel == "telegram":
+                            await send("/ask")
+                            self.assertEqual(commands(), ("/cancel",))
+                            await send("  ")
+                            self.assertEqual(commands(), ("/cancel",))
+                            self.assertEqual(reports, [])
+                        await send("пошаговый" if channel == "telegram" else "/ask прямой")
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                        self.assertIn("Вопрос принят", sent[-1])
+                        self.assertEqual(commands(), ("/cancel",))
+                        await send("/cancel")
+                        self.assertIn("Обработка отменена", sent[-1])
+                        self.assertEqual(commands(), normal)
+                        release.set()
+                        self.assertTrue(await asyncio.to_thread(completed.wait, 5))
+
+                    async def telegram():
+                        fake = FakeAiogram()
+                        bot = MenuTelegramBot()
+
+                        async def send_message(**kwargs):
+                            sent.append(kwargs["text"])
+
+                        bot.send_message = send_message
+                        publish = _create_telegram_menu_update_handler(
+                            bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=self.logger,
+                        )
+                        _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor,
+                                           logger=self.logger, menu_update_handler=publish)
+
+                        async def send(value):
+                            message = TelegramMessage()
+                            message.text = value
+                            message.from_user = SimpleNamespace(id=7)
+                            message.chat = SimpleNamespace(id=7)
+                            message.message_id = 1
+                            message.answer = lambda text, **kwargs: send_message(text=text, **kwargs)
+                            message.bot = bot
+                            await fake.dispatcher.included_router.handler(message)
+
+                        try:
+                            await exercise(send, lambda: tuple(f"/{item.command}" for item in bot.menu_calls[-1][0]))
+                        finally:
+                            release.set()
+                            await asyncio.to_thread(processor.close_deferred_actions)
+
+                    async def vk():
+                        client = FakeVkClient()
+                        original_send = client.send_message
+
+                        def record(**kwargs):
+                            original_send(**kwargs)
+                            if kwargs["text"] != "Меню команд обновлено.":
+                                sent.append(kwargs["text"])
+
+                        client.send_message = record
+                        publish = _create_vk_menu_update_handler(client, logger=self.logger)
+                        handled = threading.Event()
+
+                        def handle(update):
+                            try:
+                                _handle_update(update, incoming_message_processor=processor, client=client,
+                                               logger=self.logger, menu_update_handler=publish)
+                            finally:
+                                handled.set()
+
+                        workers = _VkUpdateWorkers(handler=handle, logger=self.logger, worker_count=1, max_queue_size=8)
+
+                        async def send(value):
+                            handled.clear()
+                            workers.submit("7", {"type": "message_new", "object": {"message": {
+                                "peer_id": 7, "from_id": 7, "id": 1, "text": value,
+                            }}})
+                            self.assertTrue(await asyncio.to_thread(handled.wait, 5))
+
+                        def commands():
+                            keyboard = next(json.loads(item) for item in reversed(client.keyboards)
+                                            if item and not json.loads(item)["inline"])
+                            return tuple(button["action"]["label"] for row in keyboard["buttons"] for button in row)
+
+                        try:
+                            await exercise(send, commands)
+                        finally:
+                            release.set()
+                            workers.close()
+                            processor.close_deferred_actions()
+
+                    with patch.object(processor._deferred_actions, "_run", side_effect=observe_completion):
+                        asyncio.run(telegram() if channel == "telegram" else vk())
+                    self.assertNotIn("Лишний итог", sent)
+                    self.assertEqual(reports, ["пошаговый" if channel == "telegram" else "прямой"])
+
+        with connect_database(self.path) as connection:
+            rows = connection.execute("SELECT actual_model, tokens_json FROM ask_usage").fetchall()
+        self.assertEqual([(name, json.loads(tokens)["prompt_tokens"]) for name, tokens in rows], [("test-ask", 15)] * 2)
 
     def test_ocr_cancels_during_download_or_model_and_drains_usage(self) -> None:
         """VK очередь и Telegram handler принимают отмену при заблокированной сети."""
@@ -878,7 +1026,7 @@ class AskChannelsTest(unittest.TestCase):
             normal_menu = menus[address]
             self.assertIn("/get_text_from_image", normal_menu)
             send("/get_text_from_image")
-            self.assertIn("/cancel", menus[address])
+            self.assertEqual(menus[address], ("/cancel",))
             response = send("", images=(ImageAttachment(load),))
             self.assertIsNotNone(response.after_delivery)
             self.assertEqual(menus[address], ("/cancel",))
@@ -1048,8 +1196,9 @@ class AskChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.send(channel, processor, "/ai")
-                    self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == "Вопрос принят. Готовлю ответ…" else None)
-                    self.assertEqual(self.delivered[0], "Вопрос принят. Готовлю ответ…")
+                    receipt = "Вопрос принят. Готовлю ответ… Для отмены введи /cancel."
+                    self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == receipt else None)
+                    self.assertEqual(self.delivered[0], receipt)
                     self.assertGreater(len(self.delivered), 2)
                     self.assertEqual("".join(self.delivered[1:]), answer)
                     self.send(channel, processor, "/ask")

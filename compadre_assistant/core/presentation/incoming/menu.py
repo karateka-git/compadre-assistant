@@ -31,6 +31,9 @@ def build_command_menu(
         Команды с обязательными параметрами без пути ввода не включаются:
         каталог не содержит конкретных значений для их выполнения.
     """
+    if pending is not None and pending.cancel_only_menu:
+        return CommandMenu(BUSY_COMMAND_MENU.items, pending.value_label)
+
     items: list[CommandSuggestion] = []
 
     def common(command: ChatCommand) -> None:
