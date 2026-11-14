@@ -30,6 +30,7 @@ from compadre_assistant.capabilities.obsidian.presentation.processing import Obs
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
+from compadre_assistant.core.presentation.incoming.events import ImageAttachment, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.presentation.telegram.bot import _register_handlers
@@ -759,6 +760,51 @@ class AskChannelsTest(unittest.TestCase):
 
             asyncio.run(exercise())
             self.assertEqual(delivered, [])
+
+    def test_admitted_ocr_projects_cancel_only_until_owner_cancels(self) -> None:
+        """Обычная публикация и периодическая сверка показывают состояние своего чата."""
+        address = ReplyAddress("telegram", "7")
+        other = ReplyAddress("telegram", "42")
+        menus = {}
+        updates = []
+        downloads = []
+
+        def publish(update):
+            updates.append(update.address)
+            menus[update.address] = tuple(item.command for item in update.menu.items)
+
+        def load():
+            downloads.append("first")
+            return b"\xff\xd8\xffsample"
+
+        with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel"), \
+                create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                 ask_config=self.config) as processor:
+            def send(text, *, chat="7", images=()):
+                return processor(IncomingEvent("telegram", chat, "update", text, chat, images=images),
+                                 completion_handler=lambda _reply: None, menu_update_handler=publish)
+
+            for chat in ("7", "42"):
+                send("/register", chat=chat)
+                send("Тест", chat=chat)
+                send("/ai", chat=chat)
+            normal_menu = menus[address]
+            self.assertIn("/get_text_from_image", normal_menu)
+            send("/get_text_from_image")
+            self.assertIn("/cancel", menus[address])
+            response = send("", images=(ImageAttachment(load),))
+            self.assertIsNotNone(response.after_delivery)
+            self.assertEqual(menus[address], ("/cancel",))
+            self.assertEqual(menus[other], normal_menu)
+            updates.clear()
+            processor.reconcile_menus(publish)
+            send("/exit")
+            self.assertEqual(updates, [])
+            send("/cancel")
+            self.assertEqual(updates, [address])
+            self.assertEqual(menus[address], normal_menu)
+            response.after_delivery(True)
+            self.assertEqual(downloads, [])
 
     def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
         """Сохраняет доступные метаданные всех вызовов после выхода каждого канала."""

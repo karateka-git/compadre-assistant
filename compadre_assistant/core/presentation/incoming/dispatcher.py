@@ -10,6 +10,7 @@ from compadre_assistant.core.presentation.message_content import compose_content
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
+from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
@@ -40,6 +41,8 @@ from compadre_assistant.core.presentation.incoming.action_selection import Actio
 LOGGER = logging.getLogger(__name__)
 _TEXT_INPUT_HINT = "Пришли текстовое сообщение или выбери возможность через /help."
 _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля открой личный чат с ботом."
+# Только успешная отмена требует пересчитать меню из проекции занятого чата.
+_DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
 
 
 class IncomingMessageResultType(StrEnum):
@@ -340,18 +343,19 @@ class IncomingMessageDispatcher:
         # Пока операция активна, не вызываем даже чтение меню с обновлением identity.
         if self._deferred_actions is not None:
             with self._pending_inputs.lock(event.reply_address):
-                if busy := self._busy_response(event):
-                    return busy
+                busy = self._busy_response(event)
+            if busy is not None:
+                if busy is _DEFERRED_CANCELLED_REPLY and menu_update_handler is not None:
+                    self._update_current_menu(event, menu_update_handler, BUSY_COMMAND_MENU)
+                return busy
         previous_menu = None
         previous_user = None
         previous_preferences = None
         if menu_update_handler is not None:
             try:
-                from compadre_assistant.core.presentation.incoming.menu import build_command_menu
-
                 # Предварительное чтение не очищает ожидание: ответ об истечении
                 # или смене контекста должен сформировать обычный маршрут ввода.
-                previous_menu = build_command_menu(*self._command_context(event, cleanup_pending=False))
+                previous_menu, _ = self._command_menu_snapshot(event, cleanup_pending=False)
                 previous_user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
                 if previous_user is not None:
                     previous_preferences = self._capability_preference_repository.get_for_user(previous_user.id)
@@ -373,13 +377,10 @@ class IncomingMessageDispatcher:
                 suggested_actions=suggested_actions,
             )
         if menu_update_handler is not None:
-            try:
-                current_menu = self.command_menu(event)
-                if current_menu != previous_menu:
-                    menu_update_handler(CommandMenuUpdate(event.reply_address, current_menu))
-            except Exception:
-                # Публикация меню вторична: обработанный текстовый ответ остаётся доступным.
-                LOGGER.exception("Could not update command menu for current chat")
+            # Фото могло занять чат между снимком меню и повторным допуском.
+            if result is _DEFERRED_CANCELLED_REPLY:
+                previous_menu = BUSY_COMMAND_MENU
+            self._update_current_menu(event, menu_update_handler, previous_menu)
             try:
                 current_user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
                 owner_changed = (previous_user.id if previous_user else None) != (current_user.id if current_user else None)
@@ -395,12 +396,20 @@ class IncomingMessageDispatcher:
                 LOGGER.exception("Could not refresh linked chat menus after incoming action")
         return response
 
+    def _update_current_menu(self, event: IncomingEvent, handler: CommandMenuUpdateHandler,
+                             previous_menu: CommandMenu | None) -> None:
+        """Передаёт изменившуюся проекцию без отказа уже выполненной команды."""
+        try:
+            menu = self.command_menu(event)
+            if menu != previous_menu:
+                handler(CommandMenuUpdate(event.reply_address, menu))
+        except Exception:
+            LOGGER.exception("Could not update command menu for current chat")
+
     def _update_linked_chat_menus(
         self, user: AppUser, origin: ReplyAddress, handler: CommandMenuUpdateHandler,
     ) -> None:
         """Пересчитывает каждый связанный адрес с его режимом и ожиданием."""
-        from compadre_assistant.core.presentation.incoming.menu import build_command_menu
-
         try:
             identities = self._user_identity_service.list_known_private_chats(user)
         except Exception:
@@ -417,7 +426,7 @@ class IncomingMessageDispatcher:
                     "command-menu-refresh", "/help", identity.external_user_id)
                 # Это чтение сохранённого адреса, а не новое событие пользователя:
                 # resolve с touch мог бы вернуть устаревший адрес обратно в БД.
-                menu = build_command_menu(*self._command_context(event, known_user=user))
+                menu, _ = self.command_menu_snapshot(event, known_user=user)
                 if self._user_identity_service.owns_known_private_chat(user, identity):
                     handler(CommandMenuUpdate(address, menu))
             except Exception:
@@ -467,7 +476,7 @@ class IncomingMessageDispatcher:
             if event.external_user_id is not None and action.external_user_id == event.external_user_id:
                 user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
                 if user is not None and user.id == action.app_user_id and actions.cancel(action):
-                    return IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
+                    return _DEFERRED_CANCELLED_REPLY
         return self.busy_reply()
 
     @staticmethod
@@ -1133,9 +1142,19 @@ class IncomingMessageDispatcher:
         Returns:
             Меню и признак успешного чтения всех источников подтверждений.
         """
-        from compadre_assistant.core.presentation.incoming.menu import build_command_menu
+        return self._command_menu_snapshot(event, known_user=known_user)
 
-        context = self._command_context(event, known_user=known_user)
+    def _command_menu_snapshot(
+        self, event: IncomingEvent, *, known_user: AppUser | None = None, cleanup_pending: bool = True,
+    ) -> tuple[CommandMenu, bool]:
+        """Учитывает текущую работу в той же проекции, что ожидание и режим."""
+        actions = self._deferred_actions
+        if actions is not None and actions.get(event.reply_address) is not None:
+            return BUSY_COMMAND_MENU, True
+        context = self._command_context(event, known_user=known_user, cleanup_pending=cleanup_pending)
+        # Работа может быть принята во время чтения источников подтверждений.
+        if actions is not None and actions.get(event.reply_address) is not None:
+            return BUSY_COMMAND_MENU, True
         return build_command_menu(*context), context[3].status == "complete"
 
     def _command_context(

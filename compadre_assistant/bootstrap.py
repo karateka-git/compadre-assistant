@@ -306,6 +306,7 @@ class ChannelMessageProcessor:
                     self._unregistered_menu_events[address] = event
                 dispatcher = IncomingMessageDispatcher(
                     registry=self._registry, pending_inputs=self._pending_inputs,
+                    deferred_actions=self._deferred_actions,
                     user_identity_service=service,
                     chat_mode_repository=SQLiteChatModeRepository(connection),
                     capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
