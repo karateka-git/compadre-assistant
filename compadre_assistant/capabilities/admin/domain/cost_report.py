@@ -81,14 +81,42 @@ class CostStatisticsReader(Protocol):
         ...
 
 
+class RequestCountReader(Protocol):
+    """Получает число запросов за подтверждённый интервал статистики шлюза."""
+
+    def read_request_count(self, start: datetime, end: datetime) -> int:
+        """Читает число запросов за непустой полуоткрытый UTC-интервал.
+
+        Args:
+            start: Нижняя граница периода включительно.
+            end: Верхняя граница периода исключительно.
+
+        Returns:
+            Подтверждённое неотрицательное количество запросов.
+
+        Raises:
+            CostSourceError: Источник не подтвердил число за весь период.
+        """
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class CostReportRow:
-    """Хранит сумму, если она известна, и состояние одного периода отчёта."""
+    """Хранит состояние стоимости и подтверждённое число запросов за период.
+
+    Args:
+        period: Календарный период отчёта.
+        status: Состояние стоимости за период.
+        amount: Известная сумма расходов, если доступна.
+        unknown_intervals: Число интервалов с неизвестной стоимостью.
+        request_count: Подтверждённое число запросов либо None, если недоступно.
+    """
 
     period: ReportPeriod
     status: CostReportStatus
     amount: Decimal | None = None
     unknown_intervals: int = 0
+    request_count: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,15 +132,18 @@ class GetGatewayCostReport:
     """Строит календарный отчёт из статистики шлюза с отдельным итогом каждого периода.
 
     Args:
-        reader: Источник статистики, если настроен оператором.
+        reader: Источник стоимости, если настроен оператором.
         currency: ISO-код валюты аккаунта либо None, если источник не настроен.
+        count_reader: Источник числа запросов для того же ключа, если подключён.
         clock: Источник одного момента с часовым поясом на отчёт.
     """
 
     def __init__(self, reader: CostStatisticsReader | None, *, currency: str | None,
+                 count_reader: RequestCountReader | None = None,
                  clock: Callable[[], datetime] | None = None) -> None:
         self._reader = reader
         self._currency = currency
+        self._count_reader = count_reader
         self._clock = clock if clock is not None else _utc_now
 
     def execute(self, timezone: str | None = None, *, period: ReportPeriod | None = None) -> GatewayCostReport:
@@ -141,15 +172,25 @@ class GetGatewayCostReport:
         if end - start > _STATISTICS_HISTORY:
             return CostReportRow(period, CostReportStatus.PERIOD_UNAVAILABLE)
         if start == end:
-            return CostReportRow(period, CostReportStatus.COMPLETE, Decimal(0))
+            return CostReportRow(period, CostReportStatus.COMPLETE, Decimal(0),
+                                 request_count=0 if self._count_reader is not None else None)
+        request_count = self._read_request_count(start, end)
         try:
             stats = self._reader.read_period(start, end)
         except IncompleteCostPeriod:
-            return CostReportRow(period, CostReportStatus.PERIOD_UNAVAILABLE)
+            return CostReportRow(period, CostReportStatus.PERIOD_UNAVAILABLE, request_count=request_count)
         except CostSourceError:
-            return CostReportRow(period, CostReportStatus.SOURCE_FAILED)
+            return CostReportRow(period, CostReportStatus.SOURCE_FAILED, request_count=request_count)
         status = CostReportStatus.PARTIAL if stats.unknown_intervals else CostReportStatus.COMPLETE
-        return CostReportRow(period, status, stats.amount, stats.unknown_intervals)
+        return CostReportRow(period, status, stats.amount, stats.unknown_intervals, request_count)
+
+    def _read_request_count(self, start: datetime, end: datetime) -> int | None:
+        if self._count_reader is None:
+            return None
+        try:
+            return self._count_reader.read_request_count(start, end)
+        except CostSourceError:
+            return None
 
 
 def _calendar_periods(timezone: str | None, clock: Callable[[], datetime],

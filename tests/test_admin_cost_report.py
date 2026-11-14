@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from compadre_assistant.capabilities.admin.domain.cost_report import (
     CostReportRow, CostReportStatus, CostSourceError, CostStatistics, CostStatisticsReader,
     GatewayCostReport, GetGatewayCostReport, IncompleteCostPeriod,
-    InvalidReportTimezone, ReportPeriod,
+    InvalidReportTimezone, ReportPeriod, RequestCountReader,
 )
 
 
@@ -121,6 +121,33 @@ class GatewayCostReportTest(unittest.TestCase):
         self.assertEqual(report.rows, (CostReportRow(ReportPeriod.DAY, CostReportStatus.PARTIAL, None, 2),))
         with self.assertRaises(ValueError):
             CostStatistics(None)
+
+    def test_request_count_and_price_failures_are_independent(self) -> None:
+        """Каждая строка сохраняет подтверждённый результат другого источника."""
+        counts = Mock(spec=RequestCountReader)
+        counts.read_request_count.side_effect = [0, IncompleteCostPeriod(), 7]
+        self.reader.read_period.side_effect = [IncompleteCostPeriod(), CostStatistics(Decimal("0.15"), 2), CostSourceError()]
+        report = GetGatewayCostReport(self.reader, currency="RUB", count_reader=counts, clock=lambda: _NOW).execute()
+        self.assertEqual(report.rows, (
+            CostReportRow(ReportPeriod.DAY, CostReportStatus.PERIOD_UNAVAILABLE, request_count=0),
+            CostReportRow(ReportPeriod.MONTH, CostReportStatus.PARTIAL, Decimal("0.15"), 2),
+            CostReportRow(ReportPeriod.YEAR, CostReportStatus.SOURCE_FAILED, request_count=7),
+        ))
+        self.assertEqual(counts.read_request_count.call_args_list, self.reader.read_period.call_args_list)
+
+    def test_request_count_skips_empty_and_expired_windows(self) -> None:
+        """Пустое окно даёт ноль, а полное окно за пределом истории недоступно."""
+        counts = Mock(spec=RequestCountReader)
+        midnight = datetime(2026, 11, 13, 18, tzinfo=UTC)
+        report = GetGatewayCostReport(self.reader, currency="RUB", count_reader=counts, clock=lambda: midnight)
+        self.assertEqual(report.execute(period=ReportPeriod.DAY).rows, (
+            CostReportRow(ReportPeriod.DAY, CostReportStatus.COMPLETE, Decimal(0), request_count=0),
+        ))
+        self.assertEqual(report.execute(period=ReportPeriod.YEAR).rows, (
+            CostReportRow(ReportPeriod.YEAR, CostReportStatus.PERIOD_UNAVAILABLE),
+        ))
+        counts.read_request_count.assert_not_called()
+        self.reader.read_period.assert_not_called()
 
     def test_unconfigured_source_has_its_own_status(self) -> None:
         """Полностью пустая настройка явно обозначается в сводке."""

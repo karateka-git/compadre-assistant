@@ -19,6 +19,7 @@ _END = _START + timedelta(hours=2, minutes=31, microseconds=42)
 _TOKEN = "account-test-token"
 _KEY = UUID("550e8400-e29b-41d4-a716-446655440000")
 _URL = "https://api.timeweb.cloud/api/v1/cloud-ai/ai-keys/statistic/token-usage"
+_CALLS_URL = "https://api.timeweb.cloud/api/v1/cloud-ai/ai-keys/statistic/calls"
 _LOGGER = "compadre_assistant.capabilities.admin.data.timeweb_statistics"
 
 
@@ -30,6 +31,17 @@ def _point(hour_offset: int, cost: object) -> dict[str, object]:
 def _response(points: list[dict[str, object]], total: int | float | None = None) -> httpx.Response:
     return httpx.Response(200, json={
         "ai_key_token_statistics": points, "meta": {"total": len(points) if total is None else total},
+    })
+
+
+def _call_point(hour_offset: int, count: object) -> dict[str, object]:
+    time = _START.replace(minute=0) + timedelta(hours=hour_offset)
+    return {"time": time.isoformat(), "call_count": count}
+
+
+def _calls_response(points: list[dict[str, object]], total: int | None = None) -> httpx.Response:
+    return httpx.Response(200, json={
+        "ai_key_calls_statistics": points, "meta": {"total": len(points) if total is None else total},
     })
 
 
@@ -80,6 +92,60 @@ class TimewebCostStatisticsReaderTest(unittest.TestCase):
         self.assertEqual(self.reader.read_period(_START, _END), CostStatistics(None, 3))
         self.reply = _response([_point(0, None), _point(1, 0), _point(2, 0)])
         self.assertEqual(self.reader.read_period(_START, _END), CostStatistics(Decimal(0), 1))
+
+    def test_request_count_uses_same_period_and_key_and_sums_confirmed_counts(self) -> None:
+        """Оба запроса используют одни границы, включая начало в середине часа."""
+        end = _END.replace(minute=0, second=0, microsecond=0)
+        self.reply = _response([_point(0, 0), _point(1, 0)])
+        self.reader.read_period(_START, end)
+        self.reply = _calls_response([_call_point(1, 5), _call_point(0, 4)])
+        self.assertEqual(self.reader.read_request_count(_START, end), 9)
+        price, count = self.requests
+        self.assertEqual(str(count.url.copy_with(query=None)), _CALLS_URL)
+        self.assertEqual(count.method, "GET")
+        self.assertEqual(count.headers["Authorization"], price.headers["Authorization"])
+        self.assertEqual(count.url.params, price.url.params)
+        self.assertEqual(count.url.params["end_time"], "2026-11-14T19:59:59.999999Z")
+        self.assertEqual(count.extensions["timeout"], price.extensions["timeout"])
+
+        self.reply = _calls_response([_call_point(0, 0), _call_point(1, 0)])
+        self.assertEqual(self.reader.read_request_count(_START, end), 0)
+        self.reply = _calls_response([_call_point(0, 2_147_483_647), _call_point(1, 1)])
+        self.assertEqual(self.reader.read_request_count(_START, end), 2_147_483_648)
+
+    def test_request_count_requires_coverage(self) -> None:
+        """Неполный ответ оставляет счётчик недоступным даже при известных нулях."""
+        complete = [_call_point(0, 0), _call_point(1, 0), _call_point(2, 0)]
+        for points, total in (([], 0), ([complete[0], complete[2]], 2), (complete, 4),
+                              ([*complete, _call_point(3, 0)], 4)):
+            self.reply = _calls_response(points, total)
+            with self.subTest(points=points, total=total), self.assertRaises(IncompleteCostPeriod):
+                self.reader.read_request_count(_START, _END)
+
+    def test_request_count_rejects_malformed_values_and_duplicates(self) -> None:
+        """Повтор, null и числа другого типа дают безопасную ошибку."""
+        other_points = [_call_point(1, 0), _call_point(2, 0)]
+        missing_count = {"time": _START.replace(minute=0).isoformat()}
+        invalid_points = [missing_count, other_points[0]]
+        invalid_points.extend(_call_point(0, value) for value in ({}, None, "0", True, -1, 0.0, 1.25, 2_147_483_648))
+        for invalid in invalid_points:
+            self.reply = _calls_response([invalid, *other_points])
+            with self.subTest(point=invalid), self.assertLogs(_LOGGER, level="WARNING"), \
+                 self.assertRaises(CostSourceError) as raised:
+                self.reader.read_request_count(_START, _END)
+            self.assertIs(type(raised.exception), CostSourceError)
+
+    def test_request_count_network_failure_and_redirect_are_safe(self) -> None:
+        """HTTP-ошибка и сетевой сбой скрывают адрес и секрет, редирект не выполняется."""
+        self.reply = httpx.Response(302, headers={"Location": "https://other.invalid"}, text=_TOKEN)
+        with self.assertLogs(_LOGGER, level="WARNING") as logs, self.assertRaises(CostSourceError) as raised:
+            self.reader.read_request_count(_START, _END)
+        self.assertEqual(len(self.requests), 1)
+        self.assert_safe(logs.output, raised.exception)
+        self.failure = httpx.ReadTimeout(_CALLS_URL)
+        with self.assertLogs(_LOGGER, level="WARNING") as logs, self.assertRaises(CostSourceError) as raised:
+            self.reader.read_request_count(_START, _END)
+        self.assert_safe(logs.output, raised.exception)
 
     def test_missing_or_shifted_points_do_not_become_zero(self) -> None:
         """Пустой, обрезанный, сдвинутый или найденный за границей ответ неполон."""
@@ -174,5 +240,5 @@ class TimewebCostStatisticsReaderTest(unittest.TestCase):
     def assert_safe(self, logs: list[str], error: Exception) -> None:
         """Проверяет отсутствие деталей запроса в диагностике и исключении."""
         content = "\n".join([*logs, str(error)])
-        for private_value in (_TOKEN, str(_KEY), _URL):
+        for private_value in (_TOKEN, str(_KEY), _URL, _CALLS_URL):
             self.assertNotIn(private_value, content)
