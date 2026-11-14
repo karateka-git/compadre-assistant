@@ -147,6 +147,10 @@ class AdminChannelsTest(unittest.TestCase):
             vk_client = self.vk(processor, "/admin")
             payload = json.loads(vk_client.keyboards[-1])["buttons"][0][0]["action"]["payload"]
             self.assert_channel_menus(processor, include_costs=True)
+            # Активность в группе не должна скрывать ранее сохранённый личный чат
+            # от фоновой сверки меню нового процесса.
+            self.telegram(processor, "/admin", chat=-404)
+            self.vk(processor, "/admin", peer=2_000_000_007)
 
         self.configure("")
         with patch.object(GetLlmCostReport, "execute", autospec=True) as execute, \

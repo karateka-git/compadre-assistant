@@ -99,15 +99,16 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.assertNotIn(self.vk, self.service.list_known_private_chats(self.user))
 
     def test_stale_enumeration_does_not_restore_or_publish_old_address(self):
-        """Смена адреса между перечислением и проверкой не оживляет прежний чат."""
+        """Явная перепривязка адреса после перечисления отменяет доставку в старый чат."""
         original = self.service.list_known_private_chats
         moved = replace(self.vk, external_chat_id="505")
+        repository = SQLiteExternalIdentityRepository(self.connection)
         calls = [0]
         def enumerate_chats(user):
             calls[0] += 1
             result = original(user)
             if calls[0] == 1:
-                self.service.resolve(moved)
+                repository.reassign(app_user_id=self.user.id, identity=moved)
             return result
         with patch.object(self.service, "list_known_private_chats", side_effect=enumerate_chats):
             self.send("/disable ask")
