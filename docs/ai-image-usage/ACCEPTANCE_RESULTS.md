@@ -498,7 +498,8 @@ Admin выключен. Пара параметров Timeweb и список д
   вопроса. Полный `unittest discover -s tests` выявил одно оставшееся
   ожидание прежнего текста `/enable ask` в тесте ошибки публикации меню.
 - На `affb8bb` после обновления ожидания прошли все 6 тестов
-  `test_linked_chat_menus`. Повторный полный прогон на этой ревизии запущен.
+  `test_linked_chat_menus`. В повторном полном прогоне прошло 1380 тестов,
+  3 теста пропущены.
 
 После согласованной установки повторить в личных чатах Telegram и VK
 личный отказ `/ai` и восстановление доступа через `/enable ask`, обычный
@@ -506,3 +507,35 @@ Admin выключен. Пара параметров Timeweb и список д
 в ожидании и во время работы меню показывает только `/cancel`, после
 отмены или ответа возвращается к режиму, а VK не дублирует обновление меню
 для ответов с постоянной клавиатурой. Эта проверка ожидается.
+
+## Выпуск v4.0.1 на VPS
+
+14.11.2026 исправления из [PR #105](https://github.com/karateka-git/compadre-assistant/pull/105)
+вошли в `main` и были перенесены в `release/4.0` через
+[PR #106](https://github.com/karateka-git/compadre-assistant/pull/106).
+Полный CI [кандидата `f2da286`](https://github.com/karateka-git/compadre-assistant/actions/runs/43593475624/attempts/1)
+подтвердил совместимость с принятой `v4.0.0`: пройдены все 177 тестов
+закреплённого набора. Ревизия контроллера `93bae08` прошла
+[полный CI `main`](https://github.com/karateka-git/compadre-assistant/actions/runs/43593472650/attempts/1).
+На VPS обновили отдельно установленный снимок контроллера и сверили
+`v4.0.0` без перезапуска ботов.
+
+Первый запуск [Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/43593886142)
+остановился до записи: `HEAD` на `main` не совпал с кандидатом в
+`release/4.0`. Из чистой копии кандидата публикатор проверил точный SHA
+и допуск CI, затем создал аннотированный тег и
+[immutable Release `445276602`](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.0.1).
+Установку из опубликованного Release запустили
+[повторно](https://github.com/karateka-git/compadre-assistant/actions/runs/43594411914).
+
+В 12:24:44 UTC workflow подтвердил Deployment `7787504840`, статус
+`22192852889` (`success`) и очистку прежнего поколения SQLite. Повторный
+`verify-installed` на VPS подтвердил SHA
+`f2da286c02efed55c2174e30aee2a1ad2af05e40`, оба healthy-контейнера без
+рестартов и активное поколение `727297ced399407589cff7fce8da5179` с
+миграцией `0005_ask_usage.sql`. Штатный backup завершился в 12:25:14 UTC
+с `Result=success` и `ExecMainStatus=0`. Основной unit и таймер backup
+остались активны.
+
+Живая перепроверка меню и отмены на `v4.0.1` ожидается в личных чатах
+Telegram и VK. Admin не включали.
