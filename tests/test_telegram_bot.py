@@ -1,4 +1,3 @@
-from compadre_assistant.core.presentation.message_content import text_content
 """Тесты низкоуровневых helpers Telegram adapter."""
 
 import asyncio
@@ -17,11 +16,13 @@ from aiogram.exceptions import (
 from aiogram.methods import GetMe
 from aiogram.types import PhotoSize
 
+from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 from compadre_assistant.core.presentation.incoming.events import ImageLoadError, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, BoundReplyAction, ConfirmationAction, CommandMenu, CommandMenuUpdate,
     CommandSuggestion, IncomingResponse, ReplyAction,
 )
+from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,
@@ -1056,6 +1057,56 @@ class TelegramBotHelpersTest(unittest.TestCase):
         bot, kwargs = aiogram.dispatcher.start_arguments
         self.assertFalse(kwargs["close_bot_session"])
         self.assertEqual(bot.session.close_calls, 1)
+
+    def test_polling_stop_drains_deferred_work_before_closing_session(self) -> None:
+        """Фоновый worker может завершить загрузку в живом loop во время shutdown."""
+        aiogram = FakeAiogram()
+        actions = DeferredActions(capacity=1)
+        started = threading.Event()
+        effects = []
+
+        async def run_polling(bot, **_kwargs):
+            loop = asyncio.get_running_loop()
+            pending_download = loop.create_future()
+            action = actions.reserve(ReplyAddress("telegram", "42"), 23, "42")
+            self.assertIsNotNone(action)
+
+            def work(cancelled):
+                started.set()
+
+                async def wait_for_loop():
+                    await pending_download
+
+                asyncio.run_coroutine_threadsafe(wait_for_loop(), loop).result(timeout=5)
+                effects.append((bot.session.close_calls, cancelled()))
+                return IncomingResponse(text_content("Отменённый результат"))
+
+            actions.after_delivery(action, True, work, lambda _reply: effects.append("unexpected completion"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+
+            def close_actions():
+                async def finish_after_cancel():
+                    if await asyncio.to_thread(action.cancelled.wait, 5):
+                        pending_download.set_result(None)
+
+                asyncio.run_coroutine_threadsafe(finish_after_cancel(), loop)
+                actions.close()
+
+            processor.close_deferred_actions = close_actions
+            aiogram.dispatcher.start_arguments = bot, {}
+
+        def processor(*_args):
+            self.fail("Прямой ввод не нужен для проверки остановки")
+
+        aiogram.dispatcher.start_polling = run_polling
+        with patch("compadre_assistant.presentation.telegram.bot._load_aiogram", return_value=aiogram):
+            asyncio.run(_run_telegram_bot(
+                token="token", incoming_message_processor=processor,
+                logger=logging.getLogger("test.telegram.draining"),
+            ))
+
+        self.assertEqual(effects, [(0, True)])
+        self.assertEqual(aiogram.dispatcher.start_arguments[0].session.close_calls, 1)
 
     def test_run_polling_reports_fatal_api_error(self) -> None:
         """Неустранимая ошибка Telegram API превращается в adapter-ошибку."""

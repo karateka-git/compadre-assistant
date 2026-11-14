@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 from html import escape
 import json
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -32,7 +33,7 @@ from compadre_assistant.core.domain.capability_preferences import UserCapability
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.presentation.telegram.bot import _register_handlers
-from compadre_assistant.presentation.vk.bot import _handle_update
+from compadre_assistant.presentation.vk.bot import _VkUpdateWorkers, _handle_update
 from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
 from tests.test_telegram_bot import FakeAiogram, TelegramMessage
 from tests.test_vk_bot import FakeVkClient
@@ -481,6 +482,283 @@ class AskChannelsTest(unittest.TestCase):
                     release.set()
                 self.assertEqual(first.result(timeout=5), "Первое фото")
                 model_type.return_value.recognize_text.assert_called_once()
+
+    def test_ocr_cancels_during_download_or_model_and_drains_usage(self) -> None:
+        """VK очередь и Telegram handler принимают отмену при заблокированной сети."""
+        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        marker = "Распознанный ответ"
+        command = "/get_text_from_image"
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                stages = []
+                entered_download, entered_model = threading.Event(), threading.Event()
+                release_download, release_model = threading.Event(), threading.Event()
+                messages = []
+
+                def download(file_id):
+                    stages.append(f"download:{file_id}")
+                    if file_id == "first":
+                        entered_download.set()
+                        if not release_download.wait(5):
+                            raise TimeoutError("Тест не освободил загрузчик")
+                    return b"\xff\xd8\xffsample"
+
+                def model(_request):
+                    stages.append("model")
+                    entered_model.set()
+                    if not release_model.wait(5):
+                        raise TimeoutError("Тест не освободил модель")
+                    return httpx.Response(200, json={
+                        "model": "test-ocr", "choices": [{"message": {"content": f"TEXT\n{marker}"},
+                                                          "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 15, "completion_tokens": 3},
+                    })
+
+                def record(chat, answer):
+                    messages.append((int(chat), answer))
+                    if answer == receipt:
+                        stages.append("receipt")
+
+                with httpx.Client(transport=httpx.MockTransport(model)) as transport, \
+                        OpenAI(base_url=self.config.base_url, api_key=self.config.api_key,
+                               max_retries=0, http_client=transport) as sdk, \
+                        patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=sdk), \
+                        create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                         ask_config=self.config) as processor:
+                    async def exercise(send, choose):
+                        await send("/register")
+                        await send("Тест")
+                        keyboard = await send("/ai")
+                        await send(command)
+                        await send("", photo="undelivered", fail_receipt=True)
+                        self.assertEqual(stages, [])
+                        await send(command)
+                        self.assertIn("Пришли одно фото", messages[-1][1])
+                        await send("/exit", photo="first")
+                        self.assertTrue(await asyncio.to_thread(entered_download.wait, 5))
+                        self.assertEqual(stages, ["receipt", "download:first"])
+                        for text, photo in (("/exit", None), ("/disable ask", None), ("текст", None),
+                                            ("", "ignored"), ("", None)):
+                            await send(text, photo=photo)
+                            self.assertIn("Обработка уже идёт", messages[-1][1])
+                        await choose(keyboard)
+                        self.assertIn("Обработка уже идёт", messages[-1][1])
+                        await send("/ai", chat=43)
+                        self.assertIn("Режим ИИ включён", messages[-1][1])
+                        await send("/cancel")
+                        self.assertIn("Обработка отменена", messages[-1][1])
+                        release_download.set()
+                        await send(command)
+                        await send("", photo="second")
+                        self.assertTrue(await asyncio.to_thread(entered_model.wait, 5))
+                        await send("/cancel")
+                        self.assertIn("Обработка отменена", messages[-1][1])
+                        await send(command)
+                        self.assertIn("Пришли одно фото", messages[-1][1])
+
+                    async def telegram():
+                        fake = FakeAiogram()
+                        _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor,
+                                           logger=self.logger)
+                        router = fake.dispatcher.included_router
+
+                        async def send(text, *, photo=None, chat=7, fail_receipt=False):
+                            message = TelegramMessage()
+                            message.chat = SimpleNamespace(id=chat)
+                            message.message_id = 1
+                            message.from_user = SimpleNamespace(id=7)
+                            message.text = text if photo is None else None
+                            message.caption = text if photo is not None else None
+                            if photo is not None:
+                                message.photo = [SimpleNamespace(file_id=photo, width=40, height=40, file_size=None)]
+
+                            async def download_image(file_id, *, destination, seek):
+                                destination.write(await asyncio.to_thread(download, file_id))
+
+                            original_answer = message.answer
+
+                            async def answer(text, **kwargs):
+                                if fail_receipt and text == receipt:
+                                    raise RuntimeError("Канал не принял квитанцию")
+                                await original_answer(text, **kwargs)
+                                record(chat, text)
+
+                            async def send_message(*, chat_id, text, **_kwargs):
+                                record(chat_id, text)
+
+                            message.download = download_image
+                            message.answer = answer
+                            message.send_message = send_message
+                            await router.handler(message)
+                            return message.reply_markups[-1] if message.reply_markups else None
+
+                        async def choose(keyboard):
+                            button = next(button for row in keyboard.inline_keyboard for button in row
+                                          if button.text == "Извлечь текст с фото")
+                            edits = []
+
+                            async def acknowledge():
+                                pass
+
+                            async def edit(**kwargs):
+                                edits.append(kwargs)
+
+                            async def send_message(*, chat_id, text, **_kwargs):
+                                record(chat_id, text)
+
+                            await router.callback_handler(SimpleNamespace(
+                                answer=acknowledge, id="busy-click", data=button.callback_data,
+                                from_user=SimpleNamespace(id=7),
+                                bot=SimpleNamespace(edit_message_reply_markup=edit, send_message=send_message),
+                                message=SimpleNamespace(chat=SimpleNamespace(id=7), message_id=1),
+                            ))
+                            self.assertEqual(edits, [])
+
+                        try:
+                            await exercise(send, choose)
+                        finally:
+                            release_download.set()
+                            release_model.set()
+                            await asyncio.to_thread(processor.close_deferred_actions)
+
+                    async def vk():
+                        client = FakeVkClient()
+                        original_send = client.send_message
+                        handled = threading.Event()
+                        fail_next_receipt = False
+
+                        def send_message(**kwargs):
+                            if fail_next_receipt and kwargs["text"] == receipt:
+                                raise RuntimeError("Канал не принял квитанцию")
+                            result = original_send(**kwargs)
+                            record(kwargs["peer_id"], kwargs["text"])
+                            return result
+
+                        client.send_message = send_message
+
+                        def handle(update):
+                            try:
+                                _handle_update(update, incoming_message_processor=processor,
+                                               client=client, logger=self.logger)
+                            finally:
+                                handled.set()
+
+                        workers = _VkUpdateWorkers(handler=handle, logger=self.logger, worker_count=1, max_queue_size=8)
+
+                        async def submit(chat, update):
+                            handled.clear()
+                            workers.submit(str(chat), update)
+                            self.assertTrue(await asyncio.to_thread(handled.wait, 5))
+
+                        async def send(text, *, photo=None, chat=7, fail_receipt=False):
+                            nonlocal fail_next_receipt
+                            fail_next_receipt = fail_receipt
+                            attachments = [] if photo is None else [{"type": "photo", "photo": {"sizes": [{
+                                "url": f"https://sun1.userapi.com/{photo}", "width": 40, "height": 40,
+                            }]}}]
+                            await submit(chat, {"type": "message_new", "object": {"message": {
+                                "id": 1, "peer_id": chat, "from_id": 7, "text": text, "attachments": attachments,
+                            }}})
+                            return client.keyboards[-1]
+
+                        async def choose(keyboard):
+                            button = next(button["action"] for row in json.loads(keyboard)["buttons"] for button in row
+                                          if button["action"]["label"] == "Извлечь текст с фото")
+                            await submit(7, {"type": "message_event", "object": {
+                                "peer_id": 7, "user_id": 7, "event_id": "busy-click", "conversation_message_id": 1,
+                                "payload": button["payload"],
+                            }})
+                            self.assertEqual(client.cleared, [])
+
+                        async def vk_download(url):
+                            return download(url.rsplit("/", 1)[-1])
+
+                        with patch("compadre_assistant.presentation.vk.photos._download", side_effect=vk_download):
+                            try:
+                                await exercise(send, choose)
+                            finally:
+                                release_download.set()
+                                release_model.set()
+                                workers.close()
+                                processor.close_deferred_actions()
+
+                    asyncio.run(telegram() if channel == "telegram" else vk())
+                self.assertEqual(stages, ["receipt", "download:first", "receipt", "download:second", "model"])
+                self.assertFalse(any(marker in answer for _, answer in messages))
+
+        with connect_database(self.path) as connection:
+            rows = connection.execute("SELECT actual_model, tokens_json FROM ask_usage").fetchall()
+        self.assertEqual([(name, json.loads(tokens)["prompt_tokens"]) for name, tokens in rows],
+                         [("test-ocr", 15), ("test-ocr", 15)])
+
+    def test_linked_channel_disables_ocr_completion_in_origin_chat(self) -> None:
+        """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
+        release, checked = threading.Event(), threading.Event()
+        command = "/get_text_from_image"
+        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+
+        with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, \
+                create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                 ask_config=self.config) as processor:
+            self.send("telegram", processor, "/register", chat_id=7)
+            self.send("telegram", processor, "Тест", chat_id=7)
+            link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
+            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            self.assertIsNotNone(code)
+            self.assertIn("привязал", self.send("vk", processor, code.group(0), chat_id=7))
+            self.send("telegram", processor, "/ai", chat_id=7)
+            self.send("telegram", processor, command, chat_id=7)
+
+            entered = threading.Event()
+
+            def recognize(**_kwargs):
+                entered.set()
+                if not release.wait(5):
+                    raise TimeoutError("Тест не освободил модель")
+                return SimpleNamespace(text="Текст после отзыва")
+
+            model_type.return_value.recognize_text.side_effect = recognize
+            original_access = processor._deferred_access
+
+            def check_access(*args):
+                allowed = original_access(*args)
+                checked.set()
+                return allowed
+
+            processor._deferred_access = check_access
+            fake = FakeAiogram()
+            _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor, logger=self.logger)
+            message = TelegramMessage()
+            message.chat = SimpleNamespace(id=7)
+            message.from_user = SimpleNamespace(id=7)
+            message.message_id = 1
+            message.photo = [SimpleNamespace(file_id="photo", file_size=None, width=30, height=30)]
+            delivered = []
+
+            async def download(_file_id, *, destination, seek):
+                destination.write(b"\xff\xd8\xffsample")
+
+            async def send_message(**kwargs):
+                delivered.append(kwargs["text"])
+
+            message.download = download
+            message.send_message = send_message
+
+            async def exercise():
+                try:
+                    await fake.dispatcher.included_router.handler(message)
+                    self.assertEqual(message.answers, [receipt])
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    disabled = await asyncio.to_thread(self.send, "vk", processor, "/disable ask", 7)
+                    self.assertIn("Возможность ask выключена", disabled)
+                    release.set()
+                    self.assertTrue(await asyncio.to_thread(checked.wait, 5))
+                finally:
+                    release.set()
+                    await asyncio.to_thread(processor.close_deferred_actions)
+
+            asyncio.run(exercise())
+            self.assertEqual(delivered, [])
 
     def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
         """Сохраняет доступные метаданные всех вызовов после выхода каждого канала."""
