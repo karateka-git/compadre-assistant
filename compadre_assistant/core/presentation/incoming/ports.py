@@ -200,6 +200,7 @@ class CapabilityDescriptor:
     persistent_mode: bool = True  # Длительный вход требует явного выхода из режима.
     enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.
     accepts_images: bool = False  # Presentation возможности умеет обрабатывать события с фото.
+    requires_profile_access: bool = False  # Только профили, допущенные оператором.
 
 
 class CapabilityMode(StrEnum):

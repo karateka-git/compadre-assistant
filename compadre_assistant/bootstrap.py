@@ -8,7 +8,7 @@ from dataclasses import replace
 from threading import Event, RLock
 from pathlib import Path
 from contextlib import contextmanager
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
@@ -96,6 +96,7 @@ def create_incoming_message_dispatcher(
     chat_mode_repository: ChatModeRepository,
     capability_preference_repository: UserCapabilityPreferenceRepository,
     disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
+    profile_access: Mapping[str, Callable[[int], bool]] | None = None,
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
 
@@ -105,6 +106,7 @@ def create_incoming_message_dispatcher(
         chat_mode_repository: Хранилище режима конкретного чата.
         capability_preference_repository: Хранилище личного выбора AppUser.
         disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
+        profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
 
     Returns:
         Диспетчер с проверенным реестром точек входа.
@@ -113,7 +115,7 @@ def create_incoming_message_dispatcher(
         ValueError: Реестр содержит конфликт ID или команд входа.
     """
     return IncomingMessageDispatcher(
-        registry=CapabilityRegistry(capabilities, disabled_capabilities),
+        registry=CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
         capability_preference_repository=capability_preference_repository,
@@ -160,13 +162,15 @@ class ChannelMessageProcessor:
 
     def __init__(self, *, database_path: Path,
                  capabilities: tuple[IncomingCapabilityPort, ...],
-                 disabled_capabilities: tuple[CapabilityDescriptor, ...] = ()) -> None:
+                 disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
+                 profile_access: Mapping[str, Callable[[int], bool]] | None = None) -> None:
         """Регистрирует обработчики при запуске без соединения с SQLite.
 
         Args:
             database_path: Общий путь SQLite для коротких core scopes.
             capabilities: Уже собранные входы включённых возможностей.
             disabled_capabilities: Метаданные отключённых входов.
+            profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
 
         Raises:
             ValueError: Повторный ID или команда входа в реестре.
@@ -174,7 +178,7 @@ class ChannelMessageProcessor:
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
         self._response_actions = ResponseActionStore()
-        self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
+        self._registry = CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access)
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
         self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}
