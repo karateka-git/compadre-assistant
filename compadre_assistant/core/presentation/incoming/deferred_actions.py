@@ -86,7 +86,12 @@ class DeferredActions:
                 self._cancel_locked(action)
                 return
             action.submitted = True
-            self._executor.submit(self._run, action, work, finish)
+            try:
+                self._executor.submit(self._run, action, work, finish)
+            except RuntimeError:
+                self._cancel_locked(action)
+                self._slots.discard(action)
+                _LOGGER.error("Deferred input executor could not start work")
 
     def claim_result(self, action: DeferredAction) -> bool:
         """Освобождает чат в момент передачи результата, если отмена не успела первой."""

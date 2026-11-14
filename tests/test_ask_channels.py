@@ -56,6 +56,9 @@ class AskChannelsTest(unittest.TestCase):
 
     def send(self, channel, processor, text, chat_id=42, on_delivery=None, *, images=(), load=None):
         """Проводит сообщение через канал и возвращает доставленный текст."""
+        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        progress = ("Вопрос принят. Готовлю ответ…", receipt)
+        ocr_finished = threading.Event()
         if channel == "telegram":
             aiogram = FakeAiogram()
             _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=processor, logger=self.logger)
@@ -68,6 +71,7 @@ class AskChannelsTest(unittest.TestCase):
             message.answer = answer
             async def send_message(*, chat_id, text, parse_mode, reply_markup=None):
                 await answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
+                ocr_finished.set()
             message.send_message = send_message
             message.chat = SimpleNamespace(id=chat_id)
             message.from_user = SimpleNamespace(id=7, username=None, full_name="Тест")
@@ -82,16 +86,23 @@ class AskChannelsTest(unittest.TestCase):
                     destination.write(await asyncio.to_thread(load, file_id))
 
                 message.download = download
-            asyncio.run(aiogram.dispatcher.included_router.handler(message))
+            async def handle():
+                await aiogram.dispatcher.included_router.handler(message)
+                if receipt in message.answers:
+                    self.assertTrue(await asyncio.to_thread(ocr_finished.wait, 5))
+
+            asyncio.run(handle())
             self.delivered = message.answers
             self.keyboard = message.reply_markups[-1]
-            return "\n".join(text for text in message.answers if text != "Вопрос принят. Готовлю ответ…")
+            return "\n".join(text for text in message.answers if text not in progress)
         client = FakeVkClient()
         original_send = client.send_message
         def send_message(**kwargs):
             result = original_send(**kwargs)
             if on_delivery:
                 on_delivery(kwargs["text"])
+            if client.messages and client.messages[0][1] == receipt and len(client.messages) > 1:
+                ocr_finished.set()
             return result
         client.send_message = send_message
         attachments = [{"type": "photo", "photo": {"sizes": [{
@@ -109,11 +120,13 @@ class AskChannelsTest(unittest.TestCase):
 
             with patch("compadre_assistant.presentation.vk.photos._download", side_effect=download):
                 handle_update()
+                if client.messages[0][1] == receipt:
+                    self.assertTrue(ocr_finished.wait(5))
         else:
             handle_update()
         self.delivered = [item[1] for item in client.messages]
         self.keyboard = client.keyboards[-1]
-        return "\n".join(text for text in self.delivered if text != "Вопрос принят. Готовлю ответ…")
+        return "\n".join(text for text in self.delivered if text not in progress)
 
     def test_registered_questions_require_ai_mode_and_remain_independent(self) -> None:
         """Оба канала требуют регистрацию и явный вход в режим ИИ."""
@@ -460,7 +473,7 @@ class AskChannelsTest(unittest.TestCase):
                 first = executor.submit(self.send, channel, processor, "", images=("first",), load=load)
                 try:
                     self.assertTrue(loading.wait(5))
-                    self.assertIn("/get_text_from_image", self.send(
+                    self.assertIn("Обработка уже идёт", self.send(
                         channel, processor, "", images=("second",), load=load,
                     ))
                     self.assertEqual(downloaded, ["first"])

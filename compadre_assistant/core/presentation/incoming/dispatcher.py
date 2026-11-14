@@ -225,7 +225,7 @@ class IncomingMessageDispatcher:
         ))
         with self._pending_inputs.lock(event.reply_address):
             if busy := self._busy_response(event, allow_cancel=False):
-                return busy
+                return replace(busy, preserve_source_actions=True)
             entry = store.claim(event, token)
         if entry is None:
             return rejected
@@ -468,6 +468,11 @@ class IncomingMessageDispatcher:
                 user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
                 if user is not None and user.id == action.app_user_id and actions.cancel(action):
                     return IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
+        return self.busy_reply()
+
+    @staticmethod
+    def busy_reply() -> IncomingResponse:
+        """Возвращает общий ответ для временно занятого чата."""
         return IncomingResponse(compose_content(
             "Обработка уже идёт. Дождись результата или введи ", code_span("/cancel"), ".",
         ))

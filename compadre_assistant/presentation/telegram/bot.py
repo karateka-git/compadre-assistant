@@ -13,7 +13,7 @@ from io import BytesIO
 from typing import Any
 
 from compadre_assistant.core.presentation.incoming.events import (
-    ImageAttachment, ImageLoadError, IncomingEvent,
+    ImageAttachment, ImageLoadError, IncomingEvent, ReplyAddress,
 )
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
@@ -156,7 +156,13 @@ async def _run_telegram_bot(
             )
             if reconciliation_thread.is_alive():
                 logger.error("Telegram menu reconciliation did not stop before timeout")
-        await bot.session.close()
+        stop_actions = getattr(incoming_message_processor, "close_deferred_actions", None)
+        try:
+            if callable(stop_actions):
+                # Загрузчик уже запущенной работы может ждать этот event loop.
+                await asyncio.to_thread(stop_actions)
+        finally:
+            await bot.session.close()
 
 
 def _create_polling_bot(
@@ -292,9 +298,12 @@ def _register_handlers(
         """Передаёт текст или ленивое вложение общему входу приложения."""
         photo = getattr(message, "photo", None)
         if photo is None and not message.text:
+            check_busy = getattr(incoming_message_processor, "reply_for_unsupported_input", None)
+            address = ReplyAddress("telegram", str(message.chat.id))
+            busy = await asyncio.to_thread(check_busy, address) if callable(check_busy) else None
             await safe_send_telegram_reply(
                 message,
-                IncomingResponse(text_content(empty_message_reply)),
+                busy if isinstance(busy, IncomingResponse) else IncomingResponse(text_content(empty_message_reply)),
                 logger=logger,
             )
             return
@@ -309,17 +318,9 @@ def _register_handlers(
             loop=loop,
             logger=logger,
         )
-        if menu_update_handler is None:
-            result = await asyncio.to_thread(
-                incoming_message_processor, incoming_message, completion_handler,
-            )
-        else:
-            result = await asyncio.to_thread(
-                incoming_message_processor,
-                incoming_message,
-                completion_handler,
-                menu_update_handler,
-            )
+        result = await _process_telegram_update(
+            incoming_message_processor, (incoming_message, completion_handler), menu_update_handler,
+        )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
         await safe_send_telegram_reply(message, result, logger=logger)
@@ -358,23 +359,44 @@ def _register_handlers(
         )
         token = callback.data if isinstance(getattr(callback, "data", None), str) else ""
         select_action = incoming_message_processor.select_action
-        if menu_update_handler is None:
-            result = await asyncio.to_thread(select_action, event, token, completion_handler)
-        else:
-            result = await asyncio.to_thread(
-                select_action, event, token, completion_handler, menu_update_handler,
-            )
+        result = await _process_telegram_update(select_action, (event, token, completion_handler), menu_update_handler)
         if result.error is not None:
             logger.error("Telegram callback processing failed: %s", result.error)
-        try:
-            await callback.bot.edit_message_reply_markup(
-                chat_id=chat.id, message_id=source.message_id, reply_markup=None,
-            )
-        except Exception:
-            logger.exception("Telegram callback keyboard removal failed")
+        if not result.preserve_source_actions:
+            try:
+                await callback.bot.edit_message_reply_markup(
+                    chat_id=chat.id, message_id=source.message_id, reply_markup=None,
+                )
+            except asyncio.CancelledError:
+                if result.after_delivery is not None:
+                    result.after_delivery(False)
+                raise
+            except Exception:
+                logger.exception("Telegram callback keyboard removal failed")
         await safe_send_telegram_reply(target, result, logger=logger)
 
     dispatcher.include_router(router)
+
+
+async def _process_telegram_update(
+    process: Callable[..., IncomingResponse], args: tuple[Any, ...],
+    menu_update_handler: CommandMenuUpdateHandler | None,
+) -> IncomingResponse:
+    """Освобождает квитанцию, если handler отменён до получения ответа worker."""
+    if menu_update_handler is not None:
+        args += (menu_update_handler,)
+    worker = asyncio.create_task(asyncio.to_thread(process, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        def discard(task: asyncio.Task[IncomingResponse]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                after_delivery = task.result().after_delivery
+                if after_delivery is not None:
+                    after_delivery(False)
+
+        worker.add_done_callback(discard)
+        raise
 
 
 def _create_telegram_menu_update_handler(
@@ -684,6 +706,22 @@ async def safe_send_telegram_reply(
     Raises:
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
+    delivered = False
+    try:
+        delivered = await _send_telegram_reply(
+            message, response, logger=logger, limit=limit, sleeper=sleeper,
+            include_bound_actions=include_bound_actions,
+        )
+    finally:
+        if response.after_delivery is not None:
+            response.after_delivery(delivered)
+
+
+async def _send_telegram_reply(
+    message: Any, response: IncomingResponse, *, logger: logging.Logger, limit: int,
+    sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
+) -> bool:
+    """Доставляет все части ответа и возвращает факт успешной доставки."""
     chunks = render_telegram_content(response.content, response.actions, limit=limit)
     keyboard = (
         _optional_telegram_inline_keyboard(response, logger)
@@ -714,12 +752,13 @@ async def safe_send_telegram_reply(
                 target_id,
                 time.monotonic() - started_at,
             )
-            return
+            return False
     logger.info(
         "Telegram response send completed: chat_id=%s duration_seconds=%.3f",
         target_id,
         time.monotonic() - started_at,
     )
+    return bool(chunks)
 
 
 def _optional_telegram_inline_keyboard(response: IncomingResponse, logger: logging.Logger) -> Any | None:

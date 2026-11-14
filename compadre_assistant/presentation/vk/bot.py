@@ -13,7 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
     CommandMenuUpdateHandler, IncomingResponse,
@@ -164,7 +164,12 @@ def run_vk_bot(
             menu_thread.join(timeout=VK_LONG_POLL_WAIT_SECONDS + 5)
             if menu_thread.is_alive():
                 logger.error("VK menu reconciliation did not stop before timeout")
-        workers.close()
+        try:
+            workers.close()
+        finally:
+            stop_actions = getattr(incoming_message_processor, "close_deferred_actions", None)
+            if callable(stop_actions):
+                stop_actions()
 
 
 class _VkUpdateWorkers:
@@ -461,10 +466,12 @@ def _handle_update(
     from_id = _require_int(message.get("from_id"), "from_id")
 
     if not text and not images:
+        check_busy = getattr(incoming_message_processor, "reply_for_unsupported_input", None)
+        busy = check_busy(ReplyAddress("vk", str(peer_id))) if callable(check_busy) else None
         _safe_send_vk_message(
             client,
             peer_id=peer_id,
-            response=IncomingResponse(text_content(empty_message_reply)),
+            response=busy if isinstance(busy, IncomingResponse) else IncomingResponse(text_content(empty_message_reply)),
             logger=logger,
         )
         return
@@ -544,7 +551,7 @@ def _handle_message_event(
     if result.error is not None:
         logger.error("VK action selection failed: %s", result.error)
     cmid = data.get("conversation_message_id")
-    if isinstance(cmid, int) and not isinstance(cmid, bool) and cmid > 0:
+    if not result.preserve_source_actions and isinstance(cmid, int) and not isinstance(cmid, bool) and cmid > 0:
         try:
             client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=cmid)
         except VkBotError as error:
@@ -656,6 +663,22 @@ def _safe_send_vk_message(
     include_bound_actions: bool | None = None,
 ) -> None:
     """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
+    delivered = False
+    try:
+        delivered = _send_vk_message(
+            client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
+            limit=limit, include_bound_actions=include_bound_actions,
+        )
+    finally:
+        if response.after_delivery is not None:
+            response.after_delivery(delivered)
+
+
+def _send_vk_message(
+    client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
+    sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
+) -> bool:
+    """Доставляет все части ответа и возвращает факт успешной доставки."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
     show_bound_actions = (
         VK_INLINE_ACTIONS_ENABLED
@@ -698,12 +721,13 @@ def _safe_send_vk_message(
                 peer_id,
                 time.monotonic() - started_at,
             )
-            return
+            return False
     logger.info(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,
         time.monotonic() - started_at,
     )
+    return bool(chunks)
 
 
 def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:

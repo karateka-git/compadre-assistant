@@ -194,6 +194,20 @@ class ChannelMessageProcessor:
         """Останавливает отложенные действия до закрытия зависимостей возможностей."""
         self._deferred_actions.close()
 
+    def reply_for_unsupported_input(self, address: ReplyAddress) -> IncomingResponse | None:
+        """Возвращает состояние занятого чата для события без поддерживаемого ввода.
+
+        Args:
+            address: Исходный адрес сообщения без текста и поддерживаемых вложений.
+
+        Returns:
+            Ответ занятого чата либо None для обычной подсказки адаптера.
+        """
+        with self._pending_inputs.lock(address):
+            if self._deferred_actions.get(address) is not None:
+                return IncomingMessageDispatcher.busy_reply()
+        return None
+
     def _deferred_access(self, event: IncomingEvent, app_user_id: int,
                          capability_id: str, required_mode: str | None) -> bool:
         with connect_database(self._database_path) as connection:
@@ -381,7 +395,7 @@ class ChannelMessageProcessor:
 
             def deliver(reply: BackgroundReply) -> None:
                 """Связывает фоновые действия только с неизменившимся исходным чатом."""
-                response = replace(reply.response, bound_actions=())
+                response = replace(reply.response, bound_actions=(), after_delivery=None)
                 if original_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:

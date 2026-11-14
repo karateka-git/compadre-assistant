@@ -143,6 +143,8 @@ class IncomingResponse:
     bound_actions: tuple[BoundReplyAction, ...] = ()
     # Адаптер исходного ответа сообщает результат отправки ровно один раз.
     after_delivery: Callable[[bool], None] | None = field(default=None, repr=False, compare=False)
+    # Отклонённый из-за занятости выбор не потребляет токен и сохраняет клавиатуру.
+    preserve_source_actions: bool = False
 
 
 @dataclass(frozen=True, slots=True)

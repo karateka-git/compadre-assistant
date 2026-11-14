@@ -1,5 +1,7 @@
 """Представляет независимый вопрос и ожидаемые ошибки Ask любому каналу."""
 
+from collections.abc import Callable
+
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
 
 from compadre_assistant.capabilities.ask.domain.errors import (
@@ -117,10 +119,13 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             "Для отмены введи ", code_span("/cancel"), ".",
         ))
 
-    def _recognize(self, attachment: ImageAttachment) -> IncomingResponse:
+    def _recognize(self, attachment: ImageAttachment, is_cancelled: Callable[[], bool]) -> IncomingResponse:
         """Преобразует результат распознавания в текст для исходного канала."""
         try:
-            result = self._extract_image_text.execute(attachment.read_bytes())
+            data = attachment.read_bytes()
+            if is_cancelled():
+                return IncomingResponse(text_content(""))
+            result = self._extract_image_text.execute(data)
         except (ImageLoadError, InvalidOcrImageError):
             failure = "Не удалось прочитать фото. "
         except AskModelTimeoutError:
@@ -190,8 +195,9 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
                     "Пришли одно фото или скриншот либо введи ", code_span("/cancel"), ".",
                 )), PendingInputOutcome.RETRY)
             attachment = event.images[0]
-            return PendingInputResult(IncomingResponse(text_content("")), PendingInputOutcome.COMPLETE,
-                                      lambda: self._recognize(attachment))
+            receipt = IncomingResponse(text_content("Фото получено. Распознаю текст. Для отмены введи /cancel."))
+            return PendingInputResult(receipt, PendingInputOutcome.COMPLETE,
+                                      cancellable_action=lambda is_cancelled: self._recognize(attachment, is_cancelled))
         if pending.input_kind != "ask_question":
             return PendingInputResult(IncomingResponse(text_content(
                 "Ожидание вопроса недоступно. Повтори /ask."
