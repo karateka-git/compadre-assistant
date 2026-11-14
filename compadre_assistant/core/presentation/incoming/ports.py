@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
@@ -141,6 +141,8 @@ class IncomingResponse:
     actions: tuple[ConfirmationAction, ...] = ()
     suggested_actions: tuple[ReplyAction, ...] = ()
     bound_actions: tuple[BoundReplyAction, ...] = ()
+    # Адаптер исходного ответа сообщает результат отправки ровно один раз.
+    after_delivery: Callable[[bool], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,11 +270,15 @@ class PendingInputResult:
     response: IncomingResponse
     outcome: PendingInputOutcome
     action: Callable[[], IncomingResponse] | None = None  # Долгое действие после атомарного принятия ввода.
+    # Возвращает ответ исполнителя; переданный предикат сообщает об отмене.
+    cancellable_action: Callable[[Callable[[], bool]], IncomingResponse] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Запрещает внешнее действие до окончательного принятия значения."""
-        if self.action is not None and self.outcome is not PendingInputOutcome.COMPLETE:
+        if (self.action is not None or self.cancellable_action is not None) and self.outcome is not PendingInputOutcome.COMPLETE:
             raise ValueError("Отложенное действие требует complete")
+        if self.action is not None and self.cancellable_action is not None:
+            raise ValueError("Допускается только один исполнитель принятого действия")
 
 
 @runtime_checkable

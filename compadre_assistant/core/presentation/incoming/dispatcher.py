@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 import logging
 
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
+from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
@@ -106,9 +108,13 @@ class IncomingMessageDispatcher:
         chat_mode_repository: ChatModeRepository,
         capability_preference_repository: UserCapabilityPreferenceRepository,
         pending_inputs: PendingInputStore | None = None,
+        deferred_actions: DeferredActions | None = None,
+        deferred_access: Callable[[IncomingEvent, int, str, str | None], bool] | None = None,
     ) -> None:
         """Внедряет общий реестр и repositories независимого профиля."""
         self._pending_inputs = pending_inputs or PendingInputStore()
+        self._deferred_actions = deferred_actions
+        self._deferred_access = deferred_access
         self._registry = registry
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
@@ -217,7 +223,10 @@ class IncomingMessageDispatcher:
         rejected = IncomingResponse(text_content(
             "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
         ))
-        entry = store.claim(event, token)
+        with self._pending_inputs.lock(event.reply_address):
+            if busy := self._busy_response(event, allow_cancel=False):
+                return busy
+            entry = store.claim(event, token)
         if entry is None:
             return rejected
         try:
@@ -328,6 +337,11 @@ class IncomingMessageDispatcher:
         """
         from compadre_assistant.core.presentation.responses import format_incoming_message_result
 
+        # Пока операция активна, не вызываем даже чтение меню с обновлением identity.
+        if self._deferred_actions is not None:
+            with self._pending_inputs.lock(event.reply_address):
+                if busy := self._busy_response(event):
+                    return busy
         previous_menu = None
         previous_user = None
         previous_preferences = None
@@ -415,6 +429,8 @@ class IncomingMessageDispatcher:
     ) -> ProcessIncomingMessageResult | IncomingResponse:
         """Сериализует ожидание чата, затем запускает независимый обычный маршрут."""
         with self._pending_inputs.lock(event.reply_address):
+            if busy := self._busy_response(event):
+                return busy
             result = self._route_pending_input(event, completion_handler)
             if result is None and not event.text.strip() and not event.images:
                 return IncomingResponse(text_content(_TEXT_INPUT_HINT))
@@ -426,6 +442,8 @@ class IncomingMessageDispatcher:
                     return self._dispatch_message(event, completion_handler)
         if isinstance(result, PendingInputResult):
             try:
+                if result.cancellable_action is not None:
+                    return result.cancellable_action(lambda: False)
                 return result.action() if result.action is not None else result.response
             except Exception as error:
                 LOGGER.exception("Accepted pending input action failed")
@@ -433,6 +451,51 @@ class IncomingMessageDispatcher:
                     "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
                 ), error)
         return result if result is not None else self._dispatch_message(event, completion_handler)
+
+    def _busy_response(self, event: IncomingEvent, *, allow_cancel: bool = True) -> IncomingResponse | None:
+        """Ограничивает занятый чат, не меняя состояние и не запуская обычный маршрут."""
+        actions = self._deferred_actions
+        if actions is None:
+            return None
+        action = actions.get(event.reply_address)
+        if action is None:
+            return None
+        parsed = ParsedChatCommand.parse(event.text.strip()) if allow_cancel else None
+        if parsed is not None and parsed.command is ChatCommand.CANCEL:
+            if parsed.arguments:
+                return IncomingResponse(compose_content("Используй ", code_span("/cancel"), " без аргументов."))
+            if event.external_user_id is not None and action.external_user_id == event.external_user_id:
+                user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
+                if user is not None and user.id == action.app_user_id and actions.cancel(action):
+                    return IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
+        return IncomingResponse(compose_content(
+            "Обработка уже идёт. Дождись результата или введи ", code_span("/cancel"), ".",
+        ))
+
+    def may_finish_deferred(self, event: IncomingEvent, app_user_id: int,
+                            capability_id: str, required_mode: str | None) -> bool:
+        """Перепроверяет исходную личность, доступ и режим в новом scope перед доставкой.
+
+        Args:
+            event: Адрес и личность без содержимого принятого ввода.
+            app_user_id: Профиль, которому принадлежит принятая работа.
+            capability_id: Владелец работы и профильного допуска.
+            required_mode: Обязательный активный режим либо None.
+
+        Returns:
+            True, если этот профиль по-прежнему может получить результат.
+        """
+        user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
+        if user is None or user.id != app_user_id or self._personal_registry(user, event).by_id(capability_id) is None:
+            return False
+        if is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+            if known is None or known[0].id != user.id or known[1].external_user_id != event.external_user_id:
+                return False
+        if required_mode is None:
+            return True
+        mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+        return mode is not None and mode.capability_id == required_mode
 
     def _route_pending_input(
         self, event: IncomingEvent,
@@ -757,9 +820,41 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
             ), error)
+        if (result.cancellable_action is not None and completion_handler is not None and event.external_user_id is not None
+                and self._deferred_actions is not None and self._deferred_access is not None):
+            return self._defer_pending_input(pending, event, user.id, result, completion_handler)
         if result.outcome is PendingInputOutcome.COMPLETE:
             self._pending_inputs.clear(event.reply_address, pending.request_id)
         return result
+
+    def _defer_pending_input(
+        self, pending: PendingInput, event: IncomingEvent, app_user_id: int,
+        result: PendingInputResult, completion_handler: ChannelCompletionHandler,
+    ) -> IncomingResponse:
+        """Под блокировкой чата резервирует работу и возвращает квитанцию без I/O."""
+        actions, work, may_finish = self._deferred_actions, result.cancellable_action, self._deferred_access
+        assert actions is not None and work is not None and may_finish is not None
+        action = actions.reserve(event.reply_address, app_user_id, event.external_user_id)
+        if action is None:
+            return IncomingResponse(text_content("Обработка сейчас занята. Попробуй отправить значение позже."))
+        if not self._pending_inputs.clear(event.reply_address, pending.request_id):
+            actions.cancel(action)
+            return IncomingResponse(text_content("Ввод уже изменился. Повтори команду."))
+        origin = replace(event, text="принятый ввод", images=())
+        pending_inputs = self._pending_inputs
+
+        def finish(response: IncomingResponse) -> None:
+            with pending_inputs.lock(action.address):
+                if action.cancelled.is_set() or not may_finish(origin, app_user_id, pending.owner_id, pending.required_mode):
+                    return
+                if not actions.claim_result(action):
+                    return
+            completion_handler(BackgroundReply(action.address, response))
+
+        def after_delivery(delivered: bool) -> None:
+            actions.after_delivery(action, delivered, work, finish)
+
+        return replace(result.response, after_delivery=after_delivery)
 
     def _continue_core_input(self, pending: PendingInput, event: IncomingEvent) -> ProcessIncomingMessageResult | IncomingResponse:
         """Повторно проверяет профиль и завершает либо сохраняет исходное ожидание."""

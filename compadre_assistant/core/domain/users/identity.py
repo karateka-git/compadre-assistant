@@ -90,6 +90,20 @@ class UserIdentityService:
         self._external_identity_repository.touch(identity)
         return self._app_user_repository.get_by_id(external_identity.app_user_id)
 
+    def resolve_without_touch(self, identity: IncomingIdentity) -> AppUser | None:
+        """Повторно читает владельца внешней личности без обновления адреса и профиля.
+
+        Args:
+            identity: Исходная личность и адрес принятого ввода.
+
+        Returns:
+            Профиль при действующей связи либо None.
+        """
+        external_identity = self._external_identity_repository.find(identity)
+        if external_identity is None:
+            return None
+        return self._app_user_repository.get_by_id(external_identity.app_user_id)
+
     def list_known_private_chats(self, user: AppUser) -> tuple[IncomingIdentity, ...]:
         """Перечисляет сохранённые личные чаты проверенного профиля.
 

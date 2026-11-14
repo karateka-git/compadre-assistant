@@ -18,6 +18,7 @@ from compadre_assistant.capabilities.admin.presentation.handler import AdminCapa
 from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -180,6 +181,7 @@ class ChannelMessageProcessor:
         """
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
+        self._deferred_actions = DeferredActions()
         self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access)
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
@@ -187,6 +189,21 @@ class ChannelMessageProcessor:
         self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
+
+    def close_deferred_actions(self) -> None:
+        """Останавливает отложенные действия до закрытия зависимостей возможностей."""
+        self._deferred_actions.close()
+
+    def _deferred_access(self, event: IncomingEvent, app_user_id: int,
+                         capability_id: str, required_mode: str | None) -> bool:
+        with connect_database(self._database_path) as connection:
+            dispatcher = IncomingMessageDispatcher(
+                registry=self._registry,
+                user_identity_service=create_user_identity_service(connection),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
+            )
+            return dispatcher.may_finish_deferred(event, app_user_id, capability_id, required_mode)
 
     @property
     def menu_delivery_failures(self) -> dict[ReplyAddress, str]:
@@ -343,10 +360,16 @@ class ChannelMessageProcessor:
                  menu_update_handler: CommandMenuUpdateHandler | None,
                  *, token: str | None = None) -> IncomingResponse:
         menu_updates: list[CommandMenuUpdate] = []
+        origin = IncomingEvent(
+            incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
+            "ответ", incoming_message.external_user_id,
+        )
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 pending_inputs=self._pending_inputs,
+                deferred_actions=self._deferred_actions,
+                deferred_access=self._deferred_access,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
@@ -359,7 +382,7 @@ class ChannelMessageProcessor:
             def deliver(reply: BackgroundReply) -> None:
                 """Связывает фоновые действия только с неизменившимся исходным чатом."""
                 response = replace(reply.response, bound_actions=())
-                if original_context is not None and reply.address == incoming_message.reply_address:
+                if original_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:
                             background_dispatcher = IncomingMessageDispatcher(
@@ -368,9 +391,9 @@ class ChannelMessageProcessor:
                                 chat_mode_repository=SQLiteChatModeRepository(background_connection),
                                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
                             )
-                            if background_dispatcher.action_context(incoming_message) == original_context:
+                            if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
-                                    incoming_message, response, self._response_actions,
+                                    origin, response, self._response_actions,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
@@ -466,12 +489,16 @@ def create_channel_message_processor(
                 capabilities += (admin,)
             else:
                 disabled += (AdminCapability.descriptor,)
-            yield ChannelMessageProcessor(
+            processor = ChannelMessageProcessor(
                 database_path=database_path,
                 capabilities=capabilities,
                 disabled_capabilities=disabled,
                 profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,
             )
+            try:
+                yield processor
+            finally:
+                processor.close_deferred_actions()
     finally:
         if runtime is not None:
             runtime.close()
