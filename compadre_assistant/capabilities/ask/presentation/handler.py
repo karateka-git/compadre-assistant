@@ -11,7 +11,7 @@ from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import As
 from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.core.presentation.incoming.events import ImageAttachment, ImageLoadError, IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
+    CancellableAction, CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
     HelpSection,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
     PendingInputResult, PendingInputOutcome, PendingInput, ReplyAction,
@@ -21,6 +21,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
 _OCR_COMMAND = "/get_text_from_image"
 _OCR_INPUT_KIND = "ocr_image"
 _OCR_ACTION = ReplyAction("Извлечь текст с фото", _OCR_COMMAND)
+_QUESTION_RECEIPT = IncomingResponse(text_content("Вопрос принят. Готовлю ответ… Для отмены введи /cancel."))
 
 
 class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
@@ -35,6 +36,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         )),)),
         enabled_by_default=True,
         accepts_images=True,
+        display_name="Режим ИИ",
     )
 
     def __init__(self, question: AskQuestion, extract_image_text: ExtractImageText) -> None:
@@ -95,13 +97,34 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             context.pending_inputs.begin(
                 event.reply_address, "ask", "ask_question",
                 app_user_id=context.app_user.id, required_mode="ask",
-                value_label="вопрос для модели", retry_command="/ask",
+                value_label="вопрос для модели", retry_command="/ask", cancel_only_menu=True,
             )
             return CapabilityResult(IncomingResponse(text_content(
                 "Введи один вопрос для модели следующим сообщением. "
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
             )))
-        return CapabilityResult(self._answer(context, event, question))
+        try:
+            question = self._question.validate_question(question)
+        except EmptyQuestionError as error:
+            return CapabilityResult(IncomingResponse(text_content(
+                "Напиши вопрос после команды: /ask <question>."
+            ), error))
+        except QuestionTooLongError as error:
+            retry_content = compose_content(
+                str(error), " Повтори ", code_span("/ask <question>"),
+                " с допустимым вопросом.",
+            )
+            if context.pending_inputs is not None:
+                retry_content = compose_content(
+                    retry_content, " Чтобы ввести вопрос следующим сообщением, вызови ",
+                    code_span("/ask"), ".",
+                )
+            return CapabilityResult(IncomingResponse(
+                retry_content, error,
+                suggested_actions=(ReplyAction("Ввести вопрос заново", "/ask"),)
+                if context.pending_inputs is not None else (),
+            ))
+        return CapabilityResult(_QUESTION_RECEIPT, cancellable_action=self._question_action(question))
 
     def _begin_ocr(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> IncomingResponse:
         """Запоминает профиль и режим, в которых можно принять одно фото."""
@@ -112,7 +135,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         context.pending_inputs.begin(
             event.reply_address, "ask", _OCR_INPUT_KIND,
             app_user_id=context.app_user.id, required_mode="ask", accepts_images=True,
-            value_label="фото для распознавания", retry_command=_OCR_COMMAND,
+            value_label="фото для распознавания", retry_command=_OCR_COMMAND, cancel_only_menu=True,
         )
         return IncomingResponse(compose_content(
             "Пришли одно фото или скриншот следующим сообщением. Ожидание действует 10 минут. "
@@ -138,34 +161,19 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             failure, "Чтобы попробовать ещё раз, вызови ", code_span(_OCR_COMMAND), " и пришли фото.",
         ), suggested_actions=(_OCR_ACTION,))
 
-    def _answer(self, context: HandlerContext, event: IncomingEvent, question: str) -> IncomingResponse:
-        """Выполняет один вопрос и преобразует ошибки модели в ответы чата."""
-        def notify() -> None:
-            """Подтверждает приём перед сетевым запросом через общий delivery port."""
-            if context.delivery is not None:
-                context.delivery.send(
-                    event.reply_address, IncomingResponse(compose_content('Вопрос принят. Готовлю ответ…'))
-                )
+    def _question_action(self, question: str) -> CancellableAction:
+        """Передаёт исполнителю только уже проверенный вопрос."""
+        def answer(is_cancelled: Callable[[], bool]) -> IncomingResponse:
+            if is_cancelled():
+                return IncomingResponse(text_content(""))
+            return self._answer(question)
 
+        return answer
+
+    def _answer(self, question: str) -> IncomingResponse:
+        """Выполняет проверенный вопрос и преобразует ошибки модели в ответы чата."""
         try:
-            response = IncomingResponse(text_content(self._question.execute(question, on_request=notify)))
-        except EmptyQuestionError as error:
-            response = IncomingResponse(compose_content('Напиши вопрос после команды: /ask <question>.'), error)
-        except QuestionTooLongError as error:
-            retry_content = compose_content(
-                str(error), " Повтори ", code_span("/ask <question>"),
-                " с допустимым вопросом.",
-            )
-            if context.pending_inputs is not None:
-                retry_content = compose_content(
-                    retry_content, " Чтобы ввести вопрос следующим сообщением, вызови ",
-                    code_span("/ask"), ".",
-                )
-            response = IncomingResponse(
-                retry_content, error,
-                suggested_actions=(ReplyAction("Ввести вопрос заново", "/ask"),)
-                if context.pending_inputs is not None else (),
-            )
+            response = IncomingResponse(text_content(self._question.execute(question)))
         except AskModelTimeoutError as error:
             response = IncomingResponse(compose_content(
                 'Модель не успела ответить. Попробуй повторить /ask позже.',
@@ -212,5 +220,5 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             return PendingInputResult(IncomingResponse(text_content(
                 str(error) + " Сократи вопрос и отправь его ещё раз или введи /cancel."
             ), error), PendingInputOutcome.RETRY)
-        return PendingInputResult(IncomingResponse(text_content("")), PendingInputOutcome.COMPLETE,
-                                  lambda: self._answer(context, event, question))
+        return PendingInputResult(_QUESTION_RECEIPT, PendingInputOutcome.COMPLETE,
+                                  cancellable_action=self._question_action(question))
