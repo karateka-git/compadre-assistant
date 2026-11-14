@@ -31,7 +31,22 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 14.11.2026
+## Последний проверенный снимок 14.11.2026, после 12:25 UTC
+
+| Область | Наблюдение 14.11.2026 |
+| --- | --- |
+| Установленный выпуск | `v4.0.1`, SHA `f2da286c02efed55c2174e30aee2a1ad2af05e40`. Immutable Release `445276602`, опубликован в 12:21:12 UTC. Свежий `verify-installed` подтвердил тот же выпуск. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.0.1) |
+| База CI | Deployment `7787504840`, текущий статус `22192852889` (`success`). Допуск: полный CI `release/4.0` `43593475624`, попытка 1, на точном SHA. [Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7787504840/statuses) · [CI выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/43593475624/attempts/1) |
+| Контроллер и policy | Отдельный снимок контроллера, GitHub variable `COMPATIBILITY_POLICY_SHA` и локальный policy pin — `93bae08cb653ce47175aca4d5b13ac896942b7a6`. Закреплённый набор из 177 тестов подтвердил совместимость с `v4.0.0`. [CI контроллера](https://github.com/karateka-git/compadre-assistant/actions/runs/43593472650/attempts/1) |
+| SQLite и backup | Активное поколение `727297ced399407589cff7fce8da5179`, миграция `0005_ask_usage.sql`. Штатная очистка прежнего поколения завершена. Штатный backup активной SQLite завершился успешно в 12:25:14 UTC. |
+| Каналы и systemd | Оба контейнера `healthy`, перезапусков ноль, запуск polling подтверждён. Основной unit и таймер backup активны. |
+| Пользовательская приёмка | Меню и отмену на `v4.0.1` ещё предстоит проверить в личных чатах. Admin выключен. |
+
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43594411914/job/132445758508) ·
+[Метрики выкладки](DEPLOY_METRICS.md#разбивка-по-этапам) ·
+[Порядок проверки VPS](OPERATIONS.md#подготовка-и-запуск-версии).
+
+## Исторический снимок 14.11.2026, после 10:53 UTC
 
 | Область | Наблюдение 14.11.2026 |
 | --- | --- |
