@@ -52,6 +52,9 @@ class TimewebCostStatisticsReader(CostStatisticsReader):
             start: Нижняя граница периода включительно.
             end: Верхняя граница периода исключительно.
 
+        Returns:
+            Стоимость и число часовых интервалов без цены.
+
         Raises:
             IncompleteCostPeriod: Ответ не подтверждает покрытие периода.
             CostSourceError: Сетевая ошибка или непригодный ответ.
@@ -59,6 +62,9 @@ class TimewebCostStatisticsReader(CostStatisticsReader):
         """
         if start.utcoffset() != timedelta(0) or end.utcoffset() != timedelta(0) or start >= end:
             raise ValueError("Timeweb требуется непустой интервал UTC.")
+        # Timeweb включает час переданного конца. Переводим полуоткрытый
+        # интервал в закрытый с точностью datetime, сохраняя точное начало.
+        inclusive_end = end - datetime.resolution
         try:
             response = self._client.get(
                 _STATISTICS_URL,
@@ -67,7 +73,7 @@ class TimewebCostStatisticsReader(CostStatisticsReader):
                     "entity_id": str(self._config.key_id),
                     "entity_type": "aikey",
                     "start_time": _utc_isoformat(start),
-                    "end_time": _utc_isoformat(end),
+                    "end_time": _utc_isoformat(inclusive_end),
                     "interval": _INTERVAL_MINUTES,
                 },
                 follow_redirects=False,
@@ -81,7 +87,7 @@ class TimewebCostStatisticsReader(CostStatisticsReader):
             raise CostSourceError("Не удалось прочитать статистику Timeweb.")
         try:
             parsed = _parse_statistics(response.content)
-            return _map_statistics(parsed, start, end)
+            return _map_statistics(parsed, start, inclusive_end)
         except (KeyError, TypeError, ValueError, OverflowError, RecursionError, DecimalException):
             _LOGGER.warning("API статистики Timeweb вернул некорректный ответ.")
             raise CostSourceError("Некорректный ответ API статистики Timeweb.") from None
@@ -125,19 +131,20 @@ def _nonnegative_decimal(value: object) -> Decimal:
     return amount
 
 
-def _map_statistics(response: _TimewebStatisticsResponse, start: datetime, end: datetime) -> CostStatistics:
+def _map_statistics(response: _TimewebStatisticsResponse, start: datetime, inclusive_end: datetime) -> CostStatistics:
     if response.total != len(response.points):
         raise IncompleteCostPeriod("Ответ Timeweb содержит неполное число точек.")
     seen = {point.time for point in response.points}
     if len(seen) != len(response.points):
         raise ValueError("В ответе есть повторные интервалы.")
 
-    # До живой сверки считаем, что API строит часовые интервалы от start_time,
-    # включая последний неполный интервал и интервалы без запросов.
-    expected_count = -((start - end) // _INTERVAL)
-    if len(seen) != expected_count or any(
-        not start <= timestamp < end or (timestamp - start) % _INTERVAL for timestamp in seen
-    ):
+    # Метка точки обозначает час UTC. Начальный и конечный часы могут
+    # содержать только часть запрошенного окна, включая часы без запросов.
+    first_hour = start.replace(minute=0, second=0, microsecond=0)
+    last_hour = inclusive_end.replace(minute=0, second=0, microsecond=0)
+    expected_count = (last_hour - first_hour) // _INTERVAL + 1
+    expected_hours = {first_hour + index * _INTERVAL for index in range(expected_count)}
+    if seen != expected_hours:
         raise IncompleteCostPeriod("Ответ Timeweb не покрывает запрошенный интервал.")
 
     known = [point.total_cost for point in response.points if point.total_cost is not None]

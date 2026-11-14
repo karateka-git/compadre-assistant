@@ -23,7 +23,7 @@ _LOGGER = "compadre_assistant.capabilities.admin.data.timeweb_statistics"
 
 
 def _point(hour_offset: int, cost: object) -> dict[str, object]:
-    point = _START + timedelta(hours=hour_offset)
+    point = _START.replace(minute=0) + timedelta(hours=hour_offset)
     return {"time": point.isoformat(), "total_cost": cost}
 
 
@@ -61,7 +61,7 @@ class TimewebCostStatisticsReaderTest(unittest.TestCase):
         self.assertEqual(request.headers["Authorization"], f"Bearer {_TOKEN}")
         self.assertEqual(dict(request.url.params), {
             "entity_id": str(_KEY), "entity_type": "aikey", "start_time": "2026-11-14T18:17:00Z",
-            "end_time": "2026-11-14T20:48:00.000042Z", "interval": "60",
+            "end_time": "2026-11-14T20:48:00.000041Z", "interval": "60",
         })
         self.assertEqual(request.extensions["timeout"]["read"], 3.0)
 
@@ -69,9 +69,9 @@ class TimewebCostStatisticsReaderTest(unittest.TestCase):
         """Дроби из JSON не проходят через float, порядок точек не влияет на итог."""
         self.reply = httpx.Response(200, content=(
             b'{"meta":{"total":3.0},"ai_key_token_statistics":['
-            b'{"time":"2026-11-14T20:17:00Z","total_cost":null},'
-            b'{"time":"2026-11-14T18:17:00Z","total_cost":0.100000000000000001},'
-            b'{"time":"2026-11-14T22:17:00+03:00","total_cost":0.2}]}'
+            b'{"time":"2026-11-14T20:00:00Z","total_cost":null},'
+            b'{"time":"2026-11-14T18:00:00Z","total_cost":0.100000000000000001},'
+            b'{"time":"2026-11-14T22:00:00+03:00","total_cost":0.2}]}'
         ))
         with localcontext(prec=2):
             self.assertEqual(self.reader.read_period(_START, _END), CostStatistics(Decimal("0.300000000000000001"), 1))
@@ -88,11 +88,43 @@ class TimewebCostStatisticsReaderTest(unittest.TestCase):
             ([_point(0, 0), _point(2, 0)], 2),
             ([_point(0, 0), _point(1, 0), _point(2, 0)], 4),
             ([_point(1, 0), _point(2, 0), _point(3, 0)], 3),
-            ([{"time": _START.replace(minute=0).isoformat(), "total_cost": 0}, _point(1, 0), _point(2, 0)], 3),
+            ([{"time": _START.isoformat(), "total_cost": 0}, _point(1, 0), _point(2, 0)], 3),
         ):
             self.reply = _response(points, total)
             with self.subTest(points=points, total=total), self.assertRaises(IncompleteCostPeriod):
                 self.reader.read_period(_START, _END)
+
+    def test_utc_grid_covers_fractional_windows_and_excludes_exact_end_hour(self) -> None:
+        """Данные включают части граничных часов и отклоняют лишний час."""
+        hour = _START.replace(hour=6, minute=0)
+        for start_delta, end_delta, api_end, expected_hours in (
+            (timedelta(), timedelta(hours=3), "08:59:59.999999", (6, 7, 8)),
+            (timedelta(minutes=15), timedelta(hours=3, minutes=5), "09:04:59.999999", (6, 7, 8, 9)),
+            (timedelta(hours=1, minutes=45), timedelta(hours=1, minutes=59, seconds=59), "07:59:58.999999", (7,)),
+            (timedelta(hours=1, minutes=45), timedelta(hours=2), "07:59:59.999999", (7,)),
+            (timedelta(hours=1, minutes=45), timedelta(hours=2, microseconds=1), "08:00:00", (7, 8)),
+        ):
+            start, end = hour + start_delta, hour + end_delta
+            points = [{"time": hour.replace(hour=value).isoformat(), "total_cost": 0} for value in expected_hours]
+            with self.subTest(start=start, end=end):
+                self.reply = _response(points)
+                self.assertEqual(self.reader.read_period(start, end), CostStatistics(Decimal(0)))
+                params = self.requests[-1].url.params
+                self.assertEqual(datetime.fromisoformat(params["start_time"]), start)
+                self.assertEqual(params["end_time"], f"2026-11-14T{api_end}Z")
+                extra = {"time": hour.replace(hour=expected_hours[-1] + 1).isoformat(), "total_cost": 0}
+                self.reply = _response([*points, extra])
+                with self.assertRaises(IncompleteCostPeriod):
+                    self.reader.read_period(start, end)
+
+    def test_one_microsecond_window_sends_equal_api_bounds(self) -> None:
+        """Одна микросекунда — точечный запрос внутри одной часовой метки."""
+        start = _START + timedelta(microseconds=1)
+        self.reply = _response([_point(0, 0)])
+        self.assertEqual(self.reader.read_period(start, start + datetime.resolution), CostStatistics(Decimal(0)))
+        params = self.requests[-1].url.params
+        self.assertEqual(params["start_time"], "2026-11-14T18:17:00.000001Z")
+        self.assertEqual(params["end_time"], params["start_time"])
 
     def test_malformed_response_has_safe_failure(self) -> None:
         """Повтор, неверная метка, отсутствующая цена и плохой JSON отклоняются."""
