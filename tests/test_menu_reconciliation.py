@@ -127,6 +127,45 @@ class MenuReconciliationTest(unittest.TestCase):
         self.assertNotIn("/cancel", self.commands())
         self.assertFalse(self.processor.menu_delivery_failures)
 
+    def test_menu_with_reply_is_published_once_and_retry_stays_addressed(self):
+        """Успех ответа фиксирует меню, а отказ сохраняет адрес для сверки."""
+        event = self.event("/name")
+        response_updates = []
+
+        def deliver(update):
+            response_updates.append(update)
+            return True, True if update is not None else None
+
+        self.processor(event, menu_update_handler=self.updates.append, defer_origin_menu=True)
+        self.assertEqual(self.updates, [])
+        self.assertTrue(self.processor.deliver_response_menu(event, self.updates.append, deliver))
+        self.assertTrue(self.processor.deliver_response_menu(event, self.updates.append, deliver))
+        self.assertEqual(self.updates, [])
+        self.assertIn("/cancel", [item.command for item in response_updates[0].menu.items])
+        self.assertIsNone(response_updates[1])
+
+        event = self.event("/cancel")
+        self.processor(event, menu_update_handler=self.updates.append, defer_origin_menu=True)
+        self.assertFalse(self.processor.deliver_response_menu(event, self.updates.append, lambda _: (False, False)))
+        self.assertIn(event.reply_address, self.processor.menu_delivery_failures)
+        self.assertEqual(self.updates, [])
+        self.processor.reconcile_menus(self.updates.append)
+        self.assertNotIn("/cancel", self.commands())
+        self.assertFalse(self.processor.menu_delivery_failures)
+
+    def test_response_menu_rechecks_ownership_before_fallback_and_acknowledgement(self):
+        """Исчезновение владельца во время ответа отменяет фиксацию и fallback."""
+        event = self.event("/help")
+        for menu_delivered in (None, True):
+            with self.subTest(menu_delivered=menu_delivered):
+                snapshot = self.processor._read_menu_snapshot(event, allow_unknown=True)
+                with patch.object(self.processor, "_read_menu_snapshot", side_effect=(snapshot, None)):
+                    self.assertTrue(self.processor.deliver_response_menu(
+                        event, self.updates.append, lambda _: (True, menu_delivered),
+                    ))
+                self.assertEqual(self.updates, [])
+                self.assertIn(event.reply_address, self.processor.menu_delivery_failures)
+
     def test_incomplete_confirmation_snapshot_defers_delivery(self):
         """Неполный снимок убирает прежнюю /confirm и не дублирует восстановление."""
         confirmation = PendingConfirmation(

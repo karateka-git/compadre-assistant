@@ -2,6 +2,7 @@ from compadre_assistant.core.presentation.message_content import text_content
 """Тесты VK presentation adapter."""
 
 import logging
+import json
 from threading import Event, Thread
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,7 @@ from compadre_assistant.presentation.vk.bot import (
     _create_vk_menu_update_handler,
     _handle_update,
     _long_poll_retry_delay,
+    _response_menu_delivery,
     _safe_send_vk_message,
     _serialize_vk_inline_keyboard,
     run_vk_bot,
@@ -716,6 +718,63 @@ class VkBotTest(unittest.TestCase):
         self.assertNotEqual(first_a, menu_b_id)
         self.assertNotEqual(menu_b_id, second_a)
         self.assertEqual(second_a, retried_a)
+
+    def test_reply_menu_restarts_addressed_retry_after_transition(self) -> None:
+        """Новое меню в ответе завершает старую серию адресных повторов."""
+        client = FakeVkClient()
+        logger = logging.getLogger("test.vk.menu.reply-transition")
+        publish = _create_vk_menu_update_handler(client, logger=logger)
+        event = IncomingEvent("vk", "22", "msg", "/status", "22")
+        update_a = CommandMenuUpdate(event.reply_address, CommandMenu((CommandSuggestion("/help", "Помощь"),)))
+        update_b = CommandMenuUpdate(event.reply_address, CommandMenu((CommandSuggestion("/status", "Состояние"),)))
+
+        class Processor:
+            def deliver_response_menu(self, event, handler, send):
+                delivered, menu_delivered = send(update_b)
+                self_outer.assertTrue(menu_delivered)
+                return delivered
+
+        self_outer = self
+        deliver = _response_menu_delivery(Processor(), publish)
+        publish(update_a)
+        _safe_send_vk_message(client, peer_id=22, response=IncomingResponse(text_content("Готово")),
+                              logger=logger, deliver_menu=lambda send: deliver(event, send))
+        publish(update_a)
+        publish(update_a)
+        self.assertEqual([text for _, text in client.messages], [
+            "Меню команд обновлено.", "Готово", "Меню команд обновлено.", "Меню команд обновлено.",
+        ])
+        self.assertNotEqual(client.keyboards[0], client.keyboards[1])
+        self.assertEqual(client.keyboards[0], client.keyboards[2])
+        self.assertNotEqual(client.random_ids[0], client.random_ids[2])
+        self.assertEqual(client.random_ids[2], client.random_ids[3])
+
+    def test_reply_menu_preserves_inline_and_falls_back_only_without_available_chunk(self) -> None:
+        """Адресная публикация нужна для пустого ответа и единственной inline-части."""
+        logger = logging.getLogger("test.vk.menu.inline-fallback")
+        update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
+        for content, limit, expected_texts, expected_inline in (
+            ("", 20, ["Меню команд обновлено."], [False]),
+            ("Готово", 20, ["Готово", "Меню команд обновлено."], [True, False]),
+            ("abcdefghij", 4, ["abcd", "efgh", "ij"], [None, False, True]),
+        ):
+            with self.subTest(content=content):
+                client = FakeVkClient()
+                publish = _create_vk_menu_update_handler(client, logger=logger)
+                actions = (BoundReplyAction("Да", "opaque", "response"),) if content else ()
+
+                def deliver(send):
+                    delivered, menu_delivered = send(update)
+                    if menu_delivered is None:
+                        publish(update)
+                    return delivered
+
+                _safe_send_vk_message(client, peer_id=22, logger=logger, limit=limit,
+                                      response=IncomingResponse(text_content(content), bound_actions=actions),
+                                      deliver_menu=deliver)
+                self.assertEqual([text for _, text in client.messages], expected_texts)
+                self.assertEqual([json.loads(k)["inline"] if k is not None else None for k in client.keyboards],
+                                 expected_inline)
 
     def test_vk_runtime_starts_and_stops_menu_reconciliation_without_changing_replies(self) -> None:
         """Runtime запускает сверку и сохраняет штатную доставку текстового ответа."""

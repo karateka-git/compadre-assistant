@@ -84,11 +84,7 @@ def run_vk_bot(
     """
     api_client = client or VkApiClient(token=token)
     menu_stop = Event()
-    publish_menu = _create_vk_menu_update_handler(api_client, logger=logger)
-
-    def menu_update_handler(update: CommandMenuUpdate) -> None:
-        if not menu_stop.is_set():
-            publish_menu(update)
+    menu_update_handler = _create_vk_menu_update_handler(api_client, logger=logger, stop=menu_stop)
 
     runtime_menu_handler = (
         menu_update_handler
@@ -488,14 +484,21 @@ def _handle_update(
         external_user_id=str(from_id),
         images=images,
     )
+    deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(
         client,
         logger=logger,
+        origin=incoming_message,
+        deliver_menu=deliver_menu,
     )
     if menu_update_handler is None:
         result = incoming_message_processor(incoming_message, completion_handler)  # type: ignore[call-arg]
-    else:
+    elif deliver_menu is None:
         result = incoming_message_processor(incoming_message, completion_handler, menu_update_handler)
+    else:
+        result = incoming_message_processor(  # type: ignore[call-arg]
+            incoming_message, completion_handler, menu_update_handler, defer_origin_menu=True,
+        )
     if result.error is not None:
         logger.error("VK incoming message processing failed: %s", result.error)
     _safe_send_vk_message(
@@ -503,6 +506,7 @@ def _handle_update(
         peer_id=peer_id,
         response=result,
         logger=logger,
+        deliver_menu=_menu_delivery_for_event(deliver_menu, incoming_message),
     )
 
 
@@ -548,11 +552,14 @@ def _handle_message_event(
         channel="vk", chat_id=str(peer_id), message_id=event_id,
         text=token, external_user_id=str(user_id),
     )
-    completion_handler = _create_vk_completion_handler(client, logger=logger)
+    deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
+    completion_handler = _create_vk_completion_handler(client, logger=logger, origin=event, deliver_menu=deliver_menu)
     if menu_update_handler is None:
         result = select_action(event, token, completion_handler)
-    else:
+    elif deliver_menu is None:
         result = select_action(event, token, completion_handler, menu_update_handler)
+    else:
+        result = select_action(event, token, completion_handler, menu_update_handler, defer_origin_menu=True)
     if result.error is not None:
         logger.error("VK action selection failed: %s", result.error)
     cmid = data.get("conversation_message_id")
@@ -561,59 +568,103 @@ def _handle_message_event(
             client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=cmid)
         except VkBotError as error:
             logger.warning("VK inline keyboard cleanup failed: %s", error)
-    _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger)
+    _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger,
+                          deliver_menu=_menu_delivery_for_event(deliver_menu, event))
+
+
+_SendWithMenu = Callable[[CommandMenuUpdate | None], tuple[bool, bool | None]]
+_DeliverMenu = Callable[[IncomingEvent, _SendWithMenu], bool]
+
+
+def _response_menu_delivery(
+    processor: IncomingMessageProcessor, handler: CommandMenuUpdateHandler | None,
+) -> _DeliverMenu | None:
+    deliver = getattr(processor, "deliver_response_menu", None)
+    if handler is None or not callable(deliver):
+        return None
+
+    def deliver_reply(event: IncomingEvent, send: _SendWithMenu) -> bool:
+        def send_and_track(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
+            delivered, menu_delivered = send(update)
+            if menu_delivered is not None and update is not None and isinstance(handler, _VkMenuUpdateHandler):
+                # Даже при неоднозначном сетевом отказе VK мог применить новый layout.
+                handler.invalidate_retry(int(update.address.chat_id))
+            return delivered, menu_delivered
+
+        return deliver(event, handler, send_and_track)
+
+    return deliver_reply
+
+
+def _menu_delivery_for_event(deliver: _DeliverMenu | None, event: IncomingEvent) -> Callable[[_SendWithMenu], bool] | None:
+    return (lambda send: deliver(event, send)) if deliver is not None else None
+
+
+def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
+    items = update.menu.items
+    if len(items) > 50:
+        raise ValueError("VK keyboard supports at most 50 buttons")
+    # Сохраняем два столбца, пока это укладывается в предел 10 рядов VK.
+    columns = max(2, (len(items) + 9) // 10)
+    rows: list[list[dict[str, object]]] = []
+    for start in range(0, len(items), columns):
+        row: list[dict[str, object]] = []
+        for item in items[start:start + columns]:
+            label = item.command
+            if not label or len(label) > 40:
+                raise ValueError("VK text button command must contain 1-40 characters")
+            row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+        rows.append(row)
+    return json.dumps(
+        {"one_time": False, "inline": False, "buttons": rows},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _create_vk_menu_update_handler(
-    client: Any, *, logger: logging.Logger,
-) -> CommandMenuUpdateHandler:
-    """Создаёт обработчик постоянной текстовой клавиатуры VK.
+    client: Any, *, logger: logging.Logger, stop: Event | None = None,
+) -> _VkMenuUpdateHandler:
+    """Создаёт обработчик адресной публикации постоянной клавиатуры VK."""
+    return _VkMenuUpdateHandler(client, logger=logger, stop=stop)
 
-    VK применяет клавиатуру через `messages.send`, поэтому обновление
-    сопровождается коротким служебным сообщением. Повтор одной попытки
-    сохраняет `random_id`, а переход меню создаёт новую серию публикации.
-    """
-    state_guard = Lock()
-    peer_locks: dict[int, Lock] = {}
-    last_attempt: dict[int, tuple[str, int]] = {}
 
-    def publish(update: CommandMenuUpdate) -> None:
+class _VkMenuUpdateHandler:
+    """Отправляет меню вне ответа с отдельной серией повторов для чата."""
+
+    def __init__(self, client: Any, *, logger: logging.Logger, stop: Event | None) -> None:
+        self._client = client
+        self._logger = logger
+        self._stop = stop
+        self._state_guard = Lock()
+        self._peer_locks: dict[int, Lock] = {}
+        self._last_attempt: dict[int, tuple[str, int]] = {}
+
+    def _peer_lock(self, peer_id: int) -> Lock:
+        with self._state_guard:
+            return self._peer_locks.setdefault(peer_id, Lock())
+
+    def invalidate_retry(self, peer_id: int) -> None:
+        """Начинает новую серию после попытки отправки меню вместе с ответом."""
+        with self._peer_lock(peer_id):
+            self._last_attempt.pop(peer_id, None)
+
+    def __call__(self, update: CommandMenuUpdate) -> None:
         """Отправляет клавиатуру только в личный VK-адрес."""
-        if update.address.channel != "vk":
+        if (self._stop is not None and self._stop.is_set()) or update.address.channel != "vk":
             return
         try:
             peer_id = int(update.address.chat_id)
         except (TypeError, ValueError):
-            logger.warning("Skipping VK menu with non-numeric peer ID")
+            self._logger.warning("Skipping VK menu with non-numeric peer ID")
             return
         if not 0 < peer_id < 2_000_000_000:
-            logger.warning("Skipping VK menu for a non-private peer")
+            self._logger.warning("Skipping VK menu for a non-private peer")
             return
 
-        items = update.menu.items
-        if len(items) > 50:
-            raise ValueError("VK keyboard supports at most 50 buttons")
-        # Два столбца сохраняют читаемость длинных команд в клиенте VK;
-        # при росте каталога расширяем ряд, чтобы не превысить 10 строк API.
-        columns = max(2, (len(items) + 9) // 10)
-        rows: list[list[dict[str, object]]] = []
-        for start in range(0, len(items), columns):
-            row: list[dict[str, object]] = []
-            for item in items[start:start + columns]:
-                label = item.command
-                if not label or len(label) > 40:
-                    raise ValueError("VK text button command must contain 1-40 characters")
-                row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
-            rows.append(row)
-        keyboard = json.dumps(
-            {"one_time": False, "inline": False, "buttons": rows},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        with state_guard:
-            peer_lock = peer_locks.setdefault(peer_id, Lock())
-        with peer_lock:
-            previous = last_attempt.get(peer_id)
+        keyboard = _serialize_vk_command_menu(update)
+        with self._peer_lock(peer_id):
+            previous = self._last_attempt.get(peer_id)
             if previous is not None and previous[0] == keyboard:
                 random_id = previous[1]
             else:
@@ -621,18 +672,14 @@ def _create_vk_menu_update_handler(
                 # ошибки сохраняет ID, а новый runtime автоматически начинает
                 # новую retry-серию.
                 random_id = randint(1, 2_147_483_647)
-                last_attempt[peer_id] = (keyboard, random_id)
+                self._last_attempt[peer_id] = (keyboard, random_id)
             # Ошибка намеренно выходит наружу: reconciliation оставит адрес на повтор.
-            client.send_message(
+            self._client.send_message(
                 peer_id=peer_id,
                 text="Меню команд обновлено.",
                 keyboard=keyboard,
                 random_id=random_id,
             )
-
-    return publish
-
-
 def _start_vk_menu_reconciliation(
     processor: IncomingMessageProcessor,
     handler: CommandMenuUpdateHandler,
@@ -666,14 +713,25 @@ def _safe_send_vk_message(
     sleeper: Callable[[float], None] = time.sleep,
     limit: int = VK_SAFE_MESSAGE_LIMIT,
     include_bound_actions: bool | None = None,
+    deliver_menu: Callable[[_SendWithMenu], bool] | None = None,
 ) -> None:
     """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
     delivered = False
-    try:
-        delivered = _send_vk_message(
+
+    def send(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
+        keyboard = None
+        if update is not None and update.address == ReplyAddress("vk", str(peer_id)) and 0 < peer_id < 2_000_000_000:
+            try:
+                keyboard = _serialize_vk_command_menu(update)
+            except ValueError:
+                logger.warning("VK command menu omitted: invalid keyboard layout")
+        return _send_vk_message(
             client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
-            limit=limit, include_bound_actions=include_bound_actions,
+            limit=limit, include_bound_actions=include_bound_actions, menu_keyboard=keyboard,
         )
+
+    try:
+        delivered = deliver_menu(send) if deliver_menu is not None else send(None)[0]
     finally:
         if response.after_delivery is not None:
             response.after_delivery(delivered)
@@ -682,8 +740,9 @@ def _safe_send_vk_message(
 def _send_vk_message(
     client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
     sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
-) -> bool:
-    """Доставляет все части ответа и возвращает факт успешной доставки."""
+    menu_keyboard: str | None,
+) -> tuple[bool, bool | None]:
+    """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
     show_bound_actions = (
         VK_INLINE_ACTIONS_ENABLED
@@ -697,6 +756,10 @@ def _send_vk_message(
             # Необязательная клавиатура не должна скрывать текстовые команды.
             # Решение принимается до API-вызова, поэтому повторной отправки нет.
             logger.warning("VK inline keyboard omitted: invalid action layout")
+    # Только одна клавиатура на сообщение: inline остаётся у последней части.
+    menu_index = len(chunks) - (2 if keyboard is not None else 1)
+    has_menu = menu_keyboard is not None and menu_index >= 0
+    menu_delivered = False if has_menu else None
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
@@ -705,7 +768,8 @@ def _send_vk_message(
     )
     for index, chunk in enumerate(chunks):
         random_id = randint(1, 2_147_483_647)
-        chunk_keyboard = keyboard if index == len(chunks) - 1 else None
+        chunk_keyboard = (menu_keyboard if has_menu and index == menu_index
+                          else keyboard if index == len(chunks) - 1 else None)
         sent = safe_send(
             lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
                 peer_id=peer_id,
@@ -726,13 +790,15 @@ def _send_vk_message(
                 peer_id,
                 time.monotonic() - started_at,
             )
-            return False
+            return False, menu_delivered
+        if has_menu and index == menu_index:
+            menu_delivered = True
     logger.info(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,
         time.monotonic() - started_at,
     )
-    return bool(chunks)
+    return bool(chunks), menu_delivered
 
 
 def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
@@ -795,6 +861,8 @@ def _create_vk_completion_handler(
     client: Any,
     *,
     logger: logging.Logger,
+    origin: IncomingEvent | None = None,
+    deliver_menu: _DeliverMenu | None = None,
 ) -> ChannelCompletionHandler:
     """Создаёт callback фонового результата в исходный VK peer."""
 
@@ -807,6 +875,8 @@ def _create_vk_completion_handler(
             peer_id=int(reply.address.chat_id),
             response=reply.response,
             logger=logger,
+            deliver_menu=_menu_delivery_for_event(deliver_menu, origin)
+            if origin is not None and reply.address == origin.reply_address else None,
         )
 
     return notify
