@@ -166,6 +166,30 @@ class MenuReconciliationTest(unittest.TestCase):
                 self.assertEqual(self.updates, [])
                 self.assertIn(event.reply_address, self.processor.menu_delivery_failures)
 
+    def test_skipped_publication_keeps_menu_eligible_for_a_later_reply(self):
+        """Отсутствие отдельной публикации не создаёт и не скрывает ошибку доставки."""
+        event = self.event("/help")
+
+        def skip(_update):
+            return False
+
+        self.processor.reconcile_menus(skip)
+        self.assertFalse(self.processor.menu_delivery_failures)
+        self.assertFalse(self.processor.deliver_response_menu(event, skip, lambda _: (False, False)))
+        failure = self.processor.menu_delivery_failures[event.reply_address]
+        self.processor.reconcile_menus(skip)
+        self.assertEqual(self.processor.menu_delivery_failures[event.reply_address], failure)
+
+        delivered = []
+
+        def send(update):
+            delivered.append(update)
+            return True, True if update is not None else None
+
+        self.assertTrue(self.processor.deliver_response_menu(event, skip, send))
+        self.assertIsNotNone(delivered[0])
+        self.assertFalse(self.processor.menu_delivery_failures)
+
     def test_incomplete_confirmation_snapshot_defers_delivery(self):
         """Неполный снимок убирает прежнюю /confirm и не дублирует восстановление."""
         confirmation = PendingConfirmation(
