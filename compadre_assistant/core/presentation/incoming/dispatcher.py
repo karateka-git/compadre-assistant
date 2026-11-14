@@ -296,14 +296,16 @@ class IncomingMessageDispatcher:
         """Объясняет причину отказа без открытия предметного обработчика."""
         if not access.profile_allowed:
             return "У твоего профиля нет доступа к этой возможности. Список: /capabilities."
+        descriptor = access.descriptor
+        label = f"«{descriptor.display_name}»" if descriptor.display_name else descriptor.capability_id
         if not access.server_available:
             return (
-                f"Возможность {access.descriptor.capability_id} недоступна на сервере. "
+                f"Возможность {label} недоступна на сервере. "
                 "Список: /capabilities."
             )
         return (
-            f"Возможность {access.descriptor.capability_id} лично выключена. "
-            f"Включить: /enable {access.descriptor.capability_id}. Список: /capabilities."
+            f"Возможность {label} лично выключена. "
+            f"Включить: /enable {descriptor.capability_id}. Список: /capabilities."
         )
 
     @staticmethod
@@ -1011,6 +1013,12 @@ class IncomingMessageDispatcher:
         except Exception as error:
             LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
             return IncomingResponse(compose_content('Не удалось сохранить выбор. Попробуй позже.'), error)
+        if enabled and access.descriptor.display_name:
+            action = "включён" if changed else "уже включён"
+            return IncomingResponse(text_content(
+                f"Личный доступ к возможности «{access.descriptor.display_name}» {action}. "
+                "Выбор действует во всех привязанных каналах."
+            ))
         state = "включена" if enabled else "выключена"
         return IncomingResponse(
             compose_content(

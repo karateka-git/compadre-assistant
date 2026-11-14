@@ -196,7 +196,7 @@ class PendingConfirmationQueryPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CapabilityDescriptor:
-    """Объявляет устойчивый ID, команду входа и общую справку возможности."""
+    """Объявляет ID, команду входа, общую справку и отображаемое название."""
 
     capability_id: str
     entry: CapabilityCommand
@@ -205,6 +205,7 @@ class CapabilityDescriptor:
     enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.
     accepts_images: bool = False  # Presentation возможности умеет обрабатывать события с фото.
     requires_profile_access: bool = False  # Только профили, допущенные оператором.
+    display_name: str | None = None  # Публичное название для ответов о доступе.
 
 
 class CapabilityMode(StrEnum):

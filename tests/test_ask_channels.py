@@ -199,20 +199,30 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertEqual(model.answer.call_count, 1)
 
     def test_ask_can_be_disabled_and_enabled_without_restart(self) -> None:
-        """Команды меняют личный допуск Ask при живом общем processor."""
+        """Оба канала показывают публичное название без автоматического входа."""
         with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type:
             model_type.return_value.answer.return_value = "Ответ"
             with create_channel_message_processor(
                 database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config
             ) as processor:
-                self.send("telegram", processor, "/register")
-                self.send("telegram", processor, "Тест")
-                self.assertIn("выключена", self.send("telegram", processor, "/disable ask"))
-                self.assertIn("/enable ask", self.send("telegram", processor, "/ask вопрос"))
-                model_type.return_value.answer.assert_not_called()
-                self.assertIn("включена", self.send("telegram", processor, "/enable ask"))
-                self.send("telegram", processor, "/ai")
-                self.assertEqual(self.send("telegram", processor, "/ask вопрос"), "Ответ")
+                for channel in ("telegram", "vk"):
+                    with self.subTest(channel=channel):
+                        self.send(channel, processor, "/register")
+                        self.send(channel, processor, "Тест")
+                        self.assertIn("выключена", self.send(channel, processor, "/disable ask"))
+                        self.assertEqual(self.send(channel, processor, "/ai"),
+                                         "Возможность «Режим ИИ» лично выключена. "
+                                         "Включить: /enable ask. Список: /capabilities.")
+                        self.assertEqual(self.send(channel, processor, "/enable ask"),
+                                         "Личный доступ к возможности «Режим ИИ» включён. "
+                                         "Выбор действует во всех привязанных каналах.")
+                        self.assertIn("«Режим ИИ» уже включён", self.send(channel, processor, "/enable ask"))
+                        denied = self.send(channel, processor, "/ask вопрос")
+                        self.assertIn("войди в режим", denied)
+                        self.assertIn("/ai", denied)
+                        self.send(channel, processor, "/ai")
+                        self.assertEqual(self.send(channel, processor, "/ask вопрос"), "Ответ")
+                self.assertEqual(model_type.return_value.answer.call_count, 2)
 
     def test_inflight_ask_delivers_after_disable_and_keeps_model_open(self) -> None:
         """Принятый Ask отвечает в исходный канал после disable, runtime живёт."""
@@ -250,7 +260,7 @@ class AskChannelsTest(unittest.TestCase):
                         self.assertEqual(response_text(future.result(timeout=5)), "Ответ: долгий")
                     self.assertIn("/enable ask", self.send(channel, processor, "/ask следующий"))
                     self.assertEqual(model.answer.call_count, 1)
-                    self.assertIn("включена", self.send(channel, processor, "/enable ask"))
+                    self.assertIn("«Режим ИИ» включён", self.send(channel, processor, "/enable ask"))
                     self.assertEqual(self.send(channel, processor, "/ask другой"), "Ответ: другой")
                 model.close.assert_called_once_with()
 
@@ -308,6 +318,8 @@ class AskChannelsTest(unittest.TestCase):
                 for channel in ("telegram", "vk"):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
+                    self.assertEqual(self.send(channel, processor, "/ai"),
+                                     "Возможность «Режим ИИ» недоступна на сервере. Список: /capabilities.")
                     self.assertIn("недоступна на сервере", self.send(channel, processor, "/ask вопрос"))
             loader.assert_not_called()
             model.assert_not_called()

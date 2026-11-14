@@ -36,6 +36,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         )),)),
         enabled_by_default=True,
         accepts_images=True,
+        display_name="Режим ИИ",
     )
 
     def __init__(self, question: AskQuestion, extract_image_text: ExtractImageText) -> None:
