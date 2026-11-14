@@ -157,5 +157,5 @@ class LinkedChatMenusTest(unittest.TestCase):
         with patch.object(self.service, "list_known_private_chats", side_effect=RuntimeError("read")):
             with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
                 response = self.send("/enable ask")
-        self.assertIn("включена", response_text(response))
+        self.assertIn("«Режим ИИ» включён", response_text(response))
         self.assertIn("/ai", response_text(self.send("/help")))

@@ -196,7 +196,7 @@ class PendingConfirmationQueryPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class CapabilityDescriptor:
-    """Объявляет устойчивый ID, команду входа и общую справку возможности."""
+    """Объявляет ID, команду входа, общую справку и отображаемое название."""
 
     capability_id: str
     entry: CapabilityCommand
@@ -205,6 +205,7 @@ class CapabilityDescriptor:
     enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.
     accepts_images: bool = False  # Presentation возможности умеет обрабатывать события с фото.
     requires_profile_access: bool = False  # Только профили, допущенные оператором.
+    display_name: str | None = None  # Публичное название для ответов о доступе.
 
 
 class CapabilityMode(StrEnum):
@@ -214,12 +215,21 @@ class CapabilityMode(StrEnum):
     COMPLETE = "complete"  # Завершить текущий сценарий; одноразовый вход сохраняет прежний режим.
 
 
+# Исполнитель получает предикат отмены текущего поколения.
+CancellableAction = Callable[[Callable[[], bool]], IncomingResponse]
+
+
 @dataclass(frozen=True, slots=True)
 class CapabilityResult:
-    """Содержит общий ответ и состояние режима без предметного результата."""
+    """Содержит общий ответ и состояние режима без предметного результата.
+
+    Для обработчика активного режима ответ с cancellable_action служит
+    квитанцией. Канал без фоновой доставки получает результат исполнителя.
+    """
 
     response: IncomingResponse
     mode: CapabilityMode = CapabilityMode.ACTIVE
+    cancellable_action: CancellableAction | None = field(default=None, repr=False)
 
 
 class IncomingCapabilityPort(Protocol):
@@ -273,7 +283,7 @@ class PendingInputResult:
     outcome: PendingInputOutcome
     action: Callable[[], IncomingResponse] | None = None  # Долгое действие после атомарного принятия ввода.
     # Возвращает ответ исполнителя; переданный предикат сообщает об отмене.
-    cancellable_action: Callable[[Callable[[], bool]], IncomingResponse] | None = field(default=None, repr=False)
+    cancellable_action: CancellableAction | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Запрещает внешнее действие до окончательного принятия значения."""
@@ -300,7 +310,9 @@ class PendingInputContinuationPort(Protocol):
         Returns:
             Ответ с решением о сохранении исходного ожидания. После принятия
             значения даже ошибка внешнего действия возвращается как complete.
-            Долгую операцию нужно вернуть в action: ядро выполнит её вне
-            блокировки чата после атомарной очистки ожидания.
+            Долгую операцию нужно вернуть в action для выполнения вне
+            блокировки чата или в cancellable_action для фонового выполнения
+            после подтверждённой доставки квитанции. При недоступной фоновой
+            доставке ядро выполняет её синхронно после очистки ожидания.
         """
         ...

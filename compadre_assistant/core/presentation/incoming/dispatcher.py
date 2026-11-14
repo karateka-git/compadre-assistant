@@ -12,7 +12,7 @@ from compadre_assistant.core.presentation.incoming.deferred_actions import Defer
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
 from compadre_assistant.core.presentation.incoming.ports import (
-    ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
+    CancellableAction, ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
@@ -296,14 +296,16 @@ class IncomingMessageDispatcher:
         """Объясняет причину отказа без открытия предметного обработчика."""
         if not access.profile_allowed:
             return "У твоего профиля нет доступа к этой возможности. Список: /capabilities."
+        descriptor = access.descriptor
+        label = f"«{descriptor.display_name}»" if descriptor.display_name else descriptor.capability_id
         if not access.server_available:
             return (
-                f"Возможность {access.descriptor.capability_id} недоступна на сервере. "
+                f"Возможность {label} недоступна на сервере. "
                 "Список: /capabilities."
             )
         return (
-            f"Возможность {access.descriptor.capability_id} лично выключена. "
-            f"Включить: /enable {access.descriptor.capability_id}. Список: /capabilities."
+            f"Возможность {label} лично выключена. "
+            f"Включить: /enable {descriptor.capability_id}. Список: /capabilities."
         )
 
     @staticmethod
@@ -379,7 +381,7 @@ class IncomingMessageDispatcher:
                 suggested_actions=suggested_actions,
             )
         if menu_update_handler is not None:
-            # Фото могло занять чат между снимком меню и повторным допуском.
+            # Действие могло занять чат между снимком меню и повторным допуском.
             if result is _DEFERRED_CANCELLED_REPLY:
                 previous_menu = BUSY_COMMAND_MENU
             self._update_current_menu(event, menu_update_handler, previous_menu)
@@ -836,24 +838,32 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
             ), error)
-        if (result.cancellable_action is not None and completion_handler is not None and event.external_user_id is not None
-                and self._deferred_actions is not None and self._deferred_access is not None):
-            return self._defer_pending_input(pending, event, user.id, result, completion_handler)
+        if result.cancellable_action is not None and self._can_defer(event, completion_handler):
+            return self._defer_action(
+                event, user.id, pending.owner_id, pending.required_mode, result.response,
+                result.cancellable_action, completion_handler, pending=pending,
+            )
         if result.outcome is PendingInputOutcome.COMPLETE:
             self._pending_inputs.clear(event.reply_address, pending.request_id)
         return result
 
-    def _defer_pending_input(
-        self, pending: PendingInput, event: IncomingEvent, app_user_id: int,
-        result: PendingInputResult, completion_handler: ChannelCompletionHandler,
+    def _can_defer(self, event: IncomingEvent, completion_handler: ChannelCompletionHandler | None) -> bool:
+        return (completion_handler is not None and event.external_user_id is not None
+                and self._deferred_actions is not None and self._deferred_access is not None)
+
+    def _defer_action(
+        self, event: IncomingEvent, app_user_id: int, capability_id: str,
+        required_mode: str | None, receipt: IncomingResponse, work: CancellableAction,
+        completion_handler: ChannelCompletionHandler | None, *, pending: PendingInput | None = None,
     ) -> IncomingResponse:
-        """Под блокировкой чата резервирует работу и возвращает квитанцию без I/O."""
-        actions, work, may_finish = self._deferred_actions, result.cancellable_action, self._deferred_access
-        assert actions is not None and work is not None and may_finish is not None
+        """Под блокировкой чата резервирует работу и возвращает квитанцию без сети."""
+        actions, may_finish = self._deferred_actions, self._deferred_access
+        assert actions is not None and completion_handler is not None and may_finish is not None
         action = actions.reserve(event.reply_address, app_user_id, event.external_user_id)
         if action is None:
-            return IncomingResponse(text_content("Обработка сейчас занята. Попробуй отправить значение позже."))
-        if not self._pending_inputs.clear(event.reply_address, pending.request_id):
+            hint = "Попробуй отправить значение позже." if pending is not None else "Попробуй повторить команду позже."
+            return IncomingResponse(text_content(f"Обработка сейчас занята. {hint}"))
+        if pending is not None and not self._pending_inputs.clear(event.reply_address, pending.request_id):
             actions.cancel(action)
             return IncomingResponse(text_content("Ввод уже изменился. Повтори команду."))
         origin = replace(event, text="принятый ввод", images=())
@@ -862,7 +872,7 @@ class IncomingMessageDispatcher:
 
         def finish(response: IncomingResponse) -> None:
             with pending_inputs.lock(action.address):
-                if action.cancelled.is_set() or not may_finish(origin, app_user_id, pending.owner_id, pending.required_mode):
+                if action.cancelled.is_set() or not may_finish(origin, app_user_id, capability_id, required_mode):
                     return
                 if not actions.claim_result(action):
                     return
@@ -875,7 +885,7 @@ class IncomingMessageDispatcher:
         def after_delivery(delivered: bool) -> None:
             actions.after_delivery(action, delivered, work, finish, refresh_after_release)
 
-        return replace(result.response, after_delivery=after_delivery)
+        return replace(receipt, after_delivery=after_delivery)
 
     def _continue_core_input(self, pending: PendingInput, event: IncomingEvent) -> ProcessIncomingMessageResult | IncomingResponse:
         """Повторно проверяет профиль и завершает либо сохраняет исходное ожидание."""
@@ -1003,6 +1013,12 @@ class IncomingMessageDispatcher:
         except Exception as error:
             LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
             return IncomingResponse(compose_content('Не удалось сохранить выбор. Попробуй позже.'), error)
+        if enabled and access.descriptor.display_name:
+            action = "включён" if changed else "уже включён"
+            return IncomingResponse(text_content(
+                f"Личный доступ к возможности «{access.descriptor.display_name}» {action}. "
+                "Выбор действует во всех привязанных каналах."
+            ))
         state = "включена" if enabled else "выключена"
         return IncomingResponse(
             compose_content(
@@ -1101,6 +1117,19 @@ class IncomingMessageDispatcher:
             )
         try:
             result = capability.handle(context, event)
+            if result.cancellable_action is not None:
+                if not self._can_defer(event, completion_handler):
+                    return result.cancellable_action(lambda: False)
+                with self._pending_inputs.lock(event.reply_address):
+                    if busy := self._busy_response(event, allow_cancel=False):
+                        return busy
+                    capability_id = capability.descriptor.capability_id
+                    if not self.may_finish_deferred(event, user.id, capability_id, capability_id):
+                        return IncomingResponse(text_content("Контекст сообщения изменился. Повтори команду в нужном режиме."))
+                    return self._defer_action(
+                        event, user.id, capability_id, capability_id, result.response,
+                        result.cancellable_action, completion_handler,
+                    )
         except Exception as error:
             LOGGER.exception(
                 "Capability handling failed: capability_id=%s",
@@ -1162,7 +1191,9 @@ class IncomingMessageDispatcher:
         # Работа может быть принята во время чтения источников подтверждений.
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
-        return build_command_menu(*context), context[3].status == "complete"
+        pending, snapshot = context[2:]
+        complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
+        return build_command_menu(*context), complete
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,
