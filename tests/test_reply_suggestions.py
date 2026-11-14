@@ -4,7 +4,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from compadre_assistant.capabilities.ask.domain.errors import QuestionTooLongError
+from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultConfirmationAction
@@ -43,31 +43,35 @@ class ReplySuggestionsTest(unittest.TestCase):
 
     def test_ask_long_question_offers_valid_retry(self) -> None:
         """Слишком длинный вопрос можно ввести заново без аргумента-заполнителя."""
-        question = Mock()
-        question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
+        model = Mock()
+        question = AskQuestion(model=model, max_question_chars=5)
         ask = AskCapability(question, Mock())
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
         self.assertIn("вызови /ask", content_text(response.content))
         self._assert_command_visible_in_channels(response, "/ask")
+        model.answer.assert_not_called()
 
-        question.execute.side_effect = None
-        question.execute.return_value = "Ответ модели"
-        answered = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
-                              _event("/ask вопрос")).response
+        model.answer.return_value = "Ответ модели"
+        accepted = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()), _event("/ask тест"))
+        self.assertIn("Вопрос принят", content_text(accepted.response.content))
+        model.answer.assert_not_called()
+        answered = accepted.cancellable_action(lambda: False)
+        self.assertEqual(content_text(answered.content), "Ответ модели")
         self.assertEqual(answered.suggested_actions, ())
 
     def test_ask_without_pending_input_keeps_only_direct_retry(self) -> None:
         """Без хранилища ожиданий голая команда не предлагается."""
-        question = Mock()
-        question.execute.side_effect = QuestionTooLongError("Слишком длинный вопрос")
+        model = Mock()
+        question = AskQuestion(model=model, max_question_chars=5)
         response = AskCapability(question, Mock()).handle(
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
         self.assertEqual(response.suggested_actions, ())
         self.assertIn("/ask <question>", content_text(response.content))
         self.assertNotIn("вызови /ask", content_text(response.content))
+        model.answer.assert_not_called()
 
     def test_obsidian_vault_offers_status_only_when_available(self) -> None:
         """Подключённый vault предлагает одну работающую команду состояния."""
