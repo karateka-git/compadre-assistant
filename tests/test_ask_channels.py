@@ -501,6 +501,7 @@ class AskChannelsTest(unittest.TestCase):
                 result_delivered = threading.Event()
                 messages = []
                 menu_calls = []
+                keyboards_by_reply = []
 
                 def record_menu(chat, commands):
                     menu_calls.append((chat, commands))
@@ -554,13 +555,18 @@ class AskChannelsTest(unittest.TestCase):
                         await send(command)
                         await send("", photo="undelivered", fail_receipt=True)
                         self.assertEqual(stages, [])
-                        self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
+                        if channel == "telegram":
+                            self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
+                        else:
+                            self.assertEqual(menu_calls[-1], normal)
                         await send(command)
                         self.assertIn("Пришли одно фото", messages[-1][1])
                         await send("/exit", photo="first")
                         self.assertTrue(await asyncio.to_thread(entered_download.wait, 5))
                         self.assertEqual(stages, ["receipt", "download:first"])
                         self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                        if channel == "vk":
+                            self.assertEqual(keyboards_by_reply[-1], (receipt, ("/cancel",)))
                         call_count = len(menu_calls)
                         await asyncio.to_thread(processor.reconcile_menus, publish)
                         for text, photo in (("/exit", None), ("/disable ask", None), ("текст", None),
@@ -575,6 +581,8 @@ class AskChannelsTest(unittest.TestCase):
                         await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
                         self.assertEqual(menu_calls[-1], normal)
+                        if channel == "vk":
+                            self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
                         await send(command)
                         await send("", photo="second")
                         self.assertTrue(await asyncio.to_thread(entered_model.wait, 5))
@@ -598,6 +606,8 @@ class AskChannelsTest(unittest.TestCase):
                             self.assertTrue(await asyncio.to_thread(result_delivered.wait, 5))
                             self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
                             self.assertIn(expected, messages[-1][1])
+                            if channel == "vk" and photo == "fast":
+                                self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
 
                     async def telegram():
                         fake = FakeAiogram()
@@ -685,11 +695,14 @@ class AskChannelsTest(unittest.TestCase):
                             if fail_next_receipt and kwargs["text"] == receipt:
                                 raise RuntimeError("Канал не принял квитанцию")
                             result = original_send(**kwargs)
-                            if kwargs["text"] == "Меню команд обновлено.":
+                            if kwargs["keyboard"]:
                                 keyboard = json.loads(kwargs["keyboard"])
-                                record_menu(kwargs["peer_id"], tuple(button["action"]["label"]
-                                            for row in keyboard["buttons"] for button in row))
-                            else:
+                                if not keyboard["inline"]:
+                                    commands = tuple(button["action"]["label"]
+                                                     for row in keyboard["buttons"] for button in row)
+                                    keyboards_by_reply.append((kwargs["text"], commands))
+                                    record_menu(kwargs["peer_id"], commands)
+                            if kwargs["text"] != "Меню команд обновлено.":
                                 record(kwargs["peer_id"], kwargs["text"])
                             return result
 

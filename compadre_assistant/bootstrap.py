@@ -282,81 +282,135 @@ class ChannelMessageProcessor:
     def _reconcile_menu_event(
         self, event: IncomingEvent, handler: CommandMenuUpdateHandler, *,
         allow_unknown: bool,
+        send: Callable[[CommandMenuUpdate], bool | None] | None = None,
     ) -> None:
         """Под процессной блокировкой перечитывает состояние перед доставкой."""
         address = event.reply_address
-        if allow_unknown and not is_private_chat_address(
-                address.channel, event.external_user_id, address.chat_id):
-            return
         try:
-            with connect_database(self._database_path) as connection:
-                service = create_user_identity_service(connection)
-                known = service.find_known_private_chat(address.channel, address.chat_id)
-                if known is not None:
-                    owner, current = known
-                    if event.external_user_id != current.external_user_id:
-                        # Явный автор исходного события не может получить меню
-                        # другого владельца совпавшего адреса. Только внутренний
-                        # проход без автора подставляет текущую identity из БД.
-                        if event.external_user_id is not None:
-                            return
-                        event = IncomingEvent(address.channel, address.chat_id, "menu-reconcile",
-                                              "/help", current.external_user_id)
-                elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
-                    return
-                else:
-                    self._unregistered_menu_events[address] = event
-                dispatcher = IncomingMessageDispatcher(
-                    registry=self._registry, pending_inputs=self._pending_inputs,
-                    deferred_actions=self._deferred_actions,
-                    user_identity_service=service,
-                    chat_mode_repository=SQLiteChatModeRepository(connection),
-                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
-                )
-                menu, complete = dispatcher.command_menu_snapshot(
-                    event, known_user=owner if known is not None else None)
-                if known is not None and not service.owns_known_private_chat(owner, current):
-                    return
+            snapshot = self._read_menu_snapshot(event, allow_unknown=allow_unknown)
+            if snapshot is None:
+                return
+            update, complete, _ = snapshot
             if not complete:
-                # Проекция уже скрыла /confirm. Доставляем её, чтобы прежнее
-                # полное меню не оставалось видимым при ошибке источника.
+                # Скрываем /confirm, пока источник подтверждений недоступен.
                 self._menu_failures.setdefault(address, INCOMPLETE_MENU_SNAPSHOT)
-            update = CommandMenuUpdate(address, menu)
             if (self._published_menus.get(address) == update
                     and self._menu_failures.get(address) in (None, INCOMPLETE_MENU_SNAPSHOT)):
                 if complete:
-                    self._menu_failures.pop(address, None)
-                    if self._pending_inputs.get(address) is None:
-                        self._unregistered_menu_events.pop(address, None)
+                    self._acknowledge_menu(update)
                 return
-            handler(update)
-            self._published_menus[address] = update
+            sent = send(update) if send is not None else None
+            if sent is False:
+                self._menu_failures[address] = "Не удалось доставить меню с ответом"
+                return
+            if sent is None:
+                if send is not None and self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+                    self._menu_failures[address] = "Состояние меню изменилось во время доставки"
+                    return
+                handler(update)
+            if self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+                self._menu_failures[address] = "Состояние меню изменилось во время доставки"
+                return
             if complete:
-                self._menu_failures.pop(address, None)
-                if self._pending_inputs.get(address) is None:
-                    self._unregistered_menu_events.pop(address, None)
+                self._acknowledge_menu(update)
+            else:
+                self._published_menus[address] = update
+                self._menu_failures[address] = INCOMPLETE_MENU_SNAPSHOT
         except Exception as error:
             self._menu_failures[address] = str(error)
             LOGGER.exception("Could not deliver reconciled command menu")
 
+    def _acknowledge_menu(self, update: CommandMenuUpdate) -> None:
+        self._published_menus[update.address] = update
+        self._menu_failures.pop(update.address, None)
+        if self._pending_inputs.get(update.address) is None:
+            self._unregistered_menu_events.pop(update.address, None)
+
+    def _read_menu_snapshot(
+        self, event: IncomingEvent, *, allow_unknown: bool,
+    ) -> tuple[CommandMenuUpdate, bool, int | None] | None:
+        """Читает меню и владельца без доставки и без обновления identity."""
+        address = event.reply_address
+        if allow_unknown and not is_private_chat_address(
+                address.channel, event.external_user_id, address.chat_id):
+            return None
+        with connect_database(self._database_path) as connection:
+            service = create_user_identity_service(connection)
+            known = service.find_known_private_chat(address.channel, address.chat_id)
+            owner = None
+            if known is not None:
+                owner, current = known
+                if event.external_user_id is None:
+                    event = replace(event, external_user_id=current.external_user_id)
+                elif event.external_user_id != current.external_user_id:
+                    return None
+            elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
+                return None
+            else:
+                self._unregistered_menu_events[address] = event
+            dispatcher = IncomingMessageDispatcher(
+                registry=self._registry, pending_inputs=self._pending_inputs,
+                deferred_actions=self._deferred_actions,
+                user_identity_service=service,
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
+            )
+            menu, complete = dispatcher.command_menu_snapshot(event, known_user=owner)
+            if known is not None and not service.owns_known_private_chat(*known):
+                return None
+        return CommandMenuUpdate(address, menu), complete, owner.id if owner is not None else None
+
+    def deliver_response_menu(
+        self, event: IncomingEvent, handler: CommandMenuUpdateHandler,
+        send: Callable[[CommandMenuUpdate | None], tuple[bool, bool | None]],
+    ) -> bool:
+        """Доставляет ответ и по возможности актуальное меню исходного чата.
+
+        Args:
+            event: Исходный адрес с явным автором события.
+            handler: Адресная доставка меню без подходящей части ответа.
+            send: Доставка ответа. Возвращает успех всего ответа и успех
+                доставки меню либо None при отсутствии подходящей части.
+
+        Returns:
+            Успех ответа, независимый от результата адресной доставки меню.
+        """
+        delivered = None
+
+        def send_with_menu(update: CommandMenuUpdate) -> bool | None:
+            nonlocal delivered
+            # Даже исключение адаптера не должно вызвать повтор ответа без меню.
+            delivered = False
+            delivered, menu_delivered = send(update)
+            return menu_delivered
+
+        with self._menu_lock:
+            if not self._deferred_menu_closed.is_set():
+                self._reconcile_menu_event(event, handler, allow_unknown=True, send=send_with_menu)
+        return send(None)[0] if delivered is None else delivered
+
     def __call__(self, incoming_message: IncomingEvent,
                  completion_handler: ChannelCompletionHandler | None = None,
-                 menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+                 menu_update_handler: CommandMenuUpdateHandler | None = None, *,
+                 defer_origin_menu: bool = False) -> IncomingResponse:
         """Обрабатывает событие в коротком core scope.
 
         Args:
             incoming_message: Событие с identity и адресом исходного чата.
             completion_handler: Доставка последующего ответа каналу.
             menu_update_handler: Необязательная доставка изменившегося меню.
+            defer_origin_menu: Сверить меню текущего адреса при доставке ответа.
 
         Returns:
             Текстовый ответ независимо от результата обновления меню.
         """
-        return self._process(incoming_message, completion_handler, menu_update_handler)
+        return self._process(incoming_message, completion_handler, menu_update_handler,
+                             defer_origin_menu=defer_origin_menu)
 
     def select_action(self, event: IncomingEvent, token: str,
                       completion_handler: ChannelCompletionHandler | None = None,
-                      menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
+                      menu_update_handler: CommandMenuUpdateHandler | None = None, *,
+                      defer_origin_menu: bool = False) -> IncomingResponse:
         """Передаёт callback адаптера общему безопасному маршруту выбора.
 
         Args:
@@ -365,17 +419,19 @@ class ChannelMessageProcessor:
             token: Только непрозрачный token из response.bound_actions.
             completion_handler: Доставка фоновых ответов с тем же контрактом.
             menu_update_handler: Публикация изменившегося меню.
+            defer_origin_menu: Сверить меню текущего адреса при доставке ответа.
 
         Returns:
             Обычный ответ с новыми действиями либо безопасный отказ.
         """
         return self._process(event, completion_handler, menu_update_handler,
-                             token=token if isinstance(token, str) else "")
+                             token=token if isinstance(token, str) else "",
+                             defer_origin_menu=defer_origin_menu)
 
     def _process(self, incoming_message: IncomingEvent,
                  completion_handler: ChannelCompletionHandler | None,
                  menu_update_handler: CommandMenuUpdateHandler | None,
-                 *, token: str | None = None) -> IncomingResponse:
+                 *, token: str | None = None, defer_origin_menu: bool = False) -> IncomingResponse:
         menu_updates: list[CommandMenuUpdate] = []
         origin = IncomingEvent(
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
@@ -446,6 +502,8 @@ class ChannelMessageProcessor:
                         and incoming_message.reply_address not in self._published_menus):
                     addresses.append(incoming_message.reply_address)
                 for address in addresses:
+                    if defer_origin_menu and address == incoming_message.reply_address:
+                        continue
                     self._reconcile_menu_event(
                         IncomingEvent(address.channel, address.chat_id,
                                       "menu-reconcile", "/help",
