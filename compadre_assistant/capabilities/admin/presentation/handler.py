@@ -126,6 +126,15 @@ def _report_response(report: GatewayCostReport) -> IncomingResponse:
 
 
 def _report_line(row: CostReportRow, currency: str) -> str:
+    line = _cost_line(row, currency)
+    if row.request_count is not None:
+        return f"{line} Запросов: {row.request_count}."
+    if row.amount is not None:
+        return f"{line} Число запросов недоступно."
+    return line
+
+
+def _cost_line(row: CostReportRow, currency: str) -> str:
     label = _PERIOD_LABELS[row.period]
     if row.status in _STATUS_MESSAGES:
         return f"{label} — {_STATUS_MESSAGES[row.status]}"

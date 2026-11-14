@@ -95,7 +95,7 @@ class AdminChannelsTest(unittest.TestCase):
         return client.messages[-1][1]
 
     def test_report_uses_timeweb_in_both_channels_without_ask_runtime(self) -> None:
-        """Отчёт берёт цены из API, не меняя существующую историю SQLite."""
+        """Отчёт берёт цены и число запросов из API, сохраняя историю SQLite."""
         self.configure(str(self.owner_id))
         moment = datetime(2026, 11, 14, 17, tzinfo=UTC)
         tokens = TokenUsage(prompt_tokens=100_000_000, completion_tokens=0)
@@ -106,7 +106,7 @@ class AdminChannelsTest(unittest.TestCase):
 
         def respond(request: httpx.Request) -> httpx.Response:
             requests.append(request)
-            return _statistics_response(request, ["0.0025", "0.0025", "null"])
+            return _statistics_response(request, ["0.0025", "0.0025", "null"], counts=[2, 2, 5])
 
         client = self.configure_timeweb(respond)
         with patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config") as load_ask, \
@@ -124,36 +124,40 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertIn("войди в режим через /admin", self.vk(processor, "/llm_costs").messages[-1][1])
             self.assertFalse(requests)
             tg_report = self.telegram(processor, "/llm_costs")[0]
-            self.assertIn("Сегодня — 0,01 ₽.", tg_report)
-            self.assertIn("Текущий месяц — Известная сумма 0,01 ₽. Интервалов без стоимости — 1.", tg_report)
-            self.assertIn("Текущий год — Полный период недоступен.", tg_report)
+            self.assertIn("Сегодня — 0,01 ₽. Запросов: 4.", tg_report)
+            self.assertIn("Текущий месяц — Известная сумма 0,01 ₽. Интервалов без стоимости — 1. Запросов: 9.", tg_report)
+            self.assertEqual(tg_report.splitlines()[-1], "Текущий год — Полный период недоступен.")
             self.assertIn("до списания бонусов", tg_report)
-            self.assertEqual(len(requests), 2)
+            self.assertEqual(len(requests), 4)
             entered = self.vk(processor, "/admin")
             payload = json.loads(entered.keyboards[-1])["buttons"][0][0]["action"]["payload"]
             self.assertEqual(self.select_vk(processor, entered, payload), tg_report)
-            self.assertEqual(len(requests), 4)
+            self.assertEqual(len(requests), 8)
             moscow = self.vk(processor, "/llm_costs Europe/Moscow").messages[-1][1]
             self.assertIn("Europe/Moscow", moscow)
-            self.assertIn("Сегодня — Известная сумма 0,01 ₽. Интервалов без стоимости — 1", moscow)
-            self.assertEqual(len(requests), 6)
+            self.assertIn("Сегодня — Известная сумма 0,01 ₽. Интервалов без стоимости — 1. Запросов: 9.", moscow)
+            self.assertEqual(len(requests), 12)
             today = self.vk(processor, "/llm_costs day Europe/Moscow").messages[-1][1]
-            self.assertIn("Сегодня — ", today)
+            self.assertIn("Запросов: 9.", today)
             self.assertNotIn("Текущий месяц", today)
-            self.assertEqual(len(requests), 7)
+            self.assertEqual(len(requests), 14)
             self.assertIn("Текущий месяц", self.telegram(processor, "/llm_costs MONTH")[0])
-            self.assertEqual(len(requests), 8)
+            self.assertEqual(len(requests), 16)
             self.assertIn("Полный период недоступен", self.telegram(processor, "/llm_costs YEAR")[0])
-            self.assertEqual(len(requests), 8)
+            self.assertEqual(len(requests), 16)
             self.assertIn("Asia/Omsk", self.vk(processor, "/llm_costs").messages[-1][1])
             self.assertIn("Часовой пояс не найден", self.telegram(processor, "/llm_costs /invalid")[0])
             self.assertIn("/llm_costs DAY Europe/Moscow", self.telegram(processor, "/llm_costs x y")[0])
-            self.assertEqual(len(requests), 10)
+            self.assertEqual(len(requests), 20)
             self.telegram(processor, "/exit")
             self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs")[0])
         load_ask.assert_not_called()
         model.assert_not_called()
         self.assertTrue(client.is_closed)
+        for first, second in zip(requests[::2], requests[1::2], strict=True):
+            self.assertEqual({first.url.path.rsplit("/", 1)[-1], second.url.path.rsplit("/", 1)[-1]},
+                             {"token-usage", "calls"})
+            self.assertEqual(first.url.params, second.url.params)
         with connect_database(self.path) as connection:
             saved = connection.execute("SELECT call_id, tokens_json FROM ask_usage").fetchall()
         self.assertEqual([row["call_id"] for row in saved], [str(observation.call_id)])
@@ -169,10 +173,12 @@ class AdminChannelsTest(unittest.TestCase):
         def respond(request: httpx.Request) -> httpx.Response:
             requests.append(request)
             data = _statistics_response(request, []).json()
-            points = data["ai_key_token_statistics"]
-            if coverage == "missing":
+            is_count = _is_count_request(request)
+            point_key = "ai_key_calls_statistics" if is_count else "ai_key_token_statistics"
+            points = data[point_key]
+            if coverage == "missing_both" or (coverage == "missing_count" and is_count):
                 points.pop()
-            elif coverage == "duplicate":
+            elif coverage == "duplicate_cost" and not is_count:
                 points[-1] = points[0]
             data["meta"]["total"] = len(points)
             return httpx.Response(200, json=data)
@@ -185,9 +191,10 @@ class AdminChannelsTest(unittest.TestCase):
             self.telegram(processor, "/admin")
             self.vk(processor, "/admin")
             for coverage, expected in (
-                ("complete", "Сегодня — 0,00 ₽."),
-                ("missing", "Сегодня — Полный период недоступен."),
-                ("duplicate", "Сегодня — Статистика Timeweb временно недоступна."),
+                ("complete", "Сегодня — 0,00 ₽. Запросов: 0."),
+                ("missing_count", "Сегодня — 0,00 ₽. Число запросов недоступно."),
+                ("duplicate_cost", "Сегодня — Статистика Timeweb временно недоступна. Запросов: 0."),
+                ("missing_both", "Сегодня — Полный период недоступен."),
             ):
                 with self.subTest(coverage=coverage):
                     telegram = self.telegram(processor, command)[0]
@@ -197,7 +204,7 @@ class AdminChannelsTest(unittest.TestCase):
                     self.assertEqual(vk, telegram)
                     self.assertNotIn("Текущий месяц", telegram)
 
-        self.assertEqual(len(requests), 6)
+        self.assertEqual(len(requests), 16)
         for request in requests:
             self.assertEqual(request.url.params["start_time"], "2026-11-14T18:15:00Z")
             self.assertEqual(request.url.params["end_time"], "2026-11-14T19:59:59.999999Z")
@@ -280,14 +287,18 @@ class AdminChannelsTest(unittest.TestCase):
     def test_large_totals_and_backend_failure_preserve_private_mode(self) -> None:
         """Ошибки чтения дают короткий ответ, а большие суммы округляются точно."""
         self.configure(str(self.owner_id))
-        responses = []
+        cost_requests = []
+        count_requests = []
         whole = "9" * 39
 
         def respond(request: httpx.Request) -> httpx.Response:
-            responses.append(request)
-            if len(responses) == 1:
+            is_count = _is_count_request(request)
+            requests = count_requests if is_count else cost_requests
+            failure_index = 2 if is_count else 1
+            requests.append(request)
+            if len(requests) == failure_index:
                 return httpx.Response(503, text="detail-not-for-chat")
-            return _statistics_response(request, [f"{whole}.995"])
+            return _statistics_response(request, [f"{whole}.995"], counts=[4])
 
         self.configure_timeweb(respond, currency="EUR")
         with patch("compadre_assistant.capabilities.admin.domain.cost_report._utc_now",
@@ -296,12 +307,12 @@ class AdminChannelsTest(unittest.TestCase):
             self.telegram(processor, "/admin")
             with self.assertLogs("compadre_assistant.capabilities.admin.data.timeweb_statistics", level="WARNING") as diagnostics:
                 failed = self.telegram(processor, "/llm_costs")[0]
-            self.assertIn("Сегодня — Статистика Timeweb временно недоступна.", failed)
+            self.assertIn("Сегодня — Статистика Timeweb временно недоступна. Запросов: 4.", failed)
             self.assertNotIn("detail-not-for-chat", failed + str(diagnostics.output))
             rounded = "1" + "0" * 39
-            self.assertIn(f"Текущий месяц — {rounded},00 EUR", failed)
-            self.assertIn(f"Текущий год — {rounded},00 EUR", failed)
-            self.assertIn(f"Сегодня — {rounded},00 EUR", self.telegram(processor, "/llm_costs DAY")[0])
+            self.assertIn(f"Текущий месяц — {rounded},00 EUR. Число запросов недоступно.", failed)
+            self.assertIn(f"Текущий год — {rounded},00 EUR. Запросов: 4.", failed)
+            self.assertIn(f"Сегодня — {rounded},00 EUR. Запросов: 4.", self.telegram(processor, "/llm_costs DAY")[0])
 
     def test_unconfigured_report_keeps_mode_in_both_channels(self) -> None:
         """Без токена и UUID режим остаётся доступен без запроса к API."""
@@ -340,16 +351,24 @@ class AdminChannelsTest(unittest.TestCase):
         self.assertFalse(processor.menu_delivery_failures)
 
 
-def _statistics_response(request: httpx.Request, amounts: list[str]) -> httpx.Response:
+def _is_count_request(request: httpx.Request) -> bool:
+    return request.url.path.endswith("/statistic/calls")
+
+
+def _statistics_response(request: httpx.Request, amounts: list[str], *, counts: list[int] | None = None) -> httpx.Response:
+    is_count = _is_count_request(request)
+    points_key = "ai_key_calls_statistics" if is_count else "ai_key_token_statistics"
+    field = "call_count" if is_count else "total_cost"
+    values = [str(count) for count in counts or ()] if is_count else amounts
     start_hour = datetime.fromisoformat(request.url.params["start_time"]).replace(minute=0, second=0, microsecond=0)
     end_hour = datetime.fromisoformat(request.url.params["end_time"]).replace(minute=0, second=0, microsecond=0)
     step = timedelta(minutes=int(request.url.params["interval"]))
     points = []
     while start_hour <= end_hour:
         index = len(points)
-        cost = amounts[index] if index < len(amounts) else "0"
-        points.append(f'{{"time":"{start_hour.isoformat()}","total_cost":{cost}}}')
+        value = values[index] if index < len(values) else "0"
+        points.append(f'{{"time":"{start_hour.isoformat()}","{field}":{value}}}')
         start_hour += step
     return httpx.Response(200, text=(
-        f'{{"ai_key_token_statistics":[{",".join(points)}],"meta":{{"total":{len(points)}}}}}'
+        f'{{"{points_key}":[{",".join(points)}],"meta":{{"total":{len(points)}}}}}'
     ))

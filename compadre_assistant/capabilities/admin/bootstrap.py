@@ -30,4 +30,4 @@ def create_admin_runtime(*, enabled: bool) -> Iterator[AdminCapability | None]:
         return
     with httpx.Client(follow_redirects=False, trust_env=False) as client:
         reader = TimewebCostStatisticsReader(config, client)
-        yield AdminCapability(GetGatewayCostReport(reader, currency=config.currency))
+        yield AdminCapability(GetGatewayCostReport(reader, currency=config.currency, count_reader=reader))
