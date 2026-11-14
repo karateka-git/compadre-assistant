@@ -159,6 +159,50 @@ class AdminChannelsTest(unittest.TestCase):
         self.assertEqual([row["call_id"] for row in saved], [str(observation.call_id)])
         self.assertEqual(json.loads(saved[0]["tokens_json"])["prompt_tokens"], tokens.prompt_tokens)
 
+    def test_fractional_timezone_requires_complete_utc_hours_in_both_channels(self) -> None:
+        """Проверяет границы DAY и отличает известный ноль от дефекта покрытия."""
+        self.configure(str(self.owner_id))
+        end = datetime(2026, 11, 14, 20, tzinfo=UTC)
+        requests = []
+        coverage = "complete"
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            data = _statistics_response(request, []).json()
+            points = data["ai_key_token_statistics"]
+            if coverage == "missing":
+                points.pop()
+            elif coverage == "duplicate":
+                points[-1] = points[0]
+            data["meta"]["total"] = len(points)
+            return httpx.Response(200, json=data)
+
+        self.configure_timeweb(respond)
+        command = "/llm_costs DAY Asia/Kathmandu"
+        with patch("compadre_assistant.capabilities.admin.domain.cost_report._utc_now", return_value=end), \
+             self.assertLogs("compadre_assistant.capabilities.admin.data.timeweb_statistics", level="WARNING"), \
+             create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
+            self.telegram(processor, "/admin")
+            self.vk(processor, "/admin")
+            for coverage, expected in (
+                ("complete", "Сегодня — 0,00 ₽."),
+                ("missing", "Сегодня — Полный период недоступен."),
+                ("duplicate", "Сегодня — Статистика Timeweb временно недоступна."),
+            ):
+                with self.subTest(coverage=coverage):
+                    telegram = self.telegram(processor, command)[0]
+                    vk = self.vk(processor, command).messages[-1][1]
+                    self.assertIn("Asia/Kathmandu", telegram)
+                    self.assertEqual(telegram.splitlines()[-1], expected)
+                    self.assertEqual(vk, telegram)
+                    self.assertNotIn("Текущий месяц", telegram)
+
+        self.assertEqual(len(requests), 6)
+        for request in requests:
+            self.assertEqual(request.url.params["start_time"], "2026-11-14T18:15:00Z")
+            self.assertEqual(request.url.params["end_time"], "2026-11-14T19:59:59.999999Z")
+            self.assertEqual(request.url.params["interval"], "60")
+
     def test_groups_untrusted_and_unknown_users_never_read_costs(self) -> None:
         """До отчёта допускается только явный доверенный автор личного чата."""
         self.configure(str(self.owner_id))
@@ -297,15 +341,15 @@ class AdminChannelsTest(unittest.TestCase):
 
 
 def _statistics_response(request: httpx.Request, amounts: list[str]) -> httpx.Response:
-    start = datetime.fromisoformat(request.url.params["start_time"])
-    end = datetime.fromisoformat(request.url.params["end_time"])
+    start_hour = datetime.fromisoformat(request.url.params["start_time"]).replace(minute=0, second=0, microsecond=0)
+    end_hour = datetime.fromisoformat(request.url.params["end_time"]).replace(minute=0, second=0, microsecond=0)
     step = timedelta(minutes=int(request.url.params["interval"]))
     points = []
-    while start < end:
+    while start_hour <= end_hour:
         index = len(points)
         cost = amounts[index] if index < len(amounts) else "0"
-        points.append(f'{{"time":"{start.isoformat()}","total_cost":{cost}}}')
-        start += step
+        points.append(f'{{"time":"{start_hour.isoformat()}","total_cost":{cost}}}')
+        start_hour += step
     return httpx.Response(200, text=(
         f'{{"ai_key_token_statistics":[{",".join(points)}],"meta":{{"total":{len(points)}}}}}'
     ))
