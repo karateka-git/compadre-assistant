@@ -8,9 +8,6 @@ from enum import StrEnum
 from typing import Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from compadre_assistant.capabilities.ask.domain.usage import UsagePeriod, UsageTotals, UsageTotalsReader
-
-
 DEFAULT_REPORT_TIMEZONE = "Asia/Omsk"  # Пояс отчёта без аргумента.
 _CLOCK_RESOLUTION = timedelta(microseconds=1)  # Точность datetime и границ учёта.
 _STATISTICS_HISTORY = timedelta(days=90)  # Подтверждённая глубина статистики Timeweb.
@@ -18,55 +15,6 @@ _STATISTICS_HISTORY = timedelta(days=90)  # Подтверждённая глу�
 
 class InvalidReportTimezone(ValueError):
     """Часовой пояс отчёта не является допустимым идентификатором IANA."""
-
-
-@dataclass(frozen=True, slots=True)
-class LlmCostReport:
-    """Хранит выбранный пояс и точные агрегаты до округления при выводе.
-
-    Args:
-        timezone: Использованный идентификатор IANA.
-        today: Итог с начала текущих местных суток.
-        month: Итог с начала текущего местного календарного месяца.
-        year: Итог с начала текущего местного календарного года.
-    """
-
-    timezone: str
-    today: UsageTotals
-    month: UsageTotals
-    year: UsageTotals
-
-
-class GetLlmCostReport:
-    """Читает итоги текущих суток, месяца и года одним снимком учёта.
-
-    Args:
-        reader: Публичный контракт чтения агрегатов по UTC-интервалам.
-        clock: Источник одного момента с часовым поясом на отчёт. По умолчанию
-            используется текущее время UTC.
-    """
-
-    def __init__(self, reader: UsageTotalsReader, *, clock: Callable[[], datetime] | None = None) -> None:
-        self._reader = reader
-        self._clock = clock if clock is not None else _utc_now
-
-    def execute(self, timezone: str | None = None) -> LlmCostReport:
-        """Возвращает точные суммы и количество обращений без оценки.
-
-        Args:
-            timezone: Идентификатор IANA для вызова либо None для `Asia/Omsk`.
-
-        Returns:
-            Итоги трёх полуоткрытых интервалов до единого момента отчёта.
-
-        Raises:
-            InvalidReportTimezone: Передан неизвестный или недопустимый пояс.
-            ValueError: Источник времени вернул момент без часового пояса.
-            ZoneInfoNotFoundError: В окружении отсутствуют данные пояса по умолчанию.
-        """
-        zone_key, periods = _calendar_periods(timezone, self._clock, tuple(ReportPeriod))
-        daily, monthly, yearly = self._reader.read_totals(tuple(UsagePeriod(start, end) for _, start, end in periods))
-        return LlmCostReport(zone_key, daily, monthly, yearly)
 
 
 class ReportPeriod(StrEnum):
@@ -148,7 +96,7 @@ class GatewayCostReport:
     """Содержит выбранный пояс, валюту аккаунта и результаты по периодам."""
 
     timezone: str
-    currency: str
+    currency: str | None
     rows: tuple[CostReportRow, ...]
 
 
@@ -157,11 +105,11 @@ class GetGatewayCostReport:
 
     Args:
         reader: Источник статистики, если настроен оператором.
-        currency: ISO-код валюты аккаунта источника.
+        currency: ISO-код валюты аккаунта либо None, если источник не настроен.
         clock: Источник одного момента с часовым поясом на отчёт.
     """
 
-    def __init__(self, reader: CostStatisticsReader | None, *, currency: str,
+    def __init__(self, reader: CostStatisticsReader | None, *, currency: str | None,
                  clock: Callable[[], datetime] | None = None) -> None:
         self._reader = reader
         self._currency = currency

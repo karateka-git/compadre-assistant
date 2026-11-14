@@ -192,6 +192,34 @@ class RuntimeConfigurationTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("Asia/Omsk", str(logger.method_calls))
 
+    def test_timeweb_admin_startup_and_healthcheck_only_validate_local_settings(self) -> None:
+        """Healthcheck обоих каналов не создаёт клиент Timeweb и скрывает секрет."""
+        key = "550e8400-e29b-41d4-a716-446655440000"
+        for channel in ("telegram", "vk"):
+            for enabled, token, key_id, expected in (
+                (True, "", "", 0),
+                (True, "account-secret", key, 0),
+                (True, "account-secret", "", 1),
+                (False, "account-secret", "bad-private-key-id", 0),
+            ):
+                with self.subTest(channel=channel, enabled=enabled, expected=expected), patch(
+                    "compadre_assistant.capabilities.admin.bootstrap.httpx.Client",
+                ) as client, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
+                    env = self.env(channel, False, "absent") | {
+                        "ENABLED_CAPABILITIES": "admin" if enabled else "",
+                        "ADMIN_TIMEWEB_API_TOKEN": token,
+                        "ADMIN_TIMEWEB_KEY_ID": key_id,
+                    }
+                    code, logger = self.run_cli(["--healthcheck", "--channels", channel], env)
+                    self.assertEqual(code, expected)
+                    client.assert_not_called()
+                    self.assertNotIn("account-secret", str(logger.method_calls))
+                    self.assertNotIn("bad-private-key-id", str(logger.method_calls))
+                    self.assertEqual(self.run_cli([f"--{channel}-bot"], env)[0], 2 if expected else 0)
+                    self.assertEqual(runner.call_count, int(expected == 0))
+                    self.assertEqual(client.call_count, int(enabled and bool(token and key_id)))
+                    client.return_value.__enter__.return_value.get.assert_not_called()
+
     def test_selected_channel_missing_settings_blocks_polling(self) -> None:
         """Незаполненный выбранный канал не открывает polling или рабочую SQLite."""
         for channel, missing in (("telegram", "TELEGRAM_BOT_TOKEN"), ("vk", "VK_BOT_TOKEN"), ("vk", "VK_GROUP_ID")):

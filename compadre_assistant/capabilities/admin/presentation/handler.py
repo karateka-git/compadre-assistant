@@ -1,9 +1,11 @@
 """Открывает режим администрирования и выдаёт отчёт о расходах."""
 
-import logging
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 
-from compadre_assistant.capabilities.admin.domain.cost_report import GetLlmCostReport, InvalidReportTimezone, LlmCostReport
-from compadre_assistant.capabilities.ask.domain.usage import NANORUBLES_PER_RUBLE, UsageTotals
+from compadre_assistant.capabilities.admin.domain.cost_report import (
+    CostReportRow, CostReportStatus, GatewayCostReport, GetGatewayCostReport,
+    InvalidReportTimezone, ReportPeriod,
+)
 from compadre_assistant.core.domain.users.entities import is_private_chat_address
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -14,12 +16,20 @@ from compadre_assistant.core.presentation.incoming.ports import (
 from compadre_assistant.core.presentation.message_content import TextSpan, TextStyle, code_span, compose_content, text_content
 
 
-_LOGGER = logging.getLogger(__name__)
 _ENTRY = "/admin"
 _COSTS = "/llm_costs"
 _COSTS_ACTION = ReplyAction("Показать расходы ИИ", _COSTS)
 _PRIVATE_CHAT_HINT = "Открой личный чат с ботом, чтобы получить отчёт."
-_NANORUBLES_PER_KOPECK = NANORUBLES_PER_RUBLE // 100  # Масштаб округления суммы отчёта.
+_PERIOD_LABELS = {
+    ReportPeriod.DAY: "Сегодня",
+    ReportPeriod.MONTH: "Текущий месяц",
+    ReportPeriod.YEAR: "Текущий год",
+}
+_STATUS_MESSAGES = {
+    CostReportStatus.PERIOD_UNAVAILABLE: "Полный период недоступен.",
+    CostReportStatus.SOURCE_UNCONFIGURED: "Статистика Timeweb не настроена.",
+    CostReportStatus.SOURCE_FAILED: "Статистика Timeweb временно недоступна.",
+}
 
 
 class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
@@ -28,14 +38,16 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
     descriptor = CapabilityDescriptor(
         "admin", CapabilityCommand(_ENTRY, (), "войти в режим администрирования"),
         CapabilityHelp(sections=(HelpSection("Отчёт о расходах", (
-            CapabilityCommand(_COSTS, (CommandParameter("часовой пояс", "<timezone>", False),),
-                              "показать расчётные расходы ИИ в личном чате"),
+            CapabilityCommand(_COSTS, (
+                CommandParameter("период", "<DAY|MONTH|YEAR>", False),
+                CommandParameter("часовой пояс", "<timezone>", False),
+            ), "показать расходы по статистике Timeweb"),
         )),)),
         enabled_by_default=True,
         requires_profile_access=True,
     )
 
-    def __init__(self, cost_report: GetLlmCostReport) -> None:
+    def __init__(self, cost_report: GetGatewayCostReport) -> None:
         """Сохраняет use case чтения отчёта о расходах."""
         self._cost_report = cost_report
 
@@ -79,22 +91,22 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
             return CapabilityResult(IncomingResponse(compose_content(
                 "Чтобы получить отчёт, вызови ", code_span(_COSTS), ".",
             ), suggested_actions=(_COSTS_ACTION,)))
-        if len(parts) > 2:
+        arguments = parts[1:]
+        period = ReportPeriod.__members__.get(arguments[0].upper()) if arguments else None
+        if period is not None:
+            arguments = arguments[1:]
+        if len(arguments) > 1 or (arguments and arguments[0].upper() in ReportPeriod.__members__):
             return CapabilityResult(IncomingResponse(compose_content(
-                "Укажи один часовой пояс. Например, ", code_span(f"{_COSTS} Europe/Moscow"), ".",
+                "Укажи период DAY, MONTH или YEAR, затем при необходимости часовой пояс. Например, ",
+                code_span(f"{_COSTS} DAY Europe/Moscow"), ".",
             )))
         try:
-            report = self._cost_report.execute(parts[1] if len(parts) == 2 else None)
+            report = self._cost_report.execute(arguments[0] if arguments else None, period=period)
         except InvalidReportTimezone:
             return CapabilityResult(IncomingResponse(compose_content(
                 "Часовой пояс не найден. Используй название IANA, например ",
                 code_span(f"{_COSTS} Europe/Moscow"), ".",
             )))
-        except Exception as error:
-            _LOGGER.exception("Не удалось получить агрегаты расходов ИИ")
-            return CapabilityResult(IncomingResponse(compose_content(
-                "Отчёт временно недоступен. Повтори ", code_span(_COSTS), " позже.",
-            ), error))
         return CapabilityResult(_report_response(report))
 
     def list_pending_confirmations(self, context: HandlerContext, origin: ReplyAddress) -> ConfirmationQueryResult:
@@ -102,17 +114,30 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
         return ConfirmationQueryResult("complete")
 
 
-def _report_response(report: LlmCostReport) -> IncomingResponse:
+def _report_response(report: GatewayCostReport) -> IncomingResponse:
+    if report.currency is None:
+        return IncomingResponse(text_content(_STATUS_MESSAGES[CostReportStatus.SOURCE_UNCONFIGURED]))
     return IncomingResponse(compose_content(
-        TextSpan("Расчётные расходы ИИ", TextStyle.EMPHASIS), "\nЧасовой пояс ", code_span(report.timezone), "\n\n",
-        _report_line("Сегодня", report.today), "\n",
-        _report_line("Текущий месяц", report.month), "\n",
-        _report_line("Текущий год", report.year),
+        TextSpan("Расходы ИИ по статистике Timeweb", TextStyle.EMPHASIS),
+        "\nЧасовой пояс ", code_span(report.timezone),
+        "\nВалюта ", report.currency, ". Суммы до списания бонусов.\n\n",
+        "\n".join(_report_line(row, report.currency) for row in report.rows),
     ))
 
 
-def _report_line(period: str, totals: UsageTotals) -> str:
-    # Округляем половину копейки вверх после суммирования точных значений.
-    kopecks = (totals.cost_nanorubles + _NANORUBLES_PER_KOPECK // 2) // _NANORUBLES_PER_KOPECK
-    rubles, kopecks = divmod(kopecks, 100)
-    return f"{period} — {rubles},{kopecks:02d} ₽. Запросов без оценки — {totals.unknown_count}."
+def _report_line(row: CostReportRow, currency: str) -> str:
+    label = _PERIOD_LABELS[row.period]
+    if row.status in _STATUS_MESSAGES:
+        return f"{label} — {_STATUS_MESSAGES[row.status]}"
+    if row.status is CostReportStatus.COMPLETE and row.amount is not None:
+        return f"{label} — {_format_amount(row.amount, currency)}."
+    known = f"Известная сумма {_format_amount(row.amount, currency)}. " if row.amount is not None else ""
+    return f"{label} — {known}Интервалов без стоимости — {row.unknown_intervals}."
+
+
+def _format_amount(amount: Decimal, currency: str) -> str:
+    # Для переноса разряда при округлении длинного целого нужна ещё одна цифра.
+    with localcontext(prec=max(3, amount.adjusted() + 4)):
+        rounded = amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    label = "₽" if currency == "RUB" else currency
+    return f"{rounded:f}".replace(".", ",") + f" {label}"

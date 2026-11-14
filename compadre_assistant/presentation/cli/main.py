@@ -324,8 +324,9 @@ def check_capability_configuration(
     Полностью пустые группы GitHub/LLM сохраняют доступность общих команд;
     обработчик Obsidian сообщает о ненастроенном провайдере. Частичные или
     некорректные группы блокируют запуск. Отсутствие embeddings включает FTS.
-    Для режима администрирования проверяет данные часовых поясов и список
-    доверенных профилей. Пустой список закрывает доступ ко всем профилям.
+    Для режима администрирования проверяет данные часовых поясов, список
+    доверенных профилей и настройки Timeweb без вызова API. Пустой список
+    закрывает доступ ко всем профилям.
 
     Args:
         enabled_capabilities: ID возможностей текущей сборки.
@@ -347,10 +348,13 @@ def check_capability_configuration(
     if "admin" in enabled_capabilities:
         try:
             trusted_ids = app_bootstrap.load_admin_profile()
+            timeweb = app_bootstrap.load_admin_timeweb_config()
             if trusted_ids:
                 logger.info("Admin configuration is ready")
             else:
                 logger.info("Admin is enabled without trusted profiles; access is closed")
+            if timeweb is None:
+                logger.info("Timeweb statistics are not configured for Admin")
         except ValueError as error:
             logger.error("Admin configuration is invalid: %s", error)
             admin_ready = False

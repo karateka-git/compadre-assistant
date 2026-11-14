@@ -12,10 +12,10 @@ from collections.abc import Callable, Iterator, Mapping
 
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
-from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile
-from compadre_assistant.capabilities.admin.domain.cost_report import GetLlmCostReport
+from compadre_assistant.capabilities.admin.bootstrap import create_admin_runtime
+from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile, load_admin_timeweb_config
 from compadre_assistant.capabilities.admin.presentation.handler import AdminCapability
-from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime, create_usage_totals_reader
+from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
 
@@ -449,8 +449,11 @@ def create_channel_message_processor(
             embedding_config=obsidian_config.embedding,
             created_note_tag=obsidian_config.obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
-        with create_ask_runtime(enabled="ask" in enabled_capabilities,
-                                database_path=database_path, config=ask_config) as ask:
+        with (
+            create_admin_runtime(enabled=admin_enabled) as admin,
+            create_ask_runtime(enabled="ask" in enabled_capabilities,
+                               database_path=database_path, config=ask_config) as ask,
+        ):
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
                 obsidian_descriptor(),
@@ -459,8 +462,8 @@ def create_channel_message_processor(
                 capabilities += (ask,)
             else:
                 disabled += (AskCapability.descriptor,)
-            if admin_enabled:
-                capabilities += (AdminCapability(GetLlmCostReport(create_usage_totals_reader(database_path))),)
+            if admin is not None:
+                capabilities += (admin,)
             else:
                 disabled += (AdminCapability.descriptor,)
             yield ChannelMessageProcessor(
