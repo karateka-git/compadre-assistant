@@ -186,6 +186,57 @@ class AskChannelsTest(unittest.TestCase):
             self.assertIn("/capabilities", client.messages[-1][1])
             self.assertEqual(client.cleared, [(7, 42)])
 
+    def test_vk_keeps_menu_until_a_reply_in_the_same_chat(self) -> None:
+        """Запуск и смена доступа из Telegram не публикуют меню в VK."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=self.logger)
+        def send(processor, text: str) -> None:
+            _handle_update({"type": "message_new", "object": {"message": {
+                "peer_id": 7, "from_id": 7, "id": 1, "text": text,
+            }}}, incoming_message_processor=processor, client=client,
+                logger=self.logger, menu_update_handler=publish)
+
+        def commands() -> set[str]:
+            menu = next(json.loads(item) for item in reversed(client.keyboards)
+                        if item and not json.loads(item)["inline"])
+            return {button["action"]["label"] for row in menu["buttons"] for button in row}
+
+        with create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config,
+        ) as processor:
+            self.send("telegram", processor, "/register", chat_id=7)
+            self.send("telegram", processor, "Тест", chat_id=7)
+            link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
+            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            self.assertIsNotNone(code)
+            send(processor, code.group(0))
+
+        # Новый процесс не знает, что отображается в клиенте VK.
+        before = len(client.messages)
+        with create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config,
+        ) as restarted:
+            restarted.reconcile_menus(publish, notify_expiry=publish.send_expiry)
+            restarted.reconcile_menus(publish, notify_expiry=publish.send_expiry)
+            self.assertEqual(len(client.messages), before)
+            self.assertFalse(restarted.menu_delivery_failures)
+
+            send(restarted, "/ai")
+            self.assertIn("/ask", commands())
+            before = len(client.messages)
+            disabled = self.send("telegram", restarted, "/disable ask", chat_id=7)
+            self.assertIn("выключена", disabled)
+            self.assertEqual(len(client.messages), before)
+            restarted.reconcile_menus(publish, notify_expiry=publish.send_expiry)
+            self.assertEqual(len(client.messages), before)
+            self.assertIn("/ask", commands())
+
+            send(restarted, "/ask")
+            reply = "\n".join(text for _, text in client.messages[before:])
+            self.assertIn("лично выключена", reply)
+            self.assertIn("/enable ask", reply)
+            self.assertNotIn("/ask", commands())
+
     def test_vk_pending_input_expires_once_and_restores_menu(self) -> None:
         """Сверка доставляет уведомление с меню и повторяет отправку со стабильным ID."""
         client = FakeVkClient()
@@ -781,8 +832,7 @@ class AskChannelsTest(unittest.TestCase):
 
                         def record(**kwargs):
                             original_send(**kwargs)
-                            if kwargs["text"] != "Меню команд обновлено.":
-                                sent.append(kwargs["text"])
+                            sent.append(kwargs["text"])
 
                         client.send_message = record
                         publish = _create_vk_menu_update_handler(client, logger=self.logger)
@@ -892,12 +942,17 @@ class AskChannelsTest(unittest.TestCase):
                         await send("/ai", chat=43)
                         self.assertEqual(menu_calls[-1], (43, normal[1]))
                         await send(command)
+                        message_count = len(messages)
                         await send("", photo="undelivered", fail_receipt=True)
                         self.assertEqual(stages, [])
                         if channel == "telegram":
                             self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
                         else:
+                            self.assertEqual(len(messages), message_count)
+                            self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                            await send("/help")
                             self.assertEqual(menu_calls[-1], normal)
+                            self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
                         await send(command)
                         self.assertIn("Пришли одно фото", messages[-1][1])
                         await send("/exit", photo="first")
@@ -1041,8 +1096,7 @@ class AskChannelsTest(unittest.TestCase):
                                                      for row in keyboard["buttons"] for button in row)
                                     keyboards_by_reply.append((kwargs["text"], commands))
                                     record_menu(kwargs["peer_id"], commands)
-                            if kwargs["text"] != "Меню команд обновлено.":
-                                record(kwargs["peer_id"], kwargs["text"])
+                            record(kwargs["peer_id"], kwargs["text"])
                             return result
 
                         client.send_message = send_message

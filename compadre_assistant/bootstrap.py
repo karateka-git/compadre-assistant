@@ -237,10 +237,11 @@ class ChannelMessageProcessor:
 
         Вызывать при запуске с готовым обработчиком и после изменения серверной
         доступности или подтверждений. Повторный вызов проверяет TTL ввода и
-        доставляет только изменившиеся либо ранее не доставленные меню.
+        передаёт каналу только изменившиеся либо ранее не доставленные меню.
 
         Args:
-            handler: Нейтральный callback публикации меню вне SQLite scope.
+            handler: Callback вне SQLite scope. False означает, что канал
+                оставил меню без публикации.
             notify_expiry: Доставка уведомления с меню для истёкшего ожидания VK.
         """
         with self._menu_lock:
@@ -363,7 +364,8 @@ class ChannelMessageProcessor:
                 if send is not None and self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
                     self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                     return
-                handler(update)
+                if handler(update) is False:
+                    return
             if self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
                 self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                 return
@@ -433,7 +435,7 @@ class ChannelMessageProcessor:
 
         Args:
             event: Исходный адрес с явным автором события.
-            handler: Адресная доставка меню без подходящей части ответа.
+            handler: Адресная доставка меню, если её поддерживает канал.
             send: Доставка ответа. Возвращает успех всего ответа и успех
                 доставки меню либо None при отсутствии подходящей части.
 

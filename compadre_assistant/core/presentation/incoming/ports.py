@@ -69,7 +69,8 @@ class CommandMenuUpdate:
     menu: CommandMenu
 
 
-CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], None]
+# False означает, что канал оставил меню без публикации.
+CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], bool | None]
 
 
 @dataclass(frozen=True, slots=True)

@@ -585,14 +585,7 @@ def _response_menu_delivery(
         return None
 
     def deliver_reply(event: IncomingEvent, send: _SendWithMenu) -> bool:
-        def send_and_track(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
-            delivered, menu_delivered = send(update)
-            if menu_delivered is not None and update is not None and isinstance(handler, _VkMenuUpdateHandler):
-                # Даже при неоднозначном сетевом отказе VK мог применить новый layout.
-                handler.invalidate_retry(int(update.address.chat_id))
-            return delivered, menu_delivered
-
-        return deliver(event, handler, send_and_track)
+        return deliver(event, handler, send)
 
     return deliver_reply
 
@@ -626,29 +619,17 @@ def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
 def _create_vk_menu_update_handler(
     client: Any, *, logger: logging.Logger, stop: Event | None = None,
 ) -> _VkMenuUpdateHandler:
-    """Создаёт обработчик адресной публикации постоянной клавиатуры VK."""
+    """Создаёт обработчик меню для содержательных сообщений VK."""
     return _VkMenuUpdateHandler(client, logger=logger, stop=stop)
 
 
 class _VkMenuUpdateHandler:
-    """Отправляет меню вне ответа с отдельной серией повторов для чата."""
+    """Доставляет нижнее меню с уведомлением об истечении ожидания."""
 
     def __init__(self, client: Any, *, logger: logging.Logger, stop: Event | None) -> None:
         self._client = client
         self._logger = logger
         self._stop = stop
-        self._state_guard = Lock()
-        self._peer_locks: dict[int, Lock] = {}
-        self._last_attempt: dict[int, tuple[str, int]] = {}
-
-    def _peer_lock(self, peer_id: int) -> Lock:
-        with self._state_guard:
-            return self._peer_locks.setdefault(peer_id, Lock())
-
-    def invalidate_retry(self, peer_id: int) -> None:
-        """Начинает новую серию после попытки отправки меню вместе с ответом."""
-        with self._peer_lock(peer_id):
-            self._last_attempt.pop(peer_id, None)
 
     def send_expiry(
         self, request_id: str, response: IncomingResponse, update: CommandMenuUpdate,
@@ -665,52 +646,28 @@ class _VkMenuUpdateHandler:
         """
         if (self._stop is not None and self._stop.is_set()) or update.address.channel != "vk":
             return False
-        peer_id = int(update.address.chat_id)
+        try:
+            peer_id = int(update.address.chat_id)
+        except (TypeError, ValueError):
+            self._logger.warning("Skipping VK expiry notice with non-numeric peer ID")
+            return False
         if not 0 < peer_id < 2_000_000_000:
             return False
         chunk, = render_vk_content(response.content)
         keyboard = _serialize_vk_command_menu(update)
         digest = blake2s(request_id.encode(), digest_size=4).digest()
         random_id = int.from_bytes(digest, "big") % 2_147_483_647 + 1
-        with self._peer_lock(peer_id):
-            self._last_attempt.pop(peer_id, None)
-            self._client.send_message(
-                peer_id=peer_id, text=chunk.text, format_data=chunk.format_data,
-                keyboard=keyboard, random_id=random_id,
-            )
+        self._client.send_message(
+            peer_id=peer_id, text=chunk.text, format_data=chunk.format_data,
+            keyboard=keyboard, random_id=random_id,
+        )
         return True
 
-    def __call__(self, update: CommandMenuUpdate) -> None:
-        """Отправляет клавиатуру только в личный VK-адрес."""
-        if (self._stop is not None and self._stop.is_set()) or update.address.channel != "vk":
-            return
-        try:
-            peer_id = int(update.address.chat_id)
-        except (TypeError, ValueError):
-            self._logger.warning("Skipping VK menu with non-numeric peer ID")
-            return
-        if not 0 < peer_id < 2_000_000_000:
-            self._logger.warning("Skipping VK menu for a non-private peer")
-            return
+    def __call__(self, update: CommandMenuUpdate) -> bool:
+        """Оставляет меню без публикации, когда к нему нет сообщения."""
+        return False
 
-        keyboard = _serialize_vk_command_menu(update)
-        with self._peer_lock(peer_id):
-            previous = self._last_attempt.get(peer_id)
-            if previous is not None and previous[0] == keyboard:
-                random_id = previous[1]
-            else:
-                # Новый ID для перехода A→B→A; повтор того же состояния после
-                # ошибки сохраняет ID, а новый runtime автоматически начинает
-                # новую retry-серию.
-                random_id = randint(1, 2_147_483_647)
-                self._last_attempt[peer_id] = (keyboard, random_id)
-            # Ошибка намеренно выходит наружу: reconciliation оставит адрес на повтор.
-            self._client.send_message(
-                peer_id=peer_id,
-                text="Меню команд обновлено.",
-                keyboard=keyboard,
-                random_id=random_id,
-            )
+
 def _start_vk_menu_reconciliation(
     processor: IncomingMessageProcessor,
     handler: _VkMenuUpdateHandler,
@@ -718,7 +675,7 @@ def _start_vk_menu_reconciliation(
     *,
     logger: logging.Logger,
 ) -> Thread | None:
-    """Запускает восстановление меню при старте и его периодическую сверку."""
+    """Запускает периодическую сверку ожиданий в личных чатах VK."""
     reconcile = getattr(processor, "run_menu_reconciliation", None)
     if not callable(reconcile):
         return None
