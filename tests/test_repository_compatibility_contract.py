@@ -94,7 +94,7 @@ class CompatibilityContractTests(unittest.TestCase):
         new = dict(old, **{f"{MIGRATIONS}/0002_added.sql": "sql2"})
         worker = {"passed": True, "imports": {"compadre_assistant.fixture": str(checkout / source)},
                   "environment": {"sys_path": [str(checkout)]}}
-        tests = {"passed": True, "test_ids": policy["test_ids"], "tests_run": 173,
+        tests = {"passed": True, "test_ids": policy["test_ids"], "tests_run": len(policy["test_ids"]),
                  "skips": [], "failures": [], "errors": []}
         candidate = dict(worker, candidate_tests=tests, fresh_fingerprint="schema", upgraded_fingerprint="schema")
         behavior = dict(worker, old_tests=tests, schema_fingerprints=["schema"],
@@ -232,7 +232,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        """Получает принятую v3.4.0 один раз без checkout рабочего дерева."""
+        """Экспортирует v4.0.0 с актуальным составом тестов совместимости один раз."""
         cls.temporary = TemporaryDirectory(prefix="compatibility-mutations-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name).resolve()
@@ -240,16 +240,15 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         cls.repository = Path(__file__).resolve().parents[1]
         subprocess.run(["git", "status", "--short"], cwd=cls.repository, check=True, capture_output=True)
         cls.checkout = cls.root / "previous"
-        cls.original = export_commit(cls.repository, BASELINE.sha, cls.checkout)
+        cls.original = export_commit(cls.repository, "119e36d2bdde0162b970c81cdc980d61dec0cc9c", cls.checkout)
 
     def _run(self, name: str, sql: str, *, full: bool = False) -> dict:
         source = self.root / name / "source"
         (source / MIGRATIONS).mkdir(parents=True)
         for path in (self.checkout / MIGRATIONS).glob("*.sql"):
-            if path.name.startswith("0005_"):
-                continue
+
             (source / MIGRATIONS / path.name).write_bytes(path.read_bytes())
-        (source / MIGRATIONS / "0005_mutation.sql").write_text(sql, encoding="utf-8")
+        (source / MIGRATIONS / "0006_mutation.sql").write_text(sql, encoding="utf-8")
         expected = overlay_sql(self.checkout, source, snapshot(self.checkout))
         output = self.root / name / "result"
         output.mkdir()
@@ -274,7 +273,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         return result
 
     def test_compatible_addition_and_unused_column_removal_pass_full_matrix(self) -> None:
-        """Новый столбец и удаление неиспользуемого fixture-поля проходят 173 tests."""
+        """Новый столбец и удаление неиспользуемого fixture-поля проходят полный набор тестов."""
         verify_inventory(self.checkout, self.policy)
         changed = deepcopy(self.policy)
         changed["matrix"][0]["method"] = "nonexistent"
