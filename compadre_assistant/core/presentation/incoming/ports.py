@@ -156,6 +156,8 @@ class BackgroundReply:
 
 
 ChannelCompletionHandler = Callable[[BackgroundReply], None]
+# Доставляет ответ с меню. ID ожидания связывает повторы отправки.
+PendingInputExpiryHandler = Callable[[str, IncomingResponse, CommandMenuUpdate], bool]
 
 
 class ReplyDeliveryPort(Protocol):

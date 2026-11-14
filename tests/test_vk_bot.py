@@ -837,8 +837,9 @@ class VkBotTest(unittest.TestCase):
         def processor(_message, _completion_handler):
             return IncomingResponse(text_content("Ответ без изменений"))
 
-        def reconcile(handler, stop):
+        def reconcile(handler, stop, *, notify_expiry):
             started.set()
+            self.assertEqual(notify_expiry, handler.send_expiry)
             handler(CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu()))
             stop.wait(2)
             stopped.set()
@@ -878,7 +879,7 @@ class VkBotTest(unittest.TestCase):
         def processor(_message, _completion_handler):
             return IncomingResponse(text_content("Ответ"))
 
-        processor.run_menu_reconciliation = lambda _handler, _stop: None
+        processor.run_menu_reconciliation = lambda _handler, _stop, **_: None
         logger = logging.getLogger("test.vk.menu.shutdown_timeout")
         with patch("compadre_assistant.presentation.vk.bot.Thread", StuckThread):
             with self.assertLogs(logger, level="ERROR") as logs:

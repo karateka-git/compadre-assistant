@@ -6,6 +6,7 @@ import random
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
+from hashlib import blake2s
 from random import randint
 from threading import Condition, Event, Lock, Thread
 from typing import Any, TypeVar
@@ -649,6 +650,36 @@ class _VkMenuUpdateHandler:
         with self._peer_lock(peer_id):
             self._last_attempt.pop(peer_id, None)
 
+    def send_expiry(
+        self, request_id: str, response: IncomingResponse, update: CommandMenuUpdate,
+    ) -> bool:
+        """Отправляет уведомление с новым меню, связывая повторы по ID ожидания.
+
+        Args:
+            request_id: ID истёкшего ожидания для стабильного random_id.
+            response: Готовый текст об истечении.
+            update: Проверенный снимок нижней клавиатуры исходного чата.
+
+        Returns:
+            True, если VK подтвердил доставку уведомления.
+        """
+        if (self._stop is not None and self._stop.is_set()) or update.address.channel != "vk":
+            return False
+        peer_id = int(update.address.chat_id)
+        if not 0 < peer_id < 2_000_000_000:
+            return False
+        chunk, = render_vk_content(response.content)
+        keyboard = _serialize_vk_command_menu(update)
+        digest = blake2s(request_id.encode(), digest_size=4).digest()
+        random_id = int.from_bytes(digest, "big") % 2_147_483_647 + 1
+        with self._peer_lock(peer_id):
+            self._last_attempt.pop(peer_id, None)
+            self._client.send_message(
+                peer_id=peer_id, text=chunk.text, format_data=chunk.format_data,
+                keyboard=keyboard, random_id=random_id,
+            )
+        return True
+
     def __call__(self, update: CommandMenuUpdate) -> None:
         """Отправляет клавиатуру только в личный VK-адрес."""
         if (self._stop is not None and self._stop.is_set()) or update.address.channel != "vk":
@@ -682,7 +713,7 @@ class _VkMenuUpdateHandler:
             )
 def _start_vk_menu_reconciliation(
     processor: IncomingMessageProcessor,
-    handler: CommandMenuUpdateHandler,
+    handler: _VkMenuUpdateHandler,
     stop: Event,
     *,
     logger: logging.Logger,
@@ -695,7 +726,7 @@ def _start_vk_menu_reconciliation(
     def run() -> None:
         """Сверяет меню до завершения VK runtime."""
         try:
-            reconcile(handler, stop)
+            reconcile(handler, stop, notify_expiry=handler.send_expiry)
         except Exception:
             logger.exception("VK menu reconciliation stopped unexpectedly")
 

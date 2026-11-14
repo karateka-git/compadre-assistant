@@ -35,7 +35,9 @@ from compadre_assistant.core.presentation.incoming.events import ImageAttachment
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
-from compadre_assistant.presentation.vk.bot import _VkUpdateWorkers, _create_vk_menu_update_handler, _handle_update
+from compadre_assistant.presentation.vk.bot import (
+    VkBotError, _VkUpdateWorkers, _create_vk_menu_update_handler, _handle_update,
+)
 from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
 from tests.response_assertions import response_text
 from tests.test_telegram_bot import FakeAiogram, MenuTelegramBot, TelegramMessage
@@ -183,6 +185,140 @@ class AskChannelsTest(unittest.TestCase):
                 logger=self.logger, menu_update_handler=publish)
             self.assertIn("/capabilities", client.messages[-1][1])
             self.assertEqual(client.cleared, [(7, 42)])
+
+    def test_vk_pending_input_expires_once_and_restores_menu(self) -> None:
+        """Сверка доставляет уведомление с меню и повторяет отправку со стабильным ID."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=self.logger)
+        attempts = []
+        drop_next = True
+        original_send = client.send_message
+
+        def send_with_loss(**kwargs):
+            nonlocal drop_next
+            if kwargs["text"].startswith("Срок ожидания ввода истёк"):
+                attempts.append(kwargs["random_id"])
+                if drop_next:
+                    drop_next = False
+                    raise VkBotError("send failed")
+            original_send(**kwargs)
+
+        client.send_message = send_with_loss
+        now = datetime(2026, 11, 14, tzinfo=UTC)
+        expired = "Срок ожидания ввода истёк. Повтори {}, чтобы начать заново."
+        address = ReplyAddress("vk", "7")
+        with create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config,
+        ) as processor:
+            processor._pending_inputs = PendingInputStore(lambda: now)
+
+            def send(text: str) -> None:
+                _handle_update({"type": "message_new", "object": {"message": {
+                    "peer_id": 7, "from_id": 7, "id": 1, "text": text,
+                }}}, incoming_message_processor=processor, client=client,
+                    logger=self.logger, menu_update_handler=publish)
+
+            def reconcile() -> None:
+                processor.reconcile_menus(publish, notify_expiry=publish.send_expiry)
+
+            send("/register")
+            now += timedelta(minutes=10)
+            with self.assertLogs("compadre_assistant.bootstrap", level="ERROR"):
+                reconcile()
+            self.assertIsNotNone(processor._pending_inputs.get(address))
+            reconcile()
+            self.assertEqual(client.messages[-1], (7, expired.format("/register")))
+            self.assertEqual(attempts[0], attempts[1])
+            self.assertIsNone(processor._pending_inputs.get(address))
+            send("/register")
+            send("Тест")
+            send("/ai")
+            self.send("telegram", processor, "/register", chat_id=7)
+            now += timedelta(minutes=10)
+            reconcile()
+            self.assertIsNotNone(processor._pending_inputs.get(ReplyAddress("telegram", "7")))
+            self.assertEqual(len(attempts), 2)
+
+            send("/ask")
+            now += timedelta(minutes=10)
+            drop_next = True
+            with self.assertLogs("compadre_assistant.bootstrap", level="ERROR"):
+                reconcile()
+            old = processor._pending_inputs.get(address)
+            send("/ask")
+            new = processor._pending_inputs.get(address)
+            self.assertNotEqual(old.request_id, new.request_id)
+            reconcile()
+            self.assertEqual(len(attempts), 3)
+            now += timedelta(minutes=10)
+            reconcile()
+            self.assertNotEqual(attempts[-1], attempts[-2])
+
+            for command in ("/ask", "/get_text_from_image"):
+                with self.subTest(command=command):
+                    send(command)
+                    start = len(client.messages)
+                    now += timedelta(minutes=9, seconds=59)
+                    reconcile()
+                    self.assertEqual(len(client.messages), start)
+                    now += timedelta(seconds=1)
+                    reconcile()
+                    reconcile()
+                    self.assertEqual(client.messages[start:], [(7, expired.format(command))])
+                    keyboard = json.loads(client.keyboards[-1])
+                    self.assertFalse(keyboard["inline"])
+                    self.assertEqual(
+                        {button["action"]["label"] for row in keyboard["buttons"] for button in row},
+                        {"/ask", "/get_text_from_image", "/exit"},
+                    )
+
+    def test_vk_pending_expiry_yields_to_incoming_or_changed_profile(self) -> None:
+        """Старое ожидание не уведомляет после отмены, замены или смены владельца."""
+        client = FakeVkClient()
+        publish = _create_vk_menu_update_handler(client, logger=self.logger)
+        now = datetime(2026, 11, 14, tzinfo=UTC)
+        with create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("ask",), ask_config=self.config,
+        ) as processor:
+            processor._pending_inputs = PendingInputStore(lambda: now)
+
+            def send(text: str) -> None:
+                _handle_update({"type": "message_new", "object": {"message": {
+                    "peer_id": 7, "from_id": 7, "id": 1, "text": text,
+                }}}, incoming_message_processor=processor, client=client,
+                    logger=self.logger, menu_update_handler=publish)
+
+            def reconcile() -> None:
+                processor.reconcile_menus(publish, notify_expiry=publish.send_expiry)
+
+            send("/register")
+            send("Тест")
+            send("/ai")
+            expiry_text = "Срок ожидания ввода истёк"
+            for incoming in ("/cancel", "/get_text_from_image", "Опоздавший вопрос"):
+                with self.subTest(incoming=incoming):
+                    send("/ask")
+                    now += timedelta(minutes=10)
+                    start = len(client.messages)
+                    send(incoming)
+                    reconcile()
+                    notices = [text for _, text in client.messages[start:] if text.startswith(expiry_text)]
+                    self.assertEqual(len(notices), int(incoming == "Опоздавший вопрос"))
+                    if incoming == "/get_text_from_image":
+                        self.assertEqual(
+                            processor._pending_inputs.get(ReplyAddress("vk", "7")).retry_command, incoming,
+                        )
+
+            send("/ask")
+            now += timedelta(minutes=10)
+            start = len(client.messages)
+            with connect_database(self.path) as connection:
+                connection.execute(
+                    "DELETE FROM external_identities WHERE channel = 'vk' AND external_user_id = '7'"
+                )
+                connection.commit()
+            reconcile()
+            self.assertEqual(client.messages[start:], [])
 
     def test_registered_questions_require_ai_mode_and_remain_independent(self) -> None:
         """Оба канала требуют регистрацию и явный вход в режим ИИ."""
