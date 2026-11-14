@@ -1,14 +1,19 @@
 """Проверяет календарный отчёт на фиксированном времени и временной SQLite."""
 
 from datetime import UTC, datetime, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from uuid import uuid4
 from zoneinfo import ZoneInfoNotFoundError
 
-from compadre_assistant.capabilities.admin.domain.cost_report import GetLlmCostReport, InvalidReportTimezone, LlmCostReport
+from compadre_assistant.capabilities.admin.domain.cost_report import (
+    CostReportRow, CostReportStatus, CostSourceError, CostStatistics, CostStatisticsReader,
+    GatewayCostReport, GetGatewayCostReport, GetLlmCostReport, IncompleteCostPeriod,
+    InvalidReportTimezone, LlmCostReport, ReportPeriod,
+)
 from compadre_assistant.capabilities.ask.bootstrap import create_usage_totals_reader
 from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
 from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageObservation, UsagePeriod, UsageTotals, UsageTotalsReader
@@ -138,3 +143,94 @@ class SQLiteCostReportTest(unittest.TestCase):
 
         self.assertEqual(report.execute(), LlmCostReport("Asia/Omsk", UsageTotals(96, 1), UsageTotals(120, 1), UsageTotals(126, 1)))
         self.assertEqual(report.execute("Europe/Moscow"), LlmCostReport("Europe/Moscow", UsageTotals(64, 0), UsageTotals(112, 1), UsageTotals(124, 1)))
+
+
+class GatewayCostReportTest(unittest.TestCase):
+    """Проверяет календарный отчёт шлюза без сети и базы SQLite."""
+
+    def setUp(self) -> None:
+        """Подготавливает источник с явно подтверждённой нулевой суммой."""
+        self.reader = Mock(spec=CostStatisticsReader)
+        self.reader.read_period.return_value = CostStatistics(Decimal(0))
+
+    def test_summary_uses_one_clock_value_for_three_omsk_periods(self) -> None:
+        """В сводке границы местного календаря разделяют одну конечную дату."""
+        clock = Mock(return_value=_NOW)
+        report = GetGatewayCostReport(self.reader, currency="RUB", clock=clock).execute()
+        self.assertEqual(report, GatewayCostReport("Asia/Omsk", "RUB", tuple(
+            CostReportRow(period, CostReportStatus.COMPLETE, Decimal(0)) for period in ReportPeriod
+        )))
+        self.assertEqual(self.reader.read_period.call_args_list, [call(start, _NOW) for start in _OMSK_STARTS])
+        clock.assert_called_once_with()
+
+    def test_explicit_period_reads_only_requested_window(self) -> None:
+        """Выбранный период использует начало месяца в указанном часовом поясе."""
+        report = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: _NOW).execute(
+            "Europe/Moscow", period=ReportPeriod.MONTH,
+        )
+        self.assertEqual(report.rows, (CostReportRow(ReportPeriod.MONTH, CostReportStatus.COMPLETE, Decimal(0)),))
+        self.reader.read_period.assert_called_once_with(_MOSCOW_START, _NOW)
+
+    def test_dst_preserves_the_actual_local_day_start(self) -> None:
+        """Скачок на летнее время не сдвигает уже прошедшую местную полночь."""
+        end = datetime(2026, 3, 29, 10, tzinfo=UTC)
+        GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: end).execute(
+            "Europe/Berlin", period=ReportPeriod.DAY,
+        )
+        self.reader.read_period.assert_called_once_with(datetime(2026, 3, 28, 23, tzinfo=UTC), end)
+
+    def test_empty_window_at_midnight_does_not_need_provider(self) -> None:
+        """При совпадении границ календарный интервал содержит ноль обращений."""
+        report = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: _OMSK_STARTS[0]).execute(
+            period=ReportPeriod.DAY,
+        )
+        self.assertEqual(report.rows, (CostReportRow(ReportPeriod.DAY, CostReportStatus.COMPLETE, Decimal(0)),))
+        self.reader.read_period.assert_not_called()
+
+    def test_year_requires_full_coverage_at_the_ninety_day_boundary(self) -> None:
+        """Ровно 90 суток доступны, за границей полный год нельзя подменить частью."""
+        end = _OMSK_STARTS[2] + timedelta(days=90)
+        selected = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: end).execute(period=ReportPeriod.YEAR)
+        self.reader.read_period.assert_called_once_with(_OMSK_STARTS[2], end)
+        self.assertEqual(selected.rows[0].status, CostReportStatus.COMPLETE)
+
+        self.reader.reset_mock()
+        outside = end + _MICROSECOND
+        summary = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: outside).execute()
+        self.assertEqual(self.reader.read_period.call_count, 2)
+        self.assertEqual(summary.rows[-1], CostReportRow(ReportPeriod.YEAR, CostReportStatus.PERIOD_UNAVAILABLE))
+        self.assertEqual([row.status for row in summary.rows[:2]], [CostReportStatus.COMPLETE] * 2)
+
+    def test_partial_price_and_read_errors_keep_other_summary_rows(self) -> None:
+        """Неполная стоимость, ошибка чтения и недостаток покрытия различаются."""
+        amount = Decimal("0.0159")
+        self.reader.read_period.side_effect = [CostSourceError(), CostStatistics(amount, 2), IncompleteCostPeriod()]
+        report = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: _NOW).execute()
+        self.assertEqual(report.rows, (
+            CostReportRow(ReportPeriod.DAY, CostReportStatus.SOURCE_FAILED),
+            CostReportRow(ReportPeriod.MONTH, CostReportStatus.PARTIAL, amount, 2),
+            CostReportRow(ReportPeriod.YEAR, CostReportStatus.PERIOD_UNAVAILABLE),
+        ))
+
+    def test_all_costs_unknown_does_not_become_zero(self) -> None:
+        """При полном покрытии без единой цены нет известной суммы."""
+        self.reader.read_period.return_value = CostStatistics(None, 2)
+        report = GetGatewayCostReport(self.reader, currency="RUB", clock=lambda: _NOW).execute(period=ReportPeriod.DAY)
+        self.assertEqual(report.rows, (CostReportRow(ReportPeriod.DAY, CostReportStatus.PARTIAL, None, 2),))
+        with self.assertRaises(ValueError):
+            CostStatistics(None)
+
+    def test_unconfigured_source_has_its_own_status(self) -> None:
+        """Полностью пустая настройка явно обозначается в сводке."""
+        report = GetGatewayCostReport(None, currency="RUB", clock=lambda: _NOW).execute()
+        self.assertEqual(report.rows, tuple(
+            CostReportRow(period, CostReportStatus.SOURCE_UNCONFIGURED) for period in ReportPeriod
+        ))
+
+    def test_invalid_timezone_does_not_read_provider(self) -> None:
+        """Проверка значения IANA выполняется до чтения статистики и часов."""
+        clock = Mock(return_value=_NOW)
+        with self.assertRaises(InvalidReportTimezone):
+            GetGatewayCostReport(self.reader, currency="RUB", clock=clock).execute("Europe/../Asia/Omsk")
+        clock.assert_not_called()
+        self.reader.read_period.assert_not_called()
