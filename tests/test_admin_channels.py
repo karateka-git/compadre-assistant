@@ -19,8 +19,10 @@ from compadre_assistant.capabilities.admin.domain.cost_report import GetLlmCostR
 from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
 from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageObservation, UsageTotals
 from compadre_assistant.capabilities.ask.domain.usage_pricing import UsagePricing, UsageTariff
+from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.ports import CommandMenuUpdate
 from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
@@ -123,15 +125,36 @@ class AdminChannelsTest(unittest.TestCase):
     def test_groups_untrusted_and_unknown_users_never_read_costs(self) -> None:
         """До отчёта допускается только явный доверенный автор личного чата."""
         self.configure(str(self.owner_id))
+        tg_group, vk_group = -404, 2_000_000_007
+        tg_key = ChatModeKey(self.owner_id, "telegram", str(tg_group))
+        vk_key = ChatModeKey(self.owner_id, "vk", str(vk_group))
+        private_hint = "Открой личный чат с ботом, чтобы получить отчёт."
         with patch.object(GetLlmCostReport, "execute", autospec=True) as execute, \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
-            self.assertIn("Режим администрирования включён", self.telegram(processor, "/admin", chat=-404)[0])
-            self.assertEqual(self.telegram(processor, "/llm_costs Invalid", chat=-404),
-                             ("Открой личный чат с ботом, чтобы получить отчёт.", None))
-            vk_group = 2_000_000_007
-            self.assertIn("Режим администрирования включён", self.vk(processor, "/admin", peer=vk_group).messages[-1][1])
+            self.assertEqual(self.telegram(processor, "/admin", chat=tg_group), (private_hint, None))
+            entered = self.vk(processor, "/admin", peer=vk_group)
+            self.assertEqual(entered.messages[-1], (vk_group, private_hint))
+            self.assertIsNone(entered.keyboards[-1])
+            with connect_database(self.path) as connection:
+                modes = SQLiteChatModeRepository(connection)
+                self.assertIsNone(modes.get(tg_key))
+                self.assertIsNone(modes.get(vk_key))
+                modes.save(ChatMode(vk_key, "ask"))
+            self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs", chat=tg_group)[0])
+            self.vk(processor, "/admin /llm_costs", peer=vk_group)
+            with connect_database(self.path) as connection:
+                modes = SQLiteChatModeRepository(connection)
+                self.assertEqual(modes.get(vk_key).capability_id, "ask")
+                # Проверяем защиту при состоянии, сохранённом старой сборкой.
+                modes.save(ChatMode(tg_key, "admin"))
+                modes.save(ChatMode(vk_key, "admin"))
+            self.assertEqual(self.telegram(processor, "/llm_costs Invalid", chat=tg_group), (private_hint, None))
             reply = self.vk(processor, "/llm_costs Europe/Moscow", peer=vk_group)
-            self.assertEqual(reply.messages[-1], (vk_group, "Открой личный чат с ботом, чтобы получить отчёт."))
+            self.assertEqual(reply.messages[-1], (vk_group, private_hint))
+            with connect_database(self.path) as connection:
+                modes = SQLiteChatModeRepository(connection)
+                self.assertIsNone(modes.get(tg_key))
+                self.assertIsNone(modes.get(vk_key))
             self.assertIn("нет доступа", self.telegram(processor, "/llm_costs", user=303, chat=303)[0])
             self.assertIn("нет доступа", self.telegram(processor, "/llm_costs", user=None)[0])
             self.assertIn("/register", self.vk(processor, "/admin", user=405, peer=405).messages[-1][1])

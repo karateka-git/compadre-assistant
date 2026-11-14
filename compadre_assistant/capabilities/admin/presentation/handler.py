@@ -7,7 +7,7 @@ from compadre_assistant.capabilities.ask.domain.usage import NANORUBLES_PER_RUBL
 from compadre_assistant.core.domain.users.entities import is_private_chat_address
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityResult, CommandParameter,
+    CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult, CommandParameter,
     ConfirmationQueryResult, HandlerContext, HelpSection, IncomingCapabilityPort, IncomingResponse,
     PendingConfirmationQueryPort, ReplyAction,
 )
@@ -40,7 +40,7 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
         self._cost_report = cost_report
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
-        """Принимает явный вход в режим и подсказывает следующее действие.
+        """Принимает явный вход в режим в личном чате.
 
         Args:
             context: Проверенный ядром профиль.
@@ -48,17 +48,15 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
             arguments: Строка после команды, которая должна быть пустой.
 
         Returns:
-            Приветствие режима либо ошибка аргумента без смены режима.
+            Приветствие режима или ответ с сохранением прежнего режима.
         """
+        if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            return CapabilityResult(IncomingResponse(text_content(_PRIVATE_CHAT_HINT)), CapabilityMode.COMPLETE)
         if arguments:
             return CapabilityResult(IncomingResponse(
                 compose_content("Используй ", code_span(_ENTRY), " без аргументов."),
                 ValueError("Аргументы входа в режим администрирования"),
             ))
-        if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
-            return CapabilityResult(IncomingResponse(text_content(
-                f"Режим администрирования включён. {_PRIVATE_CHAT_HINT}"
-            )))
         return CapabilityResult(IncomingResponse(compose_content(
             "Режим администрирования включён. Чтобы получить отчёт, вызови ",
             code_span(_COSTS), ". Для выхода вызови ", code_span("/exit"), ".",
@@ -72,10 +70,10 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
             event: Сообщение с автором и адресом исходного чата.
 
         Returns:
-            Отчёт, подсказку или понятный отказ без сведений о расходах.
+            Отчёт или подсказку. Вне личного чата завершает ошибочно сохранённый режим.
         """
         if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
-            return CapabilityResult(IncomingResponse(text_content(_PRIVATE_CHAT_HINT)))
+            return CapabilityResult(IncomingResponse(text_content(_PRIVATE_CHAT_HINT)), CapabilityMode.COMPLETE)
         parts = event.text.split()
         if not parts or parts[0] != _COSTS:
             return CapabilityResult(IncomingResponse(compose_content(
