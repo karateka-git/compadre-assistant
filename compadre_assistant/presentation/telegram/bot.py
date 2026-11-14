@@ -7,10 +7,14 @@ import threading
 from types import SimpleNamespace
 import time
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
+from io import BytesIO
 from typing import Any
 
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import (
+    ImageAttachment, ImageLoadError, IncomingEvent, ReplyAddress,
+)
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
     CommandMenuUpdateHandler, IncomingResponse,
@@ -30,6 +34,9 @@ TELEGRAM_POLLING_RETRY_MAX_SECONDS = 30.0
 TELEGRAM_POLLING_RETRY_MAX_EXPONENT = 6
 TELEGRAM_MENU_API_TIMEOUT_SECONDS = 15.0
 TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS = TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2.0
+# Ограничения действуют на загруженное фото и на оба запроса к Telegram.
+_PHOTO_MAX_BYTES = 10 * 1024 * 1024
+_PHOTO_TIMEOUT_SECONDS = 15
 # Кнопки разрешены вместе с зарегистрированным ниже callback-handler.
 TELEGRAM_INLINE_ACTIONS_ENABLED = True
 IncomingMessageProcessor = Callable[
@@ -75,7 +82,7 @@ def run_telegram_bot(
         proxy_url: Адрес прокси для Bot API или `None` для прямого подключения.
         incoming_message_processor: Обработчик входящих сообщений.
         logger: Логгер безопасных runtime-событий.
-        empty_message_reply: Ответ на сообщение без текста.
+        empty_message_reply: Ответ на сообщение без текста и фото.
     """
     try:
         asyncio.run(
@@ -107,9 +114,14 @@ async def _run_telegram_bot(
     aiogram = _load_aiogram()
     bot = _create_polling_bot(aiogram, token=token, proxy_url=proxy_url)
     dispatcher = aiogram.Dispatcher()
-    menu_update_handler = _create_telegram_menu_update_handler(
+    reconciliation_stop = threading.Event()
+    publish_menu = _create_telegram_menu_update_handler(
         bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
     )
+
+    def menu_update_handler(update: CommandMenuUpdate) -> None:
+        if not reconciliation_stop.is_set():
+            publish_menu(update)
 
     _register_handlers(
         dispatcher,
@@ -121,7 +133,6 @@ async def _run_telegram_bot(
     )
 
     logger.info("Telegram bot polling started")
-    reconciliation_stop = threading.Event()
     reconciliation_thread = _start_telegram_menu_reconciliation(
         incoming_message_processor,
         menu_update_handler,
@@ -149,7 +160,13 @@ async def _run_telegram_bot(
             )
             if reconciliation_thread.is_alive():
                 logger.error("Telegram menu reconciliation did not stop before timeout")
-        await bot.session.close()
+        stop_actions = getattr(incoming_message_processor, "close_deferred_actions", None)
+        try:
+            if callable(stop_actions):
+                # Загрузчик уже запущенной работы может ждать этот event loop.
+                await asyncio.to_thread(stop_actions)
+        finally:
+            await bot.session.close()
 
 
 def _create_polling_bot(
@@ -281,33 +298,33 @@ def _register_handlers(
     router = aiogram.Router()
 
     @router.message()
-    async def handle_text(message: Any) -> None:
-        """Передаёт текстовое сообщение общему входу приложения."""
-        if not message.text:
+    async def handle_message(message: Any) -> None:
+        """Передаёт текст или ленивое вложение общему входу приложения."""
+        photo = getattr(message, "photo", None)
+        if photo is None and not message.text:
+            check_busy = getattr(incoming_message_processor, "reply_for_unsupported_input", None)
+            address = ReplyAddress("telegram", str(message.chat.id))
+            busy = await asyncio.to_thread(check_busy, address) if callable(check_busy) else None
             await safe_send_telegram_reply(
                 message,
-                IncomingResponse(text_content(empty_message_reply)),
+                busy if isinstance(busy, IncomingResponse) else IncomingResponse(text_content(empty_message_reply)),
                 logger=logger,
             )
             return
 
-        incoming_message = _incoming_message_from_telegram(message)
+        loop = asyncio.get_running_loop()
+        images = ()
+        if photo is not None:
+            images = (_telegram_photo_attachment(message.bot, photo, loop),)
+        incoming_message = _incoming_message_from_telegram(message, images=images)
         completion_handler = _create_telegram_completion_handler(
             message,
-            loop=asyncio.get_running_loop(),
+            loop=loop,
             logger=logger,
         )
-        if menu_update_handler is None:
-            result = await asyncio.to_thread(
-                incoming_message_processor, incoming_message, completion_handler,
-            )
-        else:
-            result = await asyncio.to_thread(
-                incoming_message_processor,
-                incoming_message,
-                completion_handler,
-                menu_update_handler,
-            )
+        result = await _process_telegram_update(
+            incoming_message_processor, (incoming_message, completion_handler), menu_update_handler,
+        )
         if result.error is not None:
             logger.error("Telegram incoming message processing failed: %s", result.error)
         await safe_send_telegram_reply(message, result, logger=logger)
@@ -346,23 +363,56 @@ def _register_handlers(
         )
         token = callback.data if isinstance(getattr(callback, "data", None), str) else ""
         select_action = incoming_message_processor.select_action
-        if menu_update_handler is None:
-            result = await asyncio.to_thread(select_action, event, token, completion_handler)
-        else:
-            result = await asyncio.to_thread(
-                select_action, event, token, completion_handler, menu_update_handler,
-            )
+        result = await _process_telegram_update(select_action, (event, token, completion_handler), menu_update_handler)
         if result.error is not None:
             logger.error("Telegram callback processing failed: %s", result.error)
-        try:
-            await callback.bot.edit_message_reply_markup(
-                chat_id=chat.id, message_id=source.message_id, reply_markup=None,
-            )
-        except Exception:
-            logger.exception("Telegram callback keyboard removal failed")
+        if not result.preserve_source_actions:
+            try:
+                await callback.bot.edit_message_reply_markup(
+                    chat_id=chat.id, message_id=source.message_id, reply_markup=None,
+                )
+            except asyncio.CancelledError:
+                await _notify_telegram_delivery(result, False)
+                raise
+            except Exception:
+                logger.exception("Telegram callback keyboard removal failed")
         await safe_send_telegram_reply(target, result, logger=logger)
 
     dispatcher.include_router(router)
+
+
+async def _process_telegram_update(
+    process: Callable[..., IncomingResponse], args: tuple[Any, ...],
+    menu_update_handler: CommandMenuUpdateHandler | None,
+) -> IncomingResponse:
+    """Освобождает квитанцию, если handler отменён до получения ответа worker."""
+    if menu_update_handler is not None:
+        args += (menu_update_handler,)
+    worker = asyncio.create_task(asyncio.to_thread(process, *args))
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        def discard(task: asyncio.Task[IncomingResponse]) -> None:
+            if task.cancelled() or task.exception() is not None:
+                return
+            after_delivery = task.result().after_delivery
+            if after_delivery is not None:
+                cleanup = asyncio.get_running_loop().run_in_executor(None, after_delivery, False)
+                cleanup.add_done_callback(_report_telegram_delivery_failure)
+
+        worker.add_done_callback(discard)
+        raise
+
+
+def _report_telegram_delivery_failure(future: asyncio.Future[None]) -> None:
+    if not future.cancelled() and (error := future.exception()) is not None:
+        logging.getLogger(__name__).error("Telegram delivery notification failed: error_type=%s", type(error).__name__)
+
+
+async def _notify_telegram_delivery(response: IncomingResponse, delivered: bool) -> None:
+    """Подтверждает отправку из потока, откуда callback может использовать event loop."""
+    if response.after_delivery is not None:
+        await asyncio.to_thread(response.after_delivery, delivered)
 
 
 def _create_telegram_menu_update_handler(
@@ -488,7 +538,112 @@ class _TelegramReplyTarget:
         await self._bot.send_message(**kwargs)
 
 
-def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
+class _PhotoBuffer(BytesIO):
+    """Останавливает чтение Telegram-файла при превышении лимита."""
+
+    def write(self, data: bytes) -> int:
+        """Записывает очередной блок SDK в пределах лимита.
+
+        Args:
+            data: Блок байтов в порядке чтения файла.
+
+        Returns:
+            Число записанных байтов.
+
+        Raises:
+            ImageLoadError: Блок не помещается в оставшийся объём.
+        """
+        if self.tell() + len(data) > _PHOTO_MAX_BYTES:
+            raise ImageLoadError()
+        return super().write(data)
+
+
+def _telegram_photo_attachment(
+    bot: Any, variants: list[Any], loop: asyncio.AbstractEventLoop,
+) -> ImageAttachment:
+    """Сохраняет ленивый доступ к лучшему по разрешению варианту фото."""
+    eligible = (
+        size for size in variants
+        if size.file_id and (size.file_size is None or 0 < size.file_size <= _PHOTO_MAX_BYTES)
+    )
+    photo = max(
+        eligible,
+        key=lambda size: size.width * size.height,
+        default=None,
+    )
+    file_id = photo.file_id if photo is not None else None
+
+    async def download() -> bytes:
+        """Ограничивает getFile и потоковую загрузку одним таймаутом."""
+        try:
+            with _PhotoBuffer() as destination:
+                async with asyncio.timeout(_PHOTO_TIMEOUT_SECONDS):
+                    await bot.download(file_id, destination=destination, seek=False)
+                return destination.getvalue()
+        except _FatalPollingError:
+            # Этот тип предназначен для polling retry и наследуется от BaseException.
+            raise ImageLoadError() from None
+
+    def load() -> bytes:
+        """Запрашивает загрузку в цикле SDK из синхронного worker."""
+        if file_id is None or not loop.is_running():
+            raise ImageLoadError()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is loop:
+            raise ImageLoadError()
+
+        result: Future[bytes] = Future()
+
+        def start() -> None:
+            """Связывает задачу SDK и ожидание worker после входа в loop."""
+            if result.cancelled():
+                return
+            # Создаём корутину здесь, чтобы при закрытии loop в очереди
+            # остался только callback и не потребовалось закрывать корутину.
+            task = loop.create_task(download())
+
+            def forward_cancellation(completed: Future[bytes]) -> None:
+                if completed.cancelled():
+                    try:
+                        loop.call_soon_threadsafe(task.cancel)
+                    except RuntimeError:
+                        pass  # Цикл уже закрыт.
+
+            def finish(completed: asyncio.Task[bytes]) -> None:
+                if completed.cancelled():
+                    result.cancel()
+                    return
+                try:
+                    if completed.exception() is None:
+                        result.set_result(completed.result())
+                    else:
+                        result.set_exception(ImageLoadError())
+                except InvalidStateError:
+                    pass  # Worker уже отменил ожидание по таймауту.
+
+            result.add_done_callback(forward_cancellation)
+            task.add_done_callback(finish)
+
+        try:
+            loop.call_soon_threadsafe(start)
+        except RuntimeError:
+            raise ImageLoadError() from None
+        try:
+            # Ограничивает ожидание worker и в случае остановки event loop.
+            return result.result(timeout=_PHOTO_TIMEOUT_SECONDS)
+        except FutureTimeoutError:
+            result.cancel()
+            raise ImageLoadError() from None
+
+    return ImageAttachment(load)
+
+
+def _incoming_message_from_telegram(
+    message: Any, *, images: tuple[ImageAttachment, ...] = (),
+) -> IncomingEvent:
     """Преобразует Telegram message в application-модель."""
     telegram_user = getattr(message, "from_user", None)
     display_name = None
@@ -502,7 +657,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
         channel="telegram",
         chat_id=str(message.chat.id),
         message_id=str(message.message_id),
-        text=message.text or "",
+        text="" if images else (message.text or ""),
         external_user_id=(
             str(telegram_user.id)
             if telegram_user is not None and getattr(telegram_user, "id", None) is not None
@@ -514,6 +669,7 @@ def _incoming_message_from_telegram(message: Any) -> IncomingEvent:
             else None
         ),
         display_name=display_name,
+        images=images,
     )
 
 
@@ -566,6 +722,21 @@ async def safe_send_telegram_reply(
     Raises:
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
+    delivered = False
+    try:
+        delivered = await _send_telegram_reply(
+            message, response, logger=logger, limit=limit, sleeper=sleeper,
+            include_bound_actions=include_bound_actions,
+        )
+    finally:
+        await _notify_telegram_delivery(response, delivered)
+
+
+async def _send_telegram_reply(
+    message: Any, response: IncomingResponse, *, logger: logging.Logger, limit: int,
+    sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
+) -> bool:
+    """Доставляет все части ответа и возвращает факт успешной доставки."""
     chunks = render_telegram_content(response.content, response.actions, limit=limit)
     keyboard = (
         _optional_telegram_inline_keyboard(response, logger)
@@ -596,12 +767,13 @@ async def safe_send_telegram_reply(
                 target_id,
                 time.monotonic() - started_at,
             )
-            return
+            return False
     logger.info(
         "Telegram response send completed: chat_id=%s duration_seconds=%.3f",
         target_id,
         time.monotonic() - started_at,
     )
+    return bool(chunks)
 
 
 def _optional_telegram_inline_keyboard(response: IncomingResponse, logger: logging.Logger) -> Any | None:

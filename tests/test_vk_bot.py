@@ -264,12 +264,14 @@ class VkBotTest(unittest.TestCase):
             "peer_id": 22, "user_id": 33, "event_id": "event-1",
             "conversation_message_id": 44,
             "payload": '{"token":"opaque"}',
+            "attachments": [{"type": "photo", "photo": {}}],
         }}, incoming_message_processor=Processor(), client=client,
             logger=logging.getLogger("test.vk.event"))
         event, token, menu = seen[0]
         self.assertEqual((event.channel, event.chat_id, event.external_user_id, event.message_id),
                          ("vk", "22", "33", "event-1"))
         self.assertEqual((event.text, token, menu), ("opaque", "opaque", None))
+        self.assertEqual(event.images, ())
         self.assertEqual(client.cleared, [(22, 44)])
         self.assertEqual(client.messages[-2:], [(22, "Фон"), (22, "Готово")])
 
@@ -395,6 +397,45 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(processed[0].external_user_id, "33")
         self.assertEqual(client.messages[0][0], 22)
         self.assertIn("Пришли ссылку", client.messages[0][1])
+
+    def test_handle_update_passes_photos_without_interpreting_caption(self) -> None:
+        """Фотографии без текста и с подписью проходят одним и тем же маршрутом."""
+        client = FakeVkClient()
+        seen = []
+
+        def processor(message: IncomingEvent, _completion) -> IncomingResponse:
+            seen.append(message)
+            return IncomingResponse(text_content("Принято"))
+
+        photo = {"type": "photo", "photo": {"sizes": [
+            {"url": "https://sun1.userapi.com/image.jpg", "width": 64, "height": 64},
+            {"url": "https://sun1.userapi.com/image-big.jpg", "width": 640, "height": 640},
+        ]}}
+        logger = logging.getLogger("test.vk.photos")
+        with patch("compadre_assistant.presentation.vk.photos._download") as download:
+            for text in ("", "/exit"):
+                _handle_update({"type": "message_new", "object": {"message": {
+                    "id": 11, "peer_id": 22, "from_id": 33, "text": text,
+                    "attachments": [photo, {"type": "doc", "doc": {}}, {"type": "photo"}],
+                }}}, incoming_message_processor=processor, client=client, logger=logger)
+            download.assert_not_called()
+        self.assertEqual([(event.text, len(event.images)) for event in seen], [("", 2), ("", 2)])
+        self.assertEqual(client.messages, [(22, "Принято"), (22, "Принято")])
+
+    def test_handle_update_keeps_empty_reply_for_unsupported_attachment(self) -> None:
+        """Документ без текста обрабатывается как сообщение без поддерживаемого ввода."""
+        client = FakeVkClient()
+
+        def fail_if_called(*_args):
+            self.fail("Документ без текста не должен попасть в общий маршрут")
+
+        _handle_update({"type": "message_new", "object": {"message": {
+            "id": 11, "peer_id": 22, "from_id": 33,
+            "attachments": [{"type": "doc", "doc": {}}],
+        }}}, incoming_message_processor=fail_if_called, client=client,
+            logger=logging.getLogger("test.vk.photos"), empty_message_reply="Пришли текст")
+
+        self.assertEqual(client.messages, [(22, "Пришли текст")])
 
     def test_handle_update_passes_menu_callback_and_keeps_plain_reply(self) -> None:
         """VK передаёт callback меню в processor и отдельно отправляет его ответ."""

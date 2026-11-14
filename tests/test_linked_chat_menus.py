@@ -55,7 +55,7 @@ class LinkedChatMenusTest(unittest.TestCase):
     def test_preference_updates_other_mode_and_clears_only_invalid_pending(self):
         """Общий выбор пересчитывает разные режимы, сохраняя допустимый ввод."""
         key = ChatModeKey(self.user.id, "vk", "202")
-        self.fixture.modes.save(ChatMode(key, "obsidian"))
+        self.send("/ai", self.vk)
         self.send("/ask", self.vk)
         self.send("/name", self.foreign)
         foreign_pending = self.fixture.store.get(self.event("x", self.foreign).reply_address)
@@ -65,12 +65,12 @@ class LinkedChatMenusTest(unittest.TestCase):
         menus = self.menus()
         self.assertEqual(set(menus), {"101", "202"})
         self.assertIn("/obsidian", menus["101"])
-        self.assertIn("/reanalyze", menus["202"])
+        self.assertIn("/exit", menus["202"])
         self.assertNotIn("/ask", menus["202"])
         self.assertNotIn("/cancel", menus["202"])
         self.assertIsNone(self.fixture.store.get(self.event("x", self.vk).reply_address))
         self.assertEqual(self.fixture.store.get(foreign_pending.chat_key), foreign_pending)
-        self.assertEqual(self.fixture.modes.get(key).capability_id, "obsidian")
+        self.assertEqual(self.fixture.modes.get(key).capability_id, "ask")
         self.send("/name", self.vk)
         pending = self.fixture.store.get(self.event("x", self.vk).reply_address)
         self.updates.clear()
@@ -92,22 +92,23 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.send(f"/confirm core identity {confirmation.id} {confirmation.version} yes", self.vk)
         menus = self.menus()
         self.assertEqual(set(menus), {"101", "202", "404", "303"})
-        self.assertIn("/ask", menus["101"])
-        self.assertIn("/ask", menus["404"])
-        self.assertNotIn("/ask", menus["202"])
-        self.assertNotIn("/ask", menus["303"])
+        self.assertIn("/ai", menus["101"])
+        self.assertIn("/ai", menus["404"])
+        self.assertNotIn("/ai", menus["202"])
+        self.assertNotIn("/ai", menus["303"])
         self.assertNotIn(self.vk, self.service.list_known_private_chats(self.user))
 
     def test_stale_enumeration_does_not_restore_or_publish_old_address(self):
-        """Смена адреса между перечислением и проверкой не оживляет прежний чат."""
+        """Явная перепривязка адреса после перечисления отменяет доставку в старый чат."""
         original = self.service.list_known_private_chats
         moved = replace(self.vk, external_chat_id="505")
+        repository = SQLiteExternalIdentityRepository(self.connection)
         calls = [0]
         def enumerate_chats(user):
             calls[0] += 1
             result = original(user)
             if calls[0] == 1:
-                self.service.resolve(moved)
+                repository.reassign(app_user_id=self.user.id, identity=moved)
             return result
         with patch.object(self.service, "list_known_private_chats", side_effect=enumerate_chats):
             self.send("/disable ask")
@@ -157,4 +158,4 @@ class LinkedChatMenusTest(unittest.TestCase):
             with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
                 response = self.send("/enable ask")
         self.assertIn("включена", response_text(response))
-        self.assertIn("/ask", response_text(self.send("/help")))
+        self.assertIn("/ai", response_text(self.send("/help")))

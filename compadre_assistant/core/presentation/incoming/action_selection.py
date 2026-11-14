@@ -17,7 +17,7 @@ class ActionContext:
     app_user_id: int | None
     mode_id: str | None
     mode_revision: int
-    access: tuple[tuple[str, bool, bool], ...]
+    access: tuple[tuple[str, bool, bool, bool], ...]
     pending_request_id: str | None
 
 

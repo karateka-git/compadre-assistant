@@ -8,6 +8,10 @@ from compadre_assistant.core.presentation.incoming.ports import (
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
 
 
+# Пока принятое действие занимает чат, только отмена может изменить его состояние.
+BUSY_COMMAND_MENU = CommandMenu((CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),))
+
+
 def build_command_menu(
     personal: PersonalCapabilityRegistry | None,
     mode_id: str | None,
@@ -49,9 +53,9 @@ def build_command_menu(
                 for command in section.commands:
                     capability(command)
             common(ChatCommand.EXIT)
-            ask = personal.by_id("ask")
-            if ask is not None and not ask.descriptor.persistent_mode:
-                capability(ask.descriptor.entry)
+            for access in personal.access:
+                if access.effective and not access.descriptor.persistent_mode:
+                    capability(access.descriptor.entry)
         else:
             if mode_id:
                 common(ChatCommand.EXIT)

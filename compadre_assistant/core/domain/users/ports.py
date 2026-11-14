@@ -69,7 +69,7 @@ class ExternalIdentityRepository(Protocol):
         """Возвращает количество внешних личностей пользователя."""
 
     def touch(self, identity: IncomingIdentity) -> None:
-        """Обновляет служебные данные уже известной внешней личности."""
+        """Обновляет служебные данные связи, сохраняя известный личный адрес."""
 
 
 class IdentityLinkTokenRepository(Protocol):

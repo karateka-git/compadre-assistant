@@ -13,9 +13,10 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.events import ImageAttachment, IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
-    ConfirmationAction, ConfirmationQueryResult, IncomingResponse, PendingConfirmation, ReplyAction,
+    CapabilityCommand, CapabilityHelp, ConfirmationAction, ConfirmationQueryResult, HelpSection,
+    IncomingResponse, PendingConfirmation, ReplyAction,
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from tests.test_incoming_boundary import FakeCapability
@@ -54,6 +55,15 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.assertEqual(len(button.token), 32)
         self.assertNotIn("name", button.token)
         self.processor.select_action(replace(self.event, text="/name Подмена"), button.token)
+        self.assertEqual(self.name(), "Выбрано")
+
+    def test_callback_never_carries_image_into_the_registered_command(self):
+        """Точная команда выполняется даже при ошибочной передаче вложения адаптером."""
+        button = self.issue().bound_actions[0]
+        with patch.object(ImageAttachment, "read_bytes", side_effect=AssertionError("unexpected download")) as read:
+            event = replace(self.event, images=(ImageAttachment(lambda: b"photo"),))
+            self.processor.select_action(event, button.token)
+        read.assert_not_called()
         self.assertEqual(self.name(), "Выбрано")
 
     def test_foreign_chat_user_channel_and_missing_sender_cannot_consume_token(self):
@@ -130,6 +140,56 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.processor(replace(self.event, text="/disable selected"))
         self.processor.select_action(self.event, button.token)
         self.assertEqual(self.name(), "Первый")
+
+    def test_mode_command_requires_active_owner_for_text_and_button(self) -> None:
+        """Оба пути пропускают команду только в активный и доступный режим."""
+        other = FakeCapability("other", "/other")
+        self.capability._descriptor = replace(
+            self.capability.descriptor,
+            help=CapabilityHelp(sections=(HelpSection(
+                "Действия", (CapabilityCommand("/run_selected", (), "выполнить действие"),)
+            ),)),
+        )
+        self.processor = ChannelMessageProcessor(
+            database_path=self.path, capabilities=(self.capability, other)
+        )
+        command = "/run_selected argument"
+
+        def send(text: str) -> str:
+            return response_text(self.processor(replace(self.event, text=text)))
+
+        unregistered = replace(self.event, chat_id="2002", external_user_id="2002", text=command)
+        self.assertIn("/register", response_text(self.processor(unregistered)))
+        self.assertIn("войди в режим через /selected", send(command))
+        send("/other")
+        self.assertIn("войди в режим через /selected", send(command))
+        self.assertFalse(other.calls)
+        self.assertFalse(self.capability.calls)
+        self.assertFalse(self.issue(command).bound_actions)
+
+        send("/selected")
+        send("/name")
+        self.assertEqual(send(command), "Тестовый ответ")
+        self.assertIn("нечего отменять", send("/cancel"))
+        self.assertEqual(self.name(), "Первый")
+        button = self.issue(command).bound_actions[0]
+        self.assertEqual(
+            response_text(self.processor.select_action(self.event, button.token)),
+            "Тестовый ответ",
+        )
+        self.assertEqual([event.text for _, event in self.capability.calls], [command, command])
+
+        button = self.issue(command).bound_actions[0]
+        send("/other")
+        self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
+        self.assertIn("войди в режим через /selected", send(command))
+        send("/selected")
+        button = self.issue(command).bound_actions[0]
+        send("/disable selected")
+        self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
+        self.assertIn("лично выключена", send(command))
+        self.assertEqual(len(self.capability.calls), 2)
+        self.assertFalse(other.calls)
 
     def test_owner_change_rejects_old_button(self):
         button = self.issue().bound_actions[0]

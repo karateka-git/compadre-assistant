@@ -24,6 +24,7 @@ class PendingInput:
     value_label: str = "значение"  # Пользовательское название задаёт владелец ввода.
     required_mode: str | None = None  # Предметный ввод допустим только в указанном активном режиме.
     retry_command: str | None = None  # Команда владельца для нового ввода после истечения срока.
+    accepts_images: bool = False  # Ожидание может принять событие с изображениями.
 
 
 class PendingInputStore:
@@ -51,7 +52,11 @@ class PendingInputStore:
             raise ValueError("Часы ожидания должны возвращать timezone-aware datetime")
         return now.astimezone(timezone.utc)
 
-    def begin(self, chat_key: ReplyAddress, owner_id: str, input_kind: str, *, app_user_id: int | None = None, required_mode: str | None = None, value_label: str = "значение", retry_command: str | None = None) -> PendingInput:
+    def begin(
+        self, chat_key: ReplyAddress, owner_id: str, input_kind: str, *,
+        app_user_id: int | None = None, required_mode: str | None = None,
+        value_label: str = "значение", retry_command: str | None = None, accepts_images: bool = False,
+    ) -> PendingInput:
         """Заменяет ожидание новым ID и сроком ровно десять минут.
 
         Args:
@@ -62,6 +67,7 @@ class PendingInputStore:
             value_label: Название ожидаемого значения для общей справки.
             required_mode: Обязательный активный режим; None не ограничивает режим.
             retry_command: Точная команда владельца для повторного начала ввода.
+            accepts_images: Можно ли передать событие с изображениями владельцу.
 
         Returns:
             Новая неизменяемая запись.
@@ -69,7 +75,8 @@ class PendingInputStore:
         with self.lock(chat_key):
             now = self._now()
             pending = PendingInput(chat_key, owner_id, input_kind, uuid4().hex,
-                                   now, now + timedelta(minutes=10), app_user_id, value_label, required_mode, retry_command)
+                                   now, now + timedelta(minutes=10), app_user_id, value_label, required_mode,
+                                   retry_command, accepts_images)
             with self._entries_lock:
                 self._entries[chat_key] = pending
             return pending

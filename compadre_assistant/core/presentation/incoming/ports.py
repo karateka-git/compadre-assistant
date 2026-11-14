@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
@@ -141,6 +141,10 @@ class IncomingResponse:
     actions: tuple[ConfirmationAction, ...] = ()
     suggested_actions: tuple[ReplyAction, ...] = ()
     bound_actions: tuple[BoundReplyAction, ...] = ()
+    # Адаптер исходного ответа сообщает результат отправки ровно один раз.
+    after_delivery: Callable[[bool], None] | None = field(default=None, repr=False, compare=False)
+    # Отклонённый из-за занятости выбор не потребляет токен и сохраняет клавиатуру.
+    preserve_source_actions: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +203,8 @@ class CapabilityDescriptor:
     help: CapabilityHelp = CapabilityHelp()
     persistent_mode: bool = True  # Длительный вход требует явного выхода из режима.
     enabled_by_default: bool = False  # Новый встроенный ID не получает личный доступ автоматически.
+    accepts_images: bool = False  # Presentation возможности умеет обрабатывать события с фото.
+    requires_profile_access: bool = False  # Только профили, допущенные оператором.
 
 
 class CapabilityMode(StrEnum):
@@ -244,7 +250,7 @@ class IncomingCapabilityPort(Protocol):
 
         Args:
             context: Проверенный пользователь и доступная фоновая доставка.
-            event: Исходный текст без предметного анализа в ядре.
+            event: Исходный ввод без предметного анализа в ядре.
 
         Returns:
             Общий ответ и признак продолжения либо завершения режима.
@@ -266,11 +272,15 @@ class PendingInputResult:
     response: IncomingResponse
     outcome: PendingInputOutcome
     action: Callable[[], IncomingResponse] | None = None  # Долгое действие после атомарного принятия ввода.
+    # Возвращает ответ исполнителя; переданный предикат сообщает об отмене.
+    cancellable_action: Callable[[Callable[[], bool]], IncomingResponse] | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         """Запрещает внешнее действие до окончательного принятия значения."""
-        if self.action is not None and self.outcome is not PendingInputOutcome.COMPLETE:
+        if (self.action is not None or self.cancellable_action is not None) and self.outcome is not PendingInputOutcome.COMPLETE:
             raise ValueError("Отложенное действие требует complete")
+        if self.action is not None and self.cancellable_action is not None:
+            raise ValueError("Допускается только один исполнитель принятого действия")
 
 
 @runtime_checkable

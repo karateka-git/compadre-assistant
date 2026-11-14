@@ -8,13 +8,17 @@ from dataclasses import replace
 from threading import Event, RLock
 from pathlib import Path
 from contextlib import contextmanager
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
+from compadre_assistant.capabilities.admin.bootstrap import create_admin_runtime
+from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile, load_admin_timeweb_config
+from compadre_assistant.capabilities.admin.presentation.handler import AdminCapability
 from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -96,6 +100,7 @@ def create_incoming_message_dispatcher(
     chat_mode_repository: ChatModeRepository,
     capability_preference_repository: UserCapabilityPreferenceRepository,
     disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
+    profile_access: Mapping[str, Callable[[int], bool]] | None = None,
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
 
@@ -105,6 +110,7 @@ def create_incoming_message_dispatcher(
         chat_mode_repository: Хранилище режима конкретного чата.
         capability_preference_repository: Хранилище личного выбора AppUser.
         disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
+        profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
 
     Returns:
         Диспетчер с проверенным реестром точек входа.
@@ -113,7 +119,7 @@ def create_incoming_message_dispatcher(
         ValueError: Реестр содержит конфликт ID или команд входа.
     """
     return IncomingMessageDispatcher(
-        registry=CapabilityRegistry(capabilities, disabled_capabilities),
+        registry=CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
         capability_preference_repository=capability_preference_repository,
@@ -131,7 +137,7 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
     """
     if len(set(enabled_capabilities)) != len(enabled_capabilities):
         raise ValueError("Конфликт ID включённых возможностей")
-    unknown = set(enabled_capabilities) - {"obsidian", "ask"}
+    unknown = set(enabled_capabilities) - {"obsidian", "ask", AdminCapability.descriptor.capability_id}
     if unknown:
         raise ValueError(
             f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
@@ -160,26 +166,60 @@ class ChannelMessageProcessor:
 
     def __init__(self, *, database_path: Path,
                  capabilities: tuple[IncomingCapabilityPort, ...],
-                 disabled_capabilities: tuple[CapabilityDescriptor, ...] = ()) -> None:
+                 disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
+                 profile_access: Mapping[str, Callable[[int], bool]] | None = None) -> None:
         """Регистрирует обработчики при запуске без соединения с SQLite.
 
         Args:
             database_path: Общий путь SQLite для коротких core scopes.
             capabilities: Уже собранные входы включённых возможностей.
             disabled_capabilities: Метаданные отключённых входов.
+            profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
 
         Raises:
             ValueError: Повторный ID или команда входа в реестре.
         """
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
+        self._deferred_actions = DeferredActions()
+        self._deferred_menu_closed = Event()
         self._response_actions = ResponseActionStore()
-        self._registry = CapabilityRegistry(capabilities, disabled_capabilities)
+        self._registry = CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access)
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
         self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
+
+    def close_deferred_actions(self) -> None:
+        """Останавливает отложенные действия до закрытия зависимостей возможностей."""
+        self._deferred_menu_closed.set()
+        self._deferred_actions.close()
+
+    def reply_for_unsupported_input(self, address: ReplyAddress) -> IncomingResponse | None:
+        """Возвращает состояние занятого чата для события без поддерживаемого ввода.
+
+        Args:
+            address: Исходный адрес сообщения без текста и поддерживаемых вложений.
+
+        Returns:
+            Ответ занятого чата либо None для обычной подсказки адаптера.
+        """
+        with self._pending_inputs.lock(address):
+            if self._deferred_actions.get(address) is not None:
+                return IncomingMessageDispatcher.busy_reply()
+        return None
+
+    def _deferred_access(self, event: IncomingEvent, app_user_id: int,
+                         capability_id: str, required_mode: str | None) -> bool:
+        with connect_database(self._database_path) as connection:
+            dispatcher = IncomingMessageDispatcher(
+                registry=self._registry,
+                user_identity_service=create_user_identity_service(connection),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
+            )
+            return dispatcher.may_finish_deferred(event, app_user_id, capability_id, required_mode)
 
     @property
     def menu_delivery_failures(self) -> dict[ReplyAddress, str]:
@@ -268,6 +308,7 @@ class ChannelMessageProcessor:
                     self._unregistered_menu_events[address] = event
                 dispatcher = IncomingMessageDispatcher(
                     registry=self._registry, pending_inputs=self._pending_inputs,
+                    deferred_actions=self._deferred_actions,
                     user_identity_service=service,
                     chat_mode_repository=SQLiteChatModeRepository(connection),
                     capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
@@ -336,10 +377,28 @@ class ChannelMessageProcessor:
                  menu_update_handler: CommandMenuUpdateHandler | None,
                  *, token: str | None = None) -> IncomingResponse:
         menu_updates: list[CommandMenuUpdate] = []
+        origin = IncomingEvent(
+            incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
+            "ответ", incoming_message.external_user_id,
+        )
+
+        def refresh_deferred_menu(address: ReplyAddress) -> None:
+            if menu_update_handler is None:
+                return
+            with self._menu_lock:
+                if self._deferred_menu_closed.is_set():
+                    return
+                # Сверка берёт актуального владельца и состояние по сохранённому адресу.
+                event = IncomingEvent(address.channel, address.chat_id, "menu-reconcile", "/help")
+                self._reconcile_menu_event(event, menu_update_handler, allow_unknown=False)
+
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 pending_inputs=self._pending_inputs,
+                deferred_actions=self._deferred_actions,
+                deferred_access=self._deferred_access,
+                deferred_menu_refresh=refresh_deferred_menu if menu_update_handler is not None else None,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
@@ -351,8 +410,8 @@ class ChannelMessageProcessor:
 
             def deliver(reply: BackgroundReply) -> None:
                 """Связывает фоновые действия только с неизменившимся исходным чатом."""
-                response = replace(reply.response, bound_actions=())
-                if original_context is not None and reply.address == incoming_message.reply_address:
+                response = replace(reply.response, bound_actions=(), after_delivery=None)
+                if original_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:
                             background_dispatcher = IncomingMessageDispatcher(
@@ -361,9 +420,9 @@ class ChannelMessageProcessor:
                                 chat_mode_repository=SQLiteChatModeRepository(background_connection),
                                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
                             )
-                            if background_dispatcher.action_context(incoming_message) == original_context:
+                            if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
-                                    incoming_message, response, self._response_actions,
+                                    origin, response, self._response_actions,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
@@ -420,9 +479,15 @@ def create_channel_message_processor(
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
+
+    Raises:
+        ValueError: Список включённых ID или профиль возможности некорректен.
     """
     try:
         validate_enabled_capabilities(enabled_capabilities)
+        admin_id = AdminCapability.descriptor.capability_id
+        admin_enabled = admin_id in enabled_capabilities
+        trusted_admin_ids = load_admin_profile() if admin_enabled else frozenset()
         if "obsidian" in enabled_capabilities and obsidian_config is None:
             raise ValueError("Для включённого Obsidian требуется его профиль настроек")
         entry = ObsidianCapability(
@@ -436,20 +501,33 @@ def create_channel_message_processor(
             embedding_config=obsidian_config.embedding,
             created_note_tag=obsidian_config.obsidian_created_note_tag,
         ) if "obsidian" in enabled_capabilities else None
-        with create_ask_runtime(enabled="ask" in enabled_capabilities, config=ask_config) as ask:
+        with (
+            create_admin_runtime(enabled=admin_enabled) as admin,
+            create_ask_runtime(enabled="ask" in enabled_capabilities,
+                               database_path=database_path, config=ask_config) as ask,
+        ):
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
                 obsidian_descriptor(),
             )
             if ask is not None:
-                capabilities += (AskCapability(ask),)
+                capabilities += (ask,)
             else:
                 disabled += (AskCapability.descriptor,)
-            yield ChannelMessageProcessor(
+            if admin is not None:
+                capabilities += (admin,)
+            else:
+                disabled += (AdminCapability.descriptor,)
+            processor = ChannelMessageProcessor(
                 database_path=database_path,
                 capabilities=capabilities,
                 disabled_capabilities=disabled,
+                profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,
             )
+            try:
+                yield processor
+            finally:
+                processor.close_deferred_actions()
     finally:
         if runtime is not None:
             runtime.close()

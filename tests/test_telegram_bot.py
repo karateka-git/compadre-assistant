@@ -1,4 +1,3 @@
-from compadre_assistant.core.presentation.message_content import text_content
 """Тесты низкоуровневых helpers Telegram adapter."""
 
 import asyncio
@@ -15,23 +14,28 @@ from aiogram.exceptions import (
     TelegramUnauthorizedError as AiogramTelegramUnauthorizedError,
 )
 from aiogram.methods import GetMe
+from aiogram.types import PhotoSize
 
-from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
+from compadre_assistant.core.presentation.incoming.events import ImageLoadError, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, BoundReplyAction, ConfirmationAction, CommandMenu, CommandMenuUpdate,
     CommandSuggestion, IncomingResponse, ReplyAction,
 )
+from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.telegram.bot import (
     TelegramBotError,
     _FatalPollingError,
     _create_telegram_completion_handler,
     _create_telegram_menu_update_handler,
+    _process_telegram_update,
     _register_handlers,
     _create_polling_bot,
     _run_telegram_bot,
     _start_polling_with_retries,
     _start_telegram_menu_reconciliation,
     _telegram_polling_retry_delay,
+    _telegram_photo_attachment,
     safe_send_telegram_reply,
     _serialize_telegram_inline_keyboard,
     _TelegramReplyTarget,
@@ -244,6 +248,121 @@ class RateLimitedTelegramMessage(TelegramMessage):
         self.parse_modes.append(parse_mode)
 
 
+class TelegramPhotoDownloadTest(unittest.IsolatedAsyncioTestCase):
+    """Проверяет ограничения фото на границе Telegram SDK и worker."""
+
+    async def test_size_limit_stops_the_stream_at_first_excess_chunk(self) -> None:
+        """Проверка метаданных дополняется ограничением реально принятых байтов."""
+        positions = []
+
+        async def download(_file_id, *, destination, seek):
+            destination.write(b"1234")
+            try:
+                destination.write(b"5")
+            finally:
+                positions.append(destination.tell())
+            self.fail("Чтение продолжилось после превышения лимита")
+
+        attachment = _telegram_photo_attachment(
+            SimpleNamespace(download=download), [PhotoSize(
+                file_id="id", file_unique_id="1", width=32, height=32, file_size=2,
+            )], asyncio.get_running_loop(),
+        )
+        with patch("compadre_assistant.presentation.telegram.bot._PHOTO_MAX_BYTES", 4):
+            with self.assertRaises(ImageLoadError):
+                await asyncio.to_thread(attachment.read_bytes)
+        self.assertEqual(positions, [4])
+
+    async def test_sdk_error_is_sanitized(self) -> None:
+        """URL и цепочка ошибки SDK не проходят через контракт вложения."""
+        secret_url = "https://api.telegram.org/file/botsecret/id"
+
+        async def download(_file_id, *, destination, seek):
+            raise RuntimeError(secret_url)
+
+        attachment = _telegram_photo_attachment(
+            SimpleNamespace(download=download), [PhotoSize(
+                file_id="secret-file-id", file_unique_id="1", width=32, height=32,
+            )], asyncio.get_running_loop(),
+        )
+        self.assertNotIn("secret", repr(attachment))
+        with self.assertRaises(ImageLoadError) as caught:
+            await asyncio.to_thread(attachment.read_bytes)
+        self.assertNotIn(secret_url, str(caught.exception))
+        self.assertIsNone(caught.exception.__context__)
+
+    async def test_timeout_cancels_sdk_before_first_byte(self) -> None:
+        """Ожидание ответа SDK ограничено и до начала передачи файла."""
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def download(_file_id, *, destination, seek):
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        attachment = _telegram_photo_attachment(
+            SimpleNamespace(download=download), [PhotoSize(
+                file_id="id", file_unique_id="1", width=32, height=32,
+            )], asyncio.get_running_loop(),
+        )
+        with patch("compadre_assistant.presentation.telegram.bot._PHOTO_TIMEOUT_SECONDS", 0.1):
+            with self.assertRaises(ImageLoadError):
+                await asyncio.to_thread(attachment.read_bytes)
+            self.assertTrue(started.is_set())
+            await asyncio.wait_for(cancelled.wait(), timeout=1)
+
+    async def test_closed_loop_cannot_create_download(self) -> None:
+        """Закрытый цикл сразу возвращает ошибку worker без запроса SDK."""
+        loop = asyncio.new_event_loop()
+        loop.close()
+        attachment = _telegram_photo_attachment(
+            object(), [PhotoSize(file_id="id", file_unique_id="1", width=32, height=32)], loop,
+        )
+        with self.assertRaises(ImageLoadError):
+            await asyncio.wait_for(asyncio.to_thread(attachment.read_bytes), timeout=1)
+
+    async def test_sdk_task_cancellation_releases_worker(self) -> None:
+        """Отмена на стороне SDK освобождает worker до истечения таймаута."""
+        download_started = asyncio.Event()
+        tasks = []
+
+        async def download(_file_id, *, destination, seek):
+            tasks.append(asyncio.current_task())
+            download_started.set()
+            await asyncio.Future()
+
+        attachment = _telegram_photo_attachment(
+            SimpleNamespace(download=download), [PhotoSize(
+                file_id="id", file_unique_id="1", width=32, height=32,
+            )], asyncio.get_running_loop(),
+        )
+        worker = asyncio.create_task(asyncio.to_thread(attachment.read_bytes))
+        await asyncio.wait_for(download_started.wait(), timeout=1)
+        tasks[0].cancel()
+        with self.assertRaises(ImageLoadError):
+            await asyncio.wait_for(worker, timeout=1)
+
+    async def test_queued_download_stays_cancelled_when_loop_resumes(self) -> None:
+        """Остановившийся loop может обработать callback уже после таймаута worker."""
+        callbacks = []
+        loop = SimpleNamespace(
+            is_running=lambda: True,
+            call_soon_threadsafe=callbacks.append,
+        )
+        attachment = _telegram_photo_attachment(
+            object(), [PhotoSize(file_id="id", file_unique_id="1", width=32, height=32)], loop,
+        )
+        with patch("compadre_assistant.presentation.telegram.bot._PHOTO_TIMEOUT_SECONDS", 0.01):
+            with self.assertRaises(ImageLoadError):
+                await asyncio.to_thread(attachment.read_bytes)
+        self.assertEqual(len(callbacks), 1)
+        callbacks[0]()  # Вызов уже отменён и не должен создать задачу.
+
+
 class TelegramBotHelpersTest(unittest.TestCase):
     """Проверяет helpers, не требующие реального Telegram."""
 
@@ -388,6 +507,94 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertIn("Принял, обрабатываю", message.answers[0])
         self.assertEqual(message.answers[-1], "Готово")
 
+    def test_photo_is_loaded_only_after_worker_requests_it(self) -> None:
+        """Один вариант фото загружается на event loop по запросу worker."""
+        messages = []
+        downloads = []
+        aiogram = FakeAiogram()
+        message = TelegramMessage()
+        message.text = None
+        message.message_id = 31
+        message.caption = "/exit"
+        message.photo = [
+            PhotoSize(file_id="small", file_unique_id="1", width=16, height=16, file_size=2),
+            PhotoSize(file_id="large", file_unique_id="2", width=32, height=32),
+            PhotoSize(file_id="oversized", file_unique_id="3", width=64, height=64, file_size=5),
+        ]
+
+        async def download(file_id, *, destination, seek):
+            downloads.append((file_id, asyncio.get_running_loop(), threading.get_ident()))
+            self.assertFalse(seek)
+            destination.write(b"im")
+            destination.write(b"g!")
+
+        def processor(event, _completion) -> IncomingResponse:
+            messages.append(event)
+            self.assertEqual(event.text, "")
+            self.assertEqual(len(event.images), 1)
+            self.assertEqual(downloads, [])
+            if len(messages) > 1:
+                self.assertNotEqual(threading.get_ident(), loop_thread)
+                self.assertEqual(event.images[0].read_bytes(), b"img!")
+            return IncomingResponse(text_content("Получено"))
+
+        message.bot = SimpleNamespace(download=download)
+        _register_handlers(
+            aiogram.dispatcher, aiogram, incoming_message_processor=processor,
+            logger=logging.getLogger("test.telegram.photo"),
+        )
+        handler = aiogram.dispatcher.included_router.handler
+
+        async def exercise():
+            loop = asyncio.get_running_loop()
+            await handler(message)
+            self.assertEqual(downloads, [])
+            message.caption = None
+            await handler(message)
+            self.assertEqual(downloads, [("large", loop, loop_thread)])
+
+        loop_thread = threading.get_ident()
+        with patch("compadre_assistant.presentation.telegram.bot._PHOTO_MAX_BYTES", 4):
+            asyncio.run(exercise())
+        self.assertEqual(message.answers, ["Получено", "Получено"])
+
+    def test_photo_without_eligible_variants_does_not_execute_caption(self) -> None:
+        """Пустой список и заведомо крупный файл остаются недоступным фото."""
+        aiogram = FakeAiogram()
+        message = TelegramMessage()
+        message.text = None
+        message.message_id = 32
+        message.caption = "/exit"
+        message.photo = []
+        # Fake bot без download также проверяет, что SDK вообще не вызывается.
+        messages = []
+
+        def processor(event, _completion) -> IncomingResponse:
+            messages.append(event)
+            self.assertEqual(event.text, "")
+            self.assertEqual(len(event.images), 1)
+            with self.assertRaises(ImageLoadError):
+                event.images[0].read_bytes()
+            return IncomingResponse(text_content("Фото недоступно"))
+
+        _register_handlers(
+            aiogram.dispatcher, aiogram, incoming_message_processor=processor,
+            logger=logging.getLogger("test.telegram.photo.unavailable"),
+        )
+        handler = aiogram.dispatcher.included_router.handler
+
+        async def exercise():
+            await handler(message)
+            message.photo = [PhotoSize(
+                file_id="oversized", file_unique_id="1", width=32, height=32, file_size=5,
+            )]
+            await handler(message)
+
+        with patch("compadre_assistant.presentation.telegram.bot._PHOTO_MAX_BYTES", 4):
+            asyncio.run(exercise())
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(message.answers, ["Фото недоступно", "Фото недоступно"])
+
     def test_callback_ack_selects_opaque_token_and_removes_keyboard(self) -> None:
         """Callback подтверждается до выбора и передаёт фактическую identity."""
         order: list[str] = []
@@ -413,7 +620,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
                 self.from_user = SimpleNamespace(id=99, username="tester", full_name="Автор")
                 self.message = SimpleNamespace(
                     chat=SimpleNamespace(id=42), message_id=18, text="/disable obsidian",
-                    from_user=SimpleNamespace(id=123),
+                    from_user=SimpleNamespace(id=123), photo=[object()], caption="/exit",
                 )
 
             async def answer(self) -> None:
@@ -441,6 +648,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
                          ("telegram", "42", "callback-7", "99"))
         self.assertEqual((event.username, event.display_name, event.text),
                          ("tester", "Автор", "callback"))
+        self.assertEqual(event.images, ())
         self.assertEqual(token, "opaque-token")
         self.assertTrue(callable(completion))
         self.assertIsNone(menu)
@@ -850,6 +1058,94 @@ class TelegramBotHelpersTest(unittest.TestCase):
         bot, kwargs = aiogram.dispatcher.start_arguments
         self.assertFalse(kwargs["close_bot_session"])
         self.assertEqual(bot.session.close_calls, 1)
+
+    def test_polling_stop_drains_deferred_work_before_closing_session(self) -> None:
+        """Фоновый worker может завершить загрузку в живом loop во время shutdown."""
+        aiogram = FakeAiogram()
+        actions = DeferredActions(capacity=1)
+        started = threading.Event()
+        effects = []
+
+        async def run_polling(bot, **_kwargs):
+            loop = asyncio.get_running_loop()
+            pending_download = loop.create_future()
+            action = actions.reserve(ReplyAddress("telegram", "42"), 23, "42")
+            self.assertIsNotNone(action)
+
+            def work(cancelled):
+                started.set()
+
+                async def wait_for_loop():
+                    await pending_download
+
+                asyncio.run_coroutine_threadsafe(wait_for_loop(), loop).result(timeout=5)
+                effects.append((bot.session.close_calls, cancelled()))
+                return IncomingResponse(text_content("Отменённый результат"))
+
+            actions.after_delivery(action, True, work,
+                                   lambda _reply: effects.append("Лишний ответ"),
+                                   lambda: effects.append("Лишнее обновление меню"))
+            self.assertTrue(await asyncio.to_thread(started.wait, 5))
+
+            def close_actions():
+                async def finish_after_cancel():
+                    if await asyncio.to_thread(action.cancelled.wait, 5):
+                        pending_download.set_result(None)
+
+                asyncio.run_coroutine_threadsafe(finish_after_cancel(), loop)
+                actions.close()
+
+            processor.close_deferred_actions = close_actions
+            aiogram.dispatcher.start_arguments = bot, {}
+
+        def processor(*_args):
+            self.fail("Прямой ввод не нужен для проверки остановки")
+
+        aiogram.dispatcher.start_polling = run_polling
+        with patch("compadre_assistant.presentation.telegram.bot._load_aiogram", return_value=aiogram):
+            asyncio.run(_run_telegram_bot(
+                token="token", incoming_message_processor=processor,
+                logger=logging.getLogger("test.telegram.draining"),
+            ))
+
+        self.assertEqual(effects, [(0, True)])
+        self.assertEqual(aiogram.dispatcher.start_arguments[0].session.close_calls, 1)
+
+    def test_cancelled_update_notifies_delivery_from_worker(self) -> None:
+        """Отменённый handler не ждёт ответ processor и освобождает квитанцию вне loop."""
+        started, release = threading.Event(), threading.Event()
+
+        async def exercise():
+            loop = asyncio.get_running_loop()
+            finished = loop.create_future()
+
+            async def observed(delivered):
+                finished.set_result(delivered)
+
+            def process():
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError("Тест не освободил обработчик")
+
+                def after_delivery(delivered):
+                    asyncio.run_coroutine_threadsafe(observed(delivered), loop).result(timeout=5)
+
+                return IncomingResponse(text_content("Квитанция"), after_delivery=after_delivery)
+
+            task = asyncio.create_task(_process_telegram_update(process, (), None))
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                task.cancel()
+                task.cancel()
+                done, _ = await asyncio.wait((task,), timeout=1)
+                self.assertIn(task, done)
+                self.assertTrue(task.cancelled())
+                self.assertFalse(finished.done())
+            finally:
+                release.set()
+            self.assertIs(await asyncio.wait_for(finished, timeout=5), False)
+
+        asyncio.run(exercise())
 
     def test_run_polling_reports_fatal_api_error(self) -> None:
         """Неустранимая ошибка Telegram API превращается в adapter-ошибку."""

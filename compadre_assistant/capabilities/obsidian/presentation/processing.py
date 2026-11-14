@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 import logging
 from uuid import uuid4
 
-from compadre_assistant.core.presentation.message_content import text_content, join_content
+from compadre_assistant.core.presentation.message_content import code_span, compose_content, text_content, join_content
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin, PendingOperationError, VaultResourceBusyError
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
 from compadre_assistant.capabilities.obsidian.domain.articles.ports import ArticleFlowLeaseRepository
@@ -118,6 +118,15 @@ class ObsidianMessageResult:
 ObsidianCompletionHandler = Callable[[ObsidianMessageResult], None]
 GitHubCompletionProcessor = Callable[[str, AppUser, GitHubConnectionCompletion, PendingOrigin], ObsidianMessageResult]
 
+_APPROVAL_REPLIES = frozenset({"да", "yes", "y"})
+_REJECTION_REPLIES = frozenset({"нет", "no", "n"})
+
+
+def _is_confirmation_reply(text: str) -> bool:
+    """Распознаёт короткий ответ на ожидание Obsidian."""
+    normalized = text.lower()
+    return normalized in _APPROVAL_REPLIES or normalized in _REJECTION_REPLIES
+
 
 class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPort, PendingConfirmationQueryPort):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
@@ -180,10 +189,22 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             context: Проверенный внутренний пользователь и фоновая доставка.
             event: Исходное событие с командой входа и необязательным аргументом.
             arguments: Текст или URL после команды входа; событие сохраняется целиком.
+                Команды и подтверждения передаются отдельными сообщениями.
 
         Returns:
             Общий ответ длительного режима с результатом аргумента или справкой.
+            Недопустимый аргумент возвращает ошибку без смены режима.
         """
+        arguments = arguments.strip()
+        if arguments.startswith("/") or _is_confirmation_reply(arguments):
+            # Аргумент входа проходит обработку до сохранения режима.
+            return CapabilityResult(IncomingResponse(
+                compose_content(
+                    "Сначала войди через ", code_span("/obsidian"), " без аргументов, "
+                    "затем отправь команду или подтверждение отдельным сообщением."
+                ),
+                ValueError("Команда или подтверждение переданы как аргумент входа Obsidian"),
+            ))
         if arguments:
             return self._handle(context, event, arguments)
         user = context.app_user
@@ -512,7 +533,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
     ) -> ObsidianMessageResult | None:
         """Разрешает локальный ответ либо проверяет адресную текстовую команду."""
         normalized = text.lower()
-        simple = normalized in {"да", "yes", "y", "нет", "no", "n"}
+        simple = _is_confirmation_reply(text)
         parts = text.split()
         if not simple and (not parts or parts[0] != "/confirm"):
             return None
@@ -537,7 +558,7 @@ class ObsidianMessageHandler(IncomingCapabilityPort, PendingInputContinuationPor
             item = snapshot.confirmations[0]
             operation = item.operation
             operation_id, version = item.confirmation_id, item.version
-            approve = normalized in {"да", "yes", "y"}
+            approve = normalized in _APPROVAL_REPLIES
         else:
             if (
                 len(parts) != 6

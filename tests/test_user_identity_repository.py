@@ -1,6 +1,7 @@
 """Тесты SQLite-хранилища identity и сценария привязки каналов."""
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -21,6 +22,112 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteIdentityLifecycleRepository,
 )
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+
+
+class SQLiteExternalIdentityRepositoryTest(unittest.TestCase):
+    """Проверяет запись identity и проекции личных адресов на актуальной схеме."""
+
+    def setUp(self) -> None:
+        """Открывает мигрированную временную БД с двумя профилями."""
+        directory = self.enterContext(TemporaryDirectory(prefix="external-identity-"))
+        self.path = Path(directory) / "app.db"
+        self.connection = self.enterContext(connect_database(self.path))
+        apply_migrations(self.connection)
+        users = SQLiteAppUserRepository(self.connection)
+        self.owner = users.create(display_name="Первый")
+        self.other = users.create(display_name="Другой")
+        self.identities = SQLiteExternalIdentityRepository(self.connection)
+
+    def test_touch_keeps_known_private_chat_after_group_and_detects_first_private_chat(self) -> None:
+        """Для обоих каналов только настоящая личная активность создаёт личный адрес."""
+        for channel, group_id in (("telegram", "-293"), ("vk", "2000000293")):
+            with self.subTest(channel=channel):
+                group = _identity(channel, "293", group_id)
+                private = replace(group, external_chat_id=group.external_user_id)
+                created = self.identities.create(app_user_id=self.owner.id, identity=group)
+                self.assertEqual(self.identities.find(private), created)
+                self.identities.touch(group)
+                self.assertIsNone(self.identities.find_private_chat(channel, group_id))
+                self.assertIsNone(self.identities.find_private_chat(channel, private.external_chat_id))
+                self.assertTrue(self.identities.has_chat_address(channel, group_id))
+                self.assertFalse(self.identities.has_chat_address(channel, private.external_chat_id))
+
+                self.identities.touch(private)
+                self.identities.touch(replace(group, username="latest", display_name="Групповое имя"))
+                known = self.identities.find_private_chat(channel, private.external_chat_id)
+                self.assertEqual(known.app_user_id, self.owner.id)
+                self.assertEqual(known.username, "latest")
+                self.assertEqual(known.display_name, "Групповое имя")
+                self.assertEqual(known, self.identities.find(group))
+                self.assertFalse(self.identities.has_chat_address(channel, group_id))
+                self.assertIn(known, self.identities.list_for_user(self.owner.id))
+                self.assertNotIn(known, self.identities.list_for_user(self.other.id))
+                self.assertIn(known, self.identities.list_all_private_chats())
+        self.assertEqual(self.identities.count_for_user(self.owner.id), 2)
+        self.assertEqual(self.identities.count_for_user(self.other.id), 0)
+
+    def test_create_and_reassign_constraints_preserve_original_identity(self) -> None:
+        """Конфликты и ошибки FK откатываются, успешный перенос меняет владельца."""
+        event = _identity("telegram", "293", "293")
+        original = self.identities.create(app_user_id=self.owner.id, identity=event)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.identities.create(app_user_id=self.other.id, identity=event)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.identities.reassign(app_user_id=10**6, identity=event)
+        self.assertEqual(self.identities.find(event), original)
+        self.assertEqual(self.identities.count_for_user(self.other.id), 0)
+
+        moved = self.identities.reassign(app_user_id=self.other.id, identity=event)
+        self.assertEqual(moved.app_user_id, self.other.id)
+        self.assertEqual(self.identities.find_private_chat("telegram", "293"), moved)
+        self.assertEqual(self.identities.list_for_user(self.owner.id), ())
+        self.assertEqual(self.identities.list_for_user(self.other.id), (moved,))
+
+    def test_ambiguous_address_is_excluded_from_private_projections(self) -> None:
+        """Наличие второй identity в том же адресе блокирует адресную доставку."""
+        event = _identity("telegram", "293", "293")
+        self.identities.create(app_user_id=self.owner.id, identity=event)
+        self.identities.create(app_user_id=self.other.id, identity=replace(event, external_user_id="294"))
+        self.assertTrue(self.identities.has_chat_address("telegram", "293"))
+        self.assertIsNone(self.identities.find_private_chat("telegram", "293"))
+        self.assertEqual(self.identities.list_for_user(self.owner.id), ())
+        self.assertEqual(self.identities.list_all_private_chats(), ())
+
+    def test_waiting_group_writes_keep_newly_committed_private_chat(self) -> None:
+        """Групповое обновление и повторная регистрация не затирают свежую личку."""
+        private = _identity("telegram", "293", "293")
+        group = replace(private, external_chat_id="-293", username="late-group")
+        self.identities.create(app_user_id=self.owner.id, identity=group)
+        began = (Event(), Event())
+
+        def group_operation(index: int) -> int | None:
+            """Запускает независимую запись до фиксации личного адреса."""
+            with connect_database(self.path) as connection:
+                began[index].set()
+                if index == 0:
+                    SQLiteExternalIdentityRepository(connection).touch(group)
+                    return None
+                return SQLiteIdentityLifecycleRepository(connection).register_with_name(group, display_name="Группа").id
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.connection.execute("BEGIN IMMEDIATE")
+            self.connection.execute(
+                "UPDATE external_identities SET external_chat_id = ? WHERE channel = ? AND external_user_id = ?",
+                (private.external_chat_id, private.channel, private.external_user_id),
+            )
+            waiting = (pool.submit(group_operation, 0), pool.submit(group_operation, 1))
+            try:
+                self.assertTrue(all(start.wait(2) for start in began))
+                for future in waiting:
+                    with self.assertRaises(TimeoutError):
+                        future.result(timeout=0.05)
+            finally:
+                self.connection.commit()
+            self.assertIsNone(waiting[0].result(timeout=5))
+            self.assertEqual(waiting[1].result(timeout=5), self.owner.id)
+        known = self.identities.find_private_chat("telegram", "293")
+        self.assertEqual(known.username, "late-group")
+        self.assertEqual(known.app_user_id, self.owner.id)
 
 
 class SQLiteUserIdentityRepositoryTest(unittest.TestCase):

@@ -31,7 +31,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.identity = FakeIdentity()
         self.model = Mock()
         self.model.answer.return_value = 'Ответ'
-        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=40))
+        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=40), Mock())
         self.articles = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()
         self.obsidian = ObsidianMessageHandler(
@@ -60,6 +60,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
 
     def test_ask_retry_ttl_direct_and_mode(self):
         """Пустота и длина сохраняют срок, оба пути выполняют один вопрос."""
+        self.send('/ai')
         self.assertIn('Введи один вопрос', response_text(self.send('/ask')))
         pending = self.store.get(_event('x').reply_address)
         self.now += timedelta(minutes=9)
@@ -72,11 +73,12 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.assertEqual(self.model.answer.call_args.kwargs['question'], 'вопрос')
         self.send('/ask напрямую')
         self.assertEqual(self.model.answer.call_count, 2)
-        self.assertEqual(self.modes.get(self.key).capability_id, 'obsidian')
+        self.assertEqual(self.modes.get(self.key).capability_id, 'ask')
         self.assertFalse(self.articles.commands)
 
     def test_ask_expiry_and_failure_do_not_repeat(self):
         """Истечение не доставляет вопрос в Obsidian, timeout закрывает ввод."""
+        self.send('/ai')
         self.send('/ask')
         self.now += timedelta(minutes=10)
         self.assertIn('истёк', response_text(self.send('https://example.com/article')))
@@ -130,6 +132,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
                                       ('/reanalyze', 'obsidian', '7')):
             with self.subTest(owner=owner):
                 self.preferences.rows[(23, owner)] = True
+                self.send('/ai' if owner == 'ask' else '/obsidian')
                 self.send(command)
                 self.send('/disable ' + owner, channel='vk')
                 self.assertIn('выключена', response_text(self.send(value)))
@@ -137,25 +140,29 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.model.answer.assert_not_called()
         self.assertFalse(self.articles.commands)
 
-    def test_disabled_saved_mode_does_not_block_ask(self):
-        """Ask завершает вопрос, даже если другой канал выключил активный Obsidian."""
+    def test_mode_change_cancels_pending_ask(self):
+        """Смена режима между запросом и вводом не доставляет текст модели."""
+        self.send('/ai')
         self.send('/ask')
-        self.send('/disable obsidian', channel='vk')
-        self.assertEqual(response_text(self.send('вопрос')), 'Ответ')
+        self.modes.save(ChatMode(self.key, 'obsidian'))
+        self.assertIn('Контекст ввода изменился', response_text(self.send('вопрос')))
+        self.model.answer.assert_not_called()
         self.assertEqual(self.modes.get(self.key).capability_id, 'obsidian')
 
     def test_chat_and_channel_isolation(self):
         """Одинаковый chat ID разных каналов имеет независимый ввод."""
         for chat, channel in (('chat-1', 'telegram'), ('chat-2', 'telegram'), ('chat-1', 'vk')):
+            self.send('/ai', chat, channel)
             self.send('/ask', chat, channel)
         self.send('/cancel')
         self.send('второй', 'chat-2')
         self.send('третий', channel='vk')
         self.assertEqual([c.kwargs['question'] for c in self.model.answer.call_args_list], ['второй', 'третий'])
-        self.assertEqual(self.modes.get(self.key).capability_id, 'obsidian')
+        self.assertEqual(self.modes.get(self.key).capability_id, 'ask')
 
     def test_profile_or_server_change_drops_value(self):
         """Смена профиля или удаление владельца не пересылает текст активной возможности."""
+        self.send('/ai')
         self.send('/ask')
         self.identity.user = AppUser(id=99, display_name='Другой')
         self.assertIn('Контекст', response_text(self.send('вопрос')))
@@ -181,6 +188,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
                     target.side_effect = slow
                 else:
                     self.analysis.execute = target
+                self.send('/ai' if command == '/ask' else '/obsidian')
                 self.send(command)
                 with ThreadPoolExecutor(max_workers=3) as executor:
                     future = executor.submit(self.send, value)

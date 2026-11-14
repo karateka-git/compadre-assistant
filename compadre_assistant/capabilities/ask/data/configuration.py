@@ -26,6 +26,7 @@ class AskConfig:
         max_question_chars: Максимальная длина нормализованного вопроса.
         max_response_tokens: Лимит генерации, передаваемый API.
         max_response_chars: Максимальная допустимая длина текста ответа.
+        usage_provider: Стабильное имя профиля для метаданных вызова.
 
     Raises:
         AskConfigError: Параметры профиля некорректны.
@@ -38,6 +39,7 @@ class AskConfig:
     max_question_chars: int = 12_000
     max_response_tokens: int = 2_000
     max_response_chars: int = 16_000
+    usage_provider: str = "ask"
 
     def __post_init__(self) -> None:
         """Проверяет профиль, включая программную сборку без окружения."""
@@ -63,6 +65,8 @@ class AskConfig:
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise AskConfigError(f"ASK_{name.upper()} должен быть положительным целым.")
+        if not isinstance(self.usage_provider, str) or not self.usage_provider.strip():
+            raise AskConfigError("ASK_USAGE_PROVIDER должен содержать имя профиля.")
 
 
 def load_ask_config(environ: Mapping[str, str] | None = None) -> AskConfig:
@@ -94,5 +98,6 @@ def load_ask_config(environ: Mapping[str, str] | None = None) -> AskConfig:
         base_url=source.get("ASK_BASE_URL", "").strip(),
         api_key=source.get("ASK_API_KEY", "").strip(),
         model=source.get("ASK_MODEL", "").strip(),
+        usage_provider=source.get("ASK_USAGE_PROVIDER", "ask").strip() or "ask",
         **values,
     )

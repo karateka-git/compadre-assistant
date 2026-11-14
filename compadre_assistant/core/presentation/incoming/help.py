@@ -38,7 +38,7 @@ def format_contextual_help(
 
     def entry(item: CapabilityCommand, *, one_shot: bool = False) -> None:
         syntax = " ".join((item.name, *(parameter.syntax for parameter in item.parameters)))
-        command(syntax, item.description + ("; одноразовый вопрос без смены режима" if one_shot else ""))
+        command(syntax, item.description + ("; одноразовое действие без смены режима" if one_shot else ""))
 
     registration = pending is not None and pending.owner_id == "core" and pending.input_kind == "register_name"
     if registration:
@@ -65,10 +65,9 @@ def format_contextual_help(
                 ", ", code_span("/link_code"), ". Полная общая справка: ", code_span("/exit"),
                 ", затем ", code_span("/help"), ".",
             ))
-            # Ask объявлен публичным ID и непостоянным входом; его сценарий ядро не разбирает.
-            ask = personal.by_id("ask")
-            if ask is not None and not ask.descriptor.persistent_mode:
-                entry(ask.descriptor.entry, one_shot=True)
+            for access in personal.access:
+                if access.effective and not access.descriptor.persistent_mode:
+                    entry(access.descriptor.entry, one_shot=True)
         else:
             if mode_id:
                 access = personal.status(mode_id)

@@ -146,10 +146,10 @@ class MigrationRunnerTest(unittest.TestCase):
                     "SELECT version FROM schema_migrations ORDER BY version"
                 )]
 
-        self.assertEqual(sum(results), 4)
-        self.assertTrue(all(0 <= result <= 4 for result in results))
-        self.assertEqual(migration_count, 4)
-        self.assertEqual(versions, [1, 2, 3, 4])
+        self.assertEqual(sum(results), 5)
+        self.assertTrue(all(0 <= result <= 5 for result in results))
+        self.assertEqual(migration_count, 5)
+        self.assertEqual(versions, [1, 2, 3, 4, 5])
 
     def test_existing_profiles_receive_default_name_without_losing_data(self) -> None:
         """0003 обновляет NULL-имена после 0001 и 0002 без потери данных."""
@@ -237,10 +237,10 @@ class MigrationRunnerTest(unittest.TestCase):
                     self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
     def test_clean_install_applies_all_migrations_without_creating_profiles(self) -> None:
-        """Чистая установка применяет 0001–0004, оставляя каталог пользователей пустым."""
+        """Чистая установка применяет 0001–0005, оставляя каталог пользователей пустым."""
         with TemporaryDirectory(prefix="user-name-clean-install-") as directory:
             with connect_database(Path(directory) / "test.db") as connection:
-                self.assertEqual([item.version for item in apply_migrations(connection)], [1, 2, 3, 4])
+                self.assertEqual([item.version for item in apply_migrations(connection)], [1, 2, 3, 4, 5])
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
                 self.assertEqual(apply_migrations(connection), [])
 

@@ -123,15 +123,15 @@ class MigrateCommandTest(unittest.TestCase):
         self.assertEqual(invalid.read_bytes(), b"this is not a sqlite database")
 
     def test_failed_pending_migration_returns_failure_and_rolls_back(self) -> None:
-        """Ошибка второй миграции не оставляет её DDL/данные или запись журнала."""
-        self.assertEqual(self.run_cli(["--migrate"], {"DATABASE_PATH": str(self.database)}), 0)
+        """Ошибка очередной миграции не оставляет её DDL, данные или запись журнала."""
         migrations = self.root / "migrations"
         migrations.mkdir()
-        initial = MIGRATIONS_DIR / "0001_initial_schema.sql"
-        (migrations / initial.name).write_bytes(initial.read_bytes())
-        second = MIGRATIONS_DIR / "0002_user_capability_preferences.sql"
-        (migrations / second.name).write_bytes(second.read_bytes())
-        (migrations / "0003_failing.sql").write_text(
+        for version in range(1, 5):
+            source = next(MIGRATIONS_DIR.glob(f"{version:04d}_*.sql"))
+            (migrations / source.name).write_bytes(source.read_bytes())
+        with connect_database(self.database) as connection:
+            self.assertEqual([item.version for item in apply_migrations(connection, migrations)], [1, 2, 3, 4])
+        (migrations / "0005_failing.sql").write_text(
             "CREATE TABLE partial_change (id INTEGER);\n"
             "INSERT INTO app_users (display_name) VALUES ('Rolled back');\n"
             "INSERT INTO missing_table VALUES (1);\n", encoding="utf-8",
@@ -170,7 +170,7 @@ class MigrateCommandTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
         with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 4)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 5)
 
 
 if __name__ == "__main__":

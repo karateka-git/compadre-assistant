@@ -1,0 +1,24 @@
+{
+  "id": "sample-image-response",
+  "model": "gemini/gemini-3.1-flash-lite",
+  "choices": [
+    {
+      "message": {
+        "content": "Тест OCR\nКод 8415\nFinish"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "completion_tokens": 13,
+    "prompt_tokens": 1088,
+    "total_tokens": 1101,
+    "completion_tokens_details": {
+      "text_tokens": 13
+    },
+    "prompt_tokens_details": {
+      "text_tokens": 24,
+      "image_tokens": 1064
+    }
+  }
+}

@@ -23,6 +23,21 @@ from compadre_assistant.core.data.sqlite.user_identity_mappers import (
 )
 
 
+def _touch_identity(connection: sqlite3.Connection, dto: IncomingIdentityDto) -> None:
+    # Уже известный личный адрес нужен для очистки меню после перезапуска.
+    # Проверка в UPDATE берёт адрес после предыдущей конкурентной записи.
+    connection.execute(
+        """UPDATE external_identities SET
+        external_chat_id = CASE
+            WHEN channel IN ('telegram', 'vk') AND external_chat_id = external_user_id
+                 AND external_user_id GLOB '[1-9]*' AND external_user_id NOT GLOB '*[^0-9]*'
+            THEN external_chat_id ELSE ? END,
+        username = ?, display_name = ?, last_seen_at = CURRENT_TIMESTAMP
+        WHERE channel = ? AND external_user_id = ?""",
+        (dto.external_chat_id, dto.username, dto.display_name, dto.channel, dto.external_user_id),
+    )
+
+
 class SQLiteAppUserRepository(AppUserRepository):
     """Хранит внутренних пользователей приложения в SQLite."""
 
@@ -277,27 +292,10 @@ class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
         return int(row["identity_count"])
 
     def touch(self, identity: IncomingIdentity) -> None:
-        """Обновляет чат, имя и время последнего появления внешней личности."""
+        """Обновляет имя и активность, сохраняя уже известный личный адрес."""
         dto = incoming_identity_to_dto(identity)
         with self._connection:
-            self._connection.execute(
-                """
-                UPDATE external_identities
-                SET
-                    external_chat_id = ?,
-                    username = ?,
-                    display_name = ?,
-                    last_seen_at = CURRENT_TIMESTAMP
-                WHERE channel = ? AND external_user_id = ?
-                """,
-                (
-                    dto.external_chat_id,
-                    dto.username,
-                    dto.display_name,
-                    dto.channel,
-                    dto.external_user_id,
-                ),
-            )
+            _touch_identity(self._connection, dto)
 
 
 class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
@@ -385,7 +383,7 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
                     (dto.channel, dto.external_user_id),
                 ).fetchone()
                 if existing is not None:
-                    self._touch_identity(dto)
+                    _touch_identity(self._connection, dto)
                     return self._require_user(existing["app_user_id"])
                 creating = True
                 cursor = self._connection.execute(
@@ -460,14 +458,6 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
             VALUES (?, ?, ?, ?, ?, ?)""",
             (app_user_id, dto.channel, dto.external_user_id, dto.external_chat_id,
              dto.username, dto.display_name),
-        )
-
-    def _touch_identity(self, dto: IncomingIdentityDto) -> None:
-        self._connection.execute(
-            """UPDATE external_identities SET external_chat_id = ?, username = ?,
-            display_name = ?, last_seen_at = CURRENT_TIMESTAMP
-            WHERE channel = ? AND external_user_id = ?""",
-            (dto.external_chat_id, dto.username, dto.display_name, dto.channel, dto.external_user_id),
         )
 
     def _require_user(self, app_user_id: int) -> AppUser:
