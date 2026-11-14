@@ -34,11 +34,13 @@ class ProfileObsidianTest(unittest.TestCase):
         self.article = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()
 
-    def event(self, text: str, channel: str = "telegram", chat: str = "chat") -> IncomingEvent:
-        """Создаёт событие с полным адресом и данными отправителя."""
-        return IncomingEvent(channel, chat, "message", text, "external", "username", "Внешнее имя")
+    def event(self, text: str, channel: str = "telegram", chat: str | None = None) -> IncomingEvent:
+        """Создаёт событие из личного чата Telegram или VK либо с указанным адресом."""
+        external_id = {"telegram": "101", "vk": "202", "cli": "external"}[channel]
+        chat_id = chat if chat is not None else external_id
+        return IncomingEvent(channel, chat_id, "message", text, external_id, "username", "Внешнее имя")
 
-    def process(self, text: str, *, channel: str = "telegram", chat: str = "chat", **overrides):
+    def process(self, text: str, *, channel: str = "telegram", chat: str | None = None, **overrides):
         """Обрабатывает сообщение через сборку с новым соединением без сети."""
         options = dict(
             database_path=self.database_path,
@@ -65,14 +67,15 @@ class ProfileObsidianTest(unittest.TestCase):
             analysis_use_case_factory=lambda _connection: self.analysis,
         )
         options.update(overrides)
+        name_event = self.event("Имя", channel)
         with create_channel_message_processor(**options) as processor:
             processor(self.event("/register", channel))
-            reply = processor(self.event("Имя", channel))
+            reply = processor(name_event)
         self.assertIn("Регистрация завершена", response_text(reply))
         with connect_database(self.database_path) as connection:
             owner = connection.execute(
                 "SELECT app_user_id FROM external_identities WHERE channel = ? AND external_user_id = ?",
-                (channel, "external"),
+                (channel, name_event.external_user_id),
             ).fetchone()[0]
             SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                 UserCapabilityPreference(owner, "obsidian", True)
@@ -107,7 +110,8 @@ class ProfileObsidianTest(unittest.TestCase):
                 self.assertIn("уже зарегистрирован", response_text(self.process("/register", **options)))
                 self.assertIn("Профиль: Имя", response_text(self.process("/status", **options)))
                 self.assertIn("Теперь буду обращаться", response_text(self.process("/name Новое имя", **options)))
-                self.assertIn("Код привязки", response_text(self.process("/link_code", **options)))
+                expected_link_reply = "Для привязки профиля открой личный чат" if channel == "cli" else "Код привязки"
+                self.assertIn(expected_link_reply, response_text(self.process("/link_code", **options)))
                 help_text = response_text(self.process("/help", **options))
                 self.assertIn("/register", help_text)
                 self.assertNotIn("/vault_status", help_text)
@@ -199,7 +203,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 for field in ("channel", "chat_id", "message_id", "external_user_id", "username", "display_name", "text"):
                     self.assertEqual(getattr(saved, field), getattr(event, field))
                 user = enter.call_args.args[0].app_user
-                self.assertEqual(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, channel, "chat")).capability_id, "obsidian")
+                self.assertEqual(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, channel, event.chat_id)).capability_id, "obsidian")
                 self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, chat_id="other", text="https://example.com/article"))))
                 dispatcher.execute(replace(event, text="/exit"))
                 self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, text="https://github.com/octocat/notes"))))
@@ -221,7 +225,8 @@ class ProfileObsidianTest(unittest.TestCase):
     def test_invalid_entry_argument_preserves_previous_mode(self) -> None:
         """Ошибка аргумента не заменяет сохранённый выбор текущего чата."""
         self.register()
-        key = ChatModeKey(1, "telegram", "chat")
+        event = self.event("/obsidian")
+        key = ChatModeKey(1, event.channel, event.chat_id)
         with connect_database(self.database_path) as connection:
             SQLiteChatModeRepository(connection).save(ChatMode(key, "previous"))
         manager = FakeVaultSelectionManager(selected=_test_vault(1))
