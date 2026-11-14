@@ -32,6 +32,7 @@
 | Версия | SHA | Время выкладки | Изменение времени | Токены Codex | Изменение токенов | Результат |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
 | v3.4.0 | `22c01936c58d0cd7c99df334465f4562f9e3ca4e` | 2 мин 43,1 с | — | `unknown` | — | `state=success`, `cleanup=completed` |
+| v4.0.0 | `119e36d2bdde0162b970c81cdc980d61dec0cc9c` | 4 мин 52,4 с | +129,2 с (+79,2 %) | `unknown` | — | `state=success`, `cleanup=completed` |
 
 12 ноября 2026 года GitHub Actions запустил установку в 11:59:44.547 UTC
 и подтвердил Deployment в 12:02:27.665 UTC. Deployment `7736620585` получил
@@ -40,6 +41,13 @@
 токенов для этого интервала не подтверждены.
 [Журнал Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/43213872069/job/131168080124)
 · [Deployment и его статус](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7736620585/statuses)
+
+14 ноября 2026 года GitHub Actions подтвердил Deployment `7786489171`
+с текущим статусом `22189527386` (`success`). Время `v4.0.0` измерено от
+начала установки до подтверждения Deployment. Расход токенов Codex за
+этот интервал пока не подтверждён.
+[Журнал Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/43586845886/job/132423089545)
+· [Deployment и его статус](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7786489171/statuses)
 
 ## Разбивка по этапам
 
@@ -51,11 +59,15 @@
 | v3.4.0 | 1 | Установка и первая техническая приёмка | 11:59:44.547 → 12:02:06.173 | 141,6 с | Подтверждены перед очисткой |
 | v3.4.0 | 1 | Очистка прежней SQLite | 12:02:06.173 → 12:02:12.852 | 6,7 с | `completed` |
 | v3.4.0 | 1 | Повторная приёмка и подтверждение Deployment | 12:02:12.852 → 12:02:27.665 | 14,8 с | `success` |
+| v4.0.0 | 1 | Установка и первая техническая приёмка | 10:47:10.3017381 → 10:51:38.8160271 | 268,5 с | Подтверждены перед очисткой |
+| v4.0.0 | 1 | Очистка прежней SQLite | 10:51:38.8160271 → 10:51:46.8671664 | 8,1 с | `completed` |
+| v4.0.0 | 1 | Повторная приёмка и подтверждение Deployment | 10:51:46.8671664 → 10:52:02.6534274 | 15,8 с | `success` |
 
-В таблице приведены интервалы между отметками runner за 12 ноября 2026 года.
-Они включают вызовы SSH и GitHub API. Для отдельных замеров работы
-контроллера и времени простоя нужен его приватный отчёт.
-[Журнал Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/43213872069/job/131168080124)
+В таблице приведены интервалы между отметками runner за 12 и 14 ноября
+2026 года. Они включают вызовы SSH и GitHub API. Для отдельных замеров
+работы контроллера и времени простоя нужен его приватный отчёт.
+[Журнал выкладки v3.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43213872069/job/131168080124) ·
+[Журнал выкладки v4.0.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43586845886/job/132423089545)
 
 ## Как снять замер
 
