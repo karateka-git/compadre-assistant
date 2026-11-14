@@ -27,9 +27,11 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
     rows = policy["matrix"]
     keys = {(row["source"], row["class"], row["method"]) for row in rows}
     ids = policy["test_ids"]
+    # Ранее опубликованные теги сохраняют evidence с прежним составом тестов.
+    supported_counts = (173,) if version == 1 else (173, 177)
     if (len(rows) != 107 or len(keys) != 107
             or len({row["class"] for row in rows}) != 26
-            or len(ids) != 173 or len(set(ids)) != len(ids)
+            or len(ids) not in supported_counts or len(set(ids)) != len(ids)
             or any(row["test_id"] not in ids for row in rows)):
         raise ValueError("incomplete compatibility policy/matrix")
     return policy

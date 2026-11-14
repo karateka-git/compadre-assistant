@@ -46,6 +46,10 @@ class ArtifactAPI:
         self.policy = load_policy() | {
             "version": 1, "previous_sha": PREVIOUS_SHA, "release_id": 42, "release_tag": "v3.1.0",
         }
+        self.policy["test_ids"] = [
+            test_id for test_id in self.policy["test_ids"]
+            if not test_id.startswith("tests.test_user_identity_repository.SQLiteExternalIdentityRepositoryTest.")
+        ]
         self.repository = self.policy["repository"]
         self.selected = SelectedRelease(self.repository, "v3.2.0", "release/3.2", CANDIDATE_SHA,
                                         10, "main-full.yml", 1, 1)
@@ -61,7 +65,7 @@ class ArtifactAPI:
         source = {"compadre_assistant/fixture.py": "hash"}
         worker = {"passed": True, "imports": {"fixture": str(root / next(iter(source)))},
                   "environment": {"sys_path": [str(root)]}}
-        tests = {"passed": True, "test_ids": self.policy["test_ids"], "tests_run": 173,
+        tests = {"passed": True, "test_ids": self.policy["test_ids"], "tests_run": len(self.policy["test_ids"]),
                  "skips": [], "failures": [], "errors": []}
         self.report = {"passed": True, "previous_sha": self.policy["previous_sha"],
                        "candidate_sha": CANDIDATE_SHA, "source_verification": "passed",
@@ -135,7 +139,9 @@ class ArtifactAPI:
 
     def use_dynamic_policy(self) -> None:
         """Переводит fixture на формат policy и evidence с Deployment."""
-        self.policy = {key: self.policy[key] for key in ("repository", "matrix", "test_ids")} | {"version": 2}
+        self.policy = load_policy()
+        old_tests = self.report["old_repository_behavior"]["old_tests"]
+        old_tests.update(test_ids=self.policy["test_ids"].copy(), tests_run=len(self.policy["test_ids"]))
         self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}
         self.trusted[gate.POLICY_PATH] = json.dumps(self.policy).encode()
         self.evidence.update(version=2, baseline=asdict(ACCEPTED), policy_files={
