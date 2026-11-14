@@ -45,6 +45,14 @@ _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля откро�
 _DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
 
 
+def pending_expired_reply(pending: PendingInput) -> IncomingResponse:
+    """Возвращает подсказку повторить команду после истечения ожидания."""
+    command_hint = pending.retry_command or "команду ввода"
+    return IncomingResponse(text_content(
+        f"Срок ожидания ввода истёк. Повтори {command_hint}, чтобы начать заново."
+    ))
+
+
 class IncomingMessageResultType(StrEnum):
     """Тип результата обработки входящего сообщения."""
 
@@ -430,7 +438,7 @@ class IncomingMessageDispatcher:
                     "command-menu-refresh", "/help", identity.external_user_id)
                 # Это чтение сохранённого адреса, а не новое событие пользователя:
                 # resolve с touch мог бы вернуть устаревший адрес обратно в БД.
-                menu, _ = self.command_menu_snapshot(event, known_user=user)
+                menu, _ = self.command_menu_snapshot(event, known_user=user, preserve_expired=address.channel == "vk")
                 if self._user_identity_service.owns_known_private_chat(user, identity):
                     handler(CommandMenuUpdate(address, menu))
             except Exception:
@@ -548,10 +556,7 @@ class IncomingMessageDispatcher:
                 access = personal.status(pending.owner_id) if personal is not None else None
                 if access is None or not access.profile_allowed:
                     return None
-            command_hint = pending.retry_command or "команду ввода"
-            return IncomingResponse(text_content(
-                f"Срок ожидания ввода истёк. Повтори {command_hint}, чтобы начать заново."
-            ))
+            return pending_expired_reply(pending)
         elif pending is not None:
             if event.images and (pending.owner_id == "core" or not pending.accepts_images):
                 return IncomingResponse(text_content(_TEXT_INPUT_HINT))
@@ -1168,26 +1173,52 @@ class IncomingMessageDispatcher:
 
     def command_menu_snapshot(
         self, event: IncomingEvent, *, known_user: AppUser | None = None,
+        preserve_expired: bool = False,
     ) -> tuple[CommandMenu, bool]:
         """Возвращает меню и полноту снимка подтверждений для безопасной публикации.
 
         Args:
             event: Сохранённый адрес и identity; текст не исполняется.
             known_user: Повторно проверенный владелец адреса без обновления identity.
+            preserve_expired: Сохранить просроченную запись для фонового уведомления.
 
         Returns:
             Меню и признак успешного чтения всех источников подтверждений.
         """
-        return self._command_menu_snapshot(event, known_user=known_user)
+        return self._command_menu_snapshot(event, known_user=known_user, preserve_expired=preserve_expired)
+
+    def may_notify_input_expired(
+        self, event: IncomingEvent, pending: PendingInput, *, known_user: AppUser | None,
+    ) -> bool:
+        """Проверяет, применим ли совет повторить просроченную команду.
+
+        Args:
+            event: Проверенный адрес сохранённого личного чата.
+            pending: Запись, захваченная под блокировкой чата.
+            known_user: Текущий профиль адреса либо None до регистрации.
+
+        Returns:
+            True, если срок истёк и исходный сценарий доступен в этом чате.
+        """
+        if not pending.retry_command or not self._pending_inputs.expired(pending):
+            return False
+        personal = self._personal_registry(known_user, event) if known_user is not None else None
+        mode = self._chat_mode_repository.get(
+            ChatModeKey(known_user.id, event.channel, event.chat_id)
+        ) if known_user is not None else None
+        return self._pending_is_applicable(event, pending, known_user, personal,
+                                           mode.capability_id if mode is not None else None)
 
     def _command_menu_snapshot(
         self, event: IncomingEvent, *, known_user: AppUser | None = None, cleanup_pending: bool = True,
+        preserve_expired: bool = False,
     ) -> tuple[CommandMenu, bool]:
         """Учитывает текущую работу в той же проекции, что ожидание и режим."""
         actions = self._deferred_actions
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
-        context = self._command_context(event, known_user=known_user, cleanup_pending=cleanup_pending)
+        context = self._command_context(event, known_user=known_user, cleanup_pending=cleanup_pending,
+                                        preserve_expired=preserve_expired)
         # Работа может быть принята во время чтения источников подтверждений.
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
@@ -1197,7 +1228,7 @@ class IncomingMessageDispatcher:
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,
-        known_user: AppUser | None = None,
+        known_user: AppUser | None = None, preserve_expired: bool = False,
     ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = known_user or self._user_identity_service.resolve(_incoming_identity_from_event(event))
@@ -1208,24 +1239,34 @@ class IncomingMessageDispatcher:
         with self._pending_inputs.lock(event.reply_address):
             pending = self._pending_inputs.get(event.reply_address)
             if pending is not None:
-                valid = (not self._pending_inputs.expired(pending)
-                         and (pending.app_user_id == (user.id if user else None)
-                              or (pending.owner_id != "core" and pending.app_user_id is None)))
-                if pending.owner_id != "core":
-                    owner = personal.by_id(pending.owner_id) if personal else None
-                    valid = valid and isinstance(owner, PendingInputContinuationPort)
-                elif pending.input_kind == "link_code":
-                    valid = valid and self._profile_link_allowed(event)
-                if pending.required_mode is not None:
-                    valid = valid and mode is not None and mode.capability_id == pending.required_mode
-                if not valid:
-                    if cleanup_pending:
+                applicable = self._pending_is_applicable(
+                    event, pending, user, personal, mode.capability_id if mode else None,
+                )
+                expired = self._pending_inputs.expired(pending)
+                if cleanup_pending and (expired or not applicable):
+                    if not (preserve_expired and expired and applicable and pending.retry_command):
                         self._pending_inputs.clear(event.reply_address, pending.request_id)
-                        pending = None
+                    pending = None
         active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
         snapshot = self._confirmation_snapshot(event, user, active)
         mode_id = personal.visible_mode(mode.capability_id) if personal is not None and mode else None
         return personal, mode_id, pending, snapshot
+
+    def _pending_is_applicable(
+        self, event: IncomingEvent, pending: PendingInput, user: AppUser | None,
+        personal: PersonalCapabilityRegistry | None, mode_id: str | None,
+    ) -> bool:
+        """Проверяет владельца и доступ к сценарию независимо от его срока."""
+        if pending.app_user_id != (user.id if user else None) and (
+            pending.owner_id == "core" or pending.app_user_id is not None
+        ):
+            return False
+        if pending.required_mode is not None and mode_id != pending.required_mode:
+            return False
+        if pending.owner_id != "core":
+            owner = personal.by_id(pending.owner_id) if personal else None
+            return isinstance(owner, PendingInputContinuationPort)
+        return pending.input_kind != "link_code" or self._profile_link_allowed(event)
 
     def list_pending_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Собирает снимок ядра и доступного активного режима без выбора решения.

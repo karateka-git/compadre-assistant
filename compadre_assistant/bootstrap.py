@@ -10,7 +10,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
 
-from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.capabilities.admin.bootstrap import create_admin_runtime
 from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile, load_admin_timeweb_config
@@ -28,9 +28,11 @@ from compadre_assistant.core.presentation.incoming.ports import (
     IncomingCapabilityPort,
     IncomingResponse,
     BackgroundReply,
+    PendingInputExpiryHandler,
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
+    pending_expired_reply,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 
@@ -190,6 +192,7 @@ class ChannelMessageProcessor:
         self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
+        self._expiry_attempts: dict[ReplyAddress, tuple[str, CommandMenuUpdate]] = {}
 
     def close_deferred_actions(self) -> None:
         """Останавливает отложенные действия до закрытия зависимостей возможностей."""
@@ -227,15 +230,19 @@ class ChannelMessageProcessor:
         with self._menu_lock:
             return dict(self._menu_failures)
 
-    def reconcile_menus(self, handler: CommandMenuUpdateHandler) -> None:
+    def reconcile_menus(
+        self, handler: CommandMenuUpdateHandler, *, notify_expiry: PendingInputExpiryHandler | None = None,
+    ) -> None:
         """Восстанавливает или сверяет меню всех известных личных чатов.
 
         Вызывать при запуске с готовым обработчиком и после изменения серверной
         доступности или подтверждений. Повторный вызов проверяет TTL ввода и
-        доставляет только изменившиеся либо ранее не доставленные меню.
+        передаёт каналу только изменившиеся либо ранее не доставленные меню.
 
         Args:
-            handler: Нейтральный callback публикации меню вне SQLite scope.
+            handler: Callback вне SQLite scope. False означает, что канал
+                оставил меню без публикации.
+            notify_expiry: Доставка уведомления с меню для истёкшего ожидания VK.
         """
         with self._menu_lock:
             try:
@@ -252,16 +259,26 @@ class ChannelMessageProcessor:
                 for _, identity in identities
             }
             for address in self._pending_inputs.addresses():
-                if address not in events and address in self._unregistered_menu_events:
+                if address in events:
+                    continue
+                if address in self._unregistered_menu_events:
                     events[address] = (self._unregistered_menu_events[address], True)
+                elif notify_expiry is not None:
+                    events[address] = (
+                        IncomingEvent(address.channel, address.chat_id, "menu-reconcile", "/help"), False,
+                    )
             for address in self._menu_failures:
                 if address not in events and address in self._unregistered_menu_events:
                     events[address] = (self._unregistered_menu_events[address], True)
             for event, allow_unknown in events.values():
+                if notify_expiry is not None:
+                    if event.channel != "vk" or self._notify_pending_expiry(event, allow_unknown, notify_expiry):
+                        continue
                 self._reconcile_menu_event(event, handler, allow_unknown=allow_unknown)
 
     def run_menu_reconciliation(
         self, handler: CommandMenuUpdateHandler, stop: Event, *, interval_seconds: float = 30.0,
+        notify_expiry: PendingInputExpiryHandler | None = None,
     ) -> None:
         """Запускает сверку при старте и периодически до сигнала остановки.
 
@@ -269,15 +286,55 @@ class ChannelMessageProcessor:
             handler: Callback канала для публикации меню.
             stop: Сигнал завершения фонового цикла владельцем процесса.
             interval_seconds: Период проверки TTL и повторных доставок.
+            notify_expiry: Доставка уведомления с меню для истёкшего ожидания VK.
 
         Raises:
             ValueError: Период не положителен.
         """
         if interval_seconds <= 0:
             raise ValueError("interval_seconds must be positive")
-        self.reconcile_menus(handler)
+        self.reconcile_menus(handler, notify_expiry=notify_expiry)
         while not stop.wait(interval_seconds):
-            self.reconcile_menus(handler)
+            self.reconcile_menus(handler, notify_expiry=notify_expiry)
+
+    def _notify_pending_expiry(
+        self, event: IncomingEvent, allow_unknown: bool, notify: PendingInputExpiryHandler,
+    ) -> bool:
+        """Доставляет сообщение с актуальным меню при истечении ожидания."""
+        address = event.reply_address
+        with self._pending_inputs.lock(address):
+            pending = self._pending_inputs.get(address)
+            if pending is None or not pending.retry_command or not self._pending_inputs.expired(pending):
+                self._expiry_attempts.pop(address, None)
+                return False
+            try:
+                # Блокировка чата сохраняет порядок с отменой и заменой ожидания.
+                # SQLite scope заканчивается до внешней отправки.
+                snapshot = self._read_menu_snapshot(event, allow_unknown=allow_unknown, expired_input=pending)
+                if snapshot is None:
+                    self._pending_inputs.clear(address, pending.request_id)
+                    self._expiry_attempts.pop(address, None)
+                    return False
+                update, complete, _ = snapshot
+                attempt = self._expiry_attempts.get(address)
+                if attempt is None or attempt[0] != pending.request_id:
+                    attempt = (pending.request_id, update)
+                    self._expiry_attempts[address] = attempt
+                if notify(pending.request_id, pending_expired_reply(pending), update):
+                    self._pending_inputs.clear(address, pending.request_id)
+                    self._expiry_attempts.pop(address, None)
+                    # VK может подтвердить первую попытку с тем же random_id.
+                    if (attempt[1] == update
+                            and self._read_menu_snapshot(event, allow_unknown=allow_unknown) == snapshot):
+                        self._record_menu_delivery(update, complete)
+                    else:
+                        self._menu_failures[address] = "Состояние меню изменилось во время доставки"
+                else:
+                    self._menu_failures[address] = "Не удалось доставить уведомление об истечении"
+            except Exception as error:
+                self._menu_failures[address] = str(error)
+                LOGGER.exception("Could not notify about expired pending input")
+            return True
 
     def _reconcile_menu_event(
         self, event: IncomingEvent, handler: CommandMenuUpdateHandler, *,
@@ -307,18 +364,22 @@ class ChannelMessageProcessor:
                 if send is not None and self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
                     self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                     return
-                handler(update)
+                if handler(update) is False:
+                    return
             if self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
                 self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                 return
-            if complete:
-                self._acknowledge_menu(update)
-            else:
-                self._published_menus[address] = update
-                self._menu_failures[address] = INCOMPLETE_MENU_SNAPSHOT
+            self._record_menu_delivery(update, complete)
         except Exception as error:
             self._menu_failures[address] = str(error)
             LOGGER.exception("Could not deliver reconciled command menu")
+
+    def _record_menu_delivery(self, update: CommandMenuUpdate, complete: bool) -> None:
+        if complete:
+            self._acknowledge_menu(update)
+        else:
+            self._published_menus[update.address] = update
+            self._menu_failures[update.address] = INCOMPLETE_MENU_SNAPSHOT
 
     def _acknowledge_menu(self, update: CommandMenuUpdate) -> None:
         self._published_menus[update.address] = update
@@ -327,7 +388,7 @@ class ChannelMessageProcessor:
             self._unregistered_menu_events.pop(update.address, None)
 
     def _read_menu_snapshot(
-        self, event: IncomingEvent, *, allow_unknown: bool,
+        self, event: IncomingEvent, *, allow_unknown: bool, expired_input: PendingInput | None = None,
     ) -> tuple[CommandMenuUpdate, bool, int | None] | None:
         """Читает меню и владельца без доставки и без обновления identity."""
         address = event.reply_address
@@ -355,7 +416,13 @@ class ChannelMessageProcessor:
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
-            menu, complete = dispatcher.command_menu_snapshot(event, known_user=owner)
+            if expired_input is not None and not dispatcher.may_notify_input_expired(
+                event, expired_input, known_user=owner,
+            ):
+                return None
+            menu, complete = dispatcher.command_menu_snapshot(
+                event, known_user=owner, preserve_expired=address.channel == "vk",
+            )
             if known is not None and not service.owns_known_private_chat(*known):
                 return None
         return CommandMenuUpdate(address, menu), complete, owner.id if owner is not None else None
@@ -368,7 +435,7 @@ class ChannelMessageProcessor:
 
         Args:
             event: Исходный адрес с явным автором события.
-            handler: Адресная доставка меню без подходящей части ответа.
+            handler: Адресная доставка меню, если её поддерживает канал.
             send: Доставка ответа. Возвращает успех всего ответа и успех
                 доставки меню либо None при отсутствии подходящей части.
 
