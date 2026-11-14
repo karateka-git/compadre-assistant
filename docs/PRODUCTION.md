@@ -39,7 +39,7 @@ Python и другие режимы контроллера этому входу
 | База CI | Deployment `7786489171`, текущий статус `22189527386` (`success`), полный CI `main` `43586230283`, попытка 1. При создании релизной ветки контроллер `43586749622` подтвердил допуск по полному CI того же SHA в `main`. Задание полного CI в релизной ветке пропущено. [Deployment и его статус](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7786489171/statuses) · [CI main](https://github.com/karateka-git/compadre-assistant/actions/runs/43586230283/attempts/1) · [Контроллер релизной ветки](https://github.com/karateka-git/compadre-assistant/actions/runs/43586749622/job/132422802704) |
 | SQLite и backup | Поколение `1ff4727c3f834b98a058065b107c7bb3`, последняя миграция `0005_ask_usage.sql`. Активная SQLite, selector и финальный snapshot сохранились. Контроллер записал очистку прежней SQLite и её сопутствующих файлов. Штатный backup выбранного поколения завершился успешно в 10:53:15 UTC. |
 | Каналы и systemd | Основной unit и backup timer `active`. Оба контейнера `healthy`, перезапусков ноль, polling подтверждён. Docker restart policy `no`, запуском управляет systemd с selector. |
-| Пользовательская приёмка | Ask включён, проверка Ask и OCR в обоих личных чатах запрошена. Admin выключен. Штатные настройки Timeweb и список доверенных ещё не заданы. |
+| Пользовательская приёмка | Владелец подтвердил Ask и OCR в личных чатах штатных Telegram и VK. Admin выключен. Штатные настройки Timeweb и список доверенных ещё не заданы. |
 
 Штатный workflow подтвердил Deployment в 10:52:02.6534274 UTC.
 Перед следующим эксплуатационным действием повторите проверку VPS.
