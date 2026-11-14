@@ -69,7 +69,8 @@ class CommandMenuUpdate:
     menu: CommandMenu
 
 
-CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], None]
+# False означает, что канал оставил меню без публикации.
+CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], bool | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +157,8 @@ class BackgroundReply:
 
 
 ChannelCompletionHandler = Callable[[BackgroundReply], None]
+# Доставляет ответ с меню. ID ожидания связывает повторы отправки.
+PendingInputExpiryHandler = Callable[[str, IncomingResponse, CommandMenuUpdate], bool]
 
 
 class ReplyDeliveryPort(Protocol):

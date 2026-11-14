@@ -24,7 +24,6 @@ from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
-from compadre_assistant.core.presentation.incoming.ports import CommandMenuUpdate
 from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
 from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handler, _handle_update
 from tests.test_message_rendering import _HtmlReader
@@ -327,26 +326,28 @@ class AdminChannelsTest(unittest.TestCase):
 
     def assert_channel_menus(self, processor: ChannelMessageProcessor, *, include_costs: bool) -> None:
         """Публикует меню через настоящие обработчики двух каналов."""
-        vk_client = FakeVkClient()
-        vk_handler = _create_vk_menu_update_handler(vk_client, logger=self.logger)
-
         async def check_telegram() -> None:
             bot = MenuTelegramBot()
             handler = _create_telegram_menu_update_handler(bot, loop=asyncio.get_running_loop(),
                                                           aiogram=aiogram, logger=self.logger)
 
-            def publish_both(update: CommandMenuUpdate) -> None:
-                """Передаёт каждый снимок обоим транспортным обработчикам."""
-                handler(update)
-                vk_handler(update)
-
-            await asyncio.to_thread(processor.reconcile_menus, publish_both)
+            await asyncio.to_thread(
+                processor.reconcile_menus,
+                lambda update: handler(update) if update.address.channel == "telegram" else False,
+            )
             owner_commands = next(commands for commands, scope in bot.menu_calls if scope.chat_id == 101)
             commands = {command.command for command in owner_commands}
             self.assertEqual("llm_costs" in commands, include_costs)
 
         asyncio.run(check_telegram())
-        commands = {button["action"]["label"] for row in json.loads(vk_client.keyboards[-1])["buttons"] for button in row}
+        vk_client = FakeVkClient()
+        vk_handler = _create_vk_menu_update_handler(vk_client, logger=self.logger)
+        _handle_update({"type": "message_new", "object": {"message": {
+            "peer_id": 202, "from_id": 202, "id": 1, "text": "/help",
+        }}}, incoming_message_processor=processor, client=vk_client,
+            logger=self.logger, menu_update_handler=vk_handler)
+        menu = next(json.loads(item) for item in vk_client.keyboards if item and not json.loads(item)["inline"])
+        commands = {button["action"]["label"] for row in menu["buttons"] for button in row}
         self.assertEqual("/llm_costs" in commands, include_costs)
         self.assertFalse(processor.menu_delivery_failures)
 
