@@ -1,11 +1,10 @@
-"""Фоновый расчёт и запись наблюдений в пределах одного процесса."""
+"""Фоновая запись наблюдений в пределах одного процесса."""
 
 from collections import deque
 import logging
 from threading import Condition, Thread
 
-from compadre_assistant.capabilities.ask.domain.usage import UsageObservation, UsageRecorder
-from compadre_assistant.capabilities.ask.domain.usage_pricing import UsageEstimateWriter, UsagePricing
+from compadre_assistant.capabilities.ask.domain.usage import UsageObservation, UsageObservationWriter, UsageRecorder
 
 
 _logger = logging.getLogger(__name__)
@@ -19,8 +18,7 @@ class BackgroundUsageRecorder(UsageRecorder):
     Владелец вызывает close после завершения всех отправителей наблюдений.
 
     Args:
-        pricing: Расчёт стоимости по каталогу тарифов.
-        writer: Хранилище результата с дедупликацией по ключу вызова.
+        writer: Хранилище наблюдений с дедупликацией по ключу вызова.
         max_pending: Максимум ожидающих наблюдений помимо обрабатываемого.
 
     Raises:
@@ -30,14 +28,12 @@ class BackgroundUsageRecorder(UsageRecorder):
     def __init__(
         self,
         *,
-        pricing: UsagePricing,
-        writer: UsageEstimateWriter,
+        writer: UsageObservationWriter,
         max_pending: int = _DEFAULT_MAX_PENDING,
     ) -> None:
         """Создаёт пустую очередь и запускает поток записи."""
         if type(max_pending) is not int or max_pending < 1:
             raise ValueError("Размер очереди наблюдений должен быть положительным целым числом.")
-        self._pricing = pricing
         self._writer = writer
         self._max_pending = max_pending
         self._pending: deque[UsageObservation] = deque()
@@ -83,7 +79,7 @@ class BackgroundUsageRecorder(UsageRecorder):
                     self._ready.wait()
                 observation = self._pending.popleft()
             try:
-                self._writer.store(self._pricing.estimate(observation))
+                self._writer.store(observation)
             except Exception as error:
                 # Текст исключения может содержать исходные данные или путь к БД.
                 _logger.error("AI usage recording failed: error_type=%s", type(error).__name__)

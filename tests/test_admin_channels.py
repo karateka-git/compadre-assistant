@@ -18,8 +18,7 @@ from compadre_assistant.bootstrap import ChannelMessageProcessor, create_channel
 from compadre_assistant.capabilities.admin.data.configuration import AdminConfigError
 from compadre_assistant.capabilities.admin.domain.cost_report import GetGatewayCostReport
 from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
-from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageObservation, UsagePeriod, UsageTotals
-from compadre_assistant.capabilities.ask.domain.usage_pricing import UsagePricing, UsageTariff
+from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageObservation
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -99,10 +98,9 @@ class AdminChannelsTest(unittest.TestCase):
         """Отчёт берёт цены из API, не меняя существующую историю SQLite."""
         self.configure(str(self.owner_id))
         moment = datetime(2026, 11, 14, 17, tzinfo=UTC)
-        pricing = UsagePricing((UsageTariff("test", "model", "Проверка", moment, None, 1, 1),))
-        writer = SQLiteUsageRepository(self.path)
         tokens = TokenUsage(prompt_tokens=100_000_000, completion_tokens=0)
-        writer.store(pricing.estimate(UsageObservation(uuid4(), moment, "test", "model", tokens)))
+        observation = UsageObservation(uuid4(), moment, "test", "model", tokens)
+        self.assertTrue(SQLiteUsageRepository(self.path).store(observation))
         end = datetime(2026, 11, 14, 20, tzinfo=UTC)
         requests = []
 
@@ -156,7 +154,10 @@ class AdminChannelsTest(unittest.TestCase):
         load_ask.assert_not_called()
         model.assert_not_called()
         self.assertTrue(client.is_closed)
-        self.assertEqual(writer.read_totals((UsagePeriod(moment, end),)), (UsageTotals(100_000_000, 0),))
+        with connect_database(self.path) as connection:
+            saved = connection.execute("SELECT call_id, tokens_json FROM ask_usage").fetchall()
+        self.assertEqual([row["call_id"] for row in saved], [str(observation.call_id)])
+        self.assertEqual(json.loads(saved[0]["tokens_json"])["prompt_tokens"], tokens.prompt_tokens)
 
     def test_groups_untrusted_and_unknown_users_never_read_costs(self) -> None:
         """До отчёта допускается только явный доверенный автор личного чата."""

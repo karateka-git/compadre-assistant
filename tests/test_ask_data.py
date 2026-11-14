@@ -33,21 +33,6 @@ def _config() -> AskConfig:
     return AskConfig(base_url="https://ask.example/v1", api_key="ask-secret", model="ask-model")
 
 
-def _tariff_fields(**overrides):
-    return {
-        "provider": "test-gateway", "model": "actual-model", "source": "synthetic example",
-        "effective_from": "2026-01-01T00:00:00Z", "prompt_rate": 11, "completion_rate": 13,
-        **overrides,
-    }
-
-
-def _with_tariffs(raw: str) -> AskConfig:
-    return load_ask_config({
-        "ASK_BASE_URL": "https://ask.example/v1", "ASK_API_KEY": "ask-secret", "ASK_MODEL": "ask-model",
-        "ASK_USAGE_PROVIDER": "test-gateway", "ASK_USAGE_TARIFFS_JSON": raw,
-    })
-
-
 class AskConfigurationTest(unittest.TestCase):
     """Проверяет независимость профиля и безопасную валидацию."""
 
@@ -57,11 +42,12 @@ class AskConfigurationTest(unittest.TestCase):
             "ASK_BASE_URL": "https://ask.example/v1", "ASK_API_KEY": "ask-secret",
             "ASK_MODEL": "ask-model", "ASK_TIMEOUT_SECONDS": "9.5",
             "ASK_MAX_QUESTION_CHARS": "123", "ASK_MAX_RESPONSE_TOKENS": "45",
-            "ASK_MAX_RESPONSE_CHARS": "678", "OPENAI_API_KEY": "other-secret",
+            "ASK_MAX_RESPONSE_CHARS": "678", "ASK_USAGE_PROVIDER": "test-gateway", "OPENAI_API_KEY": "other-secret",
             "OPENAI_MODEL": "other-model", "OBSIDIAN_EMBEDDING_DIMENSIONS": "broken",
         })
         self.assertEqual(config, replace(_config(), timeout_seconds=9.5,
-                         max_question_chars=123, max_response_tokens=45, max_response_chars=678))
+                         max_question_chars=123, max_response_tokens=45, max_response_chars=678,
+                         usage_provider="test-gateway"))
         self.assertNotIn("ask-secret", repr(config))
 
     def test_obsidian_credentials_cannot_supply_missing_ask_profile(self) -> None:
@@ -81,44 +67,6 @@ class AskConfigurationTest(unittest.TestCase):
         with self.assertRaises(AskConfigError) as caught:
             load_ask_config({"ASK_TIMEOUT_SECONDS": "sensitive-value"})
         self.assertNotIn("sensitive-value", "".join(traceback.format_exception(caught.exception)))
-
-    def test_loads_versioned_tariff_history_and_optional_rules(self) -> None:
-        """Смежные интервалы принимаются с точными ставками и правилами детализации."""
-        config = _with_tariffs(json.dumps({"version": 1, "tariffs": [
-            _tariff_fields(effective_until="2026-02-01T00:00:00Z", image_rate=1, cached_rate=0,
-                           unpriced_details=["reasoning"], image_cache_disjoint=True),
-            _tariff_fields(effective_from="2026-02-01T00:00:00+00:00", prompt_rate=7),
-        ]}))
-        self.assertEqual(config.usage_provider, "test-gateway")
-        earlier, later = config.usage_tariffs
-        self.assertEqual(earlier.effective_until, later.effective_from)
-        self.assertEqual((earlier.cached_rate, earlier.image_rate, later.prompt_rate), (0, 1, 7))
-        self.assertEqual(earlier.unpriced_details, {"reasoning"})
-        self.assertTrue(earlier.image_cache_disjoint)
-        self.assertEqual(_with_tariffs("").usage_tariffs, ())
-
-    def test_rejects_invalid_catalogs_without_logging_payload(self) -> None:
-        """Предупреждает об ошибках схемы, правил, диапазонов и истории без значений JSON."""
-        entries = [
-            _tariff_fields(effective_from="2026-01-01T00:00:00+01:00"),
-            _tariff_fields(effective_until="2025-01-01T00:00:00Z"),
-            _tariff_fields(prompt_rate=True), _tariff_fields(prompt_rate=2**63),
-            _tariff_fields(completion_rate=-1), _tariff_fields(image_cache_disjoint="true"),
-            _tariff_fields(unpriced_details=["sensitive-value"]),
-            _tariff_fields(unpriced_details=["cached", "cached"]),
-            _tariff_fields(cached_rate=0, unpriced_details=["cached"]), _tariff_fields(unknown=0),
-        ]
-        catalogs = [json.dumps({"version": 1, "tariffs": [entry]}) for entry in entries]
-        catalogs.extend((
-            "sensitive-value", '{"version":1,"version":1,"tariffs":[]}',
-            '{"version":true,"tariffs":[]}', '{"version":2,"tariffs":[]}',
-            json.dumps({"version": 1, "tariffs": [_tariff_fields(), _tariff_fields()]}),
-        ))
-        for catalog in catalogs:
-            with self.subTest(catalog=catalog), self.assertRaises(AskConfigError) as caught:
-                _with_tariffs(catalog)
-            self.assertNotIn("sensitive-value", "".join(traceback.format_exception(caught.exception)))
-
 
 class AskApiTest(unittest.TestCase):
     """Использует настоящий OpenAI SDK с подменным HTTP transport."""
@@ -319,7 +267,7 @@ class AskApiTest(unittest.TestCase):
             self.assertEqual(observation.actual_model, "fallback")
             self.assertEqual(observation.tokens.image_tokens, 42)
 
-    def test_ocr_api_failure_observes_unknown_cost_and_hides_payload(self) -> None:
+    def test_ocr_api_failure_observes_missing_metadata_and_hides_payload(self) -> None:
         """Отказ API учитывается без usage, ключа и тела ответа в traceback."""
         recorder = Mock(spec=UsageRecorder)
         with self.assertRaises(AskModelUnavailableError) as caught:

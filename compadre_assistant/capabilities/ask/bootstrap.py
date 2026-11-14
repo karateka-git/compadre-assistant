@@ -8,8 +8,6 @@ from compadre_assistant.capabilities.ask.data.background_usage_recorder import B
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
 from compadre_assistant.capabilities.ask.data.llm.openai_ask_model import OpenAIAskModel
 from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
-from compadre_assistant.capabilities.ask.domain.usage import UsageTotalsReader
-from compadre_assistant.capabilities.ask.domain.usage_pricing import UsagePricing
 from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
@@ -37,9 +35,7 @@ def create_ask_runtime(
         return
     profile = config if config is not None else load_ask_config()
     with ExitStack() as resources:
-        recorder = BackgroundUsageRecorder(
-            pricing=UsagePricing(profile.usage_tariffs), writer=SQLiteUsageRepository(database_path),
-        )
+        recorder = BackgroundUsageRecorder(writer=SQLiteUsageRepository(database_path))
         resources.callback(recorder.close)
         model = OpenAIAskModel(profile, usage_recorder=recorder)
         resources.callback(model.close)
@@ -47,15 +43,3 @@ def create_ask_runtime(
             question=AskQuestion(model=model, max_question_chars=profile.max_question_chars),
             extract_image_text=ExtractImageText(model=model),
         )
-
-
-def create_usage_totals_reader(database_path: Path) -> UsageTotalsReader:
-    """Открывает доступ к агрегатам без чтения профиля и запуска клиента Ask.
-
-    Args:
-        database_path: Общий путь SQLite с применёнными миграциями.
-
-    Returns:
-        Публичный интерфейс чтения агрегатов по интервалам.
-    """
-    return SQLiteUsageRepository(database_path)

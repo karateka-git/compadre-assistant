@@ -1,4 +1,4 @@
-"""Проверки приёма наблюдений и завершения фоновой записи расходов."""
+"""Проверки приёма наблюдений и завершения фоновой записи."""
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timezone
@@ -8,8 +8,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 from compadre_assistant.capabilities.ask.data.background_usage_recorder import BackgroundUsageRecorder
-from compadre_assistant.capabilities.ask.domain.usage import UsageObservation
-from compadre_assistant.capabilities.ask.domain.usage_pricing import UsageEstimateWriter, UsagePricing
+from compadre_assistant.capabilities.ask.domain.usage import UsageObservation, UsageObservationWriter
 
 
 _LOGGER_NAME = "compadre_assistant.capabilities.ask.data.background_usage_recorder"
@@ -21,7 +20,7 @@ def _observation() -> UsageObservation:
 
 
 class BackgroundUsageRecorderTest(unittest.TestCase):
-    """Проверяет расчёт и запись вне потока отправителя без SQLite и сети."""
+    """Проверяет запись вне потока отправителя без SQLite и сети."""
 
     def test_submit_finishes_while_writer_is_blocked_and_close_drains(self) -> None:
         """Занятая запись не задерживает отправку, а close ждёт обе записи."""
@@ -29,24 +28,17 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
         release_writer = Event()
         close_started = Event()
         observations = (_observation(), _observation())
-        pricing_threads = []
         writes = []
-        pricing = UsagePricing()
 
-        def estimate(observation):
-            pricing_threads.append(get_ident())
-            return pricing.estimate(observation)
-
-        def store(result):
-            if result.observation == observations[0]:
+        def store(observation):
+            if observation == observations[0]:
                 writer_started.set()
                 release_writer.wait(_WAIT_SECONDS)
-            writes.append((result.observation, get_ident()))
+            writes.append((observation, get_ident()))
             return True
 
         recorder = BackgroundUsageRecorder(
-            pricing=Mock(spec=UsagePricing, estimate=Mock(side_effect=estimate)),
-            writer=Mock(spec=UsageEstimateWriter, store=Mock(side_effect=store)),
+            writer=Mock(spec=UsageObservationWriter, store=Mock(side_effect=store)),
         )
         self.addCleanup(recorder.close)
 
@@ -68,9 +60,7 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
                 release_writer.set()
             closing.result(timeout=_WAIT_SECONDS)
         self.assertEqual([observation for observation, _ in writes], list(observations))
-        writer_threads = [thread for _, thread in writes]
-        self.assertEqual(pricing_threads, writer_threads)
-        self.assertNotIn(caller_thread, writer_threads)
+        self.assertNotIn(caller_thread, [thread for _, thread in writes])
 
     def test_full_and_closed_queue_drop_only_new_observations(self) -> None:
         """Переполнение и закрытие диагностируются, принятые записи сохраняются."""
@@ -79,16 +69,15 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
         first, second, overflow, after_close = (_observation() for _ in range(4))
         written = []
 
-        def store(result):
-            if result.observation == first:
+        def store(observation):
+            if observation == first:
                 writer_started.set()
                 release_writer.wait(_WAIT_SECONDS)
-            written.append(result.observation)
+            written.append(observation)
             return True
 
         recorder = BackgroundUsageRecorder(
-            pricing=UsagePricing(),
-            writer=Mock(spec=UsageEstimateWriter, store=Mock(side_effect=store)),
+            writer=Mock(spec=UsageObservationWriter, store=Mock(side_effect=store)),
             max_pending=1,
         )
         self.addCleanup(recorder.close)
@@ -108,25 +97,19 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
             "AI usage observation dropped: reason=closed",
         ])
 
-    def test_pricing_and_write_errors_leave_worker_running(self) -> None:
+    def test_write_error_leaves_worker_running(self) -> None:
         """Ошибка одного обращения не раскрывает данные и не теряет следующее."""
-        first, second, third = (_observation() for _ in range(3))
-        pricing = UsagePricing()
-        writer = Mock(spec=UsageEstimateWriter)
+        first, second = _observation(), _observation()
+        writer = Mock(spec=UsageObservationWriter)
         writer.store.side_effect = [OSError("private storage details"), True]
-        estimate = Mock(side_effect=[ValueError("private pricing details"),
-                                     pricing.estimate(second), pricing.estimate(third)])
-        recorder = BackgroundUsageRecorder(pricing=Mock(spec=UsagePricing, estimate=estimate), writer=writer)
+        recorder = BackgroundUsageRecorder(writer=writer)
         self.addCleanup(recorder.close)
         with self.assertLogs(_LOGGER_NAME, level="ERROR") as logged:
-            for observation in (first, second, third):
+            for observation in (first, second):
                 recorder.submit(observation)
             recorder.close()
-        self.assertEqual([call.args[0] for call in writer.store.call_args_list], [
-            pricing.estimate(second), pricing.estimate(third),
-        ])
+        self.assertEqual([call.args[0] for call in writer.store.call_args_list], [first, second])
         self.assertEqual([entry.getMessage() for entry in logged.records], [
-            "AI usage recording failed: error_type=ValueError",
             "AI usage recording failed: error_type=OSError",
         ])
         self.assertTrue(all(entry.exc_info is None for entry in logged.records))
@@ -134,15 +117,15 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
     def test_duplicate_write_keeps_call_id_and_does_not_interrupt_queue(self) -> None:
         """Повтор доходит до хранилища с исходным ключом и не прерывает очередь."""
         first, second = _observation(), _observation()
-        writer = Mock(spec=UsageEstimateWriter)
+        writer = Mock(spec=UsageObservationWriter)
         writer.store.side_effect = [True, False, True]
-        recorder = BackgroundUsageRecorder(pricing=UsagePricing(), writer=writer)
+        recorder = BackgroundUsageRecorder(writer=writer)
         self.addCleanup(recorder.close)
         with self.assertNoLogs(_LOGGER_NAME, level="WARNING"):
             for observation in (first, first, second):
                 recorder.submit(observation)
             recorder.close()
-        self.assertEqual([call.args[0].observation.call_id for call in writer.store.call_args_list], [
+        self.assertEqual([call.args[0].call_id for call in writer.store.call_args_list], [
             first.call_id, first.call_id, second.call_id,
         ])
 
@@ -150,5 +133,5 @@ class BackgroundUsageRecorderTest(unittest.TestCase):
         """Некорректный лимит отклоняется до запуска фонового потока."""
         for max_pending in (0, -1, 1.5, True):
             with self.subTest(max_pending=max_pending), self.assertRaises(ValueError):
-                BackgroundUsageRecorder(pricing=UsagePricing(), writer=Mock(spec=UsageEstimateWriter),
+                BackgroundUsageRecorder(writer=Mock(spec=UsageObservationWriter),
                                         max_pending=max_pending)

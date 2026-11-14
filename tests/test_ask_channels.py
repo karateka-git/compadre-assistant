@@ -19,13 +19,10 @@ import httpx
 from openai import OpenAI
 
 from compadre_assistant.bootstrap import create_channel_message_processor
-from compadre_assistant.capabilities.ask.bootstrap import create_usage_totals_reader
 from compadre_assistant.capabilities.ask.data.configuration import AskConfig
 from compadre_assistant.capabilities.ask.domain.errors import (
     AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError,
 )
-from compadre_assistant.capabilities.ask.domain.usage import UsagePeriod, UsageTotals
-from compadre_assistant.capabilities.ask.domain.usage_pricing import UsageTariff
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
@@ -362,9 +359,7 @@ class AskChannelsTest(unittest.TestCase):
                 raise RuntimeError("provider filename must remain private")
             return image
 
-        profile = replace(self.config, usage_provider="test-gateway", usage_tariffs=(
-            UsageTariff("test-gateway", "fallback", "synthetic", timestamp - timedelta(seconds=1), None, 11, 13),
-        ))
+        profile = replace(self.config, usage_provider="test-gateway")
         with httpx.Client(transport=httpx.MockTransport(handle)) as transport, \
                 OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0, http_client=transport) as client, \
                 patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=client) as sdk, \
@@ -430,8 +425,13 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertEqual(requests[initial_requests + 3]["messages"][1]["content"], "вопрос")
 
         sdk.assert_called_once()
-        period = UsagePeriod(profile.usage_tariffs[0].effective_from, datetime.now(UTC) + timedelta(minutes=1))
-        self.assertEqual(create_usage_totals_reader(self.path).read_totals((period,)), (UsageTotals(8 * 235, 0),))
+        with connect_database(self.path) as connection:
+            observations = connection.execute("SELECT provider, actual_model, tokens_json FROM ask_usage").fetchall()
+        self.assertEqual(len(observations), 8)
+        for provider, model, tokens in observations:
+            self.assertEqual((provider, model), ("test-gateway", "fallback"))
+            self.assertEqual(json.loads(tokens)["prompt_tokens"], 19)
+            self.assertEqual(json.loads(tokens)["completion_tokens"], 2)
 
     def test_ocr_competing_photos_claim_one_pending_input(self) -> None:
         """Второе фото получает подсказку, пока первый загрузчик заблокирован."""
@@ -470,14 +470,10 @@ class AskChannelsTest(unittest.TestCase):
                 model_type.return_value.recognize_text.assert_called_once()
 
     def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
-        """Учитывает ответы, пустые choices и отказ API после выхода каждого канала."""
-        started = datetime.now(UTC) - timedelta(seconds=1)
-        profile = replace(self.config, usage_provider="test-gateway", usage_tariffs=(
-            UsageTariff("test-gateway", "fallback", "synthetic", started, None, 11, 13),
-        ))
+        """Сохраняет доступные метаданные всех вызовов после выхода каждого канала."""
+        profile = replace(self.config, usage_provider="test-gateway")
         success = {"model": "fallback", "choices": [{"message": {"content": "Ответ"}}],
                    "usage": {"prompt_tokens": 19, "completion_tokens": 2}}
-        period = UsagePeriod(started, started + timedelta(minutes=5))
         for index, (channel, command, extra) in enumerate((
             ("telegram", run_telegram_bot_command, {}), ("vk", run_vk_bot_command, {"group_id": 123}),
         ), start=1):
@@ -516,9 +512,13 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertEqual(command(database_path=self.path, token="123456:ABCDEF_test_token_123456789",
                                              logger=self.logger, enabled_capabilities=("ask",), **extra), 0)
                 self.assertEqual(len(requests), 4)
-                self.assertEqual(create_usage_totals_reader(self.path).read_totals((period,)), (
-                    UsageTotals(index * 470, index * 2),
-                ))
+                with connect_database(self.path) as connection:
+                    observations = connection.execute("SELECT provider, actual_model, tokens_json FROM ask_usage").fetchall()
+                self.assertEqual(len(observations), index * 4)
+                self.assertTrue(all(row["provider"] == "test-gateway" for row in observations))
+                self.assertCountEqual([
+                    (row["actual_model"], row["tokens_json"] is not None) for row in observations
+                ], [("fallback", True), ("fallback", True), (None, False), ("fallback", False)] * index)
 
     def test_usage_write_error_preserves_answer_and_later_observations(self) -> None:
         """Ошибка реальной SQLite-записи не влияет на доставку и следующий вопрос."""
@@ -527,7 +527,6 @@ class AskChannelsTest(unittest.TestCase):
                 CREATE TRIGGER reject_usage BEFORE INSERT ON ask_usage
                 BEGIN SELECT RAISE(ABORT, 'private error'); END
             """)
-        started = datetime.now(UTC) - timedelta(seconds=1)
         sdk_path = "compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI"
         with patch(sdk_path) as sdk:
             sdk.return_value.chat.completions.create.return_value = SimpleNamespace(
@@ -549,8 +548,8 @@ class AskChannelsTest(unittest.TestCase):
             with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
                                                   ask_config=self.config) as processor:
                 self.assertEqual(self.send("telegram", processor, "/ask второй"), "Ответ")
-        period = UsagePeriod(started, started + timedelta(minutes=5))
-        self.assertEqual(create_usage_totals_reader(self.path).read_totals((period,)), (UsageTotals(0, 1),))
+        with connect_database(self.path) as connection:
+            self.assertEqual([row[0] for row in connection.execute("SELECT actual_model FROM ask_usage")], ["untargeted"])
 
     def test_registry_failure_closes_created_ask_client(self) -> None:
         """Сбой регистрации после сборки Ask освобождает принадлежащий ему клиент."""

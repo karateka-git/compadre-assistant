@@ -1,10 +1,10 @@
-"""Описывает форму SQLite-данных для учёта расходов Ask."""
+"""Описывает форму наблюдения Ask в SQLite."""
 
 from dataclasses import dataclass
 
 
 @dataclass(frozen=True, slots=True)
-class UsageEstimateDto:
+class UsageObservationDto:
     """Хранит поля строки обращения в формате SQLite."""
 
     call_id: str
@@ -12,14 +12,3 @@ class UsageEstimateDto:
     provider: str
     actual_model: str | None
     tokens_json: str | None
-    tariff_json: str | None
-    cost_nanorubles: int | None
-    unknown_reason: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class UsageCostDto:
-    """Хранит проекцию строки SQLite для отчёта о расходах."""
-
-    cost_nanorubles: int | None
-    unknown_reason: str | None
