@@ -113,11 +113,13 @@ class IncomingMessageDispatcher:
         pending_inputs: PendingInputStore | None = None,
         deferred_actions: DeferredActions | None = None,
         deferred_access: Callable[[IncomingEvent, int, str, str | None], bool] | None = None,
+        deferred_menu_refresh: Callable[[ReplyAddress], None] | None = None,
     ) -> None:
         """Внедряет общий реестр и repositories независимого профиля."""
         self._pending_inputs = pending_inputs or PendingInputStore()
         self._deferred_actions = deferred_actions
         self._deferred_access = deferred_access
+        self._deferred_menu_refresh = deferred_menu_refresh
         self._registry = registry
         self._user_identity_service = user_identity_service
         self._chat_mode_repository = chat_mode_repository
@@ -856,6 +858,7 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content("Ввод уже изменился. Повтори команду."))
         origin = replace(event, text="принятый ввод", images=())
         pending_inputs = self._pending_inputs
+        refresh_menu = self._deferred_menu_refresh
 
         def finish(response: IncomingResponse) -> None:
             with pending_inputs.lock(action.address):
@@ -865,8 +868,12 @@ class IncomingMessageDispatcher:
                     return
             completion_handler(BackgroundReply(action.address, response))
 
+        def refresh_after_release() -> None:
+            if refresh_menu is not None:
+                refresh_menu(action.address)
+
         def after_delivery(delivered: bool) -> None:
-            actions.after_delivery(action, delivered, work, finish)
+            actions.after_delivery(action, delivered, work, finish, refresh_after_release)
 
         return replace(result.response, after_delivery=after_delivery)
 

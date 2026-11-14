@@ -114,9 +114,14 @@ async def _run_telegram_bot(
     aiogram = _load_aiogram()
     bot = _create_polling_bot(aiogram, token=token, proxy_url=proxy_url)
     dispatcher = aiogram.Dispatcher()
-    menu_update_handler = _create_telegram_menu_update_handler(
+    reconciliation_stop = threading.Event()
+    publish_menu = _create_telegram_menu_update_handler(
         bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
     )
+
+    def menu_update_handler(update: CommandMenuUpdate) -> None:
+        if not reconciliation_stop.is_set():
+            publish_menu(update)
 
     _register_handlers(
         dispatcher,
@@ -128,7 +133,6 @@ async def _run_telegram_bot(
     )
 
     logger.info("Telegram bot polling started")
-    reconciliation_stop = threading.Event()
     reconciliation_thread = _start_telegram_menu_reconciliation(
         incoming_message_processor,
         menu_update_handler,
@@ -368,8 +372,7 @@ def _register_handlers(
                     chat_id=chat.id, message_id=source.message_id, reply_markup=None,
                 )
             except asyncio.CancelledError:
-                if result.after_delivery is not None:
-                    result.after_delivery(False)
+                await _notify_telegram_delivery(result, False)
                 raise
             except Exception:
                 logger.exception("Telegram callback keyboard removal failed")
@@ -390,13 +393,26 @@ async def _process_telegram_update(
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
         def discard(task: asyncio.Task[IncomingResponse]) -> None:
-            if not task.cancelled() and task.exception() is None:
-                after_delivery = task.result().after_delivery
-                if after_delivery is not None:
-                    after_delivery(False)
+            if task.cancelled() or task.exception() is not None:
+                return
+            after_delivery = task.result().after_delivery
+            if after_delivery is not None:
+                cleanup = asyncio.get_running_loop().run_in_executor(None, after_delivery, False)
+                cleanup.add_done_callback(_report_telegram_delivery_failure)
 
         worker.add_done_callback(discard)
         raise
+
+
+def _report_telegram_delivery_failure(future: asyncio.Future[None]) -> None:
+    if not future.cancelled() and (error := future.exception()) is not None:
+        logging.getLogger(__name__).error("Telegram delivery notification failed: error_type=%s", type(error).__name__)
+
+
+async def _notify_telegram_delivery(response: IncomingResponse, delivered: bool) -> None:
+    """Подтверждает отправку из потока, откуда callback может использовать event loop."""
+    if response.after_delivery is not None:
+        await asyncio.to_thread(response.after_delivery, delivered)
 
 
 def _create_telegram_menu_update_handler(
@@ -713,8 +729,7 @@ async def safe_send_telegram_reply(
             include_bound_actions=include_bound_actions,
         )
     finally:
-        if response.after_delivery is not None:
-            response.after_delivery(delivered)
+        await _notify_telegram_delivery(response, delivered)
 
 
 async def _send_telegram_reply(

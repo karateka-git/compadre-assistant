@@ -28,6 +28,7 @@ from compadre_assistant.presentation.telegram.bot import (
     _FatalPollingError,
     _create_telegram_completion_handler,
     _create_telegram_menu_update_handler,
+    _process_telegram_update,
     _register_handlers,
     _create_polling_bot,
     _run_telegram_bot,
@@ -1081,7 +1082,9 @@ class TelegramBotHelpersTest(unittest.TestCase):
                 effects.append((bot.session.close_calls, cancelled()))
                 return IncomingResponse(text_content("Отменённый результат"))
 
-            actions.after_delivery(action, True, work, lambda _reply: effects.append("unexpected completion"))
+            actions.after_delivery(action, True, work,
+                                   lambda _reply: effects.append("Лишний ответ"),
+                                   lambda: effects.append("Лишнее обновление меню"))
             self.assertTrue(await asyncio.to_thread(started.wait, 5))
 
             def close_actions():
@@ -1107,6 +1110,42 @@ class TelegramBotHelpersTest(unittest.TestCase):
 
         self.assertEqual(effects, [(0, True)])
         self.assertEqual(aiogram.dispatcher.start_arguments[0].session.close_calls, 1)
+
+    def test_cancelled_update_notifies_delivery_from_worker(self) -> None:
+        """Отменённый handler не ждёт ответ processor и освобождает квитанцию вне loop."""
+        started, release = threading.Event(), threading.Event()
+
+        async def exercise():
+            loop = asyncio.get_running_loop()
+            finished = loop.create_future()
+
+            async def observed(delivered):
+                finished.set_result(delivered)
+
+            def process():
+                started.set()
+                if not release.wait(5):
+                    raise TimeoutError("Тест не освободил обработчик")
+
+                def after_delivery(delivered):
+                    asyncio.run_coroutine_threadsafe(observed(delivered), loop).result(timeout=5)
+
+                return IncomingResponse(text_content("Квитанция"), after_delivery=after_delivery)
+
+            task = asyncio.create_task(_process_telegram_update(process, (), None))
+            try:
+                self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                task.cancel()
+                task.cancel()
+                done, _ = await asyncio.wait((task,), timeout=1)
+                self.assertIn(task, done)
+                self.assertTrue(task.cancelled())
+                self.assertFalse(finished.done())
+            finally:
+                release.set()
+            self.assertIs(await asyncio.wait_for(finished, timeout=5), False)
+
+        asyncio.run(exercise())
 
     def test_run_polling_reports_fatal_api_error(self) -> None:
         """Неустранимая ошибка Telegram API превращается в adapter-ошибку."""

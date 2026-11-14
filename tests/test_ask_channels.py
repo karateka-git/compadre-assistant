@@ -36,6 +36,7 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.presentation.telegram.bot import _register_handlers
 from compadre_assistant.presentation.vk.bot import _VkUpdateWorkers, _handle_update
 from compadre_assistant.presentation.cli.main import run_telegram_bot_command, run_vk_bot_command
+from tests.response_assertions import response_text
 from tests.test_telegram_bot import FakeAiogram, TelegramMessage
 from tests.test_vk_bot import FakeVkClient
 from tests.test_process_incoming_message import FakeArticleUrlUseCase, FakeConfirmationService, _proposal
@@ -694,9 +695,16 @@ class AskChannelsTest(unittest.TestCase):
 
     def test_linked_channel_disables_ocr_completion_in_origin_chat(self) -> None:
         """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
-        release, checked = threading.Event(), threading.Event()
+        release, menu_restored = threading.Event(), threading.Event()
         command = "/get_text_from_image"
         receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        menus = []
+
+        def publish(update):
+            commands = tuple(item.command for item in update.menu.items)
+            menus.append(commands)
+            if len(menus) > 1 and "/cancel" not in commands:
+                menu_restored.set()
 
         with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, \
                 create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
@@ -719,16 +727,9 @@ class AskChannelsTest(unittest.TestCase):
                 return SimpleNamespace(text="Текст после отзыва")
 
             model_type.return_value.recognize_text.side_effect = recognize
-            original_access = processor._deferred_access
-
-            def check_access(*args):
-                allowed = original_access(*args)
-                checked.set()
-                return allowed
-
-            processor._deferred_access = check_access
             fake = FakeAiogram()
-            _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor, logger=self.logger)
+            _register_handlers(fake.dispatcher, fake, incoming_message_processor=processor, logger=self.logger,
+                               menu_update_handler=publish)
             message = TelegramMessage()
             message.chat = SimpleNamespace(id=7)
             message.from_user = SimpleNamespace(id=7)
@@ -749,11 +750,13 @@ class AskChannelsTest(unittest.TestCase):
                 try:
                     await fake.dispatcher.included_router.handler(message)
                     self.assertEqual(message.answers, [receipt])
+                    self.assertEqual(menus[-1], ("/cancel",))
                     self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                     disabled = await asyncio.to_thread(self.send, "vk", processor, "/disable ask", 7)
                     self.assertIn("Возможность ask выключена", disabled)
                     release.set()
-                    self.assertTrue(await asyncio.to_thread(checked.wait, 5))
+                    self.assertTrue(await asyncio.to_thread(menu_restored.wait, 5))
+                    self.assertNotIn("/ask", menus[-1])
                 finally:
                     release.set()
                     await asyncio.to_thread(processor.close_deferred_actions)
@@ -805,6 +808,57 @@ class AskChannelsTest(unittest.TestCase):
             self.assertEqual(menus[address], normal_menu)
             response.after_delivery(True)
             self.assertEqual(downloads, [])
+
+    def test_ocr_release_refreshes_current_menu_after_delivery_failures(self) -> None:
+        """Непринятая квитанция, успех и ошибка восстанавливают меню без нового ввода."""
+        address = ReplyAddress("telegram", "7")
+        restored = threading.Event()
+        menus = []
+        replies = []
+
+        def publish(update):
+            self.assertEqual(update.address, address)
+            commands = tuple(item.command for item in update.menu.items)
+            menus.append(commands)
+            if "/get_text_from_image" in commands and "/cancel" not in commands:
+                restored.set()
+
+        with patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, \
+                create_channel_message_processor(database_path=self.path, enabled_capabilities=("ask",),
+                                                 ask_config=self.config) as processor:
+            model_type.return_value.recognize_text.return_value = SimpleNamespace(text="Готовый текст")
+
+            def send(text, images=()):
+                return processor(IncomingEvent("telegram", "7", "update", text, "7", images=images),
+                                 completion_handler=replies.append, menu_update_handler=publish)
+
+            send("/register")
+            send("Тест")
+            send("/ai")
+            normal_menu = menus[-1]
+
+            for delivered, photo, result in (
+                (False, b"\xff\xd8\xffsample", None),
+                (True, b"\xff\xd8\xffsample", "Готовый текст"),
+                (True, b"invalid image", "Не удалось прочитать фото"),
+            ):
+                with self.subTest(delivered=delivered, result=result):
+                    replies.clear()
+                    restored.clear()
+                    send("/get_text_from_image")
+                    receipt = send("", (ImageAttachment(lambda: photo),))
+                    self.assertEqual(menus[-1], ("/cancel",))
+                    receipt.after_delivery(delivered)
+                    self.assertTrue(restored.wait(5))
+                    self.assertEqual(menus[-1], normal_menu)
+                    if result is None:
+                        self.assertEqual(replies, [])
+                    else:
+                        self.assertEqual(len(replies), 1)
+                        self.assertIn(result, response_text(replies[0].response))
+                    before = len(menus)
+                    processor.reconcile_menus(publish)
+                    self.assertEqual(len(menus), before)
 
     def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
         """Сохраняет доступные метаданные всех вызовов после выхода каждого канала."""

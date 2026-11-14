@@ -83,7 +83,13 @@ def run_vk_bot(
         max_queue_size: Максимальное число ожидающих обработки обновлений.
     """
     api_client = client or VkApiClient(token=token)
-    menu_update_handler = _create_vk_menu_update_handler(api_client, logger=logger)
+    menu_stop = Event()
+    publish_menu = _create_vk_menu_update_handler(api_client, logger=logger)
+
+    def menu_update_handler(update: CommandMenuUpdate) -> None:
+        if not menu_stop.is_set():
+            publish_menu(update)
+
     runtime_menu_handler = (
         menu_update_handler
         if callable(getattr(incoming_message_processor, "run_menu_reconciliation", None))
@@ -110,7 +116,6 @@ def run_vk_bot(
         worker_count=worker_count,
         max_queue_size=max_queue_size,
     )
-    menu_stop = Event()
     menu_thread = _start_vk_menu_reconciliation(
         incoming_message_processor,
         menu_update_handler,

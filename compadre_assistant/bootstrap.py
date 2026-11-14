@@ -182,6 +182,7 @@ class ChannelMessageProcessor:
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
         self._deferred_actions = DeferredActions()
+        self._deferred_menu_closed = Event()
         self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access)
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
@@ -192,6 +193,7 @@ class ChannelMessageProcessor:
 
     def close_deferred_actions(self) -> None:
         """Останавливает отложенные действия до закрытия зависимостей возможностей."""
+        self._deferred_menu_closed.set()
         self._deferred_actions.close()
 
     def reply_for_unsupported_input(self, address: ReplyAddress) -> IncomingResponse | None:
@@ -379,12 +381,24 @@ class ChannelMessageProcessor:
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
             "ответ", incoming_message.external_user_id,
         )
+
+        def refresh_deferred_menu(address: ReplyAddress) -> None:
+            if menu_update_handler is None:
+                return
+            with self._menu_lock:
+                if self._deferred_menu_closed.is_set():
+                    return
+                # Сверка берёт актуального владельца и состояние по сохранённому адресу.
+                event = IncomingEvent(address.channel, address.chat_id, "menu-reconcile", "/help")
+                self._reconcile_menu_event(event, menu_update_handler, allow_unknown=False)
+
         with connect_database(self._database_path) as connection:
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 pending_inputs=self._pending_inputs,
                 deferred_actions=self._deferred_actions,
                 deferred_access=self._deferred_access,
+                deferred_menu_refresh=refresh_deferred_menu if menu_update_handler is not None else None,
                 user_identity_service=create_user_identity_service(connection),
                 chat_mode_repository=SQLiteChatModeRepository(connection),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),

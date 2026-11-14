@@ -70,6 +70,7 @@ class DeferredActions:
         self, action: DeferredAction, delivered: bool,
         work: Callable[[Callable[[], bool]], IncomingResponse],
         finish: Callable[[IncomingResponse], None],
+        on_released: Callable[[], None] | None = None,
     ) -> None:
         """Запускает работу после успешной квитанции либо освобождает её место.
 
@@ -78,20 +79,23 @@ class DeferredActions:
             delivered: Адаптер подтвердил успешную отправку квитанции.
             work: Обработка вне блокировки с предикатом отмены.
             finish: Проверка допуска и передача результата в канал.
+            on_released: Уведомление об освобождении чата без команды отмены.
         """
         with self._lock:
             if self._actions.get(action.address) is not action or action.submitted:
                 return
             if not delivered:
                 self._cancel_locked(action)
-                return
-            action.submitted = True
-            try:
-                self._executor.submit(self._run, action, work, finish)
-            except RuntimeError:
-                self._cancel_locked(action)
-                self._slots.discard(action)
-                _LOGGER.error("Deferred input executor could not start work")
+            else:
+                action.submitted = True
+                try:
+                    self._executor.submit(self._run, action, work, finish, on_released)
+                    return
+                except RuntimeError:
+                    self._cancel_locked(action)
+                    self._slots.discard(action)
+                    _LOGGER.error("Deferred input executor could not start work")
+        self._notify_released(on_released)
 
     def claim_result(self, action: DeferredAction) -> bool:
         """Освобождает чат в момент передачи результата, если отмена не успела первой."""
@@ -102,7 +106,7 @@ class DeferredActions:
             return True
 
     def _run(self, action: DeferredAction, work: Callable[[Callable[[], bool]], IncomingResponse],
-             finish: Callable[[IncomingResponse], None]) -> None:
+             finish: Callable[[IncomingResponse], None], on_released: Callable[[], None] | None) -> None:
         try:
             if action.cancelled.is_set():
                 return
@@ -117,8 +121,22 @@ class DeferredActions:
             _LOGGER.error("Deferred input reply failed: error_type=%s", type(error).__name__)
         finally:
             with self._lock:
+                notify = not action.cancelled.is_set()
                 self._cancel_locked(action)
                 self._slots.discard(action)
+            if notify:
+                self._notify_released(on_released)
+
+    def _notify_released(self, on_released: Callable[[], None] | None) -> None:
+        if on_released is None:
+            return
+        with self._lock:
+            closed = self._closed
+        if not closed:
+            try:
+                on_released()
+            except Exception as error:
+                _LOGGER.error("Deferred input release notification failed: error_type=%s", type(error).__name__)
 
     def close(self) -> None:
         """Останавливает приём, отменяет текущие поколения и ждёт выхода исполнителей."""
