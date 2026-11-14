@@ -232,7 +232,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        """Экспортирует v4.0.0 с актуальным составом тестов совместимости один раз."""
+        """Экспортирует v4.0.1 с актуальным составом тестов совместимости один раз."""
         cls.temporary = TemporaryDirectory(prefix="compatibility-mutations-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name).resolve()
@@ -240,7 +240,7 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         cls.repository = Path(__file__).resolve().parents[1]
         subprocess.run(["git", "status", "--short"], cwd=cls.repository, check=True, capture_output=True)
         cls.checkout = cls.root / "previous"
-        cls.original = export_commit(cls.repository, "119e36d2bdde0162b970c81cdc980d61dec0cc9c", cls.checkout)
+        cls.original = export_commit(cls.repository, "f2da286c02efed55c2174e30aee2a1ad2af05e40", cls.checkout)
 
     def _run(self, name: str, sql: str, *, full: bool = False) -> dict:
         source = self.root / name / "source"

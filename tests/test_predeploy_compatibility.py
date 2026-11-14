@@ -46,9 +46,16 @@ class ArtifactAPI:
         self.policy = load_policy() | {
             "version": 1, "previous_sha": PREVIOUS_SHA, "release_id": 42, "release_tag": "v3.1.0",
         }
+        later_menu_tests = {
+            "tests.test_menu_reconciliation.MenuReconciliationTest."
+            "test_menu_with_reply_is_published_once_and_retry_stays_addressed",
+            "tests.test_menu_reconciliation.MenuReconciliationTest."
+            "test_response_menu_rechecks_ownership_before_fallback_and_acknowledgement",
+        }
         self.policy["test_ids"] = [
             test_id for test_id in self.policy["test_ids"]
             if not test_id.startswith("tests.test_user_identity_repository.SQLiteExternalIdentityRepositoryTest.")
+            and test_id not in later_menu_tests
         ]
         self.repository = self.policy["repository"]
         self.selected = SelectedRelease(self.repository, "v3.2.0", "release/3.2", CANDIDATE_SHA,
