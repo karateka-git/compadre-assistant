@@ -330,7 +330,7 @@ policy v1 сохраняют исторический формат провер�
 с таким артефактом три вызова давали 57 запросов. Дополнительные страницы
 увеличивали число запросов, перенаправление ZIP добавляло HTTP-запрос к
 хранилищу. Селектор релиза, `git fetch` и recovery считались отдельно.
-Для policy v2 число зависит также от чтения Deployments, статусов и
+Для policy v2 и v3 число зависит также от чтения Deployments, статусов и
 проверочных файлов. Повтор после копии обнаруживает истёкший артефакт или
 изменившийся pin, последняя сверка проверяет актуальность допуска у границы
 остановки каналов.
@@ -726,10 +726,12 @@ python -m scripts.publish_installation_tag vX.Y.Z <полный-SHA> --summary
 
 `COMPATIBILITY_POLICY_SHA` в GitHub и файл
 `/var/lib/compadre-assistant-deploy/compatibility-policy.sha` на VPS
-закрепляют проверенный коммит с матрицей, скриптами и байтами workflow.
-Обновляйте оба значения при изменении этого контракта, включая разовый
-переход на policy v2. Следующие установки автоматически меняют базу
-через доверенный `success` в Deployments.
+закрепляют проверенный коммит с политикой, скриптами и байтами workflow.
+Обновляйте оба значения при изменении доверенного контракта, как при переходе
+на политику версии 3. Установленный выпуск становится базой автоматически
+после доверенного `success` в Deployments. Состав тестов принятого коммита
+определяется при каждом полном прогоне. При смене базы или состава её тестов
+продолжайте использовать тот же pin.
 
 1. Подготовьте PR в защищённую `main` с новой policy и связанными файлами.
    Проверьте точные изменения, обязательный `pr-check` и полный набор
@@ -750,10 +752,13 @@ python -m scripts.publish_installation_tag vX.Y.Z <полный-SHA> --summary
    reviewed merge SHA и прочитайте её обратно. Запустите
    `pre-release-check-full` для `main` с `expected_sha`, равным полному SHA
    текущей вершины, и `expected_policy_sha`, равным новому pin. При отказе
-   перечитайте переменную GitHub. Возвращайте прежнее значение, если
-   переменная всё ещё указывает на новый pin этой операции. При другом
-   значении остановитесь для сверки изменений. При успехе сверьте точные SHA,
-   run/attempt и идентификаторы принятой базы из артефакта CI с состоянием VPS.
+   сохраните отчёт, а затем перечитайте переменную GitHub. Возвращайте
+   прежнее значение, если переменная всё ещё указывает на новый pin этой
+   операции. При другом значении остановитесь для сверки изменений.
+   При успехе сверьте точные SHA, run/attempt и идентификаторы принятой базы
+   из артефакта CI с состоянием VPS. Для версии 3 проверьте успешный полный
+   набор принятого коммита, отдельные дополнительные проверки и совпадение
+   отпечатка схемы. Переходите к локальному pin после этих сверок.
 4. Установите проверенный
    [controller snapshot](#обновить-отдельно-установленный-controller-snapshot)
    из точного SHA прошедшего прогона. Под тем же существующим deploy lock
@@ -945,7 +950,7 @@ Controller записывает статический `SAFE_*` в stderr и п�
 | --- | --- |
 | `SAFE_SOURCE_SCHEMA`, `SAFE_CANDIDATE_MANIFEST`, `SAFE_SCHEMA_PREFIX`, `SAFE_CANDIDATE_IMAGE` | Проверить исходный журнал/integrity, manifest SQL кандидата, точный префикс применённых миграций и revision собранного образа до evidence. |
 | `SAFE_CONFIG_READ`, `SAFE_CONFIG_PERMISSIONS`, `SAFE_CONFIG_EMPTY` | Проверить наличие и root:root/0600 внешнего pin/token, непустое значение; не выводить token. |
-| `SAFE_POLICY_PIN`, `SAFE_POLICY_CONTENT` | Проверить полный SHA внешнего reviewed pin и полноту policy. |
+| `SAFE_POLICY_PIN`, `SAFE_POLICY_CONTENT` | Проверить полный SHA внешнего reviewed pin и объявление версии в закреплённом коде. Для v1 и v2 проверить JSON политики из того же коммита. |
 | `SAFE_POLICY_BLOB_MISSING`, `SAFE_POLICY_BLOB_DIGEST` | Получить заново точные Git blobs; проверить доступ API и закреплённый commit. |
 | `SAFE_CI_PROVENANCE`, `SAFE_CI_ATTEMPT`, `SAFE_CI_JOB_MISSING`, `SAFE_CI_JOB_FAILED` | Проверить точный run/attempt, repo/ref/SHA и все обязательные steps; исправить CI и rerun. |
 | `SAFE_BASELINE_DEPLOYMENT`, `SAFE_INSTALLED_PREVIOUS_SHA` | Сопоставить установленный SHA с текущим доверенным Deployment, его статусом и immutable Release. При изменении базы повторить полный CI точного SHA кандидата. |
@@ -956,7 +961,7 @@ Controller записывает статический `SAFE_*` в stderr и п�
 | `SAFE_ARTIFACT_MISSING`, `SAFE_ARTIFACT_METADATA`, `SAFE_ARTIFACT_DIGEST` | Проверить уникальность artifact, run/head SHA, срок хранения и SHA256 ZIP из GitHub metadata; при истечении нужен новый CI run/attempt. |
 | `SAFE_ARTIFACT_REDIRECT`, `SAFE_ARTIFACT_SIZE`, `SAFE_ARTIFACT_EXPANDED_SIZE`, `SAFE_ARTIFACT_MEMBER`, `SAFE_ARTIFACT_FORMAT` | Проверить HTTPS download, лимит 64 MiB, структуру ZIP и JSON; повреждённый artifact не принимать. |
 | `SAFE_EVIDENCE_IDENTITY`, `SAFE_CANDIDATE_SHA` | Сверить точную пару SHA, policy, run/attempt, результаты и внутренние хеши. |
-| `SAFE_TEST_MANIFEST`, `SAFE_REPORT_CONTRACT` | В артефакте сверить полный список тестов из закреплённой policy, результаты, источники импортов и отпечатки схемы. Один `passed=true` не подтверждает прохождение матрицы. |
+| `SAFE_TEST_MANIFEST`, `SAFE_REPORT_CONTRACT` | В артефакте сверить найденные и начатые тесты, результаты, источники импортов и отпечатки схемы. Для v1 и v2 состав тестов сверяется с исторической политикой. |
 | `SAFE_EVIDENCE_READ`, `SAFE_EVIDENCE_RECHECK`, `SAFE_EVIDENCE_CHANGED` | Проверить доступ GitHub и доступность metadata; при повторной проверке evidence/pin должны остаться теми же. |
 | `SAFE_COPY_BACKUP`, `SAFE_COPY_SOURCE_SCHEMA` | Проверить online backup и исходный журнал/integrity на приватной копии. |
 | `SAFE_COPY_MIGRATION`, `SAFE_COPY_CANDIDATE_SCHEMA` | Проверить candidate CLI, timeout и точный журнал/integrity мигрированной копии. |

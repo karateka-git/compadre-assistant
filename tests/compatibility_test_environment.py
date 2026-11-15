@@ -1,6 +1,7 @@
 """Предоставляет настоящий изолированный venv worker-тестам на hosted Python."""
 
 import atexit
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,28 @@ from tempfile import TemporaryDirectory
 
 _temporary = None
 _python = None
+_POLICY_COMMITS = {
+    1: "c9272aaab586cc2b4bfa62d453db9ca5d7417023",
+    2: "27a6db6d07e929675042dc2a5c46d9469fec2d8b",
+}
+
+
+def historical_compatibility_policy(version: int) -> dict:
+    """Возвращает копию опубликованной политики для теста исторического артефакта.
+
+    Args:
+        version: Исторический формат 1 или 2.
+
+    Returns:
+        Политика из Git-коммита, использовавшего этот формат.
+
+    Raises:
+        KeyError: Версия политики отсутствует среди исторических фикстур.
+        subprocess.CalledProcessError: Git не смог прочитать объект коммита.
+    """
+    root = Path(__file__).resolve().parents[1]
+    path = f"{_POLICY_COMMITS[version]}:scripts/repository_compatibility_policy.json"
+    return json.loads(subprocess.check_output(["git", "-C", str(root), "show", path]))
 
 
 def worker_python() -> Path:
