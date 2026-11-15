@@ -60,7 +60,7 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.send("/name", self.foreign)
         foreign_pending = self.fixture.store.get(self.event("x", self.foreign).reply_address)
         self.updates.clear()
-        response = self.send("/disable ask")
+        response = self.send("/disable ai")
         self.assertIn("выключена", response_text(response))
         menus = self.menus()
         self.assertEqual(set(menus), {"101", "202"})
@@ -70,12 +70,12 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.assertNotIn("/cancel", menus["202"])
         self.assertIsNone(self.fixture.store.get(self.event("x", self.vk).reply_address))
         self.assertEqual(self.fixture.store.get(foreign_pending.chat_key), foreign_pending)
-        self.assertEqual(self.fixture.modes.get(key).capability_id, "ask")
+        self.assertEqual(self.fixture.modes.get(key).capability_id, "ai")
         self.send("/name", self.vk)
         pending = self.fixture.store.get(self.event("x", self.vk).reply_address)
         self.updates.clear()
         self.send("/enable")
-        self.send("ask")
+        self.send("ai")
         self.assertIn("/ask", self.menus()["202"])
         self.assertIn("/cancel", self.menus()["202"])
         self.assertEqual(self.fixture.store.get(pending.chat_key), pending)
@@ -85,7 +85,7 @@ class LinkedChatMenusTest(unittest.TestCase):
         fresh = IncomingIdentity("vk", "404", "404")
         self.send("/link " + self.service.create_link_code(self.user.id).code, fresh)
         self.assertEqual(set(self.menus()), {"101", "202", "404"})
-        self.send("/disable ask", self.foreign)
+        self.send("/disable ai", self.foreign)
         confirmation = self.service.request_rebind_confirmation(
             code=self.service.create_link_code(self.other.id).code, identity=self.vk)
         self.updates.clear()
@@ -111,7 +111,7 @@ class LinkedChatMenusTest(unittest.TestCase):
                 repository.reassign(app_user_id=self.user.id, identity=moved)
             return result
         with patch.object(self.service, "list_known_private_chats", side_effect=enumerate_chats):
-            self.send("/disable ask")
+            self.send("/disable ai")
         self.assertEqual(set(self.menus()), {"101"})
         self.assertNotIn(moved, original(self.user))
         self.assertNotIn(self.vk, original(self.user))
@@ -140,7 +140,7 @@ class LinkedChatMenusTest(unittest.TestCase):
                 repository.reassign(app_user_id=self.other.id, identity=self.vk)
             return result
         with patch.object(self.dispatcher, "_command_context", side_effect=read_context):
-            self.send("/disable ask")
+            self.send("/disable ai")
         self.assertEqual(set(self.menus()), {"101"})
         self.assertTrue(self.service.owns_known_private_chat(self.other, self.vk))
 
@@ -151,11 +151,11 @@ class LinkedChatMenusTest(unittest.TestCase):
                 raise RuntimeError("transport")
             self.updates.append(update)
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
-            response = self.send("/disable ask", handler=fail_current)
+            response = self.send("/disable ai", handler=fail_current)
         self.assertIn("выключена", response_text(response))
         self.assertEqual(set(self.menus()), {"202"})
         with patch.object(self.service, "list_known_private_chats", side_effect=RuntimeError("read")):
             with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
-                response = self.send("/enable ask")
+                response = self.send("/enable ai")
         self.assertIn("«Режим ИИ» включён", response_text(response))
         self.assertIn("/ai", response_text(self.send("/help")))
