@@ -20,7 +20,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.check_repository_compatibility import export_commit, git_commit_tree, snapshot
-from scripts.repository_compatibility_contract import FULL_DISCOVERY_POLICY_VERSION, load_policy, verify_report
+from scripts.repository_compatibility_contract import BUILT_IN_POLICY, verify_report
 
 if TYPE_CHECKING:
     from scripts.deployment_acceptance import AcceptedBaseline
@@ -44,6 +44,9 @@ DYNAMIC_HARNESS = (
     "compadre_assistant/core/data/sqlite/runtime_schema.py",
     "compadre_assistant/core/data/sqlite/migration_runner.py",
 )
+LEGACY_POLICY_PATH = "scripts/repository_compatibility_policy.json"
+FULL_DISCOVERY_HARNESS = tuple(path for path in DYNAMIC_HARNESS if path != LEGACY_POLICY_PATH)
+CONTRACT_PATH = "scripts/repository_compatibility_contract.py"
 WORKFLOWS = ("full-suite.yml", "main-full.yml", "release-full.yml")
 
 
@@ -233,9 +236,9 @@ def main() -> int:
     for sha in (candidate, policy_sha):
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise ValueError("exact candidate and external policy SHA are required")
-    policy = load_policy()
-    if policy["version"] != FULL_DISCOVERY_POLICY_VERSION or os.environ["GITHUB_REPOSITORY"] != policy["repository"]:
-        raise ValueError("unexpected repository or compatibility policy")
+    policy = BUILT_IN_POLICY
+    if os.environ["GITHUB_REPOSITORY"] != policy["repository"]:
+        raise ValueError("unexpected repository")
     for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         if not os.environ[name].isdigit() or int(os.environ[name]) <= 0:
             raise ValueError("missing CI run identity")
@@ -248,7 +251,7 @@ def main() -> int:
     with TemporaryDirectory(prefix="compatibility-policy-") as temporary:
         root = Path(temporary)
         trusted = export_commit(policy_root, policy_sha, root / "policy")
-        for path in DYNAMIC_HARNESS:
+        for path in FULL_DISCOVERY_HARNESS:
             if hashlib.sha256((policy_root / path).read_bytes()).hexdigest() != trusted[path]:
                 raise ValueError(f"policy checkout differs from pinned Git bytes: {path}")
         candidate_manifest = export_commit(args.repository, candidate, root / "candidate")
@@ -283,7 +286,7 @@ def main() -> int:
                 "candidate_migrations_data_integrity", "old_repository_behavior",
                 "candidate_verified_previous_updates")},
             "files": snapshot(args.output),
-            "policy_files": {path: trusted[path] for path in DYNAMIC_HARNESS},
+            "policy_files": {path: trusted[path] for path in FULL_DISCOVERY_HARNESS},
         }
         (args.output / "evidence.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
     return 0

@@ -21,10 +21,11 @@ import zipfile
 from scripts import predeploy_compatibility as gate
 from scripts import deploy_prod as prod
 from scripts.ci_repository_compatibility import (
-    DYNAMIC_HARNESS, LEGACY_HARNESS, DeploymentReleaseTagEvidence, ReleaseTagEvidence,
+    CONTRACT_PATH, DYNAMIC_HARNESS, FULL_DISCOVERY_HARNESS, LEGACY_HARNESS, LEGACY_POLICY_PATH,
+    DeploymentReleaseTagEvidence, ReleaseTagEvidence,
 )
 from scripts.deployment_acceptance import AcceptedBaseline
-from scripts.repository_compatibility_contract import load_policy
+from scripts.repository_compatibility_contract import BUILT_IN_POLICY
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
 from tests.compatibility_test_environment import historical_compatibility_policy
@@ -161,12 +162,16 @@ class ArtifactAPI:
             old_tests=succeeded(FULL_TEST, PLATFORM_TEST) | {"skips": [[PLATFORM_TEST, "requires Linux"]]},
             additional_tests=succeeded(ADDITIONAL_TEST),
         )
-        self._use_deployment_policy(load_policy())
+        self._use_deployment_policy(BUILT_IN_POLICY)
 
     def _use_deployment_policy(self, policy: dict) -> None:
-        self.policy = policy
-        self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}
-        self.trusted[gate.POLICY_PATH] = json.dumps(self.policy).encode()
+        self.policy = policy.copy()
+        if policy["version"] == BUILT_IN_POLICY["version"]:
+            self.trusted = {path: path.encode() for path in FULL_DISCOVERY_HARNESS}
+            self.trusted[CONTRACT_PATH] = (Path(__file__).resolve().parents[1] / CONTRACT_PATH).read_bytes()
+        else:
+            self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}
+            self.trusted[LEGACY_POLICY_PATH] = json.dumps(self.policy).encode()
         self.evidence.update(version=policy["version"], baseline=asdict(ACCEPTED), policy_files={
             name: hashlib.sha256(data).hexdigest() for name, data in self.trusted.items()})
         self.pack()
@@ -227,15 +232,35 @@ class EvidenceTests(unittest.TestCase):
         """Доказательство версии 3 с обычным пропуском допускает точную пару."""
         api = ArtifactAPI()
         api.use_full_discovery_policy()
-        with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED):
+        with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED), \
+                patch.object(api, "get", wraps=api.get) as get:
             record = gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
             self.assertEqual(record["baseline"], asdict(ACCEPTED))
             self.assertEqual(record["schema_fingerprint"], "c" * 64)
             self.assertEqual(record["artifact_digest"], api.artifact["digest"])
+            self.assertNotIn(f"/contents/{LEGACY_POLICY_PATH}", [call.args[0] for call in get.call_args_list])
             api.evidence["version"] = 2
             api.pack()
             with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_IDENTITY"):
                 gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
+
+    def test_artifact_cannot_select_policy_format(self) -> None:
+        """Версия берётся из закреплённой ревизии до чтения ZIP."""
+        api = ArtifactAPI()
+        api.use_dynamic_policy()
+        api.evidence["version"] = BUILT_IN_POLICY["version"]
+        api.pack()
+        with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_IDENTITY"):
+            gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
+
+    def test_unsupported_built_in_policy_rejects_evidence(self) -> None:
+        """Неизвестная встроенная версия закрывает допуск до чтения ZIP."""
+        api = ArtifactAPI()
+        api.use_full_discovery_policy()
+        api.trusted[CONTRACT_PATH] = b"BUILT_IN_POLICY_VERSION = 999\n"
+        with patch.object(api, "download", side_effect=AssertionError("unexpected artifact")), \
+                self.assertRaisesRegex(gate.PredeployError, "SAFE_POLICY_CONTENT"):
+            gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
 
     def test_full_discovery_artifact_rejects_mismatched_pair_and_execution(self) -> None:
         """Даже новый согласованный digest не оправдывает неверный отчёт версии 3."""
@@ -265,7 +290,7 @@ class EvidenceTests(unittest.TestCase):
                         self.assertRaisesRegex(gate.PredeployError, code):
                     gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
 
-    def test_annotated_evidence_reads_four_pinned_files_without_artifact(self):
+    def test_annotated_evidence_reads_pinned_files_without_artifact(self):
         """Считает запросы по fixture и сверяет точные bytes локального Git."""
         api = ArtifactAPI()
         with patch.object(api, "get", wraps=api.get) as get, patch.object(

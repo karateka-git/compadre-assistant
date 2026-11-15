@@ -3,24 +3,26 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import PurePosixPath, PureWindowsPath
 import re
 
+from scripts.create_release_branch import EXPECTED_REPOSITORY
 
-POLICY_PATH = Path(__file__).with_name("repository_compatibility_policy.json")
-FULL_DISCOVERY_POLICY_VERSION = 3
+
+# Доверенная ревизия объявляет встроенную версию для читателя артефактов.
+BUILT_IN_POLICY_VERSION = 3
+BUILT_IN_POLICY = {"version": BUILT_IN_POLICY_VERSION, "repository": EXPECTED_REPOSITORY}
 # С версии 2 база определяется по принятым Deployments.
-DEPLOYMENT_POLICY_VERSIONS = (2, FULL_DISCOVERY_POLICY_VERSION)
-_FULL_DISCOVERY_FIELDS = {"version", "repository"}
+DEPLOYMENT_POLICY_VERSIONS = (2, BUILT_IN_POLICY_VERSION)
 _MATRIX_FIELDS = {"version", "repository", "matrix", "test_ids"}
 _LEGACY_BASELINE_FIELDS = {"previous_sha", "release_tag", "release_id"}
 
 
-def load_policy(path: Path = POLICY_PATH) -> dict:
-    """Читает политику из доверенного checkout, включая опубликованные форматы.
+def load_legacy_policy(data: bytes) -> dict:
+    """Читает опубликованную политику v1 или v2 из доверенного коммита.
 
     Args:
-        path: Файл политики из доверенного коммита.
+        data: Байты закреплённого JSON.
 
     Returns:
         Поля политики соответствующей версии.
@@ -28,16 +30,10 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
     Raises:
         ValueError: Формат политики повреждён либо версия неизвестна.
     """
-    policy = json.loads(path.read_text(encoding="utf-8"))
+    policy = json.loads(data)
     if not isinstance(policy, dict) or type(policy.get("version")) is not int:
         raise ValueError("unknown compatibility policy")
     version = policy["version"]
-    if version == FULL_DISCOVERY_POLICY_VERSION:
-        repository = policy.get("repository")
-        if (policy.keys() != _FULL_DISCOVERY_FIELDS or not isinstance(repository, str)
-                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)):
-            raise ValueError("invalid full-discovery compatibility policy")
-        return policy
     if ((version == 1 and policy.keys() != _MATRIX_FIELDS | _LEGACY_BASELINE_FIELDS)
             or (version == 2 and policy.keys() != _MATRIX_FIELDS)
             or version not in (1, 2)):
@@ -120,7 +116,7 @@ def verify_behavior_tests(behavior: dict, policy: dict) -> None:
         ValueError: Набор пуст, неполон, неуспешен либо использует чужие ID.
         KeyError: В отчёте отсутствует обязательный набор.
     """
-    if policy["version"] != FULL_DISCOVERY_POLICY_VERSION:
+    if policy["version"] != BUILT_IN_POLICY_VERSION:
         verify_tests(behavior["old_tests"], policy["test_ids"])
         return
 
@@ -150,7 +146,7 @@ def verify_report(report: dict, policy: dict, *, previous_sha: str | None = None
         raise ValueError("compatibility runner did not verify sources/results")
     if report.get("source_changes") != {"previous": [], "candidate": []}:
         raise ValueError("source changes detected")
-    full_discovery = policy["version"] == FULL_DISCOVERY_POLICY_VERSION
+    full_discovery = policy["version"] == BUILT_IN_POLICY_VERSION
     if full_discovery:
         previous_git = report.get("previous_git")
         if (not isinstance(previous_git, dict) or previous_git.keys() != {"head", "index_tree"}

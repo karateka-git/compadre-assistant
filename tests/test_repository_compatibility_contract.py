@@ -19,7 +19,7 @@ from scripts.ci_repository_compatibility import verify_baseline
 from scripts import ci_repository_compatibility as ci
 from scripts.deployment_acceptance import AcceptedBaseline
 from scripts.repository_compatibility_contract import (
-    load_policy, verify_behavior_tests, verify_report, verify_tests,
+    BUILT_IN_POLICY, load_legacy_policy, verify_behavior_tests, verify_report, verify_tests,
 )
 from tests.compatibility_test_environment import historical_compatibility_policy, worker_python
 
@@ -83,11 +83,8 @@ class CompatibilityContractTests(unittest.TestCase):
                 altered["matrix"][0]["test_id"] = "missing.test"
             else:
                 altered["previous_sha"] = BASELINE.sha
-            with TemporaryDirectory() as temporary:
-                path = Path(temporary) / "policy.json"
-                path.write_text(json.dumps(altered), encoding="utf-8")
-                with self.subTest(kind=kind), self.assertRaises(ValueError):
-                    load_policy(path)
+            with self.subTest(kind=kind), self.assertRaises(ValueError):
+                load_legacy_policy(json.dumps(altered).encode())
 
     @staticmethod
     def _report(policy: dict, checkout: PurePath) -> dict:
@@ -162,12 +159,12 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_ci_evidence_binds_pair_policy_attempt_and_exact_report_bytes(self) -> None:
         """Orchestrator скрывает token от worker и хеширует результаты одной попытки."""
-        policy = load_policy()
+        policy = BUILT_IN_POLICY
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             policy_root = root / "policy"
             trusted = {}
-            for name in ci.DYNAMIC_HARNESS:
+            for name in ci.FULL_DISCOVERY_HARNESS:
                 path = policy_root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 content = name.encode()
@@ -207,7 +204,7 @@ class CompatibilityContractTests(unittest.TestCase):
                     export.side_effect = [trusted, workflows, {"old": "hash"}]
                     run.reset_mock()
                     if kind == "policy":
-                        (policy_root / "scripts/repository_compatibility_policy.json").write_bytes(b"substituted policy")
+                        (policy_root / ci.CONTRACT_PATH).write_bytes(b"substituted policy")
                     elif kind == "resolver":
                         (policy_root / "scripts/deployment_acceptance.py").write_bytes(b"substituted resolver")
                     elif kind == "workflow":
@@ -218,7 +215,7 @@ class CompatibilityContractTests(unittest.TestCase):
                             ValueError, "policy checkout|trusted workflow|latest accepted baseline"):
                         ci.main()
                     run.assert_not_called()
-                    for path in ("scripts/repository_compatibility_policy.json", "scripts/deployment_acceptance.py"):
+                    for path in (ci.CONTRACT_PATH, "scripts/deployment_acceptance.py"):
                         (policy_root / path).write_bytes(path.encode())
                 # Сам runner может сообщить успех. Дерево принятого коммита CI читает независимо.
                 resolve.return_value = BASELINE
@@ -235,7 +232,8 @@ class CompatibilityContractTests(unittest.TestCase):
                              ("a" * 40, BASELINE.sha, "b" * 40))
             self.assertEqual(evidence["version"], 3)
             self.assertEqual(evidence["baseline"], asdict(BASELINE))
-            self.assertEqual(set(evidence["policy_files"]), set(ci.DYNAMIC_HARNESS))
+            self.assertEqual(set(evidence["policy_files"]), set(ci.FULL_DISCOVERY_HARNESS))
+            self.assertNotIn(ci.LEGACY_POLICY_PATH, evidence["policy_files"])
             self.assertEqual((evidence["run_id"], evidence["run_attempt"]), (12, 3))
             self.assertEqual(evidence["files"]["report.json"], hashlib.sha256((output / "report.json").read_bytes()).hexdigest())
             (output / "report.json").write_text("{}", encoding="utf-8")
@@ -276,17 +274,11 @@ class FullDiscoveryContractTests(unittest.TestCase):
                                                  additional_tests=self._execution([self.additional_id]))
         return report
 
-    def test_policy_does_not_require_a_test_manifest(self) -> None:
-        """Формат версии 3 закрепляет репозиторий и исключает статический список тестов."""
-        with TemporaryDirectory() as temporary:
-            path = Path(temporary) / "policy.json"
-            path.write_text(json.dumps(self.policy), encoding="utf-8")
-            self.assertEqual(load_policy(path), self.policy)
-            for changes in ({"test_ids": []}, {"matrix": []}, {"repository": None}, {"repository": "unknown"},
-                            {"version": "3"}, {"version": 4}):
-                with self.subTest(changes=changes), self.assertRaises(ValueError):
-                    path.write_text(json.dumps(self.policy | changes), encoding="utf-8")
-                    load_policy(path)
+    def test_v3_is_defined_in_code(self) -> None:
+        """Версия 3 использует встроенную политику и не читается из JSON."""
+        self.assertEqual(BUILT_IN_POLICY, self.policy)
+        with self.assertRaises(ValueError):
+            load_legacy_policy(json.dumps(self.policy).encode())
 
     def test_report_accepts_full_execution_with_reported_skips(self) -> None:
         """Обычный пропуск и ожидаемый отказ не скрывают проверенный состав набора."""
