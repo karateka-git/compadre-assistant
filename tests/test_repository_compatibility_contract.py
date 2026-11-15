@@ -18,7 +18,9 @@ from scripts.check_repository_compatibility import (
 from scripts.ci_repository_compatibility import verify_baseline
 from scripts import ci_repository_compatibility as ci
 from scripts.deployment_acceptance import AcceptedBaseline
-from scripts.repository_compatibility_contract import load_policy, verify_inventory, verify_report, verify_tests
+from scripts.repository_compatibility_contract import (
+    load_policy, verify_behavior_tests, verify_inventory, verify_report, verify_tests,
+)
 from tests.compatibility_test_environment import worker_python
 
 
@@ -225,6 +227,105 @@ class CompatibilityContractTests(unittest.TestCase):
             self.assertEqual(evidence["files"]["report.json"], hashlib.sha256((output / "report.json").read_bytes()).hexdigest())
             (output / "report.json").write_text("{}", encoding="utf-8")
             self.assertNotEqual(evidence["files"]["report.json"], hashlib.sha256((output / "report.json").read_bytes()).hexdigest())
+
+
+class FullDiscoveryContractTests(unittest.TestCase):
+    """Проверяет доказательство полного набора и источник схемы."""
+
+    policy = {"version": 3, "repository": "karateka-git/compadre-assistant"}
+    old_passed = "test_old.OldTests.test_read"
+    old_skipped = "test_old.OldTests.test_requires_linux"
+    old_expected_failure = "test_old.OldTests.test_expected_failure"
+    additional_id = "repository_compatibility_cases.OldTests.test_extra"
+
+    @staticmethod
+    def _execution(ids: list[str]) -> dict:
+        return {"passed": True, "test_ids": ids.copy(), "started_test_ids": ids.copy(), "tests_run": len(ids),
+                "loader_errors": [], "skips": [], "failures": [], "errors": [],
+                "expected_failures": [], "unexpected_successes": []}
+
+    def _report(self) -> dict:
+        report = CompatibilityContractTests._report({"test_ids": [self.old_passed]}, Path.cwd() / "fixture")
+        report["previous_git"] = {"head": BASELINE.sha, "index_tree": "d" * 40}
+        for key in ("previous_seed", "candidate_migrations_data_integrity", "old_repository_behavior",
+                    "candidate_verified_previous_updates"):
+            report[key] = dict(report[key], returncode=0)
+        report["candidate_migrations_data_integrity"].update(
+            candidate_tests=self._execution(["test_migrations.MigrationTest.test_apply"]),
+            fresh_fingerprint="c" * 64, upgraded_fingerprint="c" * 64,
+        )
+        report["candidate_verified_previous_updates"]["schema_fingerprint"] = "c" * 64
+        old = self._execution([self.old_passed, self.old_skipped, self.old_expected_failure])
+        old["skips"] = [[self.old_skipped, "requires Linux"], [f"{self.old_passed} (part=2)", "optional input"]]
+        old["expected_failures"] = [self.old_expected_failure]
+        old["started_test_ids"].reverse()
+        report["old_repository_behavior"].update(old_tests=old, schema_fingerprints=["c" * 64],
+                                                 additional_tests=self._execution([self.additional_id]))
+        return report
+
+    def test_policy_does_not_require_a_test_manifest(self) -> None:
+        """Формат версии 3 закрепляет репозиторий и исключает статический список тестов."""
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "policy.json"
+            path.write_text(json.dumps(self.policy), encoding="utf-8")
+            self.assertEqual(load_policy(path), self.policy)
+            for changes in ({"test_ids": []}, {"matrix": []}, {"repository": None}, {"repository": "unknown"},
+                            {"version": "3"}, {"version": 4}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    path.write_text(json.dumps(self.policy | changes), encoding="utf-8")
+                    load_policy(path)
+
+    def test_report_accepts_full_execution_with_reported_skips(self) -> None:
+        """Обычный пропуск и ожидаемый отказ не скрывают проверенный состав набора."""
+        verify_report(self._report(), self.policy, previous_sha=BASELINE.sha)
+
+    def test_report_rejects_incomplete_or_unsuccessful_execution(self) -> None:
+        """Зелёный агрегат не подменяет подтверждение запуска каждого теста."""
+        for key, value in (("test_ids", []), ("test_ids", "not a manifest"), ("test_ids", [{"test": "malformed"}]),
+                           ("test_ids", [self.old_passed] * 3), ("started_test_ids", [self.old_passed]),
+                           ("started_test_ids", [self.old_passed] * 3), ("tests_run", True), ("tests_run", 2),
+                           ("passed", 1), ("loader_errors", ["cannot import tests"]),
+                           ("errors", [self.old_passed]), ("failures", [self.old_passed]),
+                           ("unexpected_successes", [self.old_expected_failure]), ("skips", None),
+                           ("skips", [[self.old_skipped, 1]]), ("skips", [["unknown", "optional"]]),
+                           ("expected_failures", ["unknown"])):
+            with self.subTest(field=key, value=value), self.assertRaises(ValueError):
+                behavior = self._report()["old_repository_behavior"]
+                behavior["old_tests"][key] = value
+                verify_behavior_tests(behavior, self.policy)
+
+    def test_report_requires_separate_successful_additional_tests(self) -> None:
+        """Дополнительные проверки не допускают пропуски или замену тестами discovery."""
+        behavior = self._report()["old_repository_behavior"]
+        del behavior["additional_tests"]
+        with self.assertRaises(KeyError):
+            verify_behavior_tests(behavior, self.policy)
+        for changes in ({"skips": [[self.additional_id, "optional"]]},
+                        {"expected_failures": [self.additional_id]}, {"started_test_ids": []},
+                        self._execution(["different.Test.test_replacement"])):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                behavior = self._report()["old_repository_behavior"]
+                behavior["additional_tests"].update(changes)
+                verify_behavior_tests(behavior, self.policy)
+        behavior = self._report()["old_repository_behavior"]
+        behavior["old_tests"] = self._execution([self.additional_id])
+        with self.assertRaises(ValueError):
+            verify_behavior_tests(behavior, self.policy)
+
+    def test_report_rejects_invalid_git_worker_and_schema_evidence(self) -> None:
+        """Точный HEAD, дерево, код завершения и отпечаток схемы обязательны."""
+        for section, field, value in (("previous_git", "head", "f" * 40),
+                                      ("previous_git", "index_tree", "not a tree"),
+                                      ("previous_seed", "returncode", False),
+                                      ("old_repository_behavior", "returncode", 1),
+                                      ("old_repository_behavior", "candidate_schema_observations", True),
+                                      ("old_repository_behavior", "schema_errors", None),
+                                      ("candidate_migrations_data_integrity", "fresh_fingerprint", "malformed"),
+                                      ("candidate_verified_previous_updates", "schema_fingerprint", "f" * 64)):
+            with self.subTest(section=section, field=field), self.assertRaises(ValueError):
+                report = self._report()
+                report[section][field] = value
+                verify_report(report, self.policy, previous_sha=BASELINE.sha)
 
 
 class CompatibilitySqlMutationTests(unittest.TestCase):

@@ -1,25 +1,44 @@
-"""Проверяет закреплённую policy, матрицу и результаты SQLite-совместимости."""
+"""Проверяет доверенную политику и доказательство SQLite-совместимости."""
 
 from __future__ import annotations
 
 import ast
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
 
 
 POLICY_PATH = Path(__file__).with_name("repository_compatibility_policy.json")
 # V2 закрепляет только политику проверок. База хранится в Deployments.
 DYNAMIC_POLICY_VERSION = 2
+FULL_DISCOVERY_POLICY_VERSION = 3
+_FULL_DISCOVERY_FIELDS = {"version", "repository"}
 _MATRIX_FIELDS = {"version", "repository", "matrix", "test_ids"}
 _LEGACY_BASELINE_FIELDS = {"previous_sha", "release_tag", "release_id"}
 
 
 def load_policy(path: Path = POLICY_PATH) -> dict:
-    """Читает policy из доверенного checkout, отвергая неполную матрицу."""
+    """Читает политику из доверенного checkout, включая опубликованные форматы.
+
+    Args:
+        path: Файл политики из доверенного коммита.
+
+    Returns:
+        Поля политики соответствующей версии.
+
+    Raises:
+        ValueError: Формат политики повреждён либо версия неизвестна.
+    """
     policy = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(policy, dict) or type(policy.get("version")) is not int:
         raise ValueError("unknown compatibility policy")
     version = policy["version"]
+    if version == FULL_DISCOVERY_POLICY_VERSION:
+        repository = policy.get("repository")
+        if (policy.keys() != _FULL_DISCOVERY_FIELDS or not isinstance(repository, str)
+                or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)):
+            raise ValueError("invalid full-discovery compatibility policy")
+        return policy
     if ((version == 1 and policy.keys() != _MATRIX_FIELDS | _LEGACY_BASELINE_FIELDS)
             or (version == DYNAMIC_POLICY_VERSION and policy.keys() != _MATRIX_FIELDS)
             or version not in (1, DYNAMIC_POLICY_VERSION)):
@@ -81,13 +100,65 @@ def verify_tests(result: dict, expected_ids: list[str] | None = None) -> None:
         raise ValueError("incomplete or unsuccessful compatibility tests")
 
 
+def _verify_test_execution(result: dict, *, allow_skips: bool) -> set[str]:
+    if not isinstance(result, dict):
+        raise ValueError("invalid compatibility test result")
+    discovered, started = result.get("test_ids"), result.get("started_test_ids")
+    if any(not isinstance(ids, list) or not ids
+           or any(not isinstance(test_id, str) or not test_id for test_id in ids)
+           or len(set(ids)) != len(ids) for ids in (discovered, started)):
+        raise ValueError("invalid compatibility test IDs")
+    started_ids = set(started)
+    if (result.get("passed") is not True or type(result.get("tests_run")) is not int
+            or result["tests_run"] != len(discovered) or started_ids != set(discovered)
+            or any(result.get(key) != [] for key in
+                   ("loader_errors", "failures", "errors", "unexpected_successes"))):
+        raise ValueError("incomplete or unsuccessful compatibility test execution")
+    skips, expected_failures = result.get("skips"), result.get("expected_failures")
+    if (not isinstance(skips, list) or not isinstance(expected_failures, list)
+            or not allow_skips and (skips or expected_failures)):
+        raise ValueError("invalid compatibility test skips or expected failures")
+    for skip in skips:
+        # unittest добавляет к ID родительского теста описание пропущенного subTest.
+        if not isinstance(skip, list) or len(skip) != 2 or any(not isinstance(value, str) for value in skip):
+            raise ValueError("invalid compatibility test skip")
+        skipped_id = skip[0]
+        if skipped_id not in started_ids and not any(skipped_id.startswith(f"{test_id} ") for test_id in started_ids):
+            raise ValueError("unknown skipped compatibility test")
+    if any(not isinstance(test_id, str) or test_id not in started_ids for test_id in expected_failures):
+        raise ValueError("unknown expected compatibility test failure")
+    return started_ids
+
+
+def verify_behavior_tests(behavior: dict, policy: dict) -> None:
+    """Проверяет состав и выполнение тестов принятой версии и отдельного набора.
+
+    Args:
+        behavior: Отчёт worker, выполнявшего старый код на новой схеме.
+        policy: Версия доверенной политики, определяющая формат отчёта.
+
+    Raises:
+        ValueError: Набор пуст, неполон, неуспешен либо использует чужие ID.
+        KeyError: В отчёте отсутствует обязательный набор.
+    """
+    if policy["version"] != FULL_DISCOVERY_POLICY_VERSION:
+        verify_tests(behavior["old_tests"], policy["test_ids"])
+        return
+
+    discovered = _verify_test_execution(behavior["old_tests"], allow_skips=True)
+    additional = _verify_test_execution(behavior["additional_tests"], allow_skips=False)
+    if discovered & additional or any(not test_id.startswith("repository_compatibility_cases.")
+                                      for test_id in additional):
+        raise ValueError("additional compatibility tests differ from trusted suite")
+
+
 def verify_report(report: dict, policy: dict, *, previous_sha: str | None = None) -> None:
-    """Проверяет оба обязательных набора, обмен, schema fingerprint и sources.
+    """Проверяет обязательные наборы, обмен, отпечаток схемы и исходники.
 
     Args:
         report: Полный runner report, ещё не считающийся доверенным admission.
-        policy: Доверенная матрица и список проверяемых tests.
-        previous_sha: Подтверждённый SHA принятой базы, обязательный для policy v2.
+        policy: Доверенная политика формата доказательства.
+        previous_sha: Подтверждённый SHA принятой базы для динамической политики.
 
     Raises:
         ValueError: Результаты, sources, SQL либо imports не согласованы.
@@ -100,15 +171,33 @@ def verify_report(report: dict, policy: dict, *, previous_sha: str | None = None
         raise ValueError("compatibility runner did not verify sources/results")
     if report.get("source_changes") != {"previous": [], "candidate": []}:
         raise ValueError("source changes detected")
+    full_discovery = policy["version"] == FULL_DISCOVERY_POLICY_VERSION
+    if full_discovery:
+        previous_git = report.get("previous_git")
+        if (not isinstance(previous_git, dict) or previous_git.keys() != {"head", "index_tree"}
+                or previous_git["head"] != expected_sha
+                or any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value)
+                       for value in previous_git.values())):
+            raise ValueError("previous Git identity evidence mismatch")
     candidate = report["candidate_migrations_data_integrity"]
     behavior = report["old_repository_behavior"]
     for name in ("previous_seed", "candidate_migrations_data_integrity",
                  "old_repository_behavior", "candidate_verified_previous_updates"):
-        if report[name].get("passed") is not True or not report[name].get("imports"):
+        worker = report[name]
+        if worker.get("passed") is not True or not worker.get("imports"):
             raise ValueError(f"missing worker/import evidence: {name}")
-    verify_tests(candidate["candidate_tests"])
-    verify_tests(behavior["old_tests"], policy["test_ids"])
+        if full_discovery and (type(worker.get("returncode")) is not int or worker["returncode"] != 0):
+            raise ValueError(f"worker did not complete successfully: {name}")
+    if full_discovery:
+        _verify_test_execution(candidate["candidate_tests"], allow_skips=False)
+    else:
+        verify_tests(candidate["candidate_tests"])
+    verify_behavior_tests(behavior, policy)
     fingerprint = candidate["fresh_fingerprint"]
+    if full_discovery and (not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+                           or type(behavior.get("candidate_schema_observations")) is not int
+                           or behavior.get("schema_errors") != []):
+        raise ValueError("invalid candidate schema evidence")
     if (candidate["upgraded_fingerprint"] != fingerprint
             or behavior["schema_fingerprints"] != [fingerprint]
             or report["candidate_verified_previous_updates"]["schema_fingerprint"] != fingerprint
