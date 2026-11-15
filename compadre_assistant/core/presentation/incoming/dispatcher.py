@@ -12,7 +12,7 @@ from compadre_assistant.core.presentation.incoming.deferred_actions import Defer
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
 from compadre_assistant.core.presentation.incoming.ports import (
-    CancellableAction, ConfirmationAction, BackgroundReply, CapabilityMode, ChannelCompletionHandler,
+    CancellableAction, ConfirmationAction, BackgroundReply, CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
@@ -43,6 +43,11 @@ _TEXT_INPUT_HINT = "Пришли текстовое сообщение или в
 _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля открой личный чат с ботом."
 # Только успешная отмена требует пересчитать меню из проекции занятого чата.
 _DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
+
+
+def _capability_label(descriptor: CapabilityDescriptor) -> str:
+    """Возвращает публичное название или идентификатор возможности без названия."""
+    return f"«{descriptor.display_name}»" if descriptor.display_name else descriptor.capability_id
 
 
 def pending_expired_reply(pending: PendingInput) -> IncomingResponse:
@@ -305,7 +310,7 @@ class IncomingMessageDispatcher:
         if not access.profile_allowed:
             return "У твоего профиля нет доступа к этой возможности. Список: /capabilities."
         descriptor = access.descriptor
-        label = f"«{descriptor.display_name}»" if descriptor.display_name else descriptor.capability_id
+        label = _capability_label(descriptor)
         if not access.server_available:
             return (
                 f"Возможность {label} недоступна на сервере. "
@@ -318,12 +323,16 @@ class IncomingMessageDispatcher:
 
     @staticmethod
     def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
-        """Показывает видимые ID, личный выбор и серверную доступность."""
+        """Показывает названия, аргументы команд и доступность возможностей."""
         lines = ["Личные возможности:"]
         visible = personal.visible_access
         for access in visible:
+            descriptor = access.descriptor
+            label = _capability_label(descriptor)
+            if descriptor.display_name:
+                label += f" ({descriptor.capability_id})"
             lines.append(
-                f"{access.descriptor.capability_id} — {access.descriptor.entry.description}. "
+                f"{label} — {descriptor.entry.description}. "
                 f"Личный выбор: {'включена' if access.user_enabled else 'выключена'}; "
                 f"сервер: {'доступна' if access.server_available else 'недоступна'}."
             )
@@ -723,6 +732,7 @@ class IncomingMessageDispatcher:
             mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
             mode_id = personal.visible_mode(mode.capability_id) if mode else None
             access = personal.status(mode_id) if mode_id else None
+            mode_label = _capability_label(access.descriptor) if access else mode_id
             status_hint = (
                 f"\n{self._blocked_reply(access)}"
                 if access is not None and not access.effective else ""
@@ -732,7 +742,7 @@ class IncomingMessageDispatcher:
                 app_user=user,
                 capability_reply=(
                     f"Профиль: {user.display_name or 'имя ещё не задано'}.\n"
-                    f"Режим этого чата: {mode_id or 'не выбран'}.\n"
+                    f"Режим этого чата: {mode_label or 'не выбран'}.\n"
                     f"{personal.entry_hint()}{status_hint}"
                 ),
             )
@@ -970,16 +980,21 @@ class IncomingMessageDispatcher:
                     else "Нет включённых возможностей. Посмотри /capabilities."
                 ))
             self._pending_inputs.begin(event.reply_address, "core", "enable" if enabled else "disable", app_user_id=user.id, retry_command="/enable" if enabled else "/disable")
-            options = "\n".join(f"{access.descriptor.capability_id} — {access.descriptor.entry.description}" for access in choices)
+            option_lines = []
+            actions = []
+            action = "Включить" if enabled else "Выключить"
+            for choice in choices:
+                descriptor = choice.descriptor
+                label = _capability_label(descriptor)
+                command_text = f"{command.value} {descriptor.capability_id}"
+                detail = command_text if descriptor.display_name else descriptor.entry.description
+                option_lines.append(f"{label} — {detail}")
+                actions.append(ReplyAction(f"{action} {label}", command_text))
+            options = "\n".join(option_lines)
             return IncomingResponse(text_content(
                 f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
-            ), suggested_actions=tuple(
-                ReplyAction(
-                    f"{'Включить' if enabled else 'Выключить'} {access.descriptor.capability_id}",
-                    f"{command.value} {access.descriptor.capability_id}",
-                ) for access in choices
-            ))
+            ), suggested_actions=tuple(actions))
         if len(parts) != 1:
             return IncomingResponse(text_content(
                 "Значение не принято. Введи один ID из предложенного списка ещё раз или введи /cancel."
@@ -998,11 +1013,14 @@ class IncomingMessageDispatcher:
                     '.',
                 )
             )
+        descriptor = access.descriptor
+        label = _capability_label(descriptor)
+        label_content = label if descriptor.display_name else code_span(label)
         if enabled and not access.server_available:
             return IncomingResponse(
                 compose_content(
                     'Возможность ',
-                    code_span(str(parts[0])),
+                    label_content,
                     ' недоступна на сервере. Личный выбор не изменён. Список: ',
                     code_span('/capabilities'),
                     '. Выбери другой доступный ID или введи /cancel.' if pending else '.',
@@ -1018,17 +1036,17 @@ class IncomingMessageDispatcher:
         except Exception as error:
             LOGGER.exception("Could not change user capability: capability_id=%s", parts[0])
             return IncomingResponse(compose_content('Не удалось сохранить выбор. Попробуй позже.'), error)
-        if enabled and access.descriptor.display_name:
+        if enabled and descriptor.display_name:
             action = "включён" if changed else "уже включён"
             return IncomingResponse(text_content(
-                f"Личный доступ к возможности «{access.descriptor.display_name}» {action}. "
+                f"Личный доступ к возможности {label} {action}. "
                 "Выбор действует во всех привязанных каналах."
             ))
         state = "включена" if enabled else "выключена"
         return IncomingResponse(
             compose_content(
                 'Возможность ',
-                code_span(str(parts[0])),
+                label_content,
                 ' ' + str('уже ' if not changed else '') + str(state) + '. Выбор действует во всех привязанных каналах. Режим и данные сохранены.',
             )
         )

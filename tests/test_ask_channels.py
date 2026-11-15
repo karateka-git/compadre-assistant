@@ -437,21 +437,34 @@ class AskChannelsTest(unittest.TestCase):
             ) as processor:
                 for channel in ("telegram", "vk"):
                     with self.subTest(channel=channel):
-                        self.send(channel, processor, "/register")
-                        self.send(channel, processor, "Тест")
-                        self.assertIn("выключена", self.send(channel, processor, "/disable ask"))
-                        self.assertEqual(self.send(channel, processor, "/ai"),
+                        def send(text: str) -> str:
+                            return self.send(channel, processor, text, chat_id=7)
+
+                        send("/register")
+                        send("Тест")
+                        self.assertIn("«Режим ИИ» (ask)", send("/capabilities"))
+                        self.assertIn("«Режим ИИ» — /disable ask", send("/disable"))
+                        self.assertIn("Возможность «Режим ИИ» выключена", send("/disable ask"))
+                        self.assertEqual(send("/ai"),
                                          "Возможность «Режим ИИ» лично выключена. "
                                          "Включить: /enable ask. Список: /capabilities.")
-                        self.assertEqual(self.send(channel, processor, "/enable ask"),
+                        self.assertIn("«Режим ИИ» — /enable ask", send("/enable"))
+                        if channel == "telegram":
+                            labels = [button.text for row in self.keyboard.inline_keyboard for button in row]
+                        else:
+                            labels = [button["action"]["label"] for row in json.loads(self.keyboard)["buttons"]
+                                      for button in row]
+                        self.assertIn("Включить «Режим ИИ»", labels)
+                        self.assertEqual(send("/enable ask"),
                                          "Личный доступ к возможности «Режим ИИ» включён. "
                                          "Выбор действует во всех привязанных каналах.")
-                        self.assertIn("«Режим ИИ» уже включён", self.send(channel, processor, "/enable ask"))
-                        denied = self.send(channel, processor, "/ask вопрос")
+                        self.assertIn("«Режим ИИ» уже включён", send("/enable ask"))
+                        denied = send("/ask вопрос")
                         self.assertIn("войди в режим", denied)
                         self.assertIn("/ai", denied)
-                        self.send(channel, processor, "/ai")
-                        self.assertEqual(self.send(channel, processor, "/ask вопрос"), "Ответ")
+                        send("/ai")
+                        self.assertIn("Режим этого чата: «Режим ИИ».", send("/status"))
+                        self.assertEqual(send("/ask вопрос"), "Ответ")
                 self.assertEqual(model_type.return_value.answer.call_count, 2)
 
     def test_inflight_ask_delivers_after_disable_and_keeps_model_open(self) -> None:
@@ -1230,7 +1243,7 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertEqual(menus[-1], ("/cancel",))
                     self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                     disabled = await asyncio.to_thread(self.send, "vk", processor, "/disable ask", 7)
-                    self.assertIn("Возможность ask выключена", disabled)
+                    self.assertIn("Возможность «Режим ИИ» выключена", disabled)
                     release.set()
                     self.assertTrue(await asyncio.to_thread(menu_restored.wait, 5))
                     self.assertNotIn("/ask", menus[-1])
