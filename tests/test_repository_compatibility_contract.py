@@ -196,10 +196,12 @@ class CompatibilityContractTests(unittest.TestCase):
                                               "--output", str(output)]), \
                     patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE) as resolve, \
                     patch.object(ci, "export_commit", side_effect=[trusted, workflows, {"old": "hash"}]) as export, \
-                    patch.object(ci, "git_commit_tree", return_value="d" * 40), patch.object(ci, "verify_report"), \
+                    patch.object(ci, "git_commit_tree", return_value="d" * 40) as tree, \
+                    patch.object(ci, "verify_report"), \
                     patch.object(ci.subprocess, "run") as run:
                 run.return_value.returncode = 0
                 self.assertEqual(ci.main(), 0)
+                tree.assert_called_once_with(root, BASELINE.sha)
                 self.assertFalse(any(key.startswith(("GITHUB_", "ACTIONS_")) for key in run.call_args.kwargs["env"]))
                 for kind in ("policy", "resolver", "workflow", "baseline"):
                     export.side_effect = [trusted, workflows, {"old": "hash"}]
@@ -218,6 +220,16 @@ class CompatibilityContractTests(unittest.TestCase):
                     run.assert_not_called()
                     for path in ("scripts/repository_compatibility_policy.json", "scripts/deployment_acceptance.py"):
                         (policy_root / path).write_bytes(path.encode())
+                # Сам runner может сообщить успех. Дерево принятого коммита CI читает независимо.
+                resolve.return_value = BASELINE
+                export.side_effect = [trusted, workflows, {"old": "hash"}]
+                report["previous_git"]["index_tree"] = "e" * 40
+                report_path = output / "report.json"
+                report_path.write_text(json.dumps(report), encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "source identity mismatch"):
+                    ci.main()
+                report["previous_git"]["index_tree"] = "d" * 40
+                report_path.write_text(json.dumps(report), encoding="utf-8")
             evidence = json.loads((output / "evidence.json").read_text())
             self.assertEqual((evidence["candidate_sha"], evidence["previous_sha"], evidence["policy_sha"]),
                              ("a" * 40, BASELINE.sha, "b" * 40))

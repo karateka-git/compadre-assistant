@@ -209,7 +209,7 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
     """Проверяет аннотацию и независимо сверяет workflow с reviewed policy.
 
     Селектор уже доказал успешный job точной попытки, которой принадлежит
-    аннотация. Исторические теги сверяются со своей policy v1.
+    аннотация. Для политик версий 2 и 3 дополнительно сверяется Deployment базы.
 
     Args:
         api: Читающий GitHub API выбранного репозитория.

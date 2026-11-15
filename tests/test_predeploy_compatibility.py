@@ -24,6 +24,7 @@ from scripts.ci_repository_compatibility import (
     DYNAMIC_HARNESS, LEGACY_HARNESS, DeploymentReleaseTagEvidence, ReleaseTagEvidence,
 )
 from scripts.deployment_acceptance import AcceptedBaseline
+from scripts.repository_compatibility_contract import load_policy
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
 from tests.compatibility_test_environment import historical_compatibility_policy
@@ -36,6 +37,9 @@ POLICY_SHA = "a" * 40
 CANDIDATE_SHA = "b" * 40
 PREVIOUS_SHA = "1" * 40
 ACCEPTED = AcceptedBaseline(PREVIOUS_SHA, "v3.1.0", 42, 51, 61)
+FULL_TEST = "test_repository.RepositoryTest.test_read"
+PLATFORM_TEST = "test_platform.PlatformTest.test_linux"
+ADDITIONAL_TEST = "repository_compatibility_cases.RepositoryTest.test_linked_profile"
 
 
 class ArtifactAPI:
@@ -134,13 +138,36 @@ class ArtifactAPI:
         return self.payload
 
     def use_dynamic_policy(self) -> None:
-        """Переводит fixture на формат policy и evidence с Deployment."""
-        self.policy = historical_compatibility_policy(2)
+        """Переводит fixture на исторический формат 2 с Deployment."""
+        policy = historical_compatibility_policy(2)
         old_tests = self.report["old_repository_behavior"]["old_tests"]
-        old_tests.update(test_ids=self.policy["test_ids"].copy(), tests_run=len(self.policy["test_ids"]))
+        old_tests.update(test_ids=policy["test_ids"].copy(), tests_run=len(policy["test_ids"]))
+        self._use_deployment_policy(policy)
+
+    def use_full_discovery_policy(self) -> None:
+        """Переводит fixture на полный прогон с отдельным дополнительным набором."""
+        def succeeded(*ids: str) -> dict:
+            return {"passed": True, "test_ids": list(ids), "started_test_ids": list(ids), "tests_run": len(ids),
+                    "loader_errors": [], "skips": [], "failures": [], "errors": [],
+                    "expected_failures": [], "unexpected_successes": []}
+
+        for key in ("previous_seed", "candidate_migrations_data_integrity", "old_repository_behavior",
+                    "candidate_verified_previous_updates"):
+            self.report[key] = dict(self.report[key], returncode=0)
+        self.report["previous_git"] = {"head": PREVIOUS_SHA, "index_tree": "d" * 40}
+        self.report["candidate_migrations_data_integrity"]["candidate_tests"] = succeeded(
+            "test_migrations.MigrationTest.test_current_journal")
+        self.report["old_repository_behavior"].update(
+            old_tests=succeeded(FULL_TEST, PLATFORM_TEST) | {"skips": [[PLATFORM_TEST, "requires Linux"]]},
+            additional_tests=succeeded(ADDITIONAL_TEST),
+        )
+        self._use_deployment_policy(load_policy())
+
+    def _use_deployment_policy(self, policy: dict) -> None:
+        self.policy = policy
         self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}
         self.trusted[gate.POLICY_PATH] = json.dumps(self.policy).encode()
-        self.evidence.update(version=2, baseline=asdict(ACCEPTED), policy_files={
+        self.evidence.update(version=policy["version"], baseline=asdict(ACCEPTED), policy_files={
             name: hashlib.sha256(data).hexdigest() for name, data in self.trusted.items()})
         self.pack()
 
@@ -195,6 +222,48 @@ class EvidenceTests(unittest.TestCase):
             result = gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA, frozen=True)
             frozen.assert_called_once_with(api, ACCEPTED.deployment_id, ACCEPTED.status_id)
             self.assertEqual(result["baseline"], asdict(ACCEPTED))
+
+    def test_full_discovery_artifact_admits_exact_pair(self) -> None:
+        """Доказательство версии 3 с обычным пропуском допускает точную пару."""
+        api = ArtifactAPI()
+        api.use_full_discovery_policy()
+        with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED):
+            record = gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
+            self.assertEqual(record["baseline"], asdict(ACCEPTED))
+            self.assertEqual(record["schema_fingerprint"], "c" * 64)
+            self.assertEqual(record["artifact_digest"], api.artifact["digest"])
+            api.evidence["version"] = 2
+            api.pack()
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_EVIDENCE_IDENTITY"):
+                gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
+
+    def test_full_discovery_artifact_rejects_mismatched_pair_and_execution(self) -> None:
+        """Даже новый согласованный digest не оправдывает неверный отчёт версии 3."""
+        old = ("old_repository_behavior", "old_tests")
+        additional = ("old_repository_behavior", "additional_tests")
+        cases = (
+            (("candidate_sha",), "f" * 40, "SAFE_CANDIDATE_SHA"),
+            (("previous_git", "head"), "e" * 40, "SAFE_REPORT_CONTRACT"),
+            ((*old, "started_test_ids"), [FULL_TEST], "SAFE_TEST_MANIFEST"),
+            ((*old, "started_test_ids"), [FULL_TEST, FULL_TEST], "SAFE_TEST_MANIFEST"),
+            (additional, None, "SAFE_TEST_MANIFEST"),
+            ((*additional, "skips"), [[ADDITIONAL_TEST, "unavailable"]], "SAFE_TEST_MANIFEST"),
+        )
+        for path, value, code in cases:
+            with self.subTest(path=path, value=value):
+                api = ArtifactAPI()
+                api.use_full_discovery_policy()
+                section = api.report
+                for key in path[:-1]:
+                    section = section[key]
+                if value is None:
+                    section.pop(path[-1])
+                else:
+                    section[path[-1]] = value
+                api.pack()
+                with patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED), \
+                        self.assertRaisesRegex(gate.PredeployError, code):
+                    gate.verify_evidence(api, api.selected, POLICY_SHA, PREVIOUS_SHA)
 
     def test_annotated_evidence_reads_four_pinned_files_without_artifact(self):
         """Считает запросы по fixture и сверяет точные bytes локального Git."""
@@ -255,6 +324,25 @@ class EvidenceTests(unittest.TestCase):
             api.workflow_bytes = b"different pinned workflow"
             with self.assertRaisesRegex(gate.PredeployError, "SAFE_WORKFLOW_BYTES"):
                 gate.verify_tag_evidence(api, checkout, selected, POLICY_SHA, proof.previous_sha)
+
+            api.workflow_bytes = b"trusted workflow"
+            proof = DeploymentReleaseTagEvidence(PREVIOUS_SHA, POLICY_SHA, 1, 1, "c" * 64, ACCEPTED)
+            git("tag", "-fa", "-m", proof.message(), selected.version)
+            selected = replace(selected, compatibility=proof,
+                               tag_object_sha=git("rev-parse", f"refs/tags/{selected.version}"))
+            for use_policy in (api.use_dynamic_policy, api.use_full_discovery_policy):
+                use_policy()
+                with self.subTest(policy_version=api.policy["version"]), patch(
+                    "scripts.deployment_acceptance.resolve_accepted_baseline", return_value=ACCEPTED,
+                ):
+                    record = gate.verify_tag_evidence(api, checkout, selected, POLICY_SHA, PREVIOUS_SHA)
+                    self.assertEqual(record["baseline"], asdict(ACCEPTED))
+                    self.assertEqual(record["tag_object_sha"], selected.tag_object_sha)
+
+            git("tag", "-fa", "-m", json.dumps(json.loads(proof.message()), indent=2), selected.version)
+            selected = replace(selected, tag_object_sha=git("rev-parse", f"refs/tags/{selected.version}"))
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_TAG_EVIDENCE"):
+                gate.verify_tag_evidence(api, checkout, selected, POLICY_SHA, PREVIOUS_SHA)
 
     def test_artifact_metadata_digest_and_api_fail_closed(self):
         """Неверный run/SHA, expiry, digest и API outage закрывают допуск."""
