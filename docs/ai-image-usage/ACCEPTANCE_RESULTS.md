@@ -924,3 +924,25 @@ polling Telegram и VK подтверждён. Активная SQLite прош�
 владельцев, выключенного доступа и других режимов. Конфликт двух ID одного
 профиля откатывает миграцию целиком. Проверка контроллера по-прежнему
 отклоняет изменение выбора и любые другие изменения общих полей.
+
+### Выпуск v4.0.4 на VPS (5.4)
+
+15 ноября 2026 года в 11:34 UTC приняли `v4.0.4`
+(`5c904b6f2f7b8331c4b4f5762356023808b80f3a`). Полный CI на базе `v4.0.3`
+запустил все 1403 обнаруженных теста (один штатный пропуск Linux) и 26
+дополнительных проверок. Полный набор кандидата выполнил 1406 тестов.
+[PR в main](https://github.com/karateka-git/compadre-assistant/pull/117) ·
+[PR релизной линии](https://github.com/karateka-git/compadre-assistant/pull/118) ·
+[CI выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/43708673694/attempts/1)
+
+Техническая приёмка подтвердила polling Telegram и VK, целостность активной
+SQLite с журналом до `0005_ask_usage.sql`, backup и очистку прежнего поколения.
+Контроллер измерил простой 71,057 с.
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43709295689) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7802813380/statuses)
+
+После приёмки переключили `ENABLED_CAPABILITIES` на `ai` и установили
+контроллер `6de377cf402483c32faa63b805f6420df434fe70`. Проверка перед
+переключением и после него вернула одну и ту же идентичность работающего
+выпуска. Процессы при переключении не перезапускались.
+[Полный CI коммита контроллера](https://github.com/karateka-git/compadre-assistant/actions/runs/43708601915/attempts/1)
