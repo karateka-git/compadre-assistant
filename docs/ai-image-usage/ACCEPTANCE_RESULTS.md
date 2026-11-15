@@ -946,3 +946,34 @@ SQLite с журналом до `0005_ask_usage.sql`, backup и очистку �
 переключением и после него вернула одну и ту же идентичность работающего
 выпуска. Процессы при переключении не перезапускались.
 [Полный CI коммита контроллера](https://github.com/karateka-git/compadre-assistant/actions/runs/43708601915/attempts/1)
+
+### Выпуск v4.0.5 на VPS (5.4)
+
+15 ноября 2026 года в 11:49 UTC приняли `v4.0.5`
+(`d0c5f41d6bc7f85105b4dfc0b5cac1fedd79e6f0`). CI запустил все 1406 обнаруженных тестов
+`v4.0.4` на схеме с `0006_ai_capability_id.sql` (один штатный пропуск
+Linux) и 26 дополнительных проверок. Полный набор кандидата выполнил
+1406 тестов.
+[PR в main](https://github.com/karateka-git/compadre-assistant/pull/119) ·
+[PR релизной линии](https://github.com/karateka-git/compadre-assistant/pull/120) ·
+[CI выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/43709864382/attempts/1)
+
+Контроллер сверил данные копии до и после миграции. В финальном backup
+до `0006` была одна строка личного выбора с кодом `ask`. В активной SQLite
+после выкладки была одна строка личного выбора с кодом `ai`. Ни в личных
+настройках, ни в таблице активных режимов строк с кодом `ask` не осталось.
+Проверены целостность SQLite, внешние ключи, backup и очистка прежнего
+поколения.
+
+Оба контейнера запустили polling и получили `ai` в `ENABLED_CAPABILITIES`.
+Контроллер измерил простой 70,463 с. Проверку `/enable ai` и `/disable ai`
+в личных чатах Telegram и VK выполняет владелец.
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43710509526) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7802972672/statuses)
+
+### Живая проверка v4.0.5 (5.4)
+
+Владелец подтвердил проверку режима ИИ в личных чатах Telegram и VK после
+выкладки `v4.0.5`. Сценарий проверял отображение «Режим ИИ» и переключение
+личного доступа командами `/disable ai` и `/enable ai`. Отдельных результатов
+по десятиминутному ожиданию и старой кнопке VK в этом подтверждении нет.
