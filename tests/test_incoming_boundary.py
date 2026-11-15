@@ -165,12 +165,14 @@ class IncomingBoundaryTest(unittest.TestCase):
             self.assertNotIn("vault", names)
         self.assertNotIn("app_user_id", {field.name for field in fields(IncomingEvent)})
 
-    def test_help_lists_every_entry_and_exit_without_calling_handlers(self) -> None:
+    def test_help_lists_entries_without_calling_handlers(self) -> None:
         """Справка всех входов доступна до активного режима и pending rebind."""
         self.identity.pending = True
         reply = self.dispatcher.execute(_event("/help"))
-        for command in ("/selected", "/other", "/exit", "/status", "/name"):
+        for command in ("/selected", "/other", "/settings"):
             self.assertIn(command, response_text(reply))
+        self.assertNotIn("/exit", response_text(reply))
+        self.assertNotIn("/name", response_text(reply))
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.capability.entries)
 
@@ -193,6 +195,8 @@ class IncomingBoundaryTest(unittest.TestCase):
             chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
+        dispatcher.execute(_event("/settings"))
+        before = self.preferences.reads
         first = response_text(dispatcher.execute(_event("/capabilities")))
         self.assertIn("selected", first)
         self.assertIn("Личный выбор: включена; сервер: доступна", first)
@@ -201,16 +205,17 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIsNone(self.identity.user.display_name)
         self.preferences.rows[(23, "selected")] = False
         self.assertIn("Личный выбор: выключена", response_text(dispatcher.execute(_event("/capabilities"))))
-        self.assertEqual(self.preferences.reads, 2)
+        self.assertEqual(self.preferences.reads, before + 2)
 
     def test_capabilities_catalog_validates_arguments_and_registration(self) -> None:
-        """Лишний аргумент не читает настройки; незнакомый канал просит регистрацию."""
+        """Лишний аргумент не меняет настройки; незнакомый канал просит регистрацию."""
+        self.dispatcher.execute(_event("/settings"))
         before = self.preferences.reads
         self.assertIn("без аргументов", response_text(self.dispatcher.execute(_event("/capabilities extra"))))
-        self.assertEqual(self.preferences.reads, before)
+        self.assertEqual(self.preferences.rows, {})
         self.identity.user = None
         self.assertIn("/register", response_text(self.dispatcher.execute(_event("/capabilities"))))
-        self.assertEqual(self.preferences.reads, before)
+        self.assertEqual(self.preferences.reads, before + 1)
 
     def test_empty_capabilities_catalog_keeps_common_commands(self) -> None:
         """Пустой серверный каталог возвращает понятный список без записи имени."""
@@ -220,6 +225,7 @@ class IncomingBoundaryTest(unittest.TestCase):
             chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
+        dispatcher.execute(_event("/settings"))
         reply = dispatcher.execute(_event("/capabilities"))
         self.assertIn("нет известных возможностей", response_text(reply))
         self.assertIn("/enable <id>", response_text(reply))
@@ -232,6 +238,7 @@ class IncomingBoundaryTest(unittest.TestCase):
             user_identity_service=self.identity, chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
+        dispatcher.execute(_event("/settings"))
         for text in ("/enable Selected", "/enable unknown"):
             reply = dispatcher.execute(_event(text))
             self.assertIn("/capabilities", response_text(reply))
@@ -244,6 +251,7 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_enable_is_idempotent_and_reports_write_failure(self) -> None:
         """Повторный выбор сообщает «уже», а сбой записи не подтверждает включение."""
         self.identity.user = AppUser(id=23, display_name=None)
+        self.dispatcher.execute(_event("/settings"))
         first = self.dispatcher.execute(_event("/enable selected"))
         self.assertIn("уже включена", response_text(first))
         self.assertTrue(self.preferences.rows[(23, "selected")])
@@ -277,10 +285,10 @@ class IncomingBoundaryTest(unittest.TestCase):
         delivery = self.capability.delivery
         before = self.repository.get_state(self.key)
         handled = len(self.capability.calls)
-        reply = self.dispatcher.execute(_event("/disable selected"))
+        self.dispatcher.execute(_event("/settings", "chat-2"))
+        reply = self.dispatcher.execute(_event("/disable selected", "chat-2"))
         self.assertIn("выключена", response_text(reply))
         self.assertEqual(self.repository.get_state(self.key), before)
-        self.assertIn("/enable selected", response_text(self.dispatcher.execute(_event("/status"))))
         self.assertNotIn("`/selected` —", response_text(self.dispatcher.execute(_event("/help"))))
         self.assertIn("/enable selected", response_text(self.dispatcher.execute(_event("текст"))))
         self.assertIn("/enable selected", response_text(self.dispatcher.execute(
@@ -289,12 +297,12 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertEqual(len(self.capability.calls), handled)
         delivery.send(event.reply_address, IncomingResponse(text_content("Готово")))
         self.assertEqual(response_text(delivered[-1].response), "Готово")
-        self.assertIn("уже выключена", response_text(self.dispatcher.execute(_event("/disable selected"))))
-        self.dispatcher.execute(_event("/disable other"))
-        self.assertIn("нет включённых", response_text(self.dispatcher.execute(_event("/start"))))
-        self.assertIn("/capabilities", response_text(self.dispatcher.execute(_event("/exit"))))
+        self.assertIn("уже выключена", response_text(self.dispatcher.execute(_event("/disable selected", "chat-2"))))
+        self.dispatcher.execute(_event("/disable other", "chat-2"))
+        self.assertNotIn("/other", response_text(self.dispatcher.execute(_event("/start"))))
+        self.assertIn("/settings", response_text(self.dispatcher.execute(_event("/exit"))))
         self.assertIsNone(self.repository.get(self.key))
-        self.assertIn("включена", response_text(self.dispatcher.execute(_event("/enable selected"))))
+        self.assertIn("включена", response_text(self.dispatcher.execute(_event("/enable selected", "chat-2"))))
         self.assertEqual(response_text(self.dispatcher.execute(_event("/selected"))), self.capability.pending)
 
     def test_disable_validates_id_and_accepts_server_disabled_entry(self) -> None:
@@ -306,6 +314,7 @@ class IncomingBoundaryTest(unittest.TestCase):
             user_identity_service=self.identity, chat_mode_repository=self.repository,
             capability_preference_repository=self.preferences,
         )
+        dispatcher.execute(_event("/settings"))
         for text in ("/disable Offline", "/disable unknown"):
             self.assertIn("/capabilities", response_text(dispatcher.execute(_event(text))))
             self.assertEqual(self.preferences.rows, {})
@@ -353,14 +362,11 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Справка, старт, статус и выход не предлагают лично выключенные входы."""
         self.preferences.rows[(23, "selected")] = False
         self.repository.save(ChatMode(self.key, "selected"))
-        for text in ("/help", "/start", "/status", "/exit", "обычный текст"):
+        for text in ("/help", "/start", "/exit", "обычный текст"):
             before = self.preferences.reads
             reply = self.dispatcher.execute(_event(text))
             self.assertEqual(self.preferences.reads, before + 1)
             self.assertNotIn("`/selected` —", response_text(reply))
-            if text == "/status":
-                self.assertIn("Режим этого чата: selected", response_text(reply))
-                self.assertIn("/enable selected", response_text(reply))
             if text == "/exit":
                 self.assertIsNone(self.repository.get(self.key))
         self.assertIn("/other", response_text(reply))
@@ -511,6 +517,7 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_general_commands_and_entry_precede_pending_rebind(self) -> None:
         """Общие команды доступны во время прежнего текстового rebind."""
         self.identity.pending = True
+        self.dispatcher.execute(_event("/settings"))
         self.assertIn("Профиль", response_text(self.dispatcher.execute(_event("/status"))))
         self.dispatcher.execute(_event("/selected"))
         self.assertTrue(self.capability.entries)
@@ -636,8 +643,8 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_empty_registry_only_offers_general_help(self) -> None:
         """Отсутствие включённых возможностей не требует предметного обработчика."""
         dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
-        self.assertIn("нет включённых", response_text(dispatcher.execute(_event("текст"))))
-        self.assertIn("/exit", response_text(dispatcher.execute(_event("/help"))))
+        self.assertIn("/settings", response_text(dispatcher.execute(_event("текст"))))
+        self.assertIn("/settings", response_text(dispatcher.execute(_event("/help"))))
 
 
 if __name__ == "__main__":

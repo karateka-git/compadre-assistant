@@ -80,7 +80,7 @@ class ChatCommand(StrEnum):
         "/status",
         CommandSection.BASIC,
         "",
-        "показать состояние подключения",
+        "показать профиль и доступные входы",
     )
     CAPABILITIES = (
         "/capabilities",
@@ -123,6 +123,13 @@ class ChatCommand(StrEnum):
     def __str__(self) -> str:
         """Форматирует одну строку Markdown для /help."""
         return f"{self.usage} — {self.description}"
+
+
+# Профильные операции ядра доступны владельцу назначенного режима.
+PROFILE_COMMANDS = frozenset({
+    ChatCommand.NAME, ChatCommand.STATUS, ChatCommand.CAPABILITIES, ChatCommand.ENABLE,
+    ChatCommand.DISABLE, ChatCommand.LINK_CODE, ChatCommand.LINK,
+})
 
 
 @dataclass(frozen=True, slots=True)

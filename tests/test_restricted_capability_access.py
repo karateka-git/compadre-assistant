@@ -100,12 +100,13 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
 
     def test_catalog_preferences_and_initial_menus_hide_untrusted_capability(self) -> None:
         """Неподтверждённый профиль не получает скрытое действие или способ выдать себе право."""
+        self.send("/settings")
         self.assertIn("restricted", self.send("/capabilities"))
         unknown = replace(self.owner, chat_id="4004", external_user_id="4004")
         self.assertIn("/register", self.send("/restricted", unknown))
         for event in (self.other, unknown):
             updates = []
-            for command in ("/help", "/start", "/status", "/capabilities", "/enable", "/disable"):
+            for command in ("/help", "/start", "/settings", "/status", "/capabilities", "/enable", "/disable"):
                 self.assertNotIn("restricted", self.send(command, event, menus=updates.append))
             self.assertTrue(updates)
             for update in updates:
@@ -125,11 +126,10 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
         self.assertIn("/restricted_action", tuple(item.command for item in admitted_menus[-1].menu.items))
         response = IncomingResponse(text_content("Действия"), suggested_actions=(
             ReplyAction("Выполнить", "/restricted_action"),
-            ReplyAction("Выключить", "/disable restricted"),
         ))
         with patch.object(IncomingMessageDispatcher, "execute", return_value=response):
             buttons = self.processor(self.owner).bound_actions
-        self.assertEqual(len(buttons), 2)
+        self.assertEqual(len(buttons), 1)
         self.processor._pending_inputs.begin(
             self.owner.reply_address, "restricted", "value", app_user_id=self.owner_id, required_mode="restricted",
         )
@@ -152,15 +152,18 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
         self.assertFalse(self.capability.calls)
         self.trusted.add(self.owner_id)
         self.assertEqual(self.send("/restricted_action"), "Тестовый ответ")
+        self.send("/settings")
         self.assertIn("выключена", self.send("/disable restricted"))
         self.assertIn("лично выключена", self.send("/restricted_action"))
 
     def test_profile_link_requires_private_verified_address(self) -> None:
         """Код и перенос профиля не выдаются в группу или по адресу без автора."""
         for event in (replace(self.owner, chat_id="-5005"), replace(self.owner, external_user_id=None)):
+            self.send("/settings", event)
             for command in ("/link_code", "/link", "/link abc", "/confirm core identity 1 1 yes"):
                 self.assertIn("открой личный чат", self.send(command, event))
             self.assertIsNone(self.processor._pending_inputs.get(event.reply_address))
+        self.send("/settings")
         self.assertIn("/link ", self.send("/link_code"))
 
     def test_missing_policy_and_disabled_descriptors_deny_by_default(self) -> None:

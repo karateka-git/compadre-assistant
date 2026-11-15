@@ -4,7 +4,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -86,7 +86,7 @@ class CommandCatalogTest(unittest.TestCase):
     def test_builtin_catalog_has_parameters_and_complete_disabled_metadata(self) -> None:
         """Отключённая сборка сохраняет полный каталог без создания клиентов."""
         obsidian = obsidian_descriptor()
-        ask = AskCapability.descriptor
+        ask = AiCapability.descriptor
         self.assertEqual(ask.entry.name, "/ai")
         self.assertEqual(ask.entry.parameters, ())
         self.assertEqual(ask.help.sections[0].commands[0].parameters,

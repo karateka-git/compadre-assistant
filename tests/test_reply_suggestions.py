@@ -4,8 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock
 
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultConfirmationAction
 from compadre_assistant.core.domain.users.entities import AppUser
@@ -45,7 +45,7 @@ class ReplySuggestionsTest(unittest.TestCase):
         """Слишком длинный вопрос можно ввести заново без аргумента-заполнителя."""
         model = Mock()
         question = AskQuestion(model=model, max_question_chars=5)
-        ask = AskCapability(question, Mock())
+        ask = AiCapability(question, Mock())
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
@@ -65,7 +65,7 @@ class ReplySuggestionsTest(unittest.TestCase):
         """Без хранилища ожиданий голая команда не предлагается."""
         model = Mock()
         question = AskQuestion(model=model, max_question_chars=5)
-        response = AskCapability(question, Mock()).handle(
+        response = AiCapability(question, Mock()).handle(
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
         self.assertEqual(response.suggested_actions, ())

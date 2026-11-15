@@ -125,7 +125,7 @@ class PendingInputTest(unittest.TestCase):
     def test_expired_slash_still_runs(self):
         pending = self.start()
         self.now += timedelta(minutes=10)
-        self.assertIn('Профиль', response_text(self.dispatcher.execute(_event('/status'))))
+        self.assertIn('Compadre Assistant', response_text(self.dispatcher.execute(_event('/help'))))
         self.assertIsNone(self.store.get(pending.chat_key))
 
     def test_repeated_entry_replaces_deadline_and_id(self):

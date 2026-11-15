@@ -40,6 +40,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: python scripts/check_pr_fast.py --base-sha "$BASE_SHA"
 
+      - name: Check Markdown links
+        run: python -X utf8 -m scripts.check_markdown_links
+
       - name: Check linked hotfix PRs
         if: startsWith(github.event.pull_request.base.ref, 'release/') || contains(github.event.pull_request.body, 'Hotfix-Links:') || contains(github.event.pull_request.body, 'Hotfix-Main-Commit:')
         env:

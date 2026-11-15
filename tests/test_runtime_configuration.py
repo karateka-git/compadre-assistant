@@ -171,7 +171,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
             ):
                 with self.subTest(channel=channel, enabled=enabled, value=value), patch(
                     f"compadre_assistant.presentation.cli.main.run_{channel}_bot"
-                ) as runner, patch("compadre_assistant.bootstrap.load_ask_config") as load_ask:
+                ) as runner, patch("compadre_assistant.bootstrap.load_ai_config") as load_ask:
                     env = self.env(channel, False, "absent") | {
                         "ENABLED_CAPABILITIES": "admin" if enabled else "",
                         "ADMIN_TRUSTED_APP_USER_IDS": value,
@@ -364,7 +364,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
                     env["ENABLED_CAPABILITIES"] = enabled
                     env.update(ASK_BASE_URL="https://ask.example/v1", ASK_API_KEY="ask-secret", ASK_MODEL="model" if valid else "")
                     for health in (False, True):
-                        with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
+                        with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("compadre_assistant.capabilities.ai.bootstrap.OpenAIModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                             code, logger = self.run_cli(["--healthcheck"] if health else [f"--{channel}-bot"], env)
                             ai_enabled = "ai" in enabled.split(",")
                             invalid = ai_enabled and not valid

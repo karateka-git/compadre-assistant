@@ -1,6 +1,6 @@
 """Контекстная справка из публичного каталога и проверенных снимков чата."""
 
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand, CommandSection
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, ConfirmationQueryResult, IncomingResponse,
@@ -61,8 +61,7 @@ def format_contextual_help(
                 line(instruction)
             command("/exit", "выйти из режима этого чата")
             parts.append(compose_content(
-                "\nОбщие команды: ", code_span("/status"), ", ", code_span("/capabilities"),
-                ", ", code_span("/link_code"), ". Полная общая справка: ", code_span("/exit"),
+                "\nПолная общая справка: ", code_span("/exit"),
                 ", затем ", code_span("/help"), ".",
             ))
             for access in personal.access:
@@ -75,12 +74,8 @@ def format_contextual_help(
                     line(f"Сохранённый режим {mode_id} устарел: эта возможность выполняет одноразовый запрос и не поддерживает постоянный режим. Выйти: /exit.")
                 else:
                     reason = "недоступна на сервере" if access is None or not access.server_available else "лично выключена"
-                    line(f"Режим {mode_id} недоступен: возможность {reason}. Выйти: /exit.")
-            for section in CommandSection:
-                line(section.value + ":")
-                for item in ChatCommand:
-                    if item.section is section and item not in (ChatCommand.CANCEL, ChatCommand.CONFIRM):
-                        command(item.usage, item.description)
+                    line(f"Режим {mode_id} недоступен: возможность {reason}.")
+                    command(ChatCommand.EXIT.value, ChatCommand.EXIT.description)
             available = [item for item in personal.access if item.effective]
             line("Возможности:" if available else "Сейчас нет доступных возможностей.")
             for item in available:

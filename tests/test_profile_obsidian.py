@@ -108,18 +108,20 @@ class ProfileObsidianTest(unittest.TestCase):
                 self.register(**options)
                 self.assertIn("Рад тебя видеть, Имя", response_text(self.process("/start", **options)))
                 self.assertIn("уже зарегистрирован", response_text(self.process("/register", **options)))
+                self.process("/settings", **options)
                 self.assertIn("Профиль: Имя", response_text(self.process("/status", **options)))
                 self.assertIn("Теперь буду обращаться", response_text(self.process("/name Новое имя", **options)))
                 expected_link_reply = "Для привязки профиля открой личный чат" if channel == "cli" else "Код привязки"
                 self.assertIn(expected_link_reply, response_text(self.process("/link_code", **options)))
                 help_text = response_text(self.process("/help", **options))
-                self.assertIn("/register", help_text)
+                self.assertIn("/name", help_text)
                 self.assertNotIn("/vault_status", help_text)
                 self.assertNotIn("/obsidian", help_text)
                 self.assertIn("недоступна на сервере", response_text(self.process("/obsidian https://example.com/article", **options)))
+                self.process("/exit", **options)
                 factory.assert_not_called()
         with connect_database(self.database_path) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes WHERE capability_id IS NOT NULL").fetchone()[0], 0)
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM obsidian_vaults").fetchone()[0], 0)
         self.assertFalse(self.article.commands)
 
@@ -129,7 +131,7 @@ class ProfileObsidianTest(unittest.TestCase):
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager), patch.object(manager, "get_selected", side_effect=AssertionError("Профиль не читает vault")):
             self.register(runtime=runtime)
-            for command in ("/start", "/register", "/status", "/help", "/name Новое имя", "/link_code", "/exit"):
+            for command in ("/start", "/register", "/settings", "/status", "/help", "/name Новое имя", "/link_code", "/exit"):
                 self.assertIsNone(self.process(command, runtime=runtime).error)
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes WHERE capability_id IS NOT NULL").fetchone()[0], 0)
@@ -141,10 +143,11 @@ class ProfileObsidianTest(unittest.TestCase):
             code = create_user_identity_service(connection).create_link_code(1)
         reply = self.process(f"/link {code.code}", channel="vk", enabled_capabilities=())
         self.assertIn("привязал этот канал", response_text(reply))
+        self.process("/settings", channel="vk", enabled_capabilities=())
         self.assertIn("Профиль: Имя", response_text(self.process("/status", channel="vk", enabled_capabilities=())))
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 1)
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT capability_id FROM active_chat_modes").fetchone()[0], "settings")
 
     def test_absent_llm_does_not_construct_provider_during_registration(self) -> None:
         """Пустые credentials не превращают регистрацию в ошибку SDK."""

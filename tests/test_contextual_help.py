@@ -6,7 +6,8 @@ from unittest.mock import Mock
 import unittest
 
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser, IdentityRebindConfirmation
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
@@ -37,12 +38,13 @@ class ContextualHelpTest(unittest.TestCase):
         self.identity.list_known_private_chats.return_value = ()
         self.obsidian = HelpCapability()
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
-        self.ask = AskCapability(Mock(), Mock())
+        self.ask = AiCapability(Mock(), Mock())
         self.other = FakeCapability("other", "/other")
+        self.settings = SettingsCapability()
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
         self.key = ChatModeKey(23, "telegram", "chat-1")
-        self.registry = CapabilityRegistry((self.obsidian, self.ask, self.other))
+        self.registry = CapabilityRegistry((self.obsidian, self.ask, self.other, self.settings))
         self.dispatcher = self.build()
 
     def build(self):
@@ -82,9 +84,9 @@ class ContextualHelpTest(unittest.TestCase):
     def test_main_lists_entries_without_subject_commands(self):
         """Основной режим показывает входы, но не внутренние команды возможностей."""
         text = self.send()
-        for command in ("/name", "/capabilities", "/link_code", "/obsidian", "/ai", "/other"):
+        for command in ("/settings", "/obsidian", "/ai", "/other"):
             self.assertIn(command, text)
-        for command in ("/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
+        for command in ("/name", "/capabilities", "/link_code", "/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
         self.assertFalse(self.other.entries)
 
@@ -92,9 +94,9 @@ class ContextualHelpTest(unittest.TestCase):
         """Активный каталог не расширяет общую справку; скрытый вход остаётся рабочим."""
         self.modes.save(ChatMode(self.key, "obsidian"))
         text = self.send()
-        for command in ("/vault_sync", "/reanalyze", "/exit", "/status", "/capabilities", "/link_code", "/help"):
+        for command in ("/vault_sync", "/reanalyze", "/exit", "/help"):
             self.assertIn(command, text)
-        for command in ("/ask", "/name", "/register", "/enable", "/other", "/confirm", "/cancel"):
+        for command in ("/status", "/capabilities", "/link_code", "/ask", "/name", "/enable", "/other", "/confirm", "/cancel"):
             self.assertNotIn(command, text)
         self.assertIn("/other", self.send(chat="other"))
         self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")
@@ -108,7 +110,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.modes.save(ChatMode(self.key, "missing" if reason == "unknown" else "obsidian"))
                 self.preferences.rows[(23, "obsidian")] = reason != "personal"
                 if reason == "server":
-                    self.registry = CapabilityRegistry((self.ask, self.other), (self.obsidian.descriptor,))
+                    self.registry = CapabilityRegistry((self.ask, self.other, self.settings), (self.obsidian.descriptor,))
                     self.dispatcher = self.build()
                 text = self.send()
                 self.assertIn("недоступен", text)
@@ -117,7 +119,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIn("/ai", text)
                 self.assertNotIn("/vault_sync", text)
                 self.assertNotIn("/obsidian", text)
-                self.assertIn("/name", text)
+                self.assertIn("/settings", text)
 
     def test_pending_is_preserved_until_expired_disabled_or_context_changed(self):
         """Просмотр сохраняет ID и срок, но удаляет ввод, который уже нельзя исполнить."""
@@ -190,9 +192,9 @@ class ContextualHelpTest(unittest.TestCase):
         self.preferences.rows[(23, "obsidian")] = False
         self.preferences.rows[(23, "other")] = False
         text = self.send()
-        self.assertIn("Сейчас нет доступных возможностей", text)
+        self.assertIn("/settings", text)
         self.assertNotIn("/obsidian", text)
-        self.assertIn("/capabilities", text)
+        self.assertNotIn("/ai", text)
 
     def test_unavailable_pending_owner_and_adjacent_chats(self):
         """Серверное отключение убирает ожидание только проверяемого чата."""
@@ -218,7 +220,7 @@ class ContextualHelpTest(unittest.TestCase):
         """Сохранённый одноразовый режим даёт выход и рабочие входы."""
         one_shot = FakeCapability("one_shot", "/once")
         one_shot._descriptor = replace(one_shot.descriptor, persistent_mode=False)
-        self.registry = CapabilityRegistry((self.ask, self.obsidian, one_shot))
+        self.registry = CapabilityRegistry((self.ask, self.obsidian, one_shot, self.settings))
         self.dispatcher = self.build()
         self.modes.save(ChatMode(self.key, "one_shot"))
         text = self.send()
@@ -226,7 +228,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.assertIn("/exit", text)
         self.assertIn("/ai", text)
         self.assertIn("/obsidian", text)
-        self.assertIn("/name", text)
+        self.assertIn("/settings", text)
         self.assertNotIn("Команды режима one_shot", text)
         self.assertNotIn("Не удалось получить", text)
         self.assertNotIn("/confirm", text)

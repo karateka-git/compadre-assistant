@@ -1,0 +1,243 @@
+"""Проверки профиля, API adapter и жизненного цикла режима ИИ без внешней сети."""
+
+from base64 import b64decode
+from dataclasses import replace
+import json
+import traceback
+import unittest
+from unittest.mock import patch
+
+import httpx
+from openai import OpenAI
+
+from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
+from compadre_assistant.capabilities.ai.data.configuration import AiConfig, AiConfigError, load_ai_config
+from compadre_assistant.capabilities.ai.data.llm.openai_model import OpenAIModel
+from compadre_assistant.capabilities.ai.domain.errors import (
+    AiModelTimeoutError, AiModelUnavailableError, InvalidAskAnswerError,
+    InvalidOcrAnswerError, InvalidOcrImageError, QuestionTooLongError,
+)
+from compadre_assistant.capabilities.ai.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
+from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import (
+    ExtractImageText, OCR_INSTRUCTION,
+)
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+
+
+def _config() -> AiConfig:
+    return AiConfig(base_url="https://ask.example/v1", api_key="ask-secret", model="ask-model")
+
+
+class AiConfigurationTest(unittest.TestCase):
+    """Проверяет независимость профиля и безопасную валидацию."""
+
+    def test_ai_ignores_obsidian_and_uses_own_settings(self) -> None:
+        """Все параметры ИИ берутся из собственного пространства имён."""
+        config = load_ai_config({
+            "ASK_BASE_URL": "https://ask.example/v1", "ASK_API_KEY": "ask-secret",
+            "ASK_MODEL": "ask-model", "ASK_TIMEOUT_SECONDS": "9.5",
+            "ASK_MAX_QUESTION_CHARS": "123", "ASK_MAX_RESPONSE_TOKENS": "45",
+            "ASK_MAX_RESPONSE_CHARS": "678", "OPENAI_API_KEY": "other-secret",
+            "OPENAI_MODEL": "other-model", "OBSIDIAN_EMBEDDING_DIMENSIONS": "broken",
+        })
+        self.assertEqual(config, replace(_config(), timeout_seconds=9.5,
+                         max_question_chars=123, max_response_tokens=45, max_response_chars=678))
+        self.assertNotIn("ask-secret", repr(config))
+
+    def test_obsidian_credentials_cannot_supply_missing_ai_profile(self) -> None:
+        """Глобальный ключ не заменяет обязательные настройки ИИ."""
+        with self.assertRaises(AiConfigError):
+            load_ai_config({"OPENAI_API_KEY": "other-secret", "OPENAI_MODEL": "other"})
+
+    def test_invalid_limits_and_endpoints_are_rejected_without_values(self) -> None:
+        """Нечисловые, бесконечные и отрицательные лимиты не доходят до SDK."""
+        for field, value in (("timeout_seconds", float("nan")), ("timeout_seconds", float("inf")),
+                             ("timeout_seconds", 0), ("max_question_chars", True),
+                             ("max_response_tokens", -1), ("max_response_chars", 1.5),
+                             ("base_url", "https://user:secret@example.com"),
+                             ("base_url", "file:///secret"), ("model", " "), ("api_key", "")):
+            with self.subTest(field=field, value=value), self.assertRaises(AiConfigError):
+                replace(_config(), **{field: value})
+        with self.assertRaises(AiConfigError) as caught:
+            load_ai_config({"ASK_TIMEOUT_SECONDS": "sensitive-value"})
+        self.assertNotIn("sensitive-value", "".join(traceback.format_exception(caught.exception)))
+
+class AiApiTest(unittest.TestCase):
+    """Использует настоящий OpenAI SDK с подменным HTTP transport."""
+
+    def _run(self, handler, *, config=None, questions=("Вопрос",), image=None):
+        profile = config or _config()
+        with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
+            with OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0,
+                        http_client=http_client) as client:
+                adapter = OpenAIModel(profile, client=client)
+                use_case = AskQuestion(model=adapter, max_question_chars=profile.max_question_chars)
+                answers = [use_case.execute(question) for question in questions]
+                if image is not None:
+                    answers.append(ExtractImageText(model=adapter).execute(image))
+                return answers
+
+    def test_requests_are_independent_and_use_ai_profile(self) -> None:
+        """На проводе видны только инструкция и текущий вопрос, без tools."""
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json={"choices": [{"message": {"content": "Ответ"}}]})
+
+        self.assertEqual(self._run(handler, questions=("Первый", "https://example.com/второй")),
+                         ["Ответ", "Ответ"])
+        self.assertEqual(len(requests), 2)
+        for request, question in zip(requests, ("Первый", "https://example.com/второй")):
+            body = json.loads(request.content)
+            self.assertEqual(body, {"model": "ask-model", "max_tokens": 2000, "messages": [
+                {"role": "system", "content": ASK_INSTRUCTION}, {"role": "user", "content": question}]})
+            self.assertEqual(str(request.url), "https://ask.example/v1/chat/completions")
+            self.assertEqual(request.headers["authorization"], "Bearer ask-secret")
+            self.assertEqual(request.extensions["timeout"]["read"], 60)
+
+    def test_timeout_and_api_errors_do_not_expose_provider_details_or_retry(self) -> None:
+        """Тип ошибки сохранён, тело провайдера исключено из traceback."""
+        for timeout in (True, False):
+            calls = []
+
+            def handler(request):
+                calls.append(request)
+                if timeout:
+                    raise httpx.ReadTimeout("provider-secret", request=request)
+                return httpx.Response(500, json={"error": {"message": "provider-secret"}})
+
+            expected = AiModelTimeoutError if timeout else AiModelUnavailableError
+            with self.subTest(timeout=timeout), self.assertRaises(expected) as caught:
+                self._run(handler)
+            formatted = "".join(traceback.format_exception(caught.exception))
+            self.assertNotIn("provider-secret", formatted)
+            self.assertNotIn("ask-secret", formatted)
+            self.assertEqual(len(calls), 1)
+
+    def test_empty_malformed_and_oversized_answers_are_rejected(self) -> None:
+        """Некорректный payload не передаётся вызывающему коду."""
+        for payload in ({}, {"choices": []}, {"choices": None},
+                        {"choices": [{"message": {"content": None}}]},
+                        {"choices": [{"message": {"content": " "}}]},
+                        {"choices": [{"message": {"content": "x" * 11}}]}):
+            with self.subTest(payload=payload), self.assertRaises(InvalidAskAnswerError):
+                self._run(lambda request: httpx.Response(200, json=payload),
+                          config=replace(_config(), max_response_chars=10))
+
+    def test_long_question_never_reaches_http(self) -> None:
+        """Настроенный лимит вопроса действует до сетевого обращения."""
+        with self.assertRaises(QuestionTooLongError):
+            self._run(lambda request: self.fail("Неожиданный HTTP запрос"),
+                      config=replace(_config(), max_question_chars=2))
+
+    def test_mixed_ask_and_ocr_share_sdk(self) -> None:
+        """Вопрос и фото используют один SDK-клиент и профиль модели."""
+        image = b"\x89PNG\r\n\x1a\nsynthetic-png"
+        text = "Тест OCR\r\n  Код [неразборчиво]\r\nFinish"
+        payload = {
+            "model": "gemini/gemini-3.1-flash-lite",
+            "choices": [{"message": {"content": f"TEXT\r\n{text}"}, "finish_reason": "stop"}],
+        }
+        requests = []
+
+        def handler(request):
+            requests.append(json.loads(request.content))
+            if len(requests) == 1:
+                return httpx.Response(200, json={"choices": [{"message": {"content": "Ответ"}}]})
+            return httpx.Response(200, json=payload)
+
+        self.assertEqual(self._run(handler, image=image), [
+            "Ответ", OcrResult(text=text.replace("\r\n", "\n")),
+        ])
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["model"], requests[1]["model"])
+        body = requests[1]["messages"]
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["role"], "user")
+        instruction, picture = body[0]["content"]
+        self.assertEqual(instruction, {"type": "text", "text": OCR_INSTRUCTION})
+        self.assertEqual(picture["type"], "image_url")
+        details, data = picture["image_url"]["url"].split(",", 1)
+        self.assertEqual(details, "data:image/png;base64")
+        self.assertEqual(b64decode(data), image)
+
+    def test_ocr_explicitly_distinguishes_absence_from_text(self) -> None:
+        """Служебные слова после заголовка остаются частью транскрипции."""
+        for content, expected in [
+            ("NO_TEXT", None), ("TEXT\nNO_TEXT", "NO_TEXT"), ("TEXT\nTEXT\n  NO_TEXT", "TEXT\n  NO_TEXT"),
+        ]:
+            with self.subTest(content=content):
+                image = b"\xff\xd8\xffsynthetic-image"
+
+                def handler(request):
+                    data_url = json.loads(request.content)["messages"][0]["content"][1]["image_url"]["url"]
+                    prefix, data = data_url.split(",", 1)
+                    self.assertEqual(prefix, "data:image/jpeg;base64")
+                    self.assertEqual(b64decode(data), image)
+                    return httpx.Response(200, json={"choices": [{
+                        "message": {"content": content}, "finish_reason": "stop",
+                    }]})
+
+                self.assertEqual(self._run(handler, questions=(), image=image), [OcrResult(text=expected)])
+                self.assertNotIn("synthetic-image", repr(OcrImage(image)))
+
+    def test_unusable_ocr_answer_is_rejected(self) -> None:
+        """Пустой, обрезанный и недопустимый OCR возвращают ошибку."""
+        cases = [(None, "stop", None), ("", "stop", None), ("TEXT\n  ", "stop", None),
+                 ("TEXT\nдлинная строка", "stop", None), ("TEXT\nКод", "length", None),
+                 ("TEXT\nКод", "stop", "private refusal"), ("без формата", "stop", None),
+                 ("NO_TEXT", "provider-new-reason", None)]
+        for content, finish_reason, refusal in cases:
+            payload = {"model": "fallback", "choices": [{
+                "message": {"content": content, "refusal": refusal}, "finish_reason": finish_reason,
+            }]}
+            with self.subTest(content=content, finish_reason=finish_reason), self.assertRaises(InvalidOcrAnswerError):
+                self._run(lambda _: httpx.Response(200, json=payload), questions=(),
+                          config=replace(_config(), max_response_chars=10), image=b"\xff\xd8\xffsample")
+
+    def test_ocr_api_failure_hides_payload(self) -> None:
+        """Отказ API не раскрывает ключ и тело ответа в traceback."""
+        with self.assertRaises(AiModelUnavailableError) as caught:
+            self._run(lambda _: httpx.Response(403, json={"error": {"message": "provider-private"}}),
+                      questions=(), image=b"\xff\xd8\xffsample")
+        formatted = "".join(traceback.format_exception(caught.exception))
+        self.assertNotIn("provider-private", formatted)
+        self.assertNotIn("ask-secret", formatted)
+        self.assertNotIn("data:image", formatted)
+
+    def test_invalid_ocr_image_has_no_api_call(self) -> None:
+        """Размер и сигнатура проверяются до отправки изображения."""
+        for image in (b"", b"\xff\xd8\xff", b"GIF89a", b"\x89PNG\r\n\x1a\n" + b"x" * (10 * 1024 * 1024)):
+            with self.assertRaises(InvalidOcrImageError):
+                self._run(lambda _: self.fail("Неожиданный HTTP запрос"),
+                          questions=(), image=image)
+
+
+class AiBootstrapTest(unittest.TestCase):
+    """Проверяет отключение и освобождение принадлежащего режиму ИИ клиента."""
+
+    def test_disabled_does_not_load_profile_or_construct_client(self) -> None:
+        """Отключённая возможность не обращается даже к loader настроек."""
+        with patch("compadre_assistant.capabilities.ai.bootstrap.load_ai_config") as loader, \
+                patch("compadre_assistant.capabilities.ai.bootstrap.OpenAIModel") as model:
+            with create_ai_runtime(enabled=False) as runtime:
+                self.assertIsNone(runtime)
+            loader.assert_not_called()
+            model.assert_not_called()
+
+    def test_enabled_runtime_configures_sdk_and_closes_on_failure(self) -> None:
+        """SDK получает отдельные настройки, без повторов и с гарантированным close."""
+        with patch("compadre_assistant.capabilities.ai.data.llm.openai_model.OpenAI") as sdk:
+            with self.assertRaisesRegex(RuntimeError, "consumer"):
+                with create_ai_runtime(enabled=True, config=_config()) as runtime:
+                    self.assertIsInstance(runtime, AiCapability)
+                    raise RuntimeError("consumer")
+            sdk.assert_called_once_with(base_url="https://ask.example/v1", api_key="ask-secret",
+                                        timeout=60.0, max_retries=0)
+            sdk.return_value.close.assert_called_once_with()
+
+
+if __name__ == "__main__":
+    unittest.main()

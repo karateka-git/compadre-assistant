@@ -5,17 +5,17 @@ import importlib.util
 from pathlib import Path
 import unittest
 
-from compadre_assistant.capabilities.ask.domain.errors import (
-    AskError,
-    AskModelError,
-    AskModelTimeoutError,
-    AskModelUnavailableError,
+from compadre_assistant.capabilities.ai.domain.errors import (
+    AiError,
+    AiModelError,
+    AiModelTimeoutError,
+    AiModelUnavailableError,
     EmptyQuestionError,
     InvalidAskAnswerError,
     QuestionTooLongError,
 )
-from compadre_assistant.capabilities.ask.domain.ports.model import AskModel
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import (
+from compadre_assistant.capabilities.ai.domain.ports.model import AskModel
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import (
     ASK_INSTRUCTION,
     AskQuestion,
 )
@@ -27,7 +27,7 @@ class FakeAskModel(AskModel):
     def __init__(self) -> None:
         self.calls: list[dict[str, str]] = []
         self.response = "Ответ модели"
-        self.error: AskModelError | None = None
+        self.error: AiModelError | None = None
 
     def answer(self, *, question: str, instruction: str) -> str:
         """Записывает запрос и возвращает подменный ответ либо ошибку."""
@@ -97,7 +97,7 @@ class AskQuestionTest(unittest.TestCase):
 
     def test_model_errors_keep_their_types_and_do_not_retry(self) -> None:
         """Ошибки port доступны presentation по типу; автоповтора запроса нет."""
-        for error_type in (AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError):
+        for error_type in (AiModelTimeoutError, AiModelUnavailableError, InvalidAskAnswerError):
             with self.subTest(error=error_type.__name__):
                 model = FakeAskModel()
                 model.error = error_type("Безопасное описание")
@@ -127,9 +127,9 @@ class AskQuestionTest(unittest.TestCase):
 
     def test_expected_errors_share_ask_base_type(self) -> None:
         """Все ожидаемые ошибки доступны через общий тип возможности."""
-        for error_type in (EmptyQuestionError, QuestionTooLongError, AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError):
+        for error_type in (EmptyQuestionError, QuestionTooLongError, AiModelTimeoutError, AiModelUnavailableError, InvalidAskAnswerError):
             with self.subTest(error=error_type.__name__):
-                self.assertTrue(issubclass(error_type, AskError))
+                self.assertTrue(issubclass(error_type, AiError))
 
 
 class AskDomainBoundaryTest(unittest.TestCase):
@@ -158,8 +158,8 @@ class AskDomainBoundaryTest(unittest.TestCase):
                         modules = [module]
                     for module in modules:
                         self.assertTrue(
-                            module == "compadre_assistant.capabilities.ask.domain"
-                            or module.startswith("compadre_assistant.capabilities.ask.domain.")
+                            module == "compadre_assistant.capabilities.ai.domain"
+                            or module.startswith("compadre_assistant.capabilities.ai.domain.")
                             or module.split(".")[0] in pure_modules,
                             f"Запрещённая зависимость Ask domain: {module}",
                         )

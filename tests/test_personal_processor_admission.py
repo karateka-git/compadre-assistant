@@ -203,11 +203,14 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             return self.send_adapter("vk", vk, text, "9", "44")
 
         self.assertIn("/enable example", send_vk("/example"))
+        tg("/settings")
         self.assertIn("включена", tg("/enable example"))
         self.assertIn("Актуальное состояние", send_vk("/example"))
+        send_vk("/settings")
         self.assertIn("выключена", send_vk("/disable example"))
         self.assertIn("/enable example", tg("/example"))
         self.assertIn("/enable example", tg("/example", "8", "43"))
+        tg("/settings", "8", "43")
         self.assertIn("включена", tg("/enable example", "8", "43"))
         code_reply = tg("/link_code", "8", "43")
         code = re.search(r"Код привязки: ([^\n]+)", code_reply)
@@ -261,11 +264,10 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
         tg = self.event("/enable example", "telegram", "tg-user", "tg-chat")
         vk = self.event("/example", "vk", "vk-user", "vk-chat")
+        first(self.event("/settings", "telegram", "tg-user", "tg-chat"))
         self.assertIn("включена", response_text(first(tg)))
         self.assertEqual(response_text(second(vk)), "Актуальное состояние")
-        self.assertIn("уже включена", response_text(second(self.event(
-            "/enable example", "vk", "vk-user", "vk-chat"
-        ))))
+        self.assertIn("уже включена", response_text(first(tg)))
         with connect_database(self.path) as connection:
             mode = connection.execute(
                 "SELECT capability_id FROM active_chat_modes "
@@ -282,6 +284,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         """TG выключает VK-вход; второй AppUser и маршрут VK остаются прежними."""
         first = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
         second = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+        first(self.event("/settings", "telegram", "tg-user", "tg-chat"))
         first(self.event("/enable example", "telegram", "tg-user", "tg-chat"))
         self.save(2, True)
         second(self.event("/example", "vk", "vk-user", "vk-chat"))
@@ -315,6 +318,8 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         admitted.start()
         try:
             self.assertTrue(started.wait(10), "Первый процесс не достиг handler")
+            processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
+            processor(self.event("/settings", "telegram", "tg-user", "tg-chat"))
             disabled_results = context.Queue()
             disabled = context.Process(
                 target=_process_event,
@@ -366,8 +371,10 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             self.assertEqual(process.exitcode, 0)
             return outcome.get(timeout=2)
 
+        send("telegram", "/settings")
         self.assertIn("включена", send("telegram", "/enable example")[0])
         self.assertEqual(send("vk", "/example"), ("Актуальное состояние", 1))
+        send("vk", "/settings")
         self.assertIn("выключена", send("vk", "/disable example")[0])
         text, entered = send("telegram", "/example")
         self.assertIn("/enable example", text)

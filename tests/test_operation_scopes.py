@@ -89,6 +89,7 @@ from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.domain.users.identity import InvalidLinkCodeError, IdentityAlreadyBoundError
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from sqlite_helpers import ensure_app_user
 
@@ -164,7 +165,7 @@ class OperationScopesTest(unittest.TestCase):
             article_flow_lease_repository=SQLiteArticleFlowLeaseRepository(connection),
         )
         return IncomingMessageDispatcher(
-            registry=CapabilityRegistry((handler,)),
+            registry=CapabilityRegistry((handler, SettingsCapability())),
             user_identity_service=create_user_identity_service(connection),
             chat_mode_repository=SQLiteChatModeRepository(connection),
             capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
@@ -245,6 +246,7 @@ class OperationScopesTest(unittest.TestCase):
         response = self.prepare()
         self.process("/exit")
         self.assertIn("Войди снова", response_text(self.process(response.actions[0].command)))
+        self.process("/settings")
         self.assertIn("Профиль", response_text(self.process("/status")))
         self.assertEqual(len(self.pending()), 1)
         reopened = self.process("/obsidian")

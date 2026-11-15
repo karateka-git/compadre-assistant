@@ -37,6 +37,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.capability = FakeCapability()
         self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability,))
         self.event = IncomingEvent("telegram", "1001", "callback", "не команда", "1001")
+        self.processor(replace(self.event, text="/settings"))
 
     def issue(self, command="/name Выбрано", label="Подпись", response=None):
         """Эмулирует явно заданные владельцем действия конкретного ответа."""
@@ -102,6 +103,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
                          ("/enable selected",))
         self.assertEqual(len(enable.bound_actions), 1)
         self.processor.select_action(self.event, enable.bound_actions[0].token)
+        self.processor(replace(self.event, text="/exit"))
         self.assertIn("/selected", response_text(self.processor(replace(self.event, text="/help"))))
 
     def test_sibling_action_is_consumed_but_other_response_survives(self):
@@ -136,8 +138,9 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.processor(replace(self.event, text="/exit"))
         self.processor.select_action(self.event, button.token)
         self.assertEqual(self.name(), "Первый")
+        self.processor(replace(self.event, text="/settings"))
         button = self.issue().bound_actions[0]
-        self.processor(replace(self.event, text="/disable selected"))
+        self.processor(replace(self.event, text="/selected"))
         self.processor.select_action(self.event, button.token)
         self.assertEqual(self.name(), "Первый")
 
@@ -185,7 +188,9 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.assertIn("войди в режим через /selected", send(command))
         send("/selected")
         button = self.issue(command).bound_actions[0]
-        send("/disable selected")
+        other_chat = replace(self.event, chat_id="2002", text="/settings")
+        self.processor(other_chat)
+        self.processor(replace(other_chat, text="/disable selected"))
         self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
         self.assertIn("лично выключена", send(command))
         self.assertEqual(len(self.capability.calls), 2)
@@ -279,17 +284,27 @@ class ResponseActionSelectionTest(unittest.TestCase):
         self.assertFalse(self.issue(response=IncomingResponse(text_content("Нет"), actions=(action,))).bound_actions)
 
     def test_background_actions_keep_original_identity_and_reject_changed_context(self):
+        self.capability._descriptor = replace(
+            self.capability.descriptor,
+            help=CapabilityHelp(sections=(HelpSection(
+                "Действия", (CapabilityCommand("/rename_selected", (), "выполнить действие"),)
+            ),)),
+        )
+        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability,))
         self.processor(replace(self.event, text="/selected"))
         delivered = []
         self.processor(self.event, delivered.append)
-        response = IncomingResponse(text_content("Имя"), suggested_actions=(ReplyAction("Имя", "/name Фон"),))
-        self.capability.delivery.send(self.event.reply_address, response)
+        delivery = self.capability.delivery
+        response = IncomingResponse(text_content("Действие"), suggested_actions=(
+            ReplyAction("Действие", "/rename_selected Фон"),
+        ))
+        delivery.send(self.event.reply_address, response)
         self.assertTrue(delivered[-1].response.bound_actions)
         button = delivered[-1].response.bound_actions[0]
         self.processor.select_action(self.event, button.token)
-        self.assertEqual(self.name(), "Фон")
+        self.assertEqual(self.capability.calls[-1][1].text, "/rename_selected Фон")
         self.processor(replace(self.event, text="/exit"))
-        self.capability.delivery.send(self.event.reply_address, response)
+        delivery.send(self.event.reply_address, response)
         self.assertFalse(delivered[-1].response.bound_actions)
 
 

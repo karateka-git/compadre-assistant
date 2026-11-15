@@ -62,10 +62,6 @@ def build_command_menu(
         else:
             if mode_id:
                 common(ChatCommand.EXIT)
-            else:
-                for command in ChatCommand:
-                    if command not in (ChatCommand.CANCEL, ChatCommand.CONFIRM):
-                        common(command)
             for access in personal.access:
                 if access.effective and access.descriptor.capability_id != mode_id:
                     capability(access.descriptor.entry)

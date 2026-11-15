@@ -60,11 +60,11 @@ class CapabilityCompositionTest(unittest.TestCase):
         """Создаёт событие зарегистрированного тестового пользователя."""
         return IncomingEvent(channel=channel, chat_id=chat, external_user_id="external", message_id="1", text=text)
 
-    def process(self, text: str, **overrides):
+    def process(self, text: str, *, chat: str = "chat", **overrides):
         """Открывает новую production-сборку на каждое тестовое сообщение."""
         return process_channel_incoming_message(
             database_path=self.database_path,
-            incoming_message=self.event(text),
+            incoming_message=self.event(text, chat=chat),
             obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"),
             use_case_factory=lambda _connection: self.article,
             analysis_use_case_factory=lambda _connection: self.analysis,
@@ -78,7 +78,7 @@ class CapabilityCompositionTest(unittest.TestCase):
                 validate_enabled_capabilities(identifiers)
 
     def test_composition_loads_obsidian_profile_only_when_enabled(self) -> None:
-        """Выключенная возможность не читает свои настройки и не влияет на будущий Ask."""
+        """Выключенная возможность не читает свои настройки и не влияет на будущий модуль ИИ."""
         profile = ObsidianConfig()
         with patch("compadre_assistant.bootstrap.load_obsidian_config", return_value=profile) as loader:
             self.assertIsNone(load_obsidian_profile(("ai",)))
@@ -102,7 +102,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             analysis_use_case_factory=lambda _connection: self.analysis,
         ) as processor:
             registered = processor._registry.by_id("obsidian")
-            for command in ("/help", "/status", "/name Имя", "/link_code"):
+            for command in ("/help", "/settings", "/status", "/name Имя", "/link_code"):
                 processor(self.event(command))
             self.assertEqual(connections, [])
             self.assertIn("Режим Obsidian", response_text(processor(self.event("/obsidian"))))
@@ -119,11 +119,12 @@ class CapabilityCompositionTest(unittest.TestCase):
         self.assertIn("Режим Obsidian", response_text(self.process("/obsidian")))
         with connect_database(self.database_path) as connection:
             before = SQLiteChatModeRepository(connection).get_state(self.key)
-        self.assertIn("выключена", response_text(self.process("/disable obsidian")))
+        self.process("/settings", chat="settings-chat")
+        self.assertIn("выключена", response_text(self.process("/disable obsidian", chat="settings-chat")))
         self.assertIn("/enable obsidian", response_text(self.process("обычный текст")))
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
-        self.assertIn("включена", response_text(self.process("/enable obsidian")))
+        self.assertIn("включена", response_text(self.process("/enable obsidian", chat="settings-chat")))
         self.assertNotIn("/enable obsidian", response_text(self.process("обычный текст")))
 
     def test_processor_closes_only_owned_process_clients(self) -> None:
@@ -234,7 +235,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", response_text(reply))
             self.assertIn("/exit", response_text(reply))
-            self.assertIn("/help", response_text(self.process("/help", enabled_capabilities=())))
+            self.assertIn("/settings", response_text(self.process("/help", enabled_capabilities=())))
             factory.assert_not_called()
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "obsidian")
@@ -349,7 +350,8 @@ class CapabilityCompositionTest(unittest.TestCase):
                 future = executor.submit(complete)
                 try:
                     self.assertTrue(started.wait(5))
-                    self.assertIn("выключена", response_text(processor(self.event("/disable obsidian"))))
+                    processor(self.event("/settings", chat="settings-chat"))
+                    self.assertIn("выключена", response_text(processor(self.event("/disable obsidian", chat="settings-chat"))))
                     self.assertEqual(client.closes, 0)
                 finally:
                     release.set()
@@ -360,15 +362,17 @@ class CapabilityCompositionTest(unittest.TestCase):
             self.assertEqual(client.closes, 0)
         self.assertEqual(client.closes, 1)
 
-    def test_rename_keeps_profile_without_mode(self) -> None:
+    def test_rename_keeps_settings_mode(self) -> None:
         """Переименование готового профиля не выбирает Obsidian."""
         with connect_database(self.database_path) as connection:
             user = create_user_identity_service(connection).register_with_name(IncomingIdentity("vk", "new", "peer"), display_name="Анатолий")
         common = dict(database_path=self.database_path, obsidian_config=ObsidianConfig(openai_base_url="https://example.com/v1", openai_api_key="test", openai_model="test"), use_case_factory=lambda _connection: self.article, analysis_use_case_factory=lambda _connection: self.analysis)
+        process_channel_incoming_message(incoming_message=IncomingEvent("vk", "peer", "0", "/settings", "new"), **common)
         reply = process_channel_incoming_message(incoming_message=IncomingEvent("vk", "peer", "1", "/name Имя", "new"), **common)
         self.assertIn("Теперь буду обращаться", response_text(reply))
         with connect_database(self.database_path) as connection:
-            self.assertIsNone(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, "vk", "peer")))
+            mode = SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, "vk", "peer"))
+            self.assertEqual(mode.capability_id, "settings")
 
 
 class ObsidianEntryStateTest(unittest.TestCase):

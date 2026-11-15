@@ -6,10 +6,11 @@ from threading import Event
 from unittest.mock import Mock
 import unittest
 
-from compadre_assistant.capabilities.ask.domain.errors import AskModelTimeoutError
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.domain.errors import AiModelTimeoutError
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
@@ -31,7 +32,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.identity = FakeIdentity()
         self.model = Mock()
         self.model.answer.return_value = 'Ответ'
-        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=40), Mock())
+        self.ask = AiCapability(AskQuestion(model=self.model, max_question_chars=40), Mock())
         self.articles = FakeArticleUrlUseCase()
         self.analysis = FakeAnalysisUseCase()
         self.obsidian = ObsidianMessageHandler(
@@ -49,7 +50,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
     def make_dispatcher(self, enabled=None):
         """Собирает ядро с общим состоянием и выбранным серверным каталогом."""
         return IncomingMessageDispatcher(
-            registry=CapabilityRegistry(enabled or (self.ask, self.obsidian, self.other)),
+            registry=CapabilityRegistry((*(enabled or (self.ask, self.obsidian, self.other)), SettingsCapability())),
             user_identity_service=self.identity, chat_mode_repository=self.modes,
             capability_preference_repository=self.preferences, pending_inputs=self.store,
         )
@@ -85,7 +86,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.model.answer.assert_not_called()
         self.assertFalse(self.articles.commands)
         self.send('/ask')
-        self.model.answer.side_effect = AskModelTimeoutError('timeout')
+        self.model.answer.side_effect = AiModelTimeoutError('timeout')
         self.assertIsNotNone(self.send('вопрос').error)
         self.assertIsNone(self.store.get(_event('x').reply_address))
 
@@ -128,6 +129,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
 
     def test_linked_channel_disable_rechecks_owner(self):
         """Отключение в VK немедленно запрещает ожидаемое действие Telegram."""
+        self.send('/settings', channel='vk')
         for command, owner, value in (('/ask', 'ai', 'https://example.com/article'),
                                       ('/reanalyze', 'obsidian', '7')):
             with self.subTest(owner=owner):
