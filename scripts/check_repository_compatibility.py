@@ -28,10 +28,28 @@ BEHAVIOR_MODULES = (
 )
 
 
-def snapshot(root: Path) -> dict[str, str]:
-    """Возвращает SHA256 всех файлов и отклоняет ссылки в одноразовом checkout."""
+def snapshot(root: Path, *, git_marker: bytes | None = None) -> dict[str, str]:
+    """Возвращает SHA256 файлов одноразового checkout и отклоняет ссылки.
+
+    Args:
+        root: Корень проверяемого дерева.
+        git_marker: Разрешённое содержимое файла .git, указывающего на вынесенные
+            метаданные. Этот файл сверяется отдельно от исходников.
+
+    Returns:
+        SHA256 каждого файла исходников.
+
+    Raises:
+        ValueError: Обнаружена ссылка либо изменился ожидаемый файл .git.
+    """
     result = {}
+    marker = root / ".git"
+    if git_marker is not None and (marker.is_symlink() or not marker.is_file()
+                                   or marker.read_bytes() != git_marker):
+        raise ValueError("previous Git metadata link changed")
     for path in sorted(root.rglob("*")):
+        if git_marker is not None and path == marker:
+            continue
         if path.is_symlink():
             raise ValueError(f"symlink in checkout: {path}")
         if path.is_file():
@@ -57,8 +75,11 @@ def export_commit(repository: Path, sha: str, destination: Path) -> dict[str, st
     if not re.fullmatch(r"[0-9a-f]{40}", sha):
         raise ValueError("a full lowercase commit SHA is required")
 
+    environment = clean_environment(isolate_git=True)
+
     def git(*args: str) -> bytes:
-        return subprocess.run(["git", "-C", str(repository), *args], check=True, capture_output=True).stdout
+        return subprocess.run(["git", "-C", str(repository), *args], env=environment,
+                              check=True, capture_output=True).stdout
 
     if git("rev-parse", "--verify", f"{sha}^{{commit}}").decode().strip() != sha:
         raise ValueError("SHA is not the exact commit")
@@ -78,7 +99,7 @@ def export_commit(repository: Path, sha: str, destination: Path) -> dict[str, st
     batch = subprocess.run(
         ["git", "-C", str(repository), "cat-file", "--batch"],
         input="".join(f"{digest}\n" for digest in entries.values()).encode(),
-        check=True, capture_output=True,
+        env=environment, check=True, capture_output=True,
     ).stdout
     offset = 0
     for name, digest in entries.items():
@@ -132,13 +153,73 @@ def overlay_sql(previous: Path, candidate: Path, original: dict[str, str]) -> di
     return expected
 
 
-def clean_environment() -> dict[str, str]:
-    """Убирает внешние настройки Python; worker дополнительно запускается с -I."""
-    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
+def clean_environment(*, isolate_git: bool = False) -> dict[str, str]:
+    """Убирает внешние настройки Python и, для полного прогона, Git."""
+    prefixes = ("PYTHON", "GIT_") if isolate_git else ("PYTHON",)
+    environment = {key: value for key, value in os.environ.items() if not key.upper().startswith(prefixes)}
     # Старый vault lock test создаёт дочерний Python без -I/-B. Не меняя test,
     # запрещаем user site/pyc также его процессу; cwd и venv остаются previous.
     environment.update(PYTHONDONTWRITEBYTECODE="1", PYTHONNOUSERSITE="1")
     return environment
+
+
+def _history_git(root: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(root), *args], env=clean_environment(isolate_git=True),
+                          check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
+
+
+def attach_git_history(repository: Path, checkout: Path, sha: str, git_directory: Path) -> bytes:
+    """Создаёт отдельные метаданные временного экспорта с доступом к объектам.
+
+    Args:
+        repository: Исходный репозиторий с объектами принятых выпусков.
+        checkout: Временное дерево точного коммита с SQL кандидата.
+        sha: Точный SHA принятой версии.
+        git_directory: Новый каталог метаданных вне checkout.
+
+    Returns:
+        Содержимое файла .git для отдельной проверки при сверке исходников.
+
+    Raises:
+        ValueError: Git обнаружил ссылку на чужие метаданные или неверный коммит.
+        subprocess.CalledProcessError: Git не смог прочитать объекты или индекс.
+    """
+    objects = _history_git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    _history_git(checkout, "init", "--quiet", "--template=", "--separate-git-dir", str(git_directory))
+    # Объекты прежних SHA доступны локально. Refs и index принадлежат
+    # временному репозиторию с пустым списком remotes.
+    (git_directory / "objects/info/alternates").write_bytes(objects.encode("utf-8") + b"\n")
+    _history_git(checkout, "update-ref", "--no-deref", "HEAD", sha)
+    _history_git(checkout, "read-tree", sha)
+    verify_git_history(checkout, sha, git_directory)
+    return (checkout / ".git").read_bytes()
+
+
+def verify_git_history(checkout: Path, sha: str, git_directory: Path) -> dict[str, str]:
+    """Сверяет расположение Git-метаданных, точный HEAD и дерево индекса.
+
+    Args:
+        checkout: Экспорт с файлом .git.
+        sha: Точный SHA принятой версии.
+        git_directory: Выделенный каталог метаданных экспорта.
+
+    Returns:
+        Проверенные SHA `HEAD` и дерева индекса.
+
+    Raises:
+        ValueError: Каталог, `HEAD` или индекс не соответствуют экспорту.
+        subprocess.CalledProcessError: Git не смог проверить метаданные.
+    """
+    actual_directory = Path(_history_git(checkout, "rev-parse", "--absolute-git-dir")).resolve()
+    if actual_directory != git_directory.resolve():
+        raise ValueError("previous Git metadata escaped its temporary directory")
+    head = _history_git(checkout, "rev-parse", "--verify", "HEAD")
+    if head != sha:
+        raise ValueError("previous Git HEAD differs from exact SHA")
+    tree = _history_git(checkout, "write-tree")
+    if tree != _history_git(checkout, "rev-parse", f"{sha}^{{tree}}"):
+        raise ValueError("previous Git index differs from exact SHA")
+    return {"head": head, "index_tree": tree}
 
 
 def create_environment(checkout: Path, target: Path, log: Path, wheelhouse: Path | None) -> Path:
@@ -176,7 +257,8 @@ def run_worker(python: Path, checkout: Path, mode: str, output: Path,
             completed = subprocess.run(
                 [str(python), "-I", "-B", str(WORKER.resolve()), "--checkout", str(checkout),
                  "--mode", mode, "--result", str(result_path), *extra],
-                cwd=checkout, env=clean_environment(), stdout=stream, stderr=subprocess.STDOUT,
+                cwd=checkout, env=clean_environment(isolate_git="--full-discovery" in extra),
+                stdout=stream, stderr=subprocess.STDOUT,
                 timeout=timeout,
             )
         result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {}
@@ -197,10 +279,12 @@ def main() -> int:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--wheelhouse", type=Path)
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=int, help="worker timeout in seconds (full discovery defaults to 600)")
     parser.add_argument("--full-discovery", action="store_true",
                         help="run the complete previous unittest suite in addition to the external cases")
     args = parser.parse_args()
+    timeout = 300 if args.timeout is None else args.timeout
+    behavior_timeout = 600 if args.full_discovery and args.timeout is None else timeout
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     report = {"scope": "step-5.3-local-mechanism-not-admission", "previous_sha": args.previous_sha,
@@ -220,7 +304,7 @@ def main() -> int:
             old_python = create_environment(previous, root / "previous-venv", output / "previous-install.log", args.wheelhouse)
             new_python = create_environment(candidate, root / "candidate-venv", output / "candidate-install.log", args.wheelhouse)
             database = root / "upgrade.db"
-            seed = run_worker(old_python, previous, "seed", output, ["--database", str(database)], args.timeout)
+            seed = run_worker(old_python, previous, "seed", output, ["--database", str(database)], timeout)
             report["previous_seed"] = seed
             old_sql = root / "previous-sql"
             old_sql.mkdir()
@@ -228,20 +312,25 @@ def main() -> int:
                 (old_sql / path.name).write_bytes(path.read_bytes())
             expected = overlay_sql(previous, candidate, old_manifest)
             report["previous_with_candidate_sql"] = expected
+            previous_git = root / "previous-git"
+            git_marker = (attach_git_history(args.repository.resolve(), previous, args.previous_sha, previous_git)
+                          if args.full_discovery else None)
             if seed["passed"]:
                 report["candidate_migrations_data_integrity"] = run_worker(
                     new_python, candidate, "candidate", output,
-                    ["--database", str(database), "--previous-sql", str(old_sql)], args.timeout)
+                    ["--database", str(database), "--previous-sql", str(old_sql)], timeout)
             selection = (["--full-discovery"] if args.full_discovery
                          else ["--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]])
             report["old_repository_behavior"] = run_worker(
                 old_python, previous, "behavior", output,
                 [*(["--database", str(database)] if report["candidate_migrations_data_integrity"]["passed"] else []),
-                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()), *selection], args.timeout)
+                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()), *selection], behavior_timeout)
             if report["old_repository_behavior"]["passed"] and report["candidate_migrations_data_integrity"]["passed"]:
                 report["candidate_verified_previous_updates"] = run_worker(
-                    new_python, candidate, "verify", output, ["--database", str(database)], args.timeout)
-            actual_previous, actual_candidate = snapshot(previous), snapshot(candidate)
+                    new_python, candidate, "verify", output, ["--database", str(database)], timeout)
+            actual_previous, actual_candidate = snapshot(previous, git_marker=git_marker), snapshot(candidate)
+            if git_marker is not None:
+                report["previous_git"] = verify_git_history(previous, args.previous_sha, previous_git)
             report["source_changes"] = {
                 label: [name for name in sorted(before.keys() | after.keys()) if before.get(name) != after.get(name)]
                 for label, before, after in (("previous", expected, actual_previous),

@@ -27,6 +27,7 @@ class CheckoutImports(importlib.abc.MetaPathFinder):
         self.checkout = checkout
         self.names = {"compadre_assistant", "document_chunker", "tests", "scripts"}
         self.names.update(p.stem for p in (checkout / "tests").glob("*.py"))
+        self.names.update(p.parent.name for p in (checkout / "tests").glob("*/__init__.py"))
         self.origins: dict[str, str] = {}
 
     def check(self, name: str, origin: str | None) -> None:
@@ -350,15 +351,19 @@ def old_behavior(modules: list[str], external_tests: Path | None = None,
     from compadre_assistant.core.data.sqlite import migration_runner
 
     names = sorted(p.name for p in migration_runner.MIGRATIONS_DIR.glob("*.sql"))
+    canonical_sql = migration_runner.MIGRATIONS_DIR.resolve()
+    migration_code = migration_runner.apply_migrations.__code__
     fingerprints: set[str] = set()
     failures: list[str] = []
     calls = 0
 
     def observe(frame, event, arg):
         nonlocal calls
-        if event != "return" or frame.f_code is not migration_runner.apply_migrations.__code__:
+        # Profiler посылает return с None и при исключении. Такой вызов
+        # не может свидетельствовать об успешно применённой схеме.
+        if event != "return" or frame.f_code is not migration_code or arg is None:
             return
-        if Path(frame.f_locals["migrations_dir"]).resolve() != migration_runner.MIGRATIONS_DIR.resolve():
+        if Path(frame.f_locals["migrations_dir"]).resolve() != canonical_sql:
             return
         try:
             fingerprints.add(assert_database(frame.f_locals["connection"], names))

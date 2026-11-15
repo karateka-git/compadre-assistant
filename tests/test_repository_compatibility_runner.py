@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from unittest.mock import patch
 from scripts import check_repository_compatibility as runner
 
 from scripts.check_repository_compatibility import (
-    MIGRATIONS, export_commit, overlay_sql, run_worker, snapshot,
+    MIGRATIONS, attach_git_history, export_commit, overlay_sql, run_worker, snapshot, verify_git_history,
 )
 from scripts.repository_compatibility_worker import CheckoutImports, run_tests
 from tests.compatibility_test_environment import worker_python
@@ -81,6 +82,68 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
         with patch.object(sys, "path", [str(self.candidate / "tests"), *sys.path]):
             with self.assertRaisesRegex(ImportError, "leakage"):
                 guard.find_spec("helper")
+
+    def test_guard_rejects_foreign_discovered_test_package(self) -> None:
+        """Каталог тестов с __init__ тоже импортируется только из принятой версии."""
+        for checkout in (self.previous, self.candidate):
+            package = checkout / "tests" / "compat_test_group"
+            package.mkdir()
+            (package / "__init__.py").write_text("", encoding="utf-8")
+        guard = CheckoutImports(self.previous)
+        with patch.object(sys, "path", [str(self.candidate / "tests"), *sys.path]):
+            with self.assertRaisesRegex(ImportError, "leakage"):
+                guard.find_spec("compat_test_group")
+
+    def test_exact_export_gets_private_git_history_without_source_changes(self) -> None:
+        """Вложенный экспорт читает старый SHA, а чужой HEAD/index/link отклоняются."""
+        repository = self.root / "source"
+        repository.mkdir()
+
+        def git(cwd, *args):
+            return subprocess.run(
+                ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                 "-c", "commit.gpgsign=false", *args],
+                cwd=cwd, check=True, capture_output=True, text=True,
+            ).stdout.strip()
+
+        git(repository, "init", "--quiet")
+        test_module = repository / "test_fixture.py"
+        test_module.write_bytes(b"# historical\n")
+        git(repository, "add", "test_fixture.py")
+        git(repository, "commit", "--quiet", "-m", "Historical fixture")
+        historical = git(repository, "rev-parse", "HEAD")
+        test_module.write_bytes(b"# accepted\n")
+        git(repository, "add", "test_fixture.py")
+        git(repository, "commit", "--quiet", "-m", "Accepted fixture")
+        accepted = git(repository, "rev-parse", "HEAD")
+        checkout = self.root / "exact"
+        original = export_commit(repository, accepted, checkout)
+        metadata = self.root / "private-git"
+
+        with patch.dict(os.environ, {"GIT_DIR": str(self.root / "wrong-git"),
+                                     "GIT_INDEX_FILE": str(self.root / "wrong-index")}):
+            marker = attach_git_history(repository, checkout, accepted, metadata)
+        self.assertEqual(snapshot(checkout, git_marker=marker), original)
+        self.assertEqual(git(checkout, "status", "--porcelain"), "")
+        self.assertEqual(git(checkout, "remote"), "")
+        proof = verify_git_history(checkout, accepted, metadata)
+        self.assertEqual(proof, {"head": accepted, "index_tree": git(repository, "rev-parse", "HEAD^{tree}")})
+        nested = self.root / "nested-export"
+        export_commit(checkout, historical, nested)
+        self.assertEqual((nested / "test_fixture.py").read_bytes(), b"# historical\n")
+
+        git(checkout, "update-ref", "--no-deref", "HEAD", historical)
+        with self.assertRaisesRegex(ValueError, "HEAD differs"):
+            verify_git_history(checkout, accepted, metadata)
+        git(checkout, "update-ref", "--no-deref", "HEAD", accepted)
+        git(checkout, "read-tree", historical)
+        with self.assertRaisesRegex(ValueError, "index differs"):
+            verify_git_history(checkout, accepted, metadata)
+        (checkout / ".git").unlink()
+        (checkout / ".git").write_bytes(b"gitdir: elsewhere\n")
+        with self.assertRaisesRegex(ValueError, "metadata link changed"):
+            snapshot(checkout, git_marker=marker)
+        self.assertEqual(git(repository, "rev-parse", "HEAD"), accepted)
 
     def test_candidate_failure_does_not_suppress_old_behavior_result(self) -> None:
         """Отказ candidate набора сохраняется отдельно и не отменяет old worker."""
