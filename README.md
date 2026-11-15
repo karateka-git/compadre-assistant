@@ -115,9 +115,9 @@ flowchart TB
 этого чата и не удаляет данные или ожидающие предложения. При недоступных
 embeddings поиск использует FTS fallback.
 
-Подробное устройство слоёв `domain`, `data`, `presentation`, хранилища и
-зависимостей описано в [ARCHITECTURE.md](docs/ARCHITECTURE.md). Настройка
-возможностей и каналов — в [SETUP.md](docs/SETUP.md).
+Схема модулей и путь сообщения описаны в [обзоре архитектуры](docs/ARCHITECTURE.md).
+Подробности обработки статьи, индекса и записи в vault — в [архитектуре Obsidian](docs/architecture/OBSIDIAN.md).
+Настройка возможностей и каналов — в [SETUP.md](docs/SETUP.md).
 
 ## Быстрый старт
 
@@ -134,7 +134,7 @@ embeddings поиск использует FTS fallback.
 ## Документация
 
 - [Карта кода](docs/CODE_MAP.md) — с какой части кода и каких тестов начать типовую задачу.
-- [Архитектура](docs/ARCHITECTURE.md) — слои, компоненты и потоки данных.
+- [Архитектура](docs/ARCHITECTURE.md) — границы модулей, путь сообщения и ссылки на документы ядра, Obsidian, ИИ и Admin.
 - [Правила сообщений](docs/USER_MESSAGES.md) — выбор ответа, оформление и текстовый путь; [ядро](docs/user-messages/CORE.md), [ИИ](docs/user-messages/AI.md), [Admin](docs/user-messages/ADMIN.md), [Obsidian](docs/user-messages/OBSIDIAN.md) — реестры действующих сценариев.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
