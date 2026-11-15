@@ -93,7 +93,8 @@ class AdminChannelsTest(unittest.TestCase):
     def test_report_uses_timeweb_in_both_channels_without_ask_runtime(self) -> None:
         """Отчёт берёт цены и число запросов из API, сохраняя историю SQLite."""
         self.configure(str(self.owner_id))
-        historical = ("00000000-0000-0000-0000-000000000001", 0, "test", "model",
+        started_at_us = int(datetime(2026, 11, 14, 17, tzinfo=UTC).timestamp()) * 1_000_000
+        historical = ("00000000-0000-0000-0000-000000000001", started_at_us, "test", "model",
                       '{"prompt_tokens": 100000000, "completion_tokens": 0}')
         with connect_database(self.path) as connection, connection:
             connection.execute("INSERT INTO ask_usage VALUES (?, ?, ?, ?, ?)", historical)
