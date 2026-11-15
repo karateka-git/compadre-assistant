@@ -24,9 +24,9 @@ from scripts.ci_repository_compatibility import (
     DYNAMIC_HARNESS, LEGACY_HARNESS, DeploymentReleaseTagEvidence, ReleaseTagEvidence,
 )
 from scripts.deployment_acceptance import AcceptedBaseline
-from scripts.repository_compatibility_contract import load_policy
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_full_ci_controller import admission_jobs, admission_run
+from tests.compatibility_test_environment import historical_compatibility_policy
 from tests.test_deploy_prod import FakeHost, OLD_SHA, OLD_IMAGE, NEW_IMAGE
 from tests import test_deploy_prod as deploy_tests
 from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
@@ -43,20 +43,9 @@ class ArtifactAPI:
 
     def __init__(self):
         """Создаёт полное evidence с настоящей policy и согласованным manifest."""
-        self.policy = load_policy() | {
-            "version": 1, "previous_sha": PREVIOUS_SHA, "release_id": 42, "release_tag": "v3.1.0",
+        self.policy = historical_compatibility_policy(1) | {
+            "previous_sha": PREVIOUS_SHA, "release_id": 42, "release_tag": "v3.1.0",
         }
-        later_menu_tests = {
-            "tests.test_menu_reconciliation.MenuReconciliationTest."
-            "test_menu_with_reply_is_published_once_and_retry_stays_addressed",
-            "tests.test_menu_reconciliation.MenuReconciliationTest."
-            "test_response_menu_rechecks_ownership_before_fallback_and_acknowledgement",
-        }
-        self.policy["test_ids"] = [
-            test_id for test_id in self.policy["test_ids"]
-            if not test_id.startswith("tests.test_user_identity_repository.SQLiteExternalIdentityRepositoryTest.")
-            and test_id not in later_menu_tests
-        ]
         self.repository = self.policy["repository"]
         self.selected = SelectedRelease(self.repository, "v3.2.0", "release/3.2", CANDIDATE_SHA,
                                         10, "main-full.yml", 1, 1)
@@ -115,7 +104,7 @@ class ArtifactAPI:
             if name.startswith(".github/workflows/"):
                 data = self.workflow_bytes if parameters["ref"] == POLICY_SHA else self.candidate_workflow_bytes
             else:
-                data = self.trusted[name if self.policy["version"] == 2 else name.rsplit("/", 1)[1]]
+                data = self.trusted[name if self.policy["version"] > 1 else name.rsplit("/", 1)[1]]
             return {"type": "file", "encoding": "base64", "content": base64.b64encode(data).decode(),
                     "sha": hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()}
         if path.startswith("/releases/tags/"):
@@ -146,7 +135,7 @@ class ArtifactAPI:
 
     def use_dynamic_policy(self) -> None:
         """Переводит fixture на формат policy и evidence с Deployment."""
-        self.policy = load_policy()
+        self.policy = historical_compatibility_policy(2)
         old_tests = self.report["old_repository_behavior"]["old_tests"]
         old_tests.update(test_ids=self.policy["test_ids"].copy(), tests_run=len(self.policy["test_ids"]))
         self.trusted = {path: path.encode() for path in DYNAMIC_HARNESS}

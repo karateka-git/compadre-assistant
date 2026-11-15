@@ -28,7 +28,9 @@ from scripts.full_ci_admission import (
     RELEASE_WORKFLOW, select_successful_run,
 )
 from scripts.full_ci_controller import GitHub
-from scripts.repository_compatibility_contract import DYNAMIC_POLICY_VERSION, load_policy, verify_report, verify_tests
+from scripts.repository_compatibility_contract import (
+    DEPLOYMENT_POLICY_VERSIONS, load_policy, verify_behavior_tests, verify_report,
+)
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
 
 
@@ -229,7 +231,7 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
     policy = _trusted_policy(_blob(api, policy_sha, POLICY_PATH))
     if policy["repository"] != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
-    if policy["version"] == DYNAMIC_POLICY_VERSION:
+    if policy["version"] in DEPLOYMENT_POLICY_VERSIONS:
         if "baseline" not in record:
             raise PredeployError("SAFE_TAG_EVIDENCE")
         verify_deployment_base(api, record["baseline"], previous_sha, frozen=frozen)
@@ -316,7 +318,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     policy = _trusted_policy(policy_data)
     if policy["repository"] != selected.repository or api.repository != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
-    dynamic = policy["version"] == DYNAMIC_POLICY_VERSION
+    dynamic = policy["version"] in DEPLOYMENT_POLICY_VERSIONS
     if dynamic:
         trusted = {path: policy_data if path == POLICY_PATH else _blob(api, policy_sha, path)
                    for path in DYNAMIC_HARNESS}
@@ -376,7 +378,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     with check("SAFE_REPORT_CONTRACT"):
         report = json.loads(files["report.json"])
         with check("SAFE_TEST_MANIFEST"):
-            verify_tests(report["old_repository_behavior"]["old_tests"], policy["test_ids"])
+            verify_behavior_tests(report["old_repository_behavior"], policy)
         verify_report(report, policy, previous_sha=previous_sha)
     if report["candidate_sha"] != selected.sha:
         raise PredeployError("SAFE_CANDIDATE_SHA")

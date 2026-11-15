@@ -13,15 +13,15 @@ import unittest
 from unittest.mock import patch
 
 from scripts.check_repository_compatibility import (
-    BEHAVIOR_MODULES, COMPATIBILITY_TESTS, MIGRATIONS, export_commit, overlay_sql, run_worker, snapshot,
+    COMPATIBILITY_TESTS, MIGRATIONS, export_commit, overlay_sql, run_worker, snapshot,
 )
 from scripts.ci_repository_compatibility import verify_baseline
 from scripts import ci_repository_compatibility as ci
 from scripts.deployment_acceptance import AcceptedBaseline
 from scripts.repository_compatibility_contract import (
-    load_policy, verify_behavior_tests, verify_inventory, verify_report, verify_tests,
+    load_policy, verify_behavior_tests, verify_report, verify_tests,
 )
-from tests.compatibility_test_environment import worker_python
+from tests.compatibility_test_environment import historical_compatibility_policy, worker_python
 
 
 BASELINE = AcceptedBaseline("22c01936c58d0cd7c99df334465f4562f9e3ca4e", "v3.4.0",
@@ -58,7 +58,7 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_manifest_rejects_empty_skips_duplicates_and_missing_test(self) -> None:
         """Даже passed=true не заменяет полный выполненный manifest."""
-        ids = load_policy()["test_ids"]
+        ids = historical_compatibility_policy(2)["test_ids"]
         result = {"passed": True, "test_ids": ids, "tests_run": len(ids),
                   "skips": [], "failures": [], "errors": []}
         verify_tests(result, ids)
@@ -72,7 +72,7 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_policy_rejects_missing_duplicate_or_unmapped_operation(self) -> None:
         """Удалённый метод и неизвестный test ID не проходят в новой policy."""
-        policy = load_policy()
+        policy = historical_compatibility_policy(2)
         for kind in ("missing", "duplicate", "unknown", "stale-baseline"):
             altered = deepcopy(policy)
             if kind == "missing":
@@ -110,14 +110,14 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_report_accepts_worker_paths_from_linux_and_windows(self) -> None:
         """Формат путей зависит от worker, который создал отчёт."""
-        policy = load_policy()
+        policy = historical_compatibility_policy(2)
         for checkout in (PurePosixPath("/tmp/ci/checkout"), PureWindowsPath(r"C:\Temp\ci\checkout")):
             with self.subTest(checkout=checkout):
                 verify_report(self._report(policy, checkout), policy, previous_sha=BASELINE.sha)
 
     def test_report_requires_absolute_checkout_and_tracked_import_origin(self) -> None:
         """Происхождение импортов проверяется в обоих форматах путей."""
-        policy = load_policy()
+        policy = historical_compatibility_policy(2)
         for checkout in (PurePosixPath("/tmp/ci/checkout"), PureWindowsPath(r"C:\Temp\ci\checkout")):
             for origin in (checkout.parent / "other/compadre_assistant/fixture.py",
                            checkout / "../checkout/compadre_assistant/fixture.py",
@@ -132,7 +132,7 @@ class CompatibilityContractTests(unittest.TestCase):
 
     def test_report_rejects_sql_import_baseline_and_result_substitution(self) -> None:
         """Подмена evidence не скрывается за зелёным агрегированным passed."""
-        policy = load_policy()
+        policy = historical_compatibility_policy(2)
         report = self._report(policy, Path.cwd().resolve() / "fixture")
         source = "compadre_assistant/fixture.py"
         new = report["sources"]["candidate"]
@@ -179,6 +179,7 @@ class CompatibilityContractTests(unittest.TestCase):
             output = root / "output"
             output.mkdir()
             report = {"candidate_sha": "a" * 40, "sources": {"previous": {"old": "hash"}, "candidate": workflows},
+                      "previous_git": {"head": BASELINE.sha, "index_tree": "d" * 40},
                       **{name: {"passed": True} for name in (
                           "candidate_migrations_data_integrity", "old_repository_behavior",
                           "candidate_verified_previous_updates")}}
@@ -195,16 +196,16 @@ class CompatibilityContractTests(unittest.TestCase):
                                               "--output", str(output)]), \
                     patch("scripts.deployment_acceptance.resolve_accepted_baseline", return_value=BASELINE) as resolve, \
                     patch.object(ci, "export_commit", side_effect=[trusted, workflows, {"old": "hash"}]) as export, \
-                    patch.object(ci, "verify_inventory"), patch.object(ci, "verify_report"), \
+                    patch.object(ci, "git_commit_tree", return_value="d" * 40), patch.object(ci, "verify_report"), \
                     patch.object(ci.subprocess, "run") as run:
                 run.return_value.returncode = 0
                 self.assertEqual(ci.main(), 0)
                 self.assertFalse(any(key.startswith(("GITHUB_", "ACTIONS_")) for key in run.call_args.kwargs["env"]))
-                for kind in ("matrix", "resolver", "workflow", "baseline"):
+                for kind in ("policy", "resolver", "workflow", "baseline"):
                     export.side_effect = [trusted, workflows, {"old": "hash"}]
                     run.reset_mock()
-                    if kind == "matrix":
-                        (policy_root / "scripts/repository_compatibility_policy.json").write_bytes(b"substituted matrix")
+                    if kind == "policy":
+                        (policy_root / "scripts/repository_compatibility_policy.json").write_bytes(b"substituted policy")
                     elif kind == "resolver":
                         (policy_root / "scripts/deployment_acceptance.py").write_bytes(b"substituted resolver")
                     elif kind == "workflow":
@@ -220,7 +221,7 @@ class CompatibilityContractTests(unittest.TestCase):
             evidence = json.loads((output / "evidence.json").read_text())
             self.assertEqual((evidence["candidate_sha"], evidence["previous_sha"], evidence["policy_sha"]),
                              ("a" * 40, BASELINE.sha, "b" * 40))
-            self.assertEqual(evidence["version"], 2)
+            self.assertEqual(evidence["version"], 3)
             self.assertEqual(evidence["baseline"], asdict(BASELINE))
             self.assertEqual(set(evidence["policy_files"]), set(ci.DYNAMIC_HARNESS))
             self.assertEqual((evidence["run_id"], evidence["run_attempt"]), (12, 3))
@@ -312,6 +313,15 @@ class FullDiscoveryContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             verify_behavior_tests(behavior, self.policy)
 
+    def test_report_rejects_fully_skipped_discovery(self) -> None:
+        """Дополнительный набор не компенсирует пропуски всех тестов принятой версии."""
+        behavior = self._report()["old_repository_behavior"]
+        old = behavior["old_tests"]
+        old["skips"] = [[test_id, "requires unavailable environment"] for test_id in old["test_ids"]]
+        old["expected_failures"] = []
+        with self.assertRaisesRegex(ValueError, "all compatibility tests were skipped"):
+            verify_behavior_tests(behavior, self.policy)
+
     def test_report_rejects_invalid_git_worker_and_schema_evidence(self) -> None:
         """Точный HEAD, дерево, код завершения и отпечаток схемы обязательны."""
         for section, field, value in (("previous_git", "head", "f" * 40),
@@ -333,17 +343,16 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        """Экспортирует v4.0.1 с актуальным составом тестов совместимости один раз."""
+        """Экспортирует точную v4.0.1 один раз для проверок мутаций."""
         cls.temporary = TemporaryDirectory(prefix="compatibility-mutations-")
         cls.addClassCleanup(cls.temporary.cleanup)
         cls.root = Path(cls.temporary.name).resolve()
-        cls.policy = load_policy()
         cls.repository = Path(__file__).resolve().parents[1]
         subprocess.run(["git", "status", "--short"], cwd=cls.repository, check=True, capture_output=True)
         cls.checkout = cls.root / "previous"
         cls.original = export_commit(cls.repository, "f2da286c02efed55c2174e30aee2a1ad2af05e40", cls.checkout)
 
-    def _run(self, name: str, sql: str, *, full: bool = False) -> dict:
+    def _run(self, name: str, sql: str, *, additional: bool = False) -> dict:
         source = self.root / name / "source"
         (source / MIGRATIONS).mkdir(parents=True)
         for path in (self.checkout / MIGRATIONS).glob("*.sql"):
@@ -353,8 +362,8 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
         expected = overlay_sql(self.checkout, source, snapshot(self.checkout))
         output = self.root / name / "result"
         output.mkdir()
-        modules = [f"tests.test_{name}" for name in BEHAVIOR_MODULES] if full else ["tests.test_user_identity_repository"]
-        extra = ["--compatibility-tests", str(COMPATIBILITY_TESTS.resolve())] if full else []
+        modules = ["tests.test_user_identity_repository"]
+        extra = ["--compatibility-tests", str(COMPATIBILITY_TESTS.resolve())] if additional else []
         result = run_worker(worker_python(), self.checkout, "behavior", output,
                             [*extra, "--test-modules", *modules], 180)
         self.assertEqual(snapshot(self.checkout), expected)
@@ -373,13 +382,8 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
             self.assertEqual(saved["old_tests"]["errors"], result["old_tests"]["errors"])
         return result
 
-    def test_compatible_addition_and_unused_column_removal_pass_full_matrix(self) -> None:
-        """Новый столбец и удаление неиспользуемого fixture-поля проходят полный набор тестов."""
-        verify_inventory(self.checkout, self.policy)
-        changed = deepcopy(self.policy)
-        changed["matrix"][0]["method"] = "nonexistent"
-        with self.assertRaisesRegex(ValueError, "public API"):
-            verify_inventory(self.checkout, changed)
+    def test_compatible_addition_and_unused_column_removal_pass_targeted_cases(self) -> None:
+        """Добавление и удаление неиспользуемого поля сохраняют проверяемое поведение."""
         # Дополнительное поле — отдельная synthetic fixture, исходные SQL не меняются.
         for name, sql in (
             ("add", "ALTER TABLE app_users ADD COLUMN compatibility_unused TEXT;"),
@@ -387,9 +391,9 @@ class CompatibilitySqlMutationTests(unittest.TestCase):
                             "ALTER TABLE app_users DROP COLUMN compatibility_unused;"),
         ):
             with self.subTest(name=name):
-                result = self._run(name, sql, full=True)
+                result = self._run(name, sql, additional=True)
                 self.assertTrue(result["passed"], result.get("error", result.get("old_tests")))
-                verify_tests(result["old_tests"], self.policy["test_ids"])
+                verify_tests(result["old_tests"])
 
     def test_changed_read_value_fails_old_assertions(self) -> None:
         """Успешный INSERT не оправдывает изменённое значение при прежнем чтении."""

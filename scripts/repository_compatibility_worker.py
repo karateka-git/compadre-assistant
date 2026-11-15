@@ -128,9 +128,10 @@ def run_tests(modules: list[str], external_tests: Path | None = None, *,
         for test_id in test_ids if test_id.startswith("unittest.loader.ModuleSkipped.")
     )
     accepts_skips = discover_dir is not None or not (result.skipped or result.expectedFailures)
+    has_unskipped_test = not set(test_ids).issubset(test.id() for test, _ in result.skipped)
     return {"passed": result.wasSuccessful() and result.testsRun == len(test_ids) > 0
             and len(set(test_ids)) == len(test_ids) and sorted(result.started) == sorted(test_ids)
-            and not loader_errors and accepts_skips,
+            and not loader_errors and accepts_skips and has_unskipped_test,
             "tests_run": result.testsRun, "test_ids": test_ids,
             "started_test_ids": result.started, "loader_errors": loader_errors,
             "failures": [test.id() for test, _ in result.failures],
@@ -462,7 +463,7 @@ def old_behavior(modules: list[str], external_tests: Path | None = None,
         "old_tests": tests, "candidate_schema_observations": calls,
         "schema_fingerprints": sorted(fingerprints), "schema_errors": failures,
         "migration_names": names,
-        "coverage": "107-method audit matrix plus external cases; local mechanism, not trusted admission",
+        "coverage": "targeted worker unittest",
     }
     if additional_tests is not None:
         report["additional_tests"] = additional_tests

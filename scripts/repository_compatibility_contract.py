@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import ast
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 
 
 POLICY_PATH = Path(__file__).with_name("repository_compatibility_policy.json")
-# V2 закрепляет только политику проверок. База хранится в Deployments.
-DYNAMIC_POLICY_VERSION = 2
 FULL_DISCOVERY_POLICY_VERSION = 3
+# С версии 2 база определяется по принятым Deployments.
+DEPLOYMENT_POLICY_VERSIONS = (2, FULL_DISCOVERY_POLICY_VERSION)
 _FULL_DISCOVERY_FIELDS = {"version", "repository"}
 _MATRIX_FIELDS = {"version", "repository", "matrix", "test_ids"}
 _LEGACY_BASELINE_FIELDS = {"previous_sha", "release_tag", "release_id"}
@@ -40,8 +39,8 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
             raise ValueError("invalid full-discovery compatibility policy")
         return policy
     if ((version == 1 and policy.keys() != _MATRIX_FIELDS | _LEGACY_BASELINE_FIELDS)
-            or (version == DYNAMIC_POLICY_VERSION and policy.keys() != _MATRIX_FIELDS)
-            or version not in (1, DYNAMIC_POLICY_VERSION)):
+            or (version == 2 and policy.keys() != _MATRIX_FIELDS)
+            or version not in (1, 2)):
         raise ValueError("unknown compatibility policy")
     rows = policy["matrix"]
     keys = {(row["source"], row["class"], row["method"]) for row in rows}
@@ -54,30 +53,6 @@ def load_policy(path: Path = POLICY_PATH) -> dict:
             or any(row["test_id"] not in ids for row in rows)):
         raise ValueError("incomplete compatibility policy/matrix")
     return policy
-
-
-def verify_inventory(checkout: Path, policy: dict) -> None:
-    """Сверяет все публичные методы закреплённых SQLite-классов с матрицей.
-
-    Args:
-        checkout: Точный previous export до исполнения Python.
-        policy: Проверенная policy выбранной базы.
-
-    Raises:
-        ValueError: Источник, класс или публичная операция не совпадают с policy.
-    """
-    expected = {(r["source"], r["class"], r["method"]) for r in policy["matrix"]}
-    actual = set()
-    for source in {r["source"] for r in policy["matrix"]}:
-        tree = ast.parse((checkout / source).read_text(encoding="utf-8"))
-        classes = {r["class"] for r in policy["matrix"] if r["source"] == source}
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef) and node.name in classes:
-                actual.update((source, node.name, method.name) for method in node.body
-                              if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
-                              and not method.name.startswith("_"))
-    if actual != expected:
-        raise ValueError("previous public API differs from policy matrix")
 
 
 def verify_tests(result: dict, expected_ids: list[str] | None = None) -> None:
@@ -118,6 +93,7 @@ def _verify_test_execution(result: dict, *, allow_skips: bool) -> set[str]:
     if (not isinstance(skips, list) or not isinstance(expected_failures, list)
             or not allow_skips and (skips or expected_failures)):
         raise ValueError("invalid compatibility test skips or expected failures")
+    skipped_ids = set()
     for skip in skips:
         # unittest добавляет к ID родительского теста описание пропущенного subTest.
         if not isinstance(skip, list) or len(skip) != 2 or any(not isinstance(value, str) for value in skip):
@@ -125,6 +101,9 @@ def _verify_test_execution(result: dict, *, allow_skips: bool) -> set[str]:
         skipped_id = skip[0]
         if skipped_id not in started_ids and not any(skipped_id.startswith(f"{test_id} ") for test_id in started_ids):
             raise ValueError("unknown skipped compatibility test")
+        skipped_ids.add(skipped_id)
+    if started_ids <= skipped_ids:
+        raise ValueError("all compatibility tests were skipped")
     if any(not isinstance(test_id, str) or test_id not in started_ids for test_id in expected_failures):
         raise ValueError("unknown expected compatibility test failure")
     return started_ids

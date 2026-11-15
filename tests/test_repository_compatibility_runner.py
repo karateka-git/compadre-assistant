@@ -157,6 +157,8 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
 
         def worker(python, checkout, mode, output, extra, timeout):
             modes.append(mode)
+            if mode == "behavior":
+                self.assertEqual(extra, ["--compatibility-tests", str(runner.COMPATIBILITY_TESTS), "--full-discovery"])
             return {"passed": mode != "candidate"}
 
         output = self.root / "separate-results"
@@ -164,6 +166,8 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
                                        "--candidate-sha", "b" * 40, "--output", str(output)]), \
                 patch.object(runner, "export_commit", side_effect=export), \
                 patch.object(runner, "create_environment", return_value=Path(sys.executable)), \
+                patch.object(runner, "attach_git_history", return_value=None), \
+                patch.object(runner, "verify_git_history", return_value={"head": "a" * 40, "index_tree": "b" * 40}), \
                 patch.object(runner, "run_worker", side_effect=worker):
             self.assertEqual(runner.main(), 1)
         self.assertEqual(modes, ["seed", "candidate", "behavior"])
@@ -248,6 +252,19 @@ class AddedTest(unittest.TestCase):
         self.assertIn("test_compat_discovery_new.AddedTest.test_new_case", result["started_test_ids"])
         self.assertEqual(result["skips"], [("test_compat_discovery_common.OrdinaryTest.test_skip", "platform")])
         self.assertEqual(result["expected_failures"], ["test_compat_discovery_common.OrdinaryTest.test_expected_failure"])
+
+    def test_discovery_fails_if_all_cases_are_skipped(self) -> None:
+        """Декларативные пропуски не дают успех при отсутствии выполненных тестов."""
+        self._write_discovery_module("all_skipped", """
+class SkippedTest(unittest.TestCase):
+    @unittest.skip('platform')
+    def test_skipped_case(self):
+        self.fail('skip must prevent this assertion')
+""")
+        result = self._discover()
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["test_ids"], result["started_test_ids"])
+        self.assertEqual(len(result["skips"]), 1)
 
     def test_discovery_fails_if_cases_are_not_started(self) -> None:
         """Пропуск через setup модуля и вызов без startTest делают прогон неполным."""

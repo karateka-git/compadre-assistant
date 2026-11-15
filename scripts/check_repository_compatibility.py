@@ -16,16 +16,6 @@ from tempfile import TemporaryDirectory
 MIGRATIONS = "compadre_assistant/core/data/sqlite/migrations"
 WORKER = Path(__file__).with_name("repository_compatibility_worker.py")
 COMPATIBILITY_TESTS = Path(__file__).with_name("repository_compatibility_cases.py")
-# Старые tests 5.1 дополняются внешними cases 5.3; доверенный manifest относится к 5.4.
-BEHAVIOR_MODULES = (
-    "analysis_result_repository", "article_user_isolation", "incoming_message_repository",
-    "processing_error_recorder", "user_identity_repository", "capability_preference_repository",
-    "chat_modes", "vault_repositories", "obsidian_proposal_repository",
-    "vault_chunk_index_repository", "vault_embedding_index_repository", "embedding_checkpoints",
-    "vault_full_text_search", "vault_lease_fencing", "github_connection_state_store",
-    "github_installation_writer", "vault_selection", "operation_scopes", "linked_chat_menus",
-    "menu_reconciliation", "telegram_flow_smoke", "capability_composition",
-)
 
 
 def snapshot(root: Path, *, git_marker: bytes | None = None) -> dict[str, str]:
@@ -168,6 +158,22 @@ def _history_git(root: Path, *args: str) -> str:
                           check=True, capture_output=True, text=True, encoding="utf-8").stdout.strip()
 
 
+def git_commit_tree(repository: Path, sha: str) -> str:
+    """Возвращает SHA дерева точного коммита из локального Git-репозитория.
+
+    Args:
+        repository: Репозиторий, из которого проверяющая сторона читает коммит.
+        sha: Уже подтверждённый SHA коммита.
+
+    Returns:
+        SHA дерева коммита.
+
+    Raises:
+        subprocess.CalledProcessError: Git не смог прочитать дерево коммита.
+    """
+    return _history_git(repository, "rev-parse", "--verify", f"{sha}^{{tree}}")
+
+
 def attach_git_history(repository: Path, checkout: Path, sha: str, git_directory: Path) -> bytes:
     """Создаёт отдельные метаданные временного экспорта с доступом к объектам.
 
@@ -217,7 +223,7 @@ def verify_git_history(checkout: Path, sha: str, git_directory: Path) -> dict[st
     if head != sha:
         raise ValueError("previous Git HEAD differs from exact SHA")
     tree = _history_git(checkout, "write-tree")
-    if tree != _history_git(checkout, "rev-parse", f"{sha}^{{tree}}"):
+    if tree != git_commit_tree(checkout, sha):
         raise ValueError("previous Git index differs from exact SHA")
     return {"head": head, "index_tree": tree}
 
@@ -272,7 +278,7 @@ def run_worker(python: Path, checkout: Path, mode: str, output: Path,
 
 
 def main() -> int:
-    """Выполняет локальный набор 5.2–5.3 без доверенного CI admission."""
+    """Выполняет полный набор принятой версии и проверяет обмен данными."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--previous-sha", required=True)
@@ -280,14 +286,12 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--timeout", type=int, help="worker timeout in seconds (full discovery defaults to 600)")
-    parser.add_argument("--full-discovery", action="store_true",
-                        help="run the complete previous unittest suite in addition to the external cases")
     args = parser.parse_args()
     timeout = 300 if args.timeout is None else args.timeout
-    behavior_timeout = 600 if args.full_discovery and args.timeout is None else timeout
+    behavior_timeout = 600 if args.timeout is None else timeout
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
-    report = {"scope": "step-5.3-local-mechanism-not-admission", "previous_sha": args.previous_sha,
+    report = {"scope": "full-previous-suite", "previous_sha": args.previous_sha,
               "candidate_sha": args.candidate_sha, "passed": False,
               "candidate_migrations_data_integrity": {"passed": False, "status": "not_run"},
               "old_repository_behavior": {"passed": False, "status": "not_run"},
@@ -313,24 +317,20 @@ def main() -> int:
             expected = overlay_sql(previous, candidate, old_manifest)
             report["previous_with_candidate_sql"] = expected
             previous_git = root / "previous-git"
-            git_marker = (attach_git_history(args.repository.resolve(), previous, args.previous_sha, previous_git)
-                          if args.full_discovery else None)
+            git_marker = attach_git_history(args.repository.resolve(), previous, args.previous_sha, previous_git)
             if seed["passed"]:
                 report["candidate_migrations_data_integrity"] = run_worker(
                     new_python, candidate, "candidate", output,
                     ["--database", str(database), "--previous-sql", str(old_sql)], timeout)
-            selection = (["--full-discovery"] if args.full_discovery
-                         else ["--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]])
             report["old_repository_behavior"] = run_worker(
                 old_python, previous, "behavior", output,
                 [*(["--database", str(database)] if report["candidate_migrations_data_integrity"]["passed"] else []),
-                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()), *selection], behavior_timeout)
+                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()), "--full-discovery"], behavior_timeout)
             if report["old_repository_behavior"]["passed"] and report["candidate_migrations_data_integrity"]["passed"]:
                 report["candidate_verified_previous_updates"] = run_worker(
                     new_python, candidate, "verify", output, ["--database", str(database)], timeout)
             actual_previous, actual_candidate = snapshot(previous, git_marker=git_marker), snapshot(candidate)
-            if git_marker is not None:
-                report["previous_git"] = verify_git_history(previous, args.previous_sha, previous_git)
+            report["previous_git"] = verify_git_history(previous, args.previous_sha, previous_git)
             report["source_changes"] = {
                 label: [name for name in sorted(before.keys() | after.keys()) if before.get(name) != after.get(name)]
                 for label, before, after in (("previous", expected, actual_previous),
@@ -345,7 +345,7 @@ def main() -> int:
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         report["error"] = str(error)
     (output / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"Step 5.3 local mechanism passed={report['passed']}; report: {output / 'report.json'}")
+    print(f"Repository compatibility passed={report['passed']}; report: {output / 'report.json'}")
     return 0 if report["passed"] else 1
 
 

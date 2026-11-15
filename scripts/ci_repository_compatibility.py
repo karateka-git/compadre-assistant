@@ -19,10 +19,8 @@ from typing import TYPE_CHECKING
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.check_repository_compatibility import export_commit, snapshot
-from scripts.repository_compatibility_contract import (
-    DYNAMIC_POLICY_VERSION, load_policy, verify_inventory, verify_report,
-)
+from scripts.check_repository_compatibility import export_commit, git_commit_tree, snapshot
+from scripts.repository_compatibility_contract import FULL_DISCOVERY_POLICY_VERSION, load_policy, verify_report
 
 if TYPE_CHECKING:
     from scripts.deployment_acceptance import AcceptedBaseline
@@ -34,7 +32,7 @@ LEGACY_HARNESS = (
     "repository_compatibility_policy.json", "check_repository_compatibility.py",
     "repository_compatibility_worker.py", "repository_compatibility_cases.py",
 )
-# V2 использует пути от корня репозитория и закрепляет зависимости читателя Deployments.
+# С версии 2 пути отсчитываются от корня и закрепляют зависимости читателя Deployments.
 DYNAMIC_HARNESS = (
     *(f"scripts/{name}" for name in LEGACY_HARNESS),
     "scripts/deployment_acceptance.py", "scripts/full_ci_controller.py", "scripts/full_ci_admission.py",
@@ -47,7 +45,6 @@ DYNAMIC_HARNESS = (
     "compadre_assistant/core/data/sqlite/migration_runner.py",
 )
 WORKFLOWS = ("full-suite.yml", "main-full.yml", "release-full.yml")
-EVIDENCE_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -237,8 +234,8 @@ def main() -> int:
         if not re.fullmatch(r"[0-9a-f]{40}", sha):
             raise ValueError("exact candidate and external policy SHA are required")
     policy = load_policy()
-    if policy["version"] != DYNAMIC_POLICY_VERSION or os.environ["GITHUB_REPOSITORY"] != policy["repository"]:
-        raise ValueError("unexpected repository")
+    if policy["version"] != FULL_DISCOVERY_POLICY_VERSION or os.environ["GITHUB_REPOSITORY"] != policy["repository"]:
+        raise ValueError("unexpected repository or compatibility policy")
     for name in ("GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"):
         if not os.environ[name].isdigit() or int(os.environ[name]) <= 0:
             raise ValueError("missing CI run identity")
@@ -261,7 +258,7 @@ def main() -> int:
                 raise ValueError(f"candidate changed trusted workflow: {name}")
         baseline = _confirmed_baseline(policy["repository"], args.previous_sha, args.accepted_baseline)
         previous_manifest = export_commit(args.repository, args.previous_sha, root / "previous")
-        verify_inventory(root / "previous", policy)
+        previous_tree = git_commit_tree(args.repository, args.previous_sha)
         # Candidate requirements/tests не получают API token и CI control file paths.
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("GITHUB_", "ACTIONS_", "INPUT_"))}
@@ -273,11 +270,12 @@ def main() -> int:
         report = json.loads((args.output / "report.json").read_text(encoding="utf-8"))
         if (result.returncode or report["candidate_sha"] != candidate
                 or report["sources"]["previous"] != previous_manifest
-                or report["sources"]["candidate"] != candidate_manifest):
+                or report["sources"]["candidate"] != candidate_manifest
+                or report.get("previous_git", {}).get("index_tree") != previous_tree):
             raise ValueError("runner failed or source identity mismatch")
         verify_report(report, policy, previous_sha=args.previous_sha)
         evidence = {
-            "version": EVIDENCE_VERSION, "repository": policy["repository"], "candidate_sha": candidate,
+            "version": policy["version"], "repository": policy["repository"], "candidate_sha": candidate,
             "previous_sha": args.previous_sha, "policy_sha": policy_sha, "baseline": baseline,
             "workflow_ref": workflow, "run_id": int(os.environ["GITHUB_RUN_ID"]),
             "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
