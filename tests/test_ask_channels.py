@@ -400,9 +400,12 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertIn("100", self.send(channel, processor, "/ask " + "я" * 101))
                     self.assertEqual(model.answer.call_count, 2)
                     with connect_database(self.path) as connection:
+                        migrated = connection.execute(
+                            "SELECT 1 FROM schema_migrations WHERE name = '0006_ai_capability_id.sql'"
+                        ).fetchone()
                         self.assertEqual(connection.execute(
                             "SELECT capability_id FROM active_chat_modes WHERE channel = ?", (channel,)
-                        ).fetchone()[0], "ask")
+                        ).fetchone()[0], "ai" if migrated else "ask")
                     self.send(channel, processor, "/exit")
                     denied = self.send(channel, processor, "/ask после выхода")
                     self.assertIn("войди в режим через", denied)

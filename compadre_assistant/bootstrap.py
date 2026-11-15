@@ -83,9 +83,19 @@ LOGGER = logging.getLogger(__name__)
 AI_CAPABILITY_ID = AskCapability.descriptor.capability_id
 # Deprecated: v4.0.3 читает SQLite и конфигурацию запуска с прежним ID.
 _LEGACY_AI_CAPABILITY_ID = "ask"
-_SQLITE_CAPABILITY_IDS = SQLiteCapabilityIds({AI_CAPABILITY_ID: _LEGACY_AI_CAPABILITY_ID})
+_LEGACY_SQLITE_CAPABILITY_IDS = SQLiteCapabilityIds({AI_CAPABILITY_ID: _LEGACY_AI_CAPABILITY_ID})
+_AI_CAPABILITY_ID_MIGRATION = "0006_ai_capability_id.sql"
 # Неполный снимок требует нового чтения, даже если консервативное меню доставлено.
 INCOMPLETE_MENU_SNAPSHOT = "Неполный снимок подтверждений"
+
+
+def _capability_ids_for_schema(connection: sqlite3.Connection) -> SQLiteCapabilityIds | None:
+    """Выбирает формат записи для обычного запуска и для возврата на новой БД."""
+    migrated = connection.execute(
+        "SELECT 1 FROM schema_migrations WHERE version = 6 AND name = ?",
+        (_AI_CAPABILITY_ID_MIGRATION,),
+    ).fetchone()
+    return None if migrated is not None else _LEGACY_SQLITE_CAPABILITY_IDS
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -230,12 +240,13 @@ class ChannelMessageProcessor:
     def _deferred_access(self, event: IncomingEvent, app_user_id: int,
                          capability_id: str, required_mode: str | None) -> bool:
         with connect_database(self._database_path) as connection:
+            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 user_identity_service=create_user_identity_service(connection),
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=_SQLITE_CAPABILITY_IDS),
+                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=_SQLITE_CAPABILITY_IDS,
+                    connection, capability_ids=capability_ids,
                 ),
             )
             return dispatcher.may_finish_deferred(event, app_user_id, capability_id, required_mode)
@@ -425,13 +436,14 @@ class ChannelMessageProcessor:
                 return None
             else:
                 self._unregistered_menu_events[address] = event
+            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry, pending_inputs=self._pending_inputs,
                 deferred_actions=self._deferred_actions,
                 user_identity_service=service,
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=_SQLITE_CAPABILITY_IDS),
+                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=_SQLITE_CAPABILITY_IDS,
+                    connection, capability_ids=capability_ids,
                 ),
             )
             if expired_input is not None and not dispatcher.may_notify_input_expired(
@@ -534,6 +546,7 @@ class ChannelMessageProcessor:
                 self._reconcile_menu_event(event, menu_update_handler, allow_unknown=False)
 
         with connect_database(self._database_path) as connection:
+            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 pending_inputs=self._pending_inputs,
@@ -541,9 +554,9 @@ class ChannelMessageProcessor:
                 deferred_access=self._deferred_access,
                 deferred_menu_refresh=refresh_deferred_menu if menu_update_handler is not None else None,
                 user_identity_service=create_user_identity_service(connection),
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=_SQLITE_CAPABILITY_IDS),
+                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=_SQLITE_CAPABILITY_IDS,
+                    connection, capability_ids=capability_ids,
                 ),
             )
             try:
@@ -557,14 +570,15 @@ class ChannelMessageProcessor:
                 if original_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:
+                            background_ids = _capability_ids_for_schema(background_connection)
                             background_dispatcher = IncomingMessageDispatcher(
                                 registry=self._registry, pending_inputs=self._pending_inputs,
                                 user_identity_service=create_user_identity_service(background_connection),
                                 chat_mode_repository=SQLiteChatModeRepository(
-                                    background_connection, capability_ids=_SQLITE_CAPABILITY_IDS,
+                                    background_connection, capability_ids=background_ids,
                                 ),
                                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                                    background_connection, capability_ids=_SQLITE_CAPABILITY_IDS,
+                                    background_connection, capability_ids=background_ids,
                                 ),
                             )
                             if background_dispatcher.action_context(origin) == original_context:
