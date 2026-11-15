@@ -1,37 +1,37 @@
 """Типизированные ошибки проверки вопроса и получения ответа модели."""
 
 
-class AskError(RuntimeError):
-    """Базовая ожидаемая ошибка сценария Ask."""
+class AiError(RuntimeError):
+    """Базовая ожидаемая ошибка сценариев ИИ."""
 
 
-class EmptyQuestionError(AskError):
+class EmptyQuestionError(AiError):
     """Вопрос не содержит символов, отличных от пробельных."""
 
 
-class QuestionTooLongError(AskError):
+class QuestionTooLongError(AiError):
     """Вопрос после удаления внешних пробелов превышает допустимую длину."""
 
 
-class AskModelError(AskError):
+class AiModelError(AiError):
     """Базовая ожидаемая ошибка получения ответа через port модели."""
 
 
-class AskModelTimeoutError(AskModelError):
+class AiModelTimeoutError(AiModelError):
     """Модель не ответила за отведённое время."""
 
 
-class AskModelUnavailableError(AskModelError):
+class AiModelUnavailableError(AiModelError):
     """Запрос к провайдеру модели завершился ошибкой API или соединения."""
 
 
-class InvalidAskAnswerError(AskModelError):
+class InvalidAskAnswerError(AiModelError):
     """Модель вернула пустой ответ или результат неподдерживаемого формата."""
 
 
-class InvalidOcrImageError(AskError):
+class InvalidOcrImageError(AiError):
     """Байты изображения пусты, имеют неизвестную сигнатуру или превышают лимит."""
 
 
-class InvalidOcrAnswerError(AskModelError):
+class InvalidOcrAnswerError(AiModelError):
     """Модель вернула незавершённый ответ либо нарушила формат распознавания."""

@@ -15,9 +15,9 @@ from compadre_assistant.core.presentation.incoming.action_selection import Respo
 from compadre_assistant.capabilities.admin.bootstrap import create_admin_runtime
 from compadre_assistant.capabilities.admin.data.configuration import load_admin_profile, load_admin_timeweb_config
 from compadre_assistant.capabilities.admin.presentation.handler import AdminCapability
-from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
-from compadre_assistant.capabilities.ask.data.configuration import AskConfig, load_ask_config
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
+from compadre_assistant.capabilities.ai.data.configuration import AiConfig, load_ai_config
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -79,7 +79,7 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
 
 LOGGER = logging.getLogger(__name__)
 # Публичный ID режима для серверной конфигурации и диагностики.
-AI_CAPABILITY_ID = AskCapability.descriptor.capability_id
+AI_CAPABILITY_ID = AiCapability.descriptor.capability_id
 # Неполный снимок требует нового чтения, даже если консервативное меню доставлено.
 INCOMPLETE_MENU_SNAPSHOT = "Неполный снимок подтверждений"
 
@@ -591,7 +591,7 @@ def create_channel_message_processor(
     use_case_factory: ProcessArticleUrlUseCaseFactory | None = None,
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
-    ask_config: AskConfig | None = None,
+    ai_config: AiConfig | None = None,
 ) -> Iterator[ChannelMessageProcessor]:
     """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
 
@@ -602,7 +602,7 @@ def create_channel_message_processor(
         use_case_factory: Подменная фабрика article pipeline для тестов.
         analysis_use_case_factory: Подменная фабрика анализа для тестов.
         enabled_capabilities: Явно включённые ID.
-        ask_config: Профиль Ask либо None для чтения ASK_* при включении.
+        ai_config: Профиль ИИ либо None для чтения ASK_* при включении.
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
@@ -630,16 +630,16 @@ def create_channel_message_processor(
         ) if "obsidian" in enabled_capabilities else None
         with (
             create_admin_runtime(enabled=admin_enabled) as admin,
-            create_ask_runtime(enabled=AI_CAPABILITY_ID in enabled_capabilities, config=ask_config) as ask,
+            create_ai_runtime(enabled=AI_CAPABILITY_ID in enabled_capabilities, config=ai_config) as ai,
         ):
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (
                 obsidian_descriptor(),
             )
-            if ask is not None:
-                capabilities += (ask,)
+            if ai is not None:
+                capabilities += (ai,)
             else:
-                disabled += (AskCapability.descriptor,)
+                disabled += (AiCapability.descriptor,)
             if admin is not None:
                 capabilities += (admin,)
             else:

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from compadre_assistant.capabilities.ask.domain.errors import InvalidOcrImageError
+from compadre_assistant.capabilities.ai.domain.errors import InvalidOcrImageError
 
 
 # Верхний предел проверяется даже для вызовов вне адаптеров каналов.

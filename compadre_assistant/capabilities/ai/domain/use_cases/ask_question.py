@@ -1,11 +1,11 @@
 """Сценарий одного вопроса и одного ответа без истории диалога."""
 
-from compadre_assistant.capabilities.ask.domain.errors import (
+from compadre_assistant.capabilities.ai.domain.errors import (
     EmptyQuestionError,
     InvalidAskAnswerError,
     QuestionTooLongError,
 )
-from compadre_assistant.capabilities.ask.domain.ports.model import AskModel
+from compadre_assistant.capabilities.ai.domain.ports.model import AskModel
 
 
 # Инструкция принадлежит возможности и одинакова для всех каналов и запросов.
@@ -50,8 +50,8 @@ class AskQuestion:
         Raises:
             EmptyQuestionError: Если после удаления пробелов вопрос пуст.
             QuestionTooLongError: Если длина вопроса превышает ограничение.
-            AskModelTimeoutError: Если истекло время ожидания модели.
-            AskModelUnavailableError: Если провайдер модели недоступен.
+            AiModelTimeoutError: Если истекло время ожидания модели.
+            AiModelUnavailableError: Если провайдер модели недоступен.
             InvalidAskAnswerError: Если модель не вернула непустую строку.
         """
         question = self.validate_question(question)

@@ -6,27 +6,27 @@ from typing import Any
 from openai import APITimeoutError, OpenAI
 from openai.types.chat import ChatCompletion, ChatCompletionMessageParam
 
-from compadre_assistant.capabilities.ask.data.configuration import AskConfig
-from compadre_assistant.capabilities.ask.domain.errors import (
-    AskModelTimeoutError,
-    AskModelUnavailableError,
+from compadre_assistant.capabilities.ai.data.configuration import AiConfig
+from compadre_assistant.capabilities.ai.domain.errors import (
+    AiModelTimeoutError,
+    AiModelUnavailableError,
     InvalidAskAnswerError,
     InvalidOcrAnswerError,
 )
-from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
-from compadre_assistant.capabilities.ask.domain.ports.model import AskModel, OcrModel
-from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import OCR_NO_TEXT, OCR_TEXT_HEADER
+from compadre_assistant.capabilities.ai.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ai.domain.ports.model import AskModel, OcrModel
+from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import OCR_NO_TEXT, OCR_TEXT_HEADER
 
 
-class OpenAIAskModel(AskModel, OcrModel):
+class OpenAIModel(AskModel, OcrModel):
     """Отправляет независимые запросы и скрывает детали ошибок провайдера.
 
     Args:
-        config: Проверенные настройки только возможности Ask.
+        config: Проверенные настройки только возможности ИИ.
         client: Подменный SDK-клиент; его жизненным циклом владеет вызывающий.
     """
 
-    def __init__(self, config: AskConfig, *, client: Any | None = None) -> None:
+    def __init__(self, config: AiConfig, *, client: Any | None = None) -> None:
         """Собирает адаптер с клиентом SDK."""
         self._config = config
         self._owns_client = client is None
@@ -40,14 +40,14 @@ class OpenAIAskModel(AskModel, OcrModel):
 
         Args:
             question: Проверенный текущий вопрос.
-            instruction: Фиксированная инструкция сценария Ask.
+            instruction: Фиксированная инструкция сценария вопроса.
 
         Returns:
             Непустой текст в пределах настроенного ограничения символов.
 
         Raises:
-            AskModelTimeoutError: Истекло время ожидания API.
-            AskModelUnavailableError: Запрос API завершился ошибкой.
+            AiModelTimeoutError: Истекло время ожидания API.
+            AiModelUnavailableError: Запрос API завершился ошибкой.
             InvalidAskAnswerError: Ответ пуст, некорректен или превышает лимит.
         """
         response = self._complete([{"role": "system", "content": instruction},
@@ -72,8 +72,8 @@ class OpenAIAskModel(AskModel, OcrModel):
             Транскрипция с исходным форматированием либо результат без текста.
 
         Raises:
-            AskModelTimeoutError: Если истёк таймаут модели.
-            AskModelUnavailableError: Если провайдер недоступен.
+            AiModelTimeoutError: Если истёк таймаут модели.
+            AiModelUnavailableError: Если провайдер недоступен.
             InvalidOcrAnswerError: Если ответ оборван или нарушает формат.
         """
         encoded = b64encode(image.data).decode("ascii")
@@ -105,11 +105,11 @@ class OpenAIAskModel(AskModel, OcrModel):
                 timeout=self._config.timeout_seconds,
             )
         except (APITimeoutError, TimeoutError):
-            raise AskModelTimeoutError("Модель не ответила за отведённое время.") from None
+            raise AiModelTimeoutError("Модель не ответила за отведённое время.") from None
         except Exception:
             # SDK может включать credentials или тело ответа в исключение.
             # Подавляем цепочку, чтобы обычный traceback тоже был безопасным.
-            raise AskModelUnavailableError("Не удалось получить ответ модели.") from None
+            raise AiModelUnavailableError("Не удалось получить ответ модели.") from None
 
     def close(self) -> None:
         """Закрывает только SDK-клиент, созданный этим adapter."""

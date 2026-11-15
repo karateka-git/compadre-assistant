@@ -1,4 +1,4 @@
-"""Проверки профиля, API adapter и жизненного цикла Ask без внешней сети."""
+"""Проверки профиля, API adapter и жизненного цикла режима ИИ без внешней сети."""
 
 from base64 import b64decode
 from dataclasses import replace
@@ -10,31 +10,31 @@ from unittest.mock import patch
 import httpx
 from openai import OpenAI
 
-from compadre_assistant.capabilities.ask.bootstrap import create_ask_runtime
-from compadre_assistant.capabilities.ask.data.configuration import AskConfig, AskConfigError, load_ask_config
-from compadre_assistant.capabilities.ask.data.llm.openai_ask_model import OpenAIAskModel
-from compadre_assistant.capabilities.ask.domain.errors import (
-    AskModelTimeoutError, AskModelUnavailableError, InvalidAskAnswerError,
+from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
+from compadre_assistant.capabilities.ai.data.configuration import AiConfig, AiConfigError, load_ai_config
+from compadre_assistant.capabilities.ai.data.llm.openai_model import OpenAIModel
+from compadre_assistant.capabilities.ai.domain.errors import (
+    AiModelTimeoutError, AiModelUnavailableError, InvalidAskAnswerError,
     InvalidOcrAnswerError, InvalidOcrImageError, QuestionTooLongError,
 )
-from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
-from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import (
+from compadre_assistant.capabilities.ai.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import ASK_INSTRUCTION, AskQuestion
+from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import (
     ExtractImageText, OCR_INSTRUCTION,
 )
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 
 
-def _config() -> AskConfig:
-    return AskConfig(base_url="https://ask.example/v1", api_key="ask-secret", model="ask-model")
+def _config() -> AiConfig:
+    return AiConfig(base_url="https://ask.example/v1", api_key="ask-secret", model="ask-model")
 
 
-class AskConfigurationTest(unittest.TestCase):
+class AiConfigurationTest(unittest.TestCase):
     """Проверяет независимость профиля и безопасную валидацию."""
 
-    def test_ask_ignores_obsidian_and_uses_own_settings(self) -> None:
-        """Все параметры Ask берутся из собственного пространства имён."""
-        config = load_ask_config({
+    def test_ai_ignores_obsidian_and_uses_own_settings(self) -> None:
+        """Все параметры ИИ берутся из собственного пространства имён."""
+        config = load_ai_config({
             "ASK_BASE_URL": "https://ask.example/v1", "ASK_API_KEY": "ask-secret",
             "ASK_MODEL": "ask-model", "ASK_TIMEOUT_SECONDS": "9.5",
             "ASK_MAX_QUESTION_CHARS": "123", "ASK_MAX_RESPONSE_TOKENS": "45",
@@ -45,10 +45,10 @@ class AskConfigurationTest(unittest.TestCase):
                          max_question_chars=123, max_response_tokens=45, max_response_chars=678))
         self.assertNotIn("ask-secret", repr(config))
 
-    def test_obsidian_credentials_cannot_supply_missing_ask_profile(self) -> None:
-        """Глобальный ключ не заменяет обязательные настройки Ask."""
-        with self.assertRaises(AskConfigError):
-            load_ask_config({"OPENAI_API_KEY": "other-secret", "OPENAI_MODEL": "other"})
+    def test_obsidian_credentials_cannot_supply_missing_ai_profile(self) -> None:
+        """Глобальный ключ не заменяет обязательные настройки ИИ."""
+        with self.assertRaises(AiConfigError):
+            load_ai_config({"OPENAI_API_KEY": "other-secret", "OPENAI_MODEL": "other"})
 
     def test_invalid_limits_and_endpoints_are_rejected_without_values(self) -> None:
         """Нечисловые, бесконечные и отрицательные лимиты не доходят до SDK."""
@@ -57,13 +57,13 @@ class AskConfigurationTest(unittest.TestCase):
                              ("max_response_tokens", -1), ("max_response_chars", 1.5),
                              ("base_url", "https://user:secret@example.com"),
                              ("base_url", "file:///secret"), ("model", " "), ("api_key", "")):
-            with self.subTest(field=field, value=value), self.assertRaises(AskConfigError):
+            with self.subTest(field=field, value=value), self.assertRaises(AiConfigError):
                 replace(_config(), **{field: value})
-        with self.assertRaises(AskConfigError) as caught:
-            load_ask_config({"ASK_TIMEOUT_SECONDS": "sensitive-value"})
+        with self.assertRaises(AiConfigError) as caught:
+            load_ai_config({"ASK_TIMEOUT_SECONDS": "sensitive-value"})
         self.assertNotIn("sensitive-value", "".join(traceback.format_exception(caught.exception)))
 
-class AskApiTest(unittest.TestCase):
+class AiApiTest(unittest.TestCase):
     """Использует настоящий OpenAI SDK с подменным HTTP transport."""
 
     def _run(self, handler, *, config=None, questions=("Вопрос",), image=None):
@@ -71,14 +71,14 @@ class AskApiTest(unittest.TestCase):
         with httpx.Client(transport=httpx.MockTransport(handler)) as http_client:
             with OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0,
                         http_client=http_client) as client:
-                adapter = OpenAIAskModel(profile, client=client)
+                adapter = OpenAIModel(profile, client=client)
                 use_case = AskQuestion(model=adapter, max_question_chars=profile.max_question_chars)
                 answers = [use_case.execute(question) for question in questions]
                 if image is not None:
                     answers.append(ExtractImageText(model=adapter).execute(image))
                 return answers
 
-    def test_requests_are_independent_and_use_ask_profile(self) -> None:
+    def test_requests_are_independent_and_use_ai_profile(self) -> None:
         """На проводе видны только инструкция и текущий вопрос, без tools."""
         requests = []
 
@@ -108,7 +108,7 @@ class AskApiTest(unittest.TestCase):
                     raise httpx.ReadTimeout("provider-secret", request=request)
                 return httpx.Response(500, json={"error": {"message": "provider-secret"}})
 
-            expected = AskModelTimeoutError if timeout else AskModelUnavailableError
+            expected = AiModelTimeoutError if timeout else AiModelUnavailableError
             with self.subTest(timeout=timeout), self.assertRaises(expected) as caught:
                 self._run(handler)
             formatted = "".join(traceback.format_exception(caught.exception))
@@ -199,7 +199,7 @@ class AskApiTest(unittest.TestCase):
 
     def test_ocr_api_failure_hides_payload(self) -> None:
         """Отказ API не раскрывает ключ и тело ответа в traceback."""
-        with self.assertRaises(AskModelUnavailableError) as caught:
+        with self.assertRaises(AiModelUnavailableError) as caught:
             self._run(lambda _: httpx.Response(403, json={"error": {"message": "provider-private"}}),
                       questions=(), image=b"\xff\xd8\xffsample")
         formatted = "".join(traceback.format_exception(caught.exception))
@@ -215,24 +215,24 @@ class AskApiTest(unittest.TestCase):
                           questions=(), image=image)
 
 
-class AskBootstrapTest(unittest.TestCase):
-    """Проверяет отключение и освобождение принадлежащего Ask клиента."""
+class AiBootstrapTest(unittest.TestCase):
+    """Проверяет отключение и освобождение принадлежащего режиму ИИ клиента."""
 
     def test_disabled_does_not_load_profile_or_construct_client(self) -> None:
         """Отключённая возможность не обращается даже к loader настроек."""
-        with patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config") as loader, \
-                patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model:
-            with create_ask_runtime(enabled=False) as runtime:
+        with patch("compadre_assistant.capabilities.ai.bootstrap.load_ai_config") as loader, \
+                patch("compadre_assistant.capabilities.ai.bootstrap.OpenAIModel") as model:
+            with create_ai_runtime(enabled=False) as runtime:
                 self.assertIsNone(runtime)
             loader.assert_not_called()
             model.assert_not_called()
 
     def test_enabled_runtime_configures_sdk_and_closes_on_failure(self) -> None:
         """SDK получает отдельные настройки, без повторов и с гарантированным close."""
-        with patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI") as sdk:
+        with patch("compadre_assistant.capabilities.ai.data.llm.openai_model.OpenAI") as sdk:
             with self.assertRaisesRegex(RuntimeError, "consumer"):
-                with create_ask_runtime(enabled=True, config=_config()) as runtime:
-                    self.assertIsInstance(runtime, AskCapability)
+                with create_ai_runtime(enabled=True, config=_config()) as runtime:
+                    self.assertIsInstance(runtime, AiCapability)
                     raise RuntimeError("consumer")
             sdk.assert_called_once_with(base_url="https://ask.example/v1", api_key="ask-secret",
                                         timeout=60.0, max_retries=0)

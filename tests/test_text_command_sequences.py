@@ -10,8 +10,8 @@ from unittest.mock import Mock
 from compadre_assistant.bootstrap import ChannelMessageProcessor
 from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import ObsidianProposalConfirmationService
 from compadre_assistant.capabilities.obsidian.data.sqlite.obsidian_proposal_repository import SQLiteObsidianProposalRepository
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.data.sqlite.analysis_result_repository import SQLiteArticleAnalysisResultRepository
 from compadre_assistant.capabilities.obsidian.data.sqlite.article_repository import SQLiteArticleRepository
 from compadre_assistant.capabilities.obsidian.data.sqlite.processing_error_repository import SQLiteProcessingErrorRecorder
@@ -60,7 +60,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         )
         self.model = Mock()
         self.model.answer.return_value = "Ответ модели"
-        self.ask = AskCapability(AskQuestion(model=self.model, max_question_chars=80), Mock())
+        self.ask = AiCapability(AskQuestion(model=self.model, max_question_chars=80), Mock())
         self.now = datetime.now(timezone.utc)
         self.sequence = 0
         self.restart()

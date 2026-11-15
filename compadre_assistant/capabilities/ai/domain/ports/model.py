@@ -2,7 +2,7 @@
 
 from typing import Protocol
 
-from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ai.domain.ocr import OcrImage, OcrResult
 
 
 class AskModel(Protocol):
@@ -16,15 +16,15 @@ class AskModel(Protocol):
         тела ответа провайдера и других чувствительных деталей в сообщении.
 
         Args:
-            question: Непустой вопрос, проверенный сценарием Ask.
-            instruction: Фиксированная инструкция, принадлежащая Ask.
+            question: Непустой вопрос, проверенный сценарием вопроса.
+            instruction: Фиксированная инструкция сценария вопроса.
 
         Returns:
             Непустой текст ответа модели.
 
         Raises:
-            AskModelTimeoutError: Если истекло время ожидания ответа.
-            AskModelUnavailableError: Если API или соединение недоступны.
+            AiModelTimeoutError: Если истекло время ожидания ответа.
+            AiModelUnavailableError: Если API или соединение недоступны.
             InvalidAskAnswerError: Если провайдер вернул некорректный ответ.
         """
 
@@ -43,7 +43,7 @@ class OcrModel(Protocol):
             Текст с сохранёнными переносами либо результат без текста.
 
         Raises:
-            AskModelTimeoutError: Если истёк таймаут модели.
-            AskModelUnavailableError: Если API или соединение недоступны.
+            AiModelTimeoutError: Если истёк таймаут модели.
+            AiModelUnavailableError: Если API или соединение недоступны.
             InvalidOcrAnswerError: Если ответ модели неполный или некорректный.
         """

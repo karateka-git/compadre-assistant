@@ -1,7 +1,7 @@
 """Сценарий распознавания текста на одном фото."""
 
-from compadre_assistant.capabilities.ask.domain.ocr import OcrImage, OcrResult
-from compadre_assistant.capabilities.ask.domain.ports.model import OcrModel
+from compadre_assistant.capabilities.ai.domain.ocr import OcrImage, OcrResult
+from compadre_assistant.capabilities.ai.domain.ports.model import OcrModel
 
 
 # Строка формата всегда предшествует буквальной транскрипции.
@@ -39,8 +39,8 @@ class ExtractImageText:
 
         Raises:
             InvalidOcrImageError: Если файл не проходит предварительную проверку.
-            AskModelTimeoutError: Если истёк таймаут модели.
-            AskModelUnavailableError: Если модель недоступна.
+            AiModelTimeoutError: Если истёк таймаут модели.
+            AiModelUnavailableError: Если модель недоступна.
             InvalidOcrAnswerError: Если модель вернула некорректный результат.
         """
         return self._model.recognize_text(image=OcrImage(data), instruction=OCR_INSTRUCTION)

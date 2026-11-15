@@ -78,7 +78,7 @@ class CapabilityCompositionTest(unittest.TestCase):
                 validate_enabled_capabilities(identifiers)
 
     def test_composition_loads_obsidian_profile_only_when_enabled(self) -> None:
-        """Выключенная возможность не читает свои настройки и не влияет на будущий Ask."""
+        """Выключенная возможность не читает свои настройки и не влияет на будущий модуль ИИ."""
         profile = ObsidianConfig()
         with patch("compadre_assistant.bootstrap.load_obsidian_config", return_value=profile) as loader:
             self.assertIsNone(load_obsidian_profile(("ai",)))

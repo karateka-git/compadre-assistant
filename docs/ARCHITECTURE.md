@@ -1,7 +1,7 @@
 # Архитектура Compadre Assistant
 
 Compadre Assistant — модульный личный ассистент в Telegram и VK.
-Возможность Ask отвечает на отдельные вопросы без истории переписки и
+Возможность ИИ (`ai`) отвечает на отдельные вопросы без истории переписки и
 распознаёт текст с фото. Admin показывает расходы по статистике Timeweb доверенным
 профилям в личных чатах. Obsidian принимает ссылки на статьи, извлекает и
 анализирует их текст, сопоставляет материал с Obsidian vault в GitHub и готовит
@@ -27,9 +27,9 @@ flowchart LR
     IN --> MODE[(Режим пользователя в чате канала)]
     IN --> OP[Obsidian presentation: команды, URL и ответы]
     OP --> OD
-    IN --> AP[Ask presentation: режим ИИ, вопрос и распознавание фото]
-    AP --> AD[Ask domain: use case и port]
-    AM[Ask data: LLM adapter] -. реализует port .-> AD
+    IN --> AP[ai presentation: режим ИИ, вопрос и распознавание фото]
+    AP --> AD[ai domain: use case и port]
+    AM[ai data: LLM adapter] -. реализует port .-> AD
     IN -->|доверенный AppUser| ADM[Admin presentation: проверка личного чата]
     ADM --> AR[Admin domain: календарные периоды]
     AR --> UR[Admin domain: порт статистики расходов]
@@ -59,7 +59,7 @@ Obsidian. Адаптеры Telegram и VK преобразуют события 
 | `capabilities/obsidian/data/` | Профиль настроек Obsidian, предметные SQLite DTO, mappers и repositories; HTTP, GitHub, LLM, embeddings, extraction, YAML-конфигурация vault и adapter `document_chunker`. |
 | `capabilities/obsidian/presentation/` | Команды, обработка текста и подтверждений, форматирование ответов Obsidian и статический пример правил vault. |
 | `capabilities/obsidian/bootstrap.py` | Сборка зависимостей возможности и её публичного входа. |
-| `capabilities/ask/` | Режим ИИ, вопросы, распознавание фото и адаптер LLM. |
+| `capabilities/ai/` | Режим ИИ, вопросы, распознавание фото и адаптер LLM. |
 | `capabilities/admin/` | Режим администрирования, доверенные профили, календарный отчёт и HTTP-адаптер статистики Timeweb. |
 | `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне presentation возможностей. |
 
@@ -89,7 +89,7 @@ ID, команд и зарезервированных общих имён пр�
 GitHub App, embeddings, chunking и тега заметок. Главный composition root
 вызывает его loader только при включённом Obsidian; CLI передаёт профиль
 сборке процесса и healthcheck. При отключении ошибочные предметные переменные
-окружения не разбираются. У Ask собственный профиль `AskConfig` и loader;
+окружения не разбираются. У модуля ИИ собственный профиль `AiConfig` и loader;
 добавление его полей не потребует изменений общей модели `AppConfig`.
 При включённом `admin` проверка и сборка загружают
 `ADMIN_TRUSTED_APP_USER_IDS`, проверяют наличие пояса `Asia/Omsk` и локальные
@@ -127,7 +127,7 @@ Telegram и VK отображают общий ответ, включая пол
 упорядоченными `Paragraph` и `BulletList`; абзацы и `ListItem` состоят из
 `TextSpan(text, style)`. Стили `PLAIN`, `EMPHASIS`, `CODE` выражают смысл:
 обычный текст, короткий акцент и точное значение для копирования. Presentation
-ядра, Ask или Obsidian создаёт эти блоки и выбирает слова; адаптер не разбирает
+ядра, ИИ или Obsidian создаёт эти блоки и выбирает слова; адаптер не разбирает
 предметный сценарий. Текст пользователя, URL, путь, diff, статья и ответ LLM
 остаются буквальными данными, включая похожие на HTML и Markdown символы.
 
@@ -202,7 +202,7 @@ VK прикладывает изменившееся меню к содержа�
 другая команда прерывает ввод. Истечение, смена профиля, режима или доступа
 прекращают ожидание. После перезапуска память ожиданий пуста; пользователь
 повторяет исходную команду. Сценарии ввода описаны в
-[реестре ядра](user-messages/CORE.md), [Ask](user-messages/ASK.md) и
+[реестре ядра](user-messages/CORE.md), [ИИ](user-messages/AI.md) и
 [Obsidian](user-messages/OBSIDIAN.md).
 
 ### Режим чата и данные
@@ -257,7 +257,7 @@ SQLite-транзакцией. Повторный запрос того же к�
 входов также приходят из composition root, без предметных ID и команд в core.
 Для каждого `AppUser` таблица `user_capability_preferences` хранит явные
 переопределения по ключу `(app_user_id, capability_id)`. Отсутствие строки у
-нового или существующего профиля означает default из descriptor: Ask включён,
+нового или существующего профиля означает default из descriptor: ИИ включён,
 Obsidian выключен, Admin выбран для доверенного профиля. Фактический допуск
 требует серверной доступности, личного выбора и доверенного права для
 ограниченного входа. Право проверяется по разрешённому внутреннему ID
@@ -522,7 +522,7 @@ remote Markdown с ожидаемым: если commit уже создан, ло
 
 ### Режим ИИ, вопросы и распознавание текста
 
-`AskCapability` вызывает `AskQuestion` и `ExtractImageText` через их отдельные
+`AiCapability` вызывает `AskQuestion` и `ExtractImageText` через их отдельные
 domain ports. Composition root собирает один OpenAI-compatible клиент для
 обоих сценариев. Личный выбор проверяется на каждом событии.
 Вход `/ai` выбирает активный режим `ai` для этого чата. Диспетчер
@@ -621,7 +621,7 @@ runtime автоматически: старый код может отверг�
 
 - [RELEASES.md](RELEASES.md) — проверки PR и точного коммита выпуска.
 - [RUN.md](RUN.md) — локальный запуск, smoke-проверки и команды.
-- [USER_MESSAGES.md](USER_MESSAGES.md) — правила пользовательских ответов и ссылки на реестры ядра, Ask и Obsidian.
+- [USER_MESSAGES.md](USER_MESSAGES.md) — правила пользовательских ответов и ссылки на реестры ядра, ИИ и Obsidian.
 - [OPERATIONS.md](OPERATIONS.md) — эксплуатация VPS, обновление, логи и backup.
 - [GITHUB_APP.md](GITHUB_APP.md) — создание и настройка GitHub App.
 - [DOCUMENT_CHUNKER.md](DOCUMENT_CHUNKER.md) — правила разбиения Markdown.

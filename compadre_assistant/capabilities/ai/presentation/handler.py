@@ -1,14 +1,14 @@
-"""Представляет независимый вопрос и ожидаемые ошибки Ask любому каналу."""
+"""Обрабатывает команды режима ИИ и формирует ответы для канала."""
 
 from collections.abc import Callable
 
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
 
-from compadre_assistant.capabilities.ask.domain.errors import (
-    AskModelError, AskModelTimeoutError, EmptyQuestionError, InvalidOcrImageError, QuestionTooLongError,
+from compadre_assistant.capabilities.ai.domain.errors import (
+    AiModelError, AiModelTimeoutError, EmptyQuestionError, InvalidOcrImageError, QuestionTooLongError,
 )
-from compadre_assistant.capabilities.ask.domain.use_cases.ask_question import AskQuestion
-from compadre_assistant.capabilities.ask.domain.use_cases.extract_image_text import ExtractImageText
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.core.presentation.incoming.events import ImageAttachment, ImageLoadError, IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     CancellableAction, CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
@@ -24,7 +24,7 @@ _OCR_ACTION = ReplyAction("Извлечь текст с фото", _OCR_COMMAND)
 _QUESTION_RECEIPT = IncomingResponse(text_content("Вопрос принят. Готовлю ответ… Для отмены введи /cancel."))
 
 
-class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
+class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
     """Открывает режим ИИ для независимых вопросов и распознавания текста."""
 
     descriptor = CapabilityDescriptor(
@@ -151,9 +151,9 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             result = self._extract_image_text.execute(data)
         except (ImageLoadError, InvalidOcrImageError):
             failure = "Не удалось прочитать фото. "
-        except AskModelTimeoutError:
+        except AiModelTimeoutError:
             failure = "Модель не успела распознать текст. "
-        except AskModelError:
+        except AiModelError:
             failure = "Не удалось распознать текст на фото. "
         else:
             return IncomingResponse(text_content(result.text if result.text is not None else "На фото нет текста."))
@@ -174,11 +174,11 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         """Выполняет проверенный вопрос и преобразует ошибки модели в ответы чата."""
         try:
             response = IncomingResponse(text_content(self._question.execute(question)))
-        except AskModelTimeoutError as error:
+        except AiModelTimeoutError as error:
             response = IncomingResponse(compose_content(
                 'Модель не успела ответить. Попробуй повторить /ask позже.',
             ), error)
-        except AskModelError as error:
+        except AiModelError as error:
             response = IncomingResponse(compose_content(
                 'Не удалось получить ответ модели. Попробуй /ask позже.',
             ), error)

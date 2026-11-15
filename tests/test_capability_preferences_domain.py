@@ -2,7 +2,7 @@
 
 import unittest
 
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.core.domain.capability_preferences import (
     CapabilityDefault,
     GetUserCapabilitySelections,
@@ -40,7 +40,7 @@ class CapabilityPreferencesDomainTest(unittest.TestCase):
 
     def test_descriptors_define_defaults(self) -> None:
         """Ask включён, Obsidian и будущий встроенный ID выключены."""
-        self.assertTrue(AskCapability.descriptor.enabled_by_default)
+        self.assertTrue(AiCapability.descriptor.enabled_by_default)
         self.assertFalse(CapabilityDescriptor("obsidian", CapabilityCommand("/obsidian", (), "Vault")).enabled_by_default)
         self.assertFalse(CapabilityDescriptor("new", CapabilityCommand("/new", (), "New")).enabled_by_default)
 

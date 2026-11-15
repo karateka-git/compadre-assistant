@@ -8,7 +8,7 @@ Compadre Assistant — личный ассистент в Telegram и VK. Он �
 ## Состояние проекта
 
 Реализованы общие профили Telegram и VK, режимы по чатам, независимые
-возможности Ask, Admin и Obsidian, индекс vault и подтверждаемая запись в GitHub.
+возможности ИИ (`ai`), Admin и Obsidian, индекс vault и подтверждаемая запись в GitHub.
 В [снимке VPS за 13.11.2026](docs/PRODUCTION.md#последний-проверенный-снимок-13112026)
 зафиксированы установленная `v3.4.0`, оба работающих канала и переход
 на выбор базы CI из GitHub Deployments.
@@ -54,10 +54,10 @@ Compadre Assistant — личный ассистент в Telegram и VK. Он �
 flowchart TB
     Channels[Telegram и VK] --> Core[Ядро: пользователи, команды, режимы]
     Core --> Ports[Общий интерфейс возможностей]
-    Ports --> Ask["Ask<br/>вопрос или фото → LLM → ответ"]
+    Ports --> Ai["ИИ (`ai`)<br/>вопрос или фото → LLM → ответ"]
     Ports -->|доверенный профиль| Admin["Admin<br/>статистика Timeweb → отчёт в личном чате"]
     Ports --> Obsidian["Obsidian<br/>статья → анализ → предложение → vault"]
-    Config[Настройки запуска] -. подключают или отключают .-> Ask
+    Config[Настройки запуска] -. подключают или отключают .-> Ai
     Config -. подключают или отключают .-> Admin
     Config -. подключают или отключают .-> Obsidian
 ```
@@ -77,14 +77,14 @@ flowchart LR
     Enter["/ai"] --> Mode[Активный режим ИИ]
     Mode --> Question["/ask вопрос"]
     Mode --> Photo["/get_text_from_image → ожидание одного фото"]
-    Question --> Ask[Модуль Ask]
+    Question --> Ai["Модуль ai"]
     Question --> Ack[Подтверждение приёма вопроса]
-    Photo -->|одно фото принято| Ask
-    Ask --> LLM[Провайдер LLM]
+    Photo -->|одно фото принято| Ai
+    Ai --> LLM[Провайдер LLM]
     LLM --> Answer[Ответ в исходный чат]
 ```
 
-Ask отвечает на отдельный вопрос без истории переписки и доступа к vault или
+Модуль ИИ отвечает на отдельный вопрос без истории переписки и доступа к vault или
 возвращает текст с одного фото. После ответа режим ИИ остаётся активным в том же
 чате. Длинный ответ отправляется частями. [Как получить текст с фото](docs/RUN.md#получить-текст-с-фото-в-режиме-ии).
 
@@ -128,7 +128,7 @@ embeddings поиск использует FTS fallback.
 
 - [Карта кода](docs/CODE_MAP.md) — с какой части кода и каких тестов начать типовую задачу.
 - [Архитектура](docs/ARCHITECTURE.md) — слои, компоненты и потоки данных.
-- [Правила сообщений](docs/USER_MESSAGES.md) — выбор ответа, оформление и текстовый путь; [ядро](docs/user-messages/CORE.md), [Ask](docs/user-messages/ASK.md), [Admin](docs/user-messages/ADMIN.md), [Obsidian](docs/user-messages/OBSIDIAN.md) — реестры действующих сценариев.
+- [Правила сообщений](docs/USER_MESSAGES.md) — выбор ответа, оформление и текстовый путь; [ядро](docs/user-messages/CORE.md), [ИИ](docs/user-messages/AI.md), [Admin](docs/user-messages/ADMIN.md), [Obsidian](docs/user-messages/OBSIDIAN.md) — реестры действующих сценариев.
 - [Подготовка](docs/SETUP.md) — установка, `.env`, выбор канала и среда разработки.
 - [Запуск и проверки](docs/RUN.md) — локальный запуск, healthcheck и smoke-сценарии.
 - [Эксплуатация](docs/OPERATIONS.md) — production VPS, обновления, логи и backup.

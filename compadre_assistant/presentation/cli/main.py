@@ -336,14 +336,14 @@ def check_capability_configuration(
     Returns:
         `True`, если профили включённых возможностей допускают запуск.
     """
-    ask_ready = True
+    ai_ready = True
     if app_bootstrap.AI_CAPABILITY_ID in enabled_capabilities:
         try:
-            app_bootstrap.load_ask_config()
-            logger.info("Ask configuration is ready; API availability is not checked")
+            app_bootstrap.load_ai_config()
+            logger.info("AI configuration is ready; API availability is not checked")
         except ValueError as error:
-            logger.error("Ask configuration is invalid: %s", error)
-            ask_ready = False
+            logger.error("AI configuration is invalid: %s", error)
+            ai_ready = False
     admin_ready = True
     if "admin" in enabled_capabilities:
         try:
@@ -360,7 +360,7 @@ def check_capability_configuration(
             admin_ready = False
     if "obsidian" not in enabled_capabilities:
         logger.info("Obsidian is disabled; provider configuration is not checked")
-        return ask_ready and admin_ready
+        return ai_ready and admin_ready
     if obsidian_config is None:
         logger.error("Obsidian configuration is missing")
         return False
@@ -380,7 +380,7 @@ def check_capability_configuration(
         )
     github_ready = check_github_config(obsidian_config.github_app, logger)
     embedding_ready = check_embedding_config(obsidian_config.embedding, logger)
-    return ask_ready and admin_ready and llm_ready and github_ready and embedding_ready
+    return ai_ready and admin_ready and llm_ready and github_ready and embedding_ready
 
 
 def check_telegram_config(token: str, logger: logging.Logger) -> bool:

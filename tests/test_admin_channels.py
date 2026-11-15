@@ -106,8 +106,8 @@ class AdminChannelsTest(unittest.TestCase):
             return _statistics_response(request, ["0.0025", "0.0025", "null"], counts=[2, 2, 5])
 
         client = self.configure_timeweb(respond)
-        with patch("compadre_assistant.capabilities.ask.bootstrap.load_ask_config") as load_ask, \
-             patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model, \
+        with patch("compadre_assistant.capabilities.ai.bootstrap.load_ai_config") as load_ask, \
+             patch("compadre_assistant.capabilities.ai.bootstrap.OpenAIModel") as model, \
              patch("compadre_assistant.capabilities.admin.domain.cost_report._utc_now",
                    return_value=end), \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:

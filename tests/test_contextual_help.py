@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import unittest
 
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
-from compadre_assistant.capabilities.ask.presentation.handler import AskCapability
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser, IdentityRebindConfirmation
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
@@ -37,7 +37,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.identity.list_known_private_chats.return_value = ()
         self.obsidian = HelpCapability()
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
-        self.ask = AskCapability(Mock(), Mock())
+        self.ask = AiCapability(Mock(), Mock())
         self.other = FakeCapability("other", "/other")
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
