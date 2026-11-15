@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import base64
 from collections import Counter
 from contextlib import closing, contextmanager
@@ -15,26 +16,28 @@ import re
 import sqlite3
 import stat
 import subprocess
-from tempfile import TemporaryDirectory
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 from scripts import deploy_prepare as prep
 from scripts.ci_repository_compatibility import (
-    DYNAMIC_HARNESS, LEGACY_HARNESS, WORKFLOWS, DeploymentReleaseTagEvidence, ReleaseTagEvidence, verify_baseline,
+    CONTRACT_PATH, DYNAMIC_HARNESS, FULL_DISCOVERY_HARNESS, LEGACY_HARNESS, LEGACY_POLICY_PATH, WORKFLOWS,
+    DeploymentReleaseTagEvidence, ReleaseTagEvidence, verify_baseline,
 )
 from scripts.full_ci_admission import (
     Admission, COMPATIBILITY_CHECK, COMPATIBILITY_STEPS, FULL_CALLERS, MAIN_WORKFLOW,
     RELEASE_WORKFLOW, select_successful_run,
 )
 from scripts.full_ci_controller import GitHub
-from scripts.repository_compatibility_contract import DYNAMIC_POLICY_VERSION, load_policy, verify_report, verify_tests
+from scripts.repository_compatibility_contract import (
+    BUILT_IN_POLICY, BUILT_IN_POLICY_VERSION, DEPLOYMENT_POLICY_VERSIONS, load_legacy_policy,
+    verify_behavior_tests, verify_report,
+)
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
 
 
 # Лимиты защищают контроллер от чрезмерного artifact и распаковки ZIP.
 MAX_ARTIFACT = 64 * 1024 * 1024
-POLICY_PATH = "scripts/repository_compatibility_policy.json"
 
 
 class PredeployError(ValueError):
@@ -120,12 +123,25 @@ def _local_git_object(checkout: Path, kind: str, ref: str) -> bytes:
                           cwd=checkout, capture_output=True, check=True).stdout
 
 
-def _trusted_policy(data: bytes) -> dict:
-    with TemporaryDirectory(prefix="predeploy-policy-") as temporary:
-        path = Path(temporary) / "policy.json"
-        path.write_bytes(data)
-        with check("SAFE_POLICY_CONTENT"):
-            return load_policy(path)
+def _trusted_policy(api: GitHub, sha: str) -> tuple[dict, dict[str, bytes]]:
+    sources = {CONTRACT_PATH: _blob(api, sha, CONTRACT_PATH)}
+    with check("SAFE_POLICY_CONTENT"):
+        # Читаем объявление из закреплённых Git-байтов, не исполняя чужой код.
+        versions = [
+            node.value for node in ast.parse(sources[CONTRACT_PATH]).body
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "BUILT_IN_POLICY_VERSION"
+                for target in node.targets
+            )
+        ]
+        if versions:
+            if (len(versions) != 1 or not isinstance(versions[0], ast.Constant)
+                    or type(versions[0].value) is not int or versions[0].value != BUILT_IN_POLICY_VERSION):
+                raise PredeployError("SAFE_POLICY_CONTENT")
+            return BUILT_IN_POLICY, sources
+    sources[LEGACY_POLICY_PATH] = _blob(api, sha, LEGACY_POLICY_PATH)
+    with check("SAFE_POLICY_CONTENT"):
+        return load_legacy_policy(sources[LEGACY_POLICY_PATH]), sources
 
 
 def tag_evidence_record(checkout: Path, selected, policy_sha: str, previous_sha: str) -> dict:
@@ -207,7 +223,7 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
     """Проверяет аннотацию и независимо сверяет workflow с reviewed policy.
 
     Селектор уже доказал успешный job точной попытки, которой принадлежит
-    аннотация. Исторические теги сверяются со своей policy v1.
+    аннотация. Для политик версий 2 и 3 дополнительно сверяется Deployment базы.
 
     Args:
         api: Читающий GitHub API выбранного репозитория.
@@ -226,10 +242,16 @@ def verify_tag_evidence(api: GitHub, checkout: Path, selected, policy_sha: str,
     if api.repository != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
     record = tag_evidence_record(checkout, selected, policy_sha, previous_sha)
-    policy = _trusted_policy(_blob(api, policy_sha, POLICY_PATH))
+    if "baseline" in record:
+        policy, _ = _trusted_policy(api, policy_sha)
+    else:
+        # У аннотации v1 нет Deployment. Для неё допустима только JSON-политика v1.
+        policy_data = _blob(api, policy_sha, LEGACY_POLICY_PATH)
+        with check("SAFE_POLICY_CONTENT"):
+            policy = load_legacy_policy(policy_data)
     if policy["repository"] != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
-    if policy["version"] == DYNAMIC_POLICY_VERSION:
+    if policy["version"] in DEPLOYMENT_POLICY_VERSIONS:
         if "baseline" not in record:
             raise PredeployError("SAFE_TAG_EVIDENCE")
         verify_deployment_base(api, record["baseline"], previous_sha, frozen=frozen)
@@ -312,25 +334,27 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     elif select_successful_run(api, selected.repository, selected.workflow, selected.sha,
                                branch, selected.run_id, selected.run_attempt) is None:
         raise PredeployError("SAFE_CI_ATTEMPT")
-    policy_data = _blob(api, policy_sha, POLICY_PATH)
-    policy = _trusted_policy(policy_data)
+    policy, policy_sources = _trusted_policy(api, policy_sha)
     if policy["repository"] != selected.repository or api.repository != selected.repository:
         raise PredeployError("SAFE_CI_PROVENANCE")
-    dynamic = policy["version"] == DYNAMIC_POLICY_VERSION
-    if dynamic:
-        trusted = {path: policy_data if path == POLICY_PATH else _blob(api, policy_sha, path)
-                   for path in DYNAMIC_HARNESS}
-    else:
+    dynamic = policy["version"] in DEPLOYMENT_POLICY_VERSIONS
+    if not dynamic:
         if previous_sha is None:
             raise PredeployError("SAFE_POLICY_PIN")
         if policy["previous_sha"] != previous_sha:
             raise PredeployError("SAFE_INSTALLED_PREVIOUS_SHA")
-        trusted = {name: policy_data if f"scripts/{name}" == POLICY_PATH else
-                   _blob(api, policy_sha, f"scripts/{name}") for name in LEGACY_HARNESS}
         with check("SAFE_BASELINE_RELEASE"):
             verify_baseline(policy, api.get(f"/releases/tags/{policy['release_tag']}"),
                             api.get(f"/git/ref/tags/{policy['release_tag']}"), previous_sha,
                             lambda sha: api.get(f"/git/tags/{sha}"))
+    if policy["version"] == BUILT_IN_POLICY_VERSION:
+        harness = FULL_DISCOVERY_HARNESS
+    else:
+        harness = DYNAMIC_HARNESS if dynamic else LEGACY_HARNESS
+    trusted = {}
+    for name in harness:
+        path = name if dynamic else f"scripts/{name}"
+        trusted[name] = policy_sources[path] if path in policy_sources else _blob(api, policy_sha, path)
     for name in WORKFLOWS:
         path = f".github/workflows/{name}"
         if _blob(api, policy_sha, path) != _blob(api, selected.sha, path):
@@ -376,7 +400,7 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
     with check("SAFE_REPORT_CONTRACT"):
         report = json.loads(files["report.json"])
         with check("SAFE_TEST_MANIFEST"):
-            verify_tests(report["old_repository_behavior"]["old_tests"], policy["test_ids"])
+            verify_behavior_tests(report["old_repository_behavior"], policy)
         verify_report(report, policy, previous_sha=previous_sha)
     if report["candidate_sha"] != selected.sha:
         raise PredeployError("SAFE_CANDIDATE_SHA")
