@@ -15,6 +15,79 @@ from compadre_assistant.core.data.sqlite.migration_runner import (
 import compadre_assistant.core.data.sqlite.migration_runner as migration_runner
 
 
+class AiCapabilityIdMigrationTest(unittest.TestCase):
+    """Проверяет перенос режимов и личного доступа с выпущенной схемы 0005."""
+
+    def setUp(self) -> None:
+        """Создаёт временную БД с включённым и выключенным ИИ и другими режимами."""
+        self.root = Path(self.enterContext(TemporaryDirectory(prefix="ai-capability-id-")))
+        self.database_path = self.root / "fixture.db"
+        self.previous_sql = self.root / "previous-sql"
+        self.previous_sql.mkdir()
+        for path in MIGRATIONS_DIR.glob("000[1-5]_*.sql"):
+            (self.previous_sql / path.name).write_bytes(path.read_bytes())
+        self.connection = self.enterContext(connect_database(self.database_path))
+        apply_migrations(self.connection, self.previous_sql)
+        with self.connection as connection:
+            connection.execute("INSERT INTO app_users (id) VALUES (1), (2)")
+            connection.executemany("INSERT INTO active_chat_modes VALUES (?, ?, ?, ?, ?, 'fixture')", (
+                (1, "telegram", "11", "ask", 4), (1, "vk", "22", None, 2),
+                (2, "telegram", "33", "obsidian", 1), (2, "vk", "44", "ask", 9),
+            ))
+            connection.executemany("INSERT INTO user_capability_preferences VALUES (?, ?, ?)", (
+                (1, "ask", 0), (2, "ask", 1), (1, "obsidian", 1),
+            ))
+
+    def test_migration_renames_only_the_ai_ids(self) -> None:
+        """Миграция сохраняет чат, владельца, timestamp, ревизию и значение выбора."""
+        from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
+        from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+        from compadre_assistant.core.domain.chat_modes import ChatModeKey
+        from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
+
+        connection = self.connection
+        self.assertEqual([m.name for m in apply_migrations(connection)], ["0006_ai_capability_id.sql"])
+        self.assertEqual(self._modes(), [
+            (1, "telegram", "11", "ai", 4, "fixture"), (1, "vk", "22", None, 2, "fixture"),
+            (2, "telegram", "33", "obsidian", 1, "fixture"), (2, "vk", "44", "ai", 9, "fixture"),
+        ])
+        self.assertEqual(self._preferences(), [(1, "ai", 0), (1, "obsidian", 1), (2, "ai", 1)])
+        self.assertEqual(apply_migrations(connection), [])
+        self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+        self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+        with connect_database(self.database_path) as reopened:
+            modes = SQLiteChatModeRepository(reopened)
+            key = ChatModeKey(1, "telegram", "11")
+            self.assertEqual(modes.get(key).capability_id, "ai")
+            self.assertFalse(modes.replace_if_revision(key, 3, "obsidian"))
+            self.assertTrue(modes.replace_if_revision(key, 4, "ai"))
+            preferences = SQLiteUserCapabilityPreferenceRepository(reopened)
+            self.assertEqual(preferences.get_for_user(1)[0], UserCapabilityPreference(1, "ai", False))
+            self.assertIs(preferences.upsert(UserCapabilityPreference(1, "ai", True)), False)
+        self.assertEqual(self._preferences(), [(1, "ai", 1), (1, "obsidian", 1), (2, "ai", 1)])
+
+    def test_conflicting_choice_rolls_back_both_table_updates(self) -> None:
+        """В случае дубликата миграция сохраняет оба выбора и откатывает смену режима."""
+        with self.connection as connection:
+            connection.execute("INSERT INTO user_capability_preferences VALUES (1, 'ai', 1)")
+        before_modes, before_preferences = self._modes(), self._preferences()
+        with self.assertRaisesRegex(MigrationError, "UNIQUE constraint failed"):
+            apply_migrations(self.connection)
+        self.assertEqual(self._modes(), before_modes)
+        self.assertEqual(self._preferences(), before_preferences)
+        self.assertEqual(self.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 5)
+
+    def _modes(self) -> list[tuple]:
+        return [tuple(row) for row in self.connection.execute(
+            "SELECT * FROM active_chat_modes ORDER BY app_user_id, channel, chat_id"
+        )]
+
+    def _preferences(self) -> list[tuple]:
+        return [tuple(row) for row in self.connection.execute(
+            "SELECT * FROM user_capability_preferences ORDER BY app_user_id, capability_id"
+        )]
+
+
 class MigrationRunnerTest(unittest.TestCase):
     """Проверяет межпроцессный алгоритм миграций на отдельных соединениях."""
 

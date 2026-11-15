@@ -64,7 +64,6 @@ from compadre_assistant.capabilities.obsidian.smoke import (
     run_sqlite_smoke,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
-from compadre_assistant.core.data.sqlite.capability_ids import SQLiteCapabilityIds
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreferenceRepository
@@ -81,21 +80,8 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
 LOGGER = logging.getLogger(__name__)
 # Публичный ID режима для серверной конфигурации и диагностики.
 AI_CAPABILITY_ID = AskCapability.descriptor.capability_id
-# Deprecated: v4.0.3 читает SQLite и конфигурацию запуска с прежним ID.
-_LEGACY_AI_CAPABILITY_ID = "ask"
-_LEGACY_SQLITE_CAPABILITY_IDS = SQLiteCapabilityIds({AI_CAPABILITY_ID: _LEGACY_AI_CAPABILITY_ID})
-_AI_CAPABILITY_ID_MIGRATION = "0006_ai_capability_id.sql"
 # Неполный снимок требует нового чтения, даже если консервативное меню доставлено.
 INCOMPLETE_MENU_SNAPSHOT = "Неполный снимок подтверждений"
-
-
-def _capability_ids_for_schema(connection: sqlite3.Connection) -> SQLiteCapabilityIds | None:
-    """Выбирает формат записи для обычного запуска и для возврата на новой БД."""
-    migrated = connection.execute(
-        "SELECT 1 FROM schema_migrations WHERE version = 6 AND name = ?",
-        (_AI_CAPABILITY_ID_MIGRATION,),
-    ).fetchone()
-    return None if migrated is not None else _LEGACY_SQLITE_CAPABILITY_IDS
 
 
 def create_user_identity_service(connection: sqlite3.Connection) -> UserIdentityService:
@@ -144,30 +130,22 @@ def create_incoming_message_dispatcher(
     )
 
 
-def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> tuple[str, ...]:
-    """Проверяет список доступных возможностей и возвращает актуальные ID.
+def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None:
+    """Проверяет выбранные ID относительно доступных сборок приложения.
 
     Args:
         enabled_capabilities: ID из конфигурации запуска.
 
-    Returns:
-        Проверенные идентификаторы текущей версии в исходном порядке.
-
     Raises:
         ValueError: Список содержит повторный или неизвестный ID.
     """
-    resolved = tuple(
-        AI_CAPABILITY_ID if item == _LEGACY_AI_CAPABILITY_ID else item
-        for item in enabled_capabilities
-    )
-    if len(set(resolved)) != len(resolved):
+    if len(set(enabled_capabilities)) != len(enabled_capabilities):
         raise ValueError("Конфликт ID включённых возможностей")
-    unknown = set(resolved) - {"obsidian", AI_CAPABILITY_ID, AdminCapability.descriptor.capability_id}
+    unknown = set(enabled_capabilities) - {"obsidian", AI_CAPABILITY_ID, AdminCapability.descriptor.capability_id}
     if unknown:
         raise ValueError(
             f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
         )
-    return resolved
 
 
 def load_obsidian_profile(
@@ -240,14 +218,11 @@ class ChannelMessageProcessor:
     def _deferred_access(self, event: IncomingEvent, app_user_id: int,
                          capability_id: str, required_mode: str | None) -> bool:
         with connect_database(self._database_path) as connection:
-            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 user_identity_service=create_user_identity_service(connection),
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
-                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=capability_ids,
-                ),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
             return dispatcher.may_finish_deferred(event, app_user_id, capability_id, required_mode)
 
@@ -436,15 +411,12 @@ class ChannelMessageProcessor:
                 return None
             else:
                 self._unregistered_menu_events[address] = event
-            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry, pending_inputs=self._pending_inputs,
                 deferred_actions=self._deferred_actions,
                 user_identity_service=service,
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
-                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=capability_ids,
-                ),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
             if expired_input is not None and not dispatcher.may_notify_input_expired(
                 event, expired_input, known_user=owner,
@@ -546,7 +518,6 @@ class ChannelMessageProcessor:
                 self._reconcile_menu_event(event, menu_update_handler, allow_unknown=False)
 
         with connect_database(self._database_path) as connection:
-            capability_ids = _capability_ids_for_schema(connection)
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry,
                 pending_inputs=self._pending_inputs,
@@ -554,10 +525,8 @@ class ChannelMessageProcessor:
                 deferred_access=self._deferred_access,
                 deferred_menu_refresh=refresh_deferred_menu if menu_update_handler is not None else None,
                 user_identity_service=create_user_identity_service(connection),
-                chat_mode_repository=SQLiteChatModeRepository(connection, capability_ids=capability_ids),
-                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                    connection, capability_ids=capability_ids,
-                ),
+                chat_mode_repository=SQLiteChatModeRepository(connection),
+                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
             )
             try:
                 original_context = dispatcher.action_context(incoming_message)
@@ -570,16 +539,11 @@ class ChannelMessageProcessor:
                 if original_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:
-                            background_ids = _capability_ids_for_schema(background_connection)
                             background_dispatcher = IncomingMessageDispatcher(
                                 registry=self._registry, pending_inputs=self._pending_inputs,
                                 user_identity_service=create_user_identity_service(background_connection),
-                                chat_mode_repository=SQLiteChatModeRepository(
-                                    background_connection, capability_ids=background_ids,
-                                ),
-                                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(
-                                    background_connection, capability_ids=background_ids,
-                                ),
+                                chat_mode_repository=SQLiteChatModeRepository(background_connection),
+                                capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
                             )
                             if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
@@ -647,7 +611,7 @@ def create_channel_message_processor(
         ValueError: Список включённых ID или профиль возможности некорректен.
     """
     try:
-        enabled_capabilities = validate_enabled_capabilities(enabled_capabilities)
+        validate_enabled_capabilities(enabled_capabilities)
         admin_id = AdminCapability.descriptor.capability_id
         admin_enabled = admin_id in enabled_capabilities
         trusted_admin_ids = load_admin_profile() if admin_enabled else frozenset()
