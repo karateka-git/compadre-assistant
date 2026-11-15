@@ -49,7 +49,7 @@ class MenuReconciliationTest(unittest.TestCase):
         """Новый процесс восстанавливает меню и не повторяет тот же снимок."""
         self.processor.reconcile_menus(self.updates.append)
         self.assertEqual(len(self.updates), 1)
-        self.assertIn("/status", self.commands())
+        self.assertIn("/settings", self.commands())
         self.processor.reconcile_menus(self.updates.append)
         self.assertEqual(len(self.updates), 1)
         restarted = ChannelMessageProcessor(database_path=self.database_path, capabilities=())
@@ -107,6 +107,7 @@ class MenuReconciliationTest(unittest.TestCase):
         """Периодический проход снимает ввод по TTL без пользовательского события."""
         now = datetime(2026, 10, 28, tzinfo=timezone.utc)
         self.processor._pending_inputs._clock = lambda: now
+        self.processor(self.event("/settings"))
         self.processor(self.event("/name"), menu_update_handler=self.updates.append)
         self.assertIn("/cancel", self.commands())
         self.processor._pending_inputs._clock = lambda: now + timedelta(minutes=11)
@@ -119,6 +120,7 @@ class MenuReconciliationTest(unittest.TestCase):
         def fail(update):
             raise RuntimeError("transport down")
 
+        self.processor(self.event("/settings"))
         with self.assertLogs("compadre_assistant.bootstrap", level="ERROR"):
             self.processor(self.event("/name"), menu_update_handler=fail)
         self.assertIn(ReplyAddress("telegram", "1001"), self.processor.menu_delivery_failures)
@@ -129,6 +131,7 @@ class MenuReconciliationTest(unittest.TestCase):
 
     def test_menu_with_reply_is_published_once_and_retry_stays_addressed(self):
         """Успех ответа фиксирует меню, а отказ сохраняет адрес для сверки."""
+        self.processor(self.event("/settings"))
         event = self.event("/name")
         response_updates = []
 
@@ -299,7 +302,7 @@ class MenuReconciliationTest(unittest.TestCase):
             self.updates.append, allow_unknown=False,
         )
         self.assertEqual(len(self.updates), 1)
-        self.assertIn("/status", self.commands())
+        self.assertIn("/settings", self.commands())
 
     def test_removed_or_ambiguous_address_is_not_republished(self):
         """Сверка не публикует адрес, который больше не принадлежит одному профилю."""

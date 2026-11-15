@@ -125,6 +125,13 @@ class ChatCommand(StrEnum):
         return f"{self.usage} — {self.description}"
 
 
+# Профильные операции ядра доступны владельцу назначенного режима.
+PROFILE_COMMANDS = frozenset({
+    ChatCommand.NAME, ChatCommand.STATUS, ChatCommand.CAPABILITIES, ChatCommand.ENABLE,
+    ChatCommand.DISABLE, ChatCommand.LINK_CODE, ChatCommand.LINK,
+})
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedChatCommand:
     """Содержит распознанную команду и необработанную строку аргументов."""

@@ -182,7 +182,7 @@ class AiChannelsTest(unittest.TestCase):
                 "conversation_message_id": 42, "payload": actions[0]["payload"],
             }}, incoming_message_processor=processor, client=client,
                 logger=self.logger, menu_update_handler=publish)
-            self.assertIn("/capabilities", client.messages[-1][1])
+            self.assertIn("/settings", client.messages[-1][1])
             self.assertEqual(client.cleared, [(7, 42)])
 
     def test_vk_keeps_menu_until_a_reply_in_the_same_chat(self) -> None:
@@ -205,6 +205,7 @@ class AiChannelsTest(unittest.TestCase):
         ) as processor:
             self.send("telegram", processor, "/register", chat_id=7)
             self.send("telegram", processor, "Тест", chat_id=7)
+            self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
             code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
@@ -441,6 +442,8 @@ class AiChannelsTest(unittest.TestCase):
 
                         send("/register")
                         send("Тест")
+                        self.assertIn("/settings", send("/capabilities"))
+                        send("/settings")
                         self.assertIn("«Режим ИИ» (ai)", send("/capabilities"))
                         self.assertIn("Неизвестная возможность", send("/disable ask"))
                         self.assertIn("«Режим ИИ» — /disable ai", send("/disable"))
@@ -459,7 +462,7 @@ class AiChannelsTest(unittest.TestCase):
                         self.assertIn("войди в режим", denied)
                         self.assertIn("/ai", denied)
                         send("/ai")
-                        self.assertIn("Режим этого чата: «Режим ИИ».", send("/status"))
+                        self.assertIn("/settings", send("/status"))
                         self.assertEqual(send("/ask вопрос"), "Ответ")
                 self.assertEqual(model_type.return_value.answer.call_count, 2)
 
@@ -487,19 +490,20 @@ class AiChannelsTest(unittest.TestCase):
                 ) as processor:
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
+                    self.send(channel, processor, "/settings", chat_id=7)
                     self.send(channel, processor, "/ai")
                     with ThreadPoolExecutor(max_workers=1) as executor:
                         future = executor.submit(processor, IncomingEvent(channel, "42", "direct", "/ask долгий", "7"))
                         try:
                             self.assertTrue(started.wait(5))
-                            self.assertIn("выключена", self.send(channel, processor, "/disable ai"))
+                            self.assertIn("выключена", self.send(channel, processor, "/disable ai", chat_id=7))
                             model.close.assert_not_called()
                         finally:
                             release.set()
                         self.assertEqual(response_text(future.result(timeout=5)), "Ответ: долгий")
                     self.assertIn("/enable ai", self.send(channel, processor, "/ask следующий"))
                     self.assertEqual(model.answer.call_count, 1)
-                    self.assertIn("«Режим ИИ» включён", self.send(channel, processor, "/enable ai"))
+                    self.assertIn("«Режим ИИ» включён", self.send(channel, processor, "/enable ai", chat_id=7))
                     self.assertEqual(self.send(channel, processor, "/ask другой"), "Ответ: другой")
                 model.close.assert_called_once_with()
 
@@ -686,10 +690,11 @@ class AiChannelsTest(unittest.TestCase):
                     self.assertNotIn(command, photo())
                     send("/ai")
                     send(command)
-                    send("/disable ai")
+                    send("/settings", chat_id=8)
+                    send("/disable ai", chat_id=8)
                     self.assertNotIn(command, photo())
                     self.assertIn("выключена", send(command))
-                    send("/enable ai")
+                    send("/enable ai", chat_id=8)
                     send(command)
                     self.assertIn("Не удалось прочитать фото", photo(file_id="broken"))
                     self.assertIn(command, photo())
@@ -1185,10 +1190,12 @@ class AiChannelsTest(unittest.TestCase):
                                                  ai_config=self.config) as processor:
             self.send("telegram", processor, "/register", chat_id=7)
             self.send("telegram", processor, "Тест", chat_id=7)
+            self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
             code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
             self.assertIn("привязал", self.send("vk", processor, code.group(0), chat_id=7))
+            self.send("vk", processor, "/settings", chat_id=7)
             self.send("telegram", processor, "/ai", chat_id=7)
             self.send("telegram", processor, command, chat_id=7)
 

@@ -91,6 +91,7 @@ class TextCommandSequencesTest(unittest.TestCase):
 
     def code(self, **address):
         """Извлекает из ответа точный код для ручной привязки другого канала."""
+        self.say("/settings", **address)
         match = re.search(r"/link (\S+)", self.say("/link_code", **address))
         self.assertIsNotNone(match)
         return match.group(1)
@@ -127,6 +128,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertIn("следующим сообщением", self.say("/link", channel="vk"))
         self.assertIn("/cancel", self.say("wrong", channel="vk"))
         self.assertIn("привязал", self.say(code, channel="vk"))
+        self.say("/settings", channel="vk")
         self.assertIn("уже привязан", self.say("/link " + self.code(), channel="vk"))
         self.say("/name")
         for info in ("/help", "/status", "/capabilities", "/start"):
@@ -143,15 +145,24 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/disable", channel="vk")
         self.say("obsidian", channel="vk")
         self.assertIn("недоступен", self.say("/help"))
-        self.say("/enable obsidian")
+        self.say("/enable obsidian", channel="vk")
         self.assertIn("Команды режима obsidian", self.say("/help"))
-        self.say("/disable obsidian")
+        self.say("/disable obsidian", channel="vk")
         self.assertIn("выключена", self.say("https://example.com/article"))
         self.assertFalse(self.fetcher.calls)
+
+    def test_unregistered_telegram_can_link_existing_vk_profile(self):
+        """До регистрации обратная привязка принимает прямую команду с кодом."""
+        self.register("Профиль VK", channel="vk")
+        self.assertIn("/register", self.say("/settings"))
+        self.assertIn("привязал", self.say("/link " + self.code(channel="vk")))
+        self.assertIn("Профиль VK", self.say("/settings"))
+        self.assertEqual(self.profile_names(), ["Профиль VK"])
 
     def test_ask_and_reanalyze_keep_subject_pipeline_and_mode(self):
         """Ask требует явной смены режима, а повторный анализ сохраняет сценарий."""
         self.register()
+        self.say("/settings")
         self.say("/enable obsidian")
         self.say("/obsidian")
         self.assertIn("Анализ готов", self.say("https://example.com/article"))
@@ -184,12 +195,15 @@ class TextCommandSequencesTest(unittest.TestCase):
     def test_ttl_retry_cancel_and_restart_preserve_saved_mode(self):
         """TTL всех владельцев даёт выполнимую команду, перезапуск теряет только ввод."""
         self.register()
+        self.say("/settings")
         self.say("/enable obsidian")
         self.say("/obsidian")
         for command in ("/name", "/link", "/disable", "/ask", "/reanalyze"):
             with self.subTest(command=command):
                 if command in ("/ask", "/reanalyze"):
                     self.say("/ai" if command == "/ask" else "/obsidian")
+                else:
+                    self.say("/settings")
                 self.say(command)
                 self.now += timedelta(minutes=10)
                 self.assertEqual(self.say("позднее значение"),
@@ -200,9 +214,10 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/cancel")
         self.assertEqual(self.say("/cancel"),
             "В этом чате нечего отменять. Продолжай текущий режим или вызови нужную команду.")
+        self.say("/settings")
         self.say("/name")
         self.restart()
-        self.assertIn("Команды режима ai", self.say("/help"))
+        self.assertIn("/name", self.say("/help"))
         self.say("Не новое имя")
         self.assertEqual(self.profile_names(), ["Первый"])
         self.model.answer.assert_not_called()
@@ -219,9 +234,10 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/cancel")
         self.assertEqual(self.say("VK вопрос", channel="vk"), "Ответ модели")
         self.say("/ask")
+        self.say("/settings", channel="vk")
         self.say("/disable ai", channel="vk")
         self.assertIn("выключена", self.say("Отложенный вопрос"))
-        self.say("/enable ai")
+        self.say("/enable ai", channel="vk")
         self.say("/ask")
         self.say("/unknown")
         self.say("Не вопрос")
@@ -235,8 +251,8 @@ class TextCommandSequencesTest(unittest.TestCase):
         """От кода до переноса проверяет просмотр, частичный снимок и повторный выбор."""
         self.register()
         self.register("Второй", channel="vk")
+        self.say("/settings", channel="vk")
         self.say("/enable obsidian", channel="vk")
-        self.say("/obsidian", channel="vk")
         self.say("/link", channel="vk")
         created = self.send(self.code(), channel="vk")
         self.assertEqual(len(created.actions), 2)
@@ -246,12 +262,14 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertFalse(self.send("/confirm").actions)
         self.say("да", channel="vk")
         self.assertIn("Второй", self.say("/status", channel="vk"))
+        self.say("/obsidian", channel="vk")
         self.obsidian._obsidian_confirmation_service = None
         partial = self.send("/confirm", channel="vk")
         self.assertIn("Список действий неполный", response_text(partial))
         self.assertEqual([a.command for a in partial.actions], [a.command for a in created.actions])
         self.assertIsNotNone(self.send(selected).error)
         self.assertIn("перепривязал", self.say(selected, channel="vk"))
+        self.say("/settings", channel="vk")
         self.assertIn("Первый", self.say("/status", channel="vk"))
         self.assertIn("устарело", self.say(selected, channel="vk"))
         self.assertEqual(self.say("/confirm", channel="vk"),
@@ -260,6 +278,7 @@ class TextCommandSequencesTest(unittest.TestCase):
     def test_obsidian_confirmation_short_and_addressed_from_command(self):
         """Запрос отключения показывает точный выбор; просмотр и /cancel не решают его."""
         self.register()
+        self.say("/settings")
         self.say("/enable obsidian")
         self.say("/obsidian")
         self.say("/vault_disconnect")
@@ -286,8 +305,10 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.register(name)
         model_text = ('Ответ <b>модели</b> &amp; `код` 👩‍💻 е\u0301\n' * 220)
         self.model.answer.return_value = model_text
+        self.say("/settings")
+        status = self.send("/status")
         self.say("/ai")
-        responses = (self.send("/status"), self.send("/ask Вопрос"))
+        responses = (status, self.send("/ask Вопрос"))
         self.assertIn(name, response_text(responses[0]))
         self.assertEqual(response_text(responses[1]), model_text)
         for response in responses:
@@ -323,6 +344,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         """Текстовый отказ закрывает ожидание; старая кнопка не отключает хранилище."""
         address = {"chat": "1001", "user": "1001"}
         self.register(**address)
+        self.say("/settings", **address)
         self.say("/enable obsidian", **address)
         self.say("/obsidian", **address)
         response = self.send("/vault_disconnect", **address)

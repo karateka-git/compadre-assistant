@@ -82,6 +82,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
             ReplyAction("Сменить", "/name Новое"),
         ))
         event = IncomingEvent("telegram", "1001", "1", "запрос", "1001")
+        self.processor(IncomingEvent("telegram", "1001", "enter", "/settings", "1001"))
         with patch.object(IncomingMessageDispatcher, "execute", return_value=response):
             issued = self.processor(event)
         token = issued.bound_actions[0].token
@@ -102,7 +103,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
 
         with patch.object(IncomingMessageDispatcher, "execute", return_value=response):
             old = self.processor(event).bound_actions[0].token
-        self.processor(IncomingEvent("telegram", "1001", "2", "/disable selected", "1001"))
+        self.processor(IncomingEvent("telegram", "1001", "2", "/exit", "1001"))
         asyncio.run(aiogram.dispatcher.included_router.callback_handler(Callback(old, bot)))
         self.assertEqual(self.name("telegram", "1001"), "Новое")
         self.assertIn("больше недоступна", bot.sent[-1]["text"])
@@ -110,6 +111,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
     def test_vk_callback_and_text_only_path_use_exact_commands(self) -> None:
         """VK payload передаёт token; ручной путь исполняет тот же текст."""
         client = FakeVkClient()
+        self.processor(IncomingEvent("vk", "2002", "enter", "/settings", "2002"))
         response = IncomingResponse(text_content("Введи /name Кнопка"), suggested_actions=(
             ReplyAction("Сменить", "/name Кнопка"),
         ))

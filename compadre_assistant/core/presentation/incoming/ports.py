@@ -5,6 +5,7 @@ from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
 
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.domain.users.entities import AppUser
@@ -176,6 +177,8 @@ class HandlerContext:
     app_user: AppUser
     delivery: ReplyDeliveryPort | None = None
     pending_inputs: PendingInputStore | None = None
+    # Привязано к текущему событию и выдаётся зарегистрированному владельцу команд.
+    profile_operation: Callable[[ChatCommand, str], IncomingResponse] | None = None
 
 
 @runtime_checkable
@@ -209,6 +212,8 @@ class CapabilityDescriptor:
     accepts_images: bool = False  # Presentation возможности умеет обрабатывать события с фото.
     requires_profile_access: bool = False  # Только профили, допущенные оператором.
     display_name: str | None = None  # Публичное название для ответов о доступе.
+    personally_configurable: bool = True  # Пользователь может менять личный выбор.
+    profile_commands: frozenset[ChatCommand] = frozenset()  # Разрешённые операции профиля ядра.
 
 
 class CapabilityMode(StrEnum):

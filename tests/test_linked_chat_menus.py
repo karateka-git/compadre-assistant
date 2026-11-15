@@ -57,35 +57,36 @@ class LinkedChatMenusTest(unittest.TestCase):
         key = ChatModeKey(self.user.id, "vk", "202")
         self.send("/ai", self.vk)
         self.send("/ask", self.vk)
+        self.send("/settings", self.foreign)
         self.send("/name", self.foreign)
         foreign_pending = self.fixture.store.get(self.event("x", self.foreign).reply_address)
+        self.send("/settings")
         self.updates.clear()
         response = self.send("/disable ai")
         self.assertIn("выключена", response_text(response))
         menus = self.menus()
-        self.assertEqual(set(menus), {"101", "202"})
-        self.assertIn("/obsidian", menus["101"])
+        self.assertEqual(set(menus), {"202"})
         self.assertIn("/exit", menus["202"])
         self.assertNotIn("/ask", menus["202"])
         self.assertNotIn("/cancel", menus["202"])
         self.assertIsNone(self.fixture.store.get(self.event("x", self.vk).reply_address))
         self.assertEqual(self.fixture.store.get(foreign_pending.chat_key), foreign_pending)
         self.assertEqual(self.fixture.modes.get(key).capability_id, "ai")
-        self.send("/name", self.vk)
-        pending = self.fixture.store.get(self.event("x", self.vk).reply_address)
         self.updates.clear()
         self.send("/enable")
         self.send("ai")
         self.assertIn("/ask", self.menus()["202"])
-        self.assertIn("/cancel", self.menus()["202"])
-        self.assertEqual(self.fixture.store.get(pending.chat_key), pending)
+        self.assertNotIn("/cancel", self.menus()["202"])
+        self.assertEqual(self.fixture.store.get(foreign_pending.chat_key), foreign_pending)
 
     def test_link_and_rebind_refresh_both_owners_without_leaking_preferences(self):
         """Перенесённый чат получает новый профиль, оставшиеся — своего владельца."""
         fresh = IncomingIdentity("vk", "404", "404")
         self.send("/link " + self.service.create_link_code(self.user.id).code, fresh)
         self.assertEqual(set(self.menus()), {"101", "202", "404"})
+        self.send("/settings", self.foreign)
         self.send("/disable ai", self.foreign)
+        self.send("/exit", self.foreign)
         confirmation = self.service.request_rebind_confirmation(
             code=self.service.create_link_code(self.other.id).code, identity=self.vk)
         self.updates.clear()
@@ -111,6 +112,7 @@ class LinkedChatMenusTest(unittest.TestCase):
                 repository.reassign(app_user_id=self.user.id, identity=moved)
             return result
         with patch.object(self.service, "list_known_private_chats", side_effect=enumerate_chats):
+            self.send("/settings")
             self.send("/disable ai")
         self.assertEqual(set(self.menus()), {"101"})
         self.assertNotIn(moved, original(self.user))
@@ -140,6 +142,7 @@ class LinkedChatMenusTest(unittest.TestCase):
                 repository.reassign(app_user_id=self.other.id, identity=self.vk)
             return result
         with patch.object(self.dispatcher, "_command_context", side_effect=read_context):
+            self.send("/settings")
             self.send("/disable ai")
         self.assertEqual(set(self.menus()), {"101"})
         self.assertTrue(self.service.owns_known_private_chat(self.other, self.vk))
@@ -150,6 +153,10 @@ class LinkedChatMenusTest(unittest.TestCase):
             if update.address.chat_id == "101":
                 raise RuntimeError("transport")
             self.updates.append(update)
+        self.send("/settings")
+        self.updates.clear()
+        self.send("/disable")
+        self.updates.clear()
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
             response = self.send("/disable ai", handler=fail_current)
         self.assertIn("выключена", response_text(response))
@@ -158,4 +165,5 @@ class LinkedChatMenusTest(unittest.TestCase):
             with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
                 response = self.send("/enable ai")
         self.assertIn("«Режим ИИ» включён", response_text(response))
+        self.send("/exit")
         self.assertIn("/ai", response_text(self.send("/help")))

@@ -18,6 +18,7 @@ from compadre_assistant.capabilities.admin.presentation.handler import AdminCapa
 from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
 from compadre_assistant.capabilities.ai.data.configuration import AiConfig, load_ai_config
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -123,7 +124,9 @@ def create_incoming_message_dispatcher(
         ValueError: Реестр содержит конфликт ID или команд входа.
     """
     return IncomingMessageDispatcher(
-        registry=CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access),
+        registry=CapabilityRegistry(
+            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+        ),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
         capability_preference_repository=capability_preference_repository,
@@ -188,7 +191,9 @@ class ChannelMessageProcessor:
         self._deferred_actions = DeferredActions()
         self._deferred_menu_closed = Event()
         self._response_actions = ResponseActionStore()
-        self._registry = CapabilityRegistry(capabilities, disabled_capabilities, profile_access=profile_access)
+        self._registry = CapabilityRegistry(
+            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+        )
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
         self._published_menus: dict[ReplyAddress, CommandMenuUpdate] = {}

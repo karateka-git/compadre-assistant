@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from compadre_assistant.core.domain.capability_preferences import UserCapabilitySelection
 
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand, PROFILE_COMMANDS
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityDescriptor,
     IncomingCapabilityPort,
@@ -42,7 +42,7 @@ class CapabilityRegistry:
         self._mode_command_owners: dict[str, CapabilityDescriptor] = {}
         self._profile_access = dict(profile_access or {})
         identifiers: set[str] = set()
-        command_names = {item.value for item in ChatCommand}
+        command_names: set[str] = set()
 
         def register(descriptor: CapabilityDescriptor) -> None:
             """Проверяет весь каталог, включая команды отключённой возможности."""
@@ -55,10 +55,18 @@ class CapabilityRegistry:
             mode_commands = tuple(
                 command for section in descriptor.help.sections for command in section.commands
             )
+            if descriptor.profile_commands and (
+                not descriptor.persistent_mode or not descriptor.profile_commands <= PROFILE_COMMANDS
+                or not descriptor.profile_commands <= {command.name for command in mode_commands}
+            ):
+                raise ValueError(f"Некорректные команды профиля возможности {identifier}")
             for command in (descriptor.entry, *mode_commands):
                 if re.fullmatch(r"/[a-z][a-z0-9_]*", command.name) is None:
                     raise ValueError(f"Некорректная команда возможности {identifier}: {command.name!r}")
-                if command.name in command_names:
+                if command.name in command_names or (
+                    command.name in ChatCommand
+                    and (command is descriptor.entry or command.name not in descriptor.profile_commands)
+                ):
                     raise ValueError(f"Конфликт команды возможностей: {command.name}")
                 if not command.description.strip():
                     raise ValueError(f"Нет описания команды: {command.name}")
@@ -92,6 +100,13 @@ class CapabilityRegistry:
         """Возвращает включённый обработчик сохранённого ID."""
         return self._by_id.get(capability_id)
 
+    def is_personally_configurable(self, capability_id: str) -> bool:
+        """Проверяет, входит ли возможность в изменяемый личный выбор."""
+        return any(
+            descriptor.capability_id == capability_id and descriptor.personally_configurable
+            for descriptor in self.descriptors()
+        )
+
     def descriptors(self) -> tuple[CapabilityDescriptor, ...]:
         """Возвращает каталог собранных и отключённых входов без создания клиентов."""
         return (
@@ -118,7 +133,8 @@ class CapabilityRegistry:
                 CapabilityAccess(
                     descriptor,
                     descriptor.capability_id in self._by_id,
-                    selected.get(descriptor.capability_id, descriptor.enabled_by_default),
+                    (selected.get(descriptor.capability_id, descriptor.enabled_by_default)
+                     if descriptor.personally_configurable else True),
                     self._profile_allows(descriptor, app_user_id),
                 )
                 for descriptor in self.descriptors()

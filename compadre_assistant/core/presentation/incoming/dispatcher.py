@@ -7,7 +7,7 @@ from enum import StrEnum
 import logging
 
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand, ParsedChatCommand
+from compadre_assistant.core.presentation.incoming.commands import PROFILE_COMMANDS, ChatCommand, ParsedChatCommand
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
@@ -273,19 +273,25 @@ class IncomingMessageDispatcher:
         command, *arguments = text.split()
         if command == "/cancel":
             return context.pending_request_id is not None
+        effective = {identifier for identifier, server, enabled, allowed in context.access
+                     if server and enabled and allowed}
+        owner = self._registry.mode_command_owner(command)
+        in_owner_mode = owner is not None and owner.capability_id == context.mode_id and owner.capability_id in effective
+        if command in PROFILE_COMMANDS:
+            if not in_owner_mode:
+                return False
         if command in {ChatCommand.ENABLE.value, ChatCommand.DISABLE.value} and arguments:
-            return len(arguments) == 1 and any(
-                capability_id == arguments[0] and allowed
-                for capability_id, _, _, allowed in context.access
+            return (len(arguments) == 1
+                    and self._registry.is_personally_configurable(arguments[0])
+                    and any(capability_id == arguments[0] and allowed
+                            for capability_id, _, _, allowed in context.access)
             )
         if command in {item.value for item in ChatCommand}:
             return True
-        effective = {owner for owner, server, enabled, allowed in context.access if server and enabled and allowed}
         entry = self._registry.by_command(command)
         if entry is not None:
             return entry.descriptor.capability_id in effective
-        owner = self._registry.mode_command_owner(command)
-        return owner is not None and owner.capability_id == context.mode_id and owner.capability_id in effective
+        return in_owner_mode
 
     def _action_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Читает ожидания проверенного адреса без touch исходной identity."""
@@ -301,7 +307,7 @@ class IncomingMessageDispatcher:
         """Передаёт domain только устойчивые ID и defaults общего каталога."""
         return tuple(
             CapabilityDefault(entry.capability_id, entry.enabled_by_default)
-            for entry in self._registry.descriptors()
+            for entry in self._registry.descriptors() if entry.personally_configurable
         )
 
     @staticmethod
@@ -325,7 +331,7 @@ class IncomingMessageDispatcher:
     def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
         """Показывает названия, аргументы команд и доступность возможностей."""
         lines = ["Личные возможности:"]
-        visible = personal.visible_access
+        visible = tuple(item for item in personal.visible_access if item.descriptor.personally_configurable)
         for access in visible:
             descriptor = access.descriptor
             label = _capability_label(descriptor)
@@ -597,15 +603,6 @@ class IncomingMessageDispatcher:
         if command is ChatCommand.HELP:
             return self._contextual_help(event)
         identity = _incoming_identity_from_event(event)
-        if command is ChatCommand.CAPABILITIES:
-            if parsed is not None and parsed.arguments:
-                return IncomingResponse(compose_content('Используй ', code_span('/capabilities'), ' без аргументов.'))
-            user = self._user_identity_service.resolve(identity)
-            if user is None:
-                return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
-            return IncomingResponse(text_content(self._capability_catalog(self._personal_registry(user, event))))
-        if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
-            return self._change_capability(command, parsed.arguments if parsed else "", identity, event)
         if command is ChatCommand.CONFIRM:
             parts = parsed.arguments.split() if parsed else []
             if not parts:
@@ -684,19 +681,10 @@ class IncomingMessageDispatcher:
                 capability_reply=self._personal_registry(existing, event).entry_hint(),
             )
 
-        if command is ChatCommand.LINK:
-            if not self._profile_link_allowed(event):
-                return IncomingResponse(text_content(_PROFILE_LINK_PRIVATE_HINT))
-            if parsed is None or not parsed.arguments:
-                user = self._user_identity_service.resolve(identity)
-                self._pending_inputs.begin(event.reply_address, "core", "link_code", app_user_id=user.id if user else None, retry_command="/link")
-                return IncomingResponse(text_content(
-                    "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
-                ))
-            return self._link_identity(parsed.arguments, identity)
-
         user = self._user_identity_service.resolve(identity)
         if user is None:
+            if command is ChatCommand.LINK:
+                return self._start_link(parsed.arguments, identity, event)
             if event.images:
                 return IncomingResponse(text_content(_TEXT_INPUT_HINT))
             return ProcessIncomingMessageResult(type=IncomingMessageResultType.UNKNOWN_IDENTITY)
@@ -708,6 +696,37 @@ class IncomingMessageDispatcher:
                 app_user=user,
                 capability_reply=personal.entry_hint(),
             )
+        return self._dispatch(user, event, completion_handler, self._personal_registry(user, event))
+
+    def _profile_operation(
+        self, command: ChatCommand, arguments: str, user: AppUser, event: IncomingEvent, mode_id: str,
+        personal: PersonalCapabilityRegistry,
+    ) -> IncomingResponse:
+        """Выполняет узкую операцию ядра после проверки владельца режима."""
+        from compadre_assistant.core.presentation.responses import format_incoming_message_result
+
+        owner = self._registry.mode_command_owner(command.value)
+        if owner is None or owner.capability_id != mode_id or command not in owner.profile_commands:
+            return IncomingResponse(text_content("Команда недоступна в этом режиме. Посмотри /help."))
+        result = self._apply_profile_operation(command, arguments, user, event, mode_id, personal)
+        return result if isinstance(result, IncomingResponse) else IncomingResponse(
+            format_incoming_message_result(result), result.error,
+        )
+
+    def _apply_profile_operation(
+        self, command: ChatCommand, arguments: str, user: AppUser, event: IncomingEvent, mode_id: str,
+        personal: PersonalCapabilityRegistry,
+    ) -> ProcessIncomingMessageResult | IncomingResponse:
+        if command is ChatCommand.CAPABILITIES:
+            if arguments:
+                return IncomingResponse(compose_content('Используй ', code_span('/capabilities'), ' без аргументов.'))
+            return IncomingResponse(text_content(self._capability_catalog(personal)))
+        if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
+            return self._change_capability(command, arguments, user, event, personal, required_mode=mode_id)
+        if command is ChatCommand.LINK:
+            return self._start_link(
+                arguments, _incoming_identity_from_event(event), event, user=user, required_mode=mode_id,
+            )
         if command is ChatCommand.LINK_CODE:
             if not self._profile_link_allowed(event):
                 return IncomingResponse(text_content(_PROFILE_LINK_PRIVATE_HINT))
@@ -718,35 +737,44 @@ class IncomingMessageDispatcher:
                 link_code=link_code,
             )
         if command is ChatCommand.NAME:
-            if not parsed.arguments:
-                self._pending_inputs.begin(event.reply_address, "core", "profile_name", app_user_id=user.id, retry_command="/name")
+            if not arguments:
+                self._pending_inputs.begin(
+                    event.reply_address, "core", "profile_name", app_user_id=user.id,
+                    required_mode=mode_id, retry_command="/name",
+                )
                 return IncomingResponse(text_content(
                     "Пришли новое имя профиля. Ожидание действует 10 минут. Для отмены введи /cancel."
                 ))
-            return self._save_name(
-                parsed.arguments if parsed is not None else "",
-                user,
-            )
+            return self._save_name(arguments, user)
         if command is ChatCommand.STATUS:
-            personal = self._personal_registry(user, event)
-            mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
-            mode_id = personal.visible_mode(mode.capability_id) if mode else None
-            access = personal.status(mode_id) if mode_id else None
+            access = personal.status(mode_id)
             mode_label = _capability_label(access.descriptor) if access else mode_id
-            status_hint = (
-                f"\n{self._blocked_reply(access)}"
-                if access is not None and not access.effective else ""
-            )
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.PROFILE_STATUS,
                 app_user=user,
                 capability_reply=(
                     f"Профиль: {user.display_name or 'имя ещё не задано'}.\n"
-                    f"Режим этого чата: {mode_label or 'не выбран'}.\n"
-                    f"{personal.entry_hint()}{status_hint}"
+                    f"Режим этого чата: {mode_label}.\n"
+                    f"{personal.entry_hint()}"
                 ),
             )
-        return self._dispatch(user, event, completion_handler, self._personal_registry(user, event))
+        return IncomingResponse(text_content("Команда недоступна в этом режиме. Посмотри /help."))
+
+    def _start_link(
+        self, code: str, identity: IncomingIdentity, event: IncomingEvent,
+        *, user: AppUser | None = None, required_mode: str | None = None,
+    ) -> ProcessIncomingMessageResult | IncomingResponse:
+        if not self._profile_link_allowed(event):
+            return IncomingResponse(text_content(_PROFILE_LINK_PRIVATE_HINT))
+        if code:
+            return self._link_identity(code, identity)
+        self._pending_inputs.begin(
+            event.reply_address, "core", "link_code", app_user_id=user.id if user else None,
+            required_mode=required_mode, retry_command="/link",
+        )
+        return IncomingResponse(text_content(
+            "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
+        ))
 
     def _link_identity(self, code: str, identity: IncomingIdentity) -> ProcessIncomingMessageResult | IncomingResponse:
         """Применяет код одинаково для прямой команды и ожидаемого значения."""
@@ -910,9 +938,18 @@ class IncomingMessageDispatcher:
             if (user.id if user else None) != pending.app_user_id:
                 self._pending_inputs.clear(event.reply_address, pending.request_id)
                 return IncomingResponse(text_content("Профиль канала изменился. Повтори команду."))
-            if pending.input_kind in ("enable", "disable"):
+            personal = self._personal_registry(user, event) if user is not None else None
+            if pending.required_mode is not None:
+                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id)) if user else None
+                if (mode is None or mode.capability_id != pending.required_mode or personal is None
+                        or personal.by_id(pending.required_mode) is None):
+                    self._pending_inputs.clear(event.reply_address, pending.request_id)
+                    return IncomingResponse(text_content(
+                        "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
+                    ))
+            if pending.input_kind in ("enable", "disable") and user is not None and personal is not None:
                 command = ChatCommand.ENABLE if pending.input_kind == "enable" else ChatCommand.DISABLE
-                return self._change_capability(command, event.text, identity, event, pending)
+                return self._change_capability(command, event.text, user, event, personal, pending)
             if pending.input_kind == "link_code":
                 if not self._profile_link_allowed(event):
                     self._pending_inputs.clear(event.reply_address, pending.request_id)
@@ -941,45 +978,43 @@ class IncomingMessageDispatcher:
         return result
 
     def _change_capability(
-        self, command: ChatCommand, arguments: str, identity: IncomingIdentity,
-        event: IncomingEvent, pending: PendingInput | None = None,
+        self, command: ChatCommand, arguments: str, user: AppUser,
+        event: IncomingEvent, personal: PersonalCapabilityRegistry,
+        pending: PendingInput | None = None, *, required_mode: str | None = None,
     ) -> IncomingResponse:
         """Проверяет общую команду и сохраняет один личный выбор AppUser.
 
         Args:
             command: Команда включения либо отключения.
             arguments: Строка аргументов после команды.
-            identity: Разрешаемая identity исходного канала.
+            user: Профиль, для которого проверен режим команды или исходное ожидание.
             event: Исходное событие для ожидания в конкретном чате.
+            personal: Снимок доступа допущенного профиля.
             pending: Продолжаемый ввод либо прямой вызов.
+            required_mode: Режим, которому принадлежит новое ожидание.
 
         Returns:
             Подтверждение собственного commit или понятный отказ без записи.
         """
-        user = self._user_identity_service.resolve(identity)
-        if user is None:
-            if pending is not None:
-                self._pending_inputs.clear(event.reply_address, pending.request_id)
-            return IncomingResponse(compose_content('Сначала зарегистрируйся: ', code_span('/register'), '.'))
-        if pending is not None and user.id != pending.app_user_id:
-            self._pending_inputs.clear(event.reply_address, pending.request_id)
-            return IncomingResponse(text_content("Профиль канала изменился. Повтори команду."))
         enabled = command is ChatCommand.ENABLE
         parts = arguments.split()
-        personal = self._personal_registry(user, event)
         if not parts and pending is None:
             choices = tuple(
                 access for access in personal.visible_access
-                if access.server_available and not access.user_enabled
+                if access.descriptor.personally_configurable and access.server_available and not access.user_enabled
             ) if enabled else tuple(
-                access for access in personal.visible_access if access.user_enabled
+                access for access in personal.visible_access
+                if access.descriptor.personally_configurable and access.user_enabled
             )
             if not choices:
                 return IncomingResponse(text_content(
                     "Нет возможностей, которые можно включить. Посмотри /capabilities." if enabled
                     else "Нет включённых возможностей. Посмотри /capabilities."
                 ))
-            self._pending_inputs.begin(event.reply_address, "core", "enable" if enabled else "disable", app_user_id=user.id, retry_command="/enable" if enabled else "/disable")
+            self._pending_inputs.begin(
+                event.reply_address, "core", "enable" if enabled else "disable",
+                app_user_id=user.id, required_mode=required_mode, retry_command=command.value,
+            )
             option_lines = []
             actions = []
             action = "Включить" if enabled else "Выключить"
@@ -1014,6 +1049,10 @@ class IncomingMessageDispatcher:
                 )
             )
         descriptor = access.descriptor
+        if not descriptor.personally_configurable:
+            return IncomingResponse(text_content(
+                f"Личный доступ к возможности {_capability_label(descriptor)} нельзя изменить."
+            ))
         label = _capability_label(descriptor)
         label_content = label if descriptor.display_name else code_span(label)
         if enabled and not access.server_available:
@@ -1139,6 +1178,10 @@ class IncomingMessageDispatcher:
                 ),
             )
         try:
+            if capability.descriptor.profile_commands:
+                context = replace(context, profile_operation=lambda command, arguments: self._profile_operation(
+                    command, arguments, user, event, capability.descriptor.capability_id, personal,
+                ))
             result = capability.handle(context, event)
             if result.cancellable_action is not None:
                 if not self._can_defer(event, completion_handler):
@@ -1279,7 +1322,9 @@ class IncomingMessageDispatcher:
             pending.owner_id == "core" or pending.app_user_id is not None
         ):
             return False
-        if pending.required_mode is not None and mode_id != pending.required_mode:
+        if pending.required_mode is not None and (
+            mode_id != pending.required_mode or personal is None or personal.by_id(pending.required_mode) is None
+        ):
             return False
         if pending.owner_id != "core":
             owner = personal.by_id(pending.owner_id) if personal else None

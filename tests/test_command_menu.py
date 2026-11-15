@@ -58,8 +58,9 @@ class CommandMenuTest(unittest.TestCase):
         """Параметры не становятся заполнителями, недоступные входы скрыты."""
         fixture = self.fixture
         commands = self.commands()
-        for command in ("/name", "/enable", "/disable", "/link", "/ai", "/obsidian", "/other"):
+        for command in ("/settings", "/ai", "/obsidian", "/other"):
             self.assertIn(command, commands)
+        self.assertFalse(set(commands) & {"/name", "/enable", "/disable", "/link"})
         self.assertNotIn("/ask", commands)
         self.assertNotIn("/reanalyze", commands)
         self.assertNotIn("/confirm", commands)
@@ -67,9 +68,12 @@ class CommandMenuTest(unittest.TestCase):
         self.assertTrue(all(" " not in command for command in commands))
         self.assertEqual(len(commands), len(set(commands)))
         fixture.preferences.rows[(23, "other")] = False
+        fixture.send("/settings")
         for command, kind in (("/name", "profile_name"), ("/enable", "enable"), ("/disable", "disable"), ("/link", "link_code")):
+            self.assertIn(command, self.commands())
             fixture.send(command)
             self.assertEqual(fixture.store.get(_event("x").reply_address).input_kind, kind)
+        fixture.send("/exit")
         fixture.preferences.rows[(23, "other")] = False
         self.assertNotIn("/other", self.commands())
         fixture.registry = CapabilityRegistry((fixture.obsidian,), (fixture.ask.descriptor,))
@@ -102,7 +106,7 @@ class CommandMenuTest(unittest.TestCase):
                 fixture.modes.save(ChatMode(fixture.key, mode))
                 fixture.preferences.rows[(23, "obsidian")] = False
                 fixture.preferences.rows[(23, "ai")] = mode != "ai"
-                expected = ("/exit", "/other") if mode == "ai" else ("/exit", "/ai", "/other")
+                expected = ("/exit", "/other", "/settings") if mode == "ai" else ("/exit", "/ai", "/other", "/settings")
                 self.assertEqual(self.commands(), expected)
 
     def test_pending_expiration_and_context_validation_match_help(self):
@@ -185,6 +189,7 @@ class CommandMenuUpdateTest(unittest.TestCase):
 
     def test_pending_replacement_completion_cancel_and_unchanged_actions(self):
         """Создание, замена и закрытие ввода меняют меню один раз на переход."""
+        self.fixture.send("/settings")
         self.send("/link")
         self.assertEqual(len(self.updates), 1)
         self.assertIn("/cancel", [item.command for item in self.updates[-1].menu.items])
@@ -210,8 +215,9 @@ class CommandMenuUpdateTest(unittest.TestCase):
         self.assertEqual(self.updates[-1].address, _event("x").reply_address)
         self.assertIn("/exit", [item.command for item in self.updates[-1].menu.items])
         self.assertNotIn("/name", [item.command for item in self.updates[-1].menu.items])
-        self.send("/exit")
+        self.send("/settings")
         self.send("/disable ai")
+        self.send("/exit")
         self.assertNotIn("/ai", [item.command for item in self.updates[-1].menu.items])
         count = len(self.updates)
         self.send("/status", chat="other")

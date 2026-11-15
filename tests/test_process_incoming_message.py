@@ -23,6 +23,7 @@ from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import (
     AnalyzeArticleResult,
 )
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from tests.test_incoming_boundary import MemoryChatModes
@@ -624,7 +625,7 @@ def _make_use_case(**dependencies: object) -> PresentationScenario:
     preferences = MemoryCapabilityPreferences()
     preferences.rows[(identity_service.app_user.id, "obsidian")] = True
     dispatcher = IncomingMessageDispatcher(
-        registry=CapabilityRegistry((obsidian,)),
+        registry=CapabilityRegistry((obsidian, SettingsCapability())),
         user_identity_service=identity_service,
         chat_mode_repository=modes,
         capability_preference_repository=preferences,
@@ -898,16 +899,16 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(message_repository.messages, [])
 
     def test_execute_returns_status_for_registered_identity(self) -> None:
-        """Команда `/status` возвращает structured result текущего пользователя."""
+        """Команда `/status` в настройках показывает сведения о профиле."""
         use_case = _make_use_case(
             article_url_use_case=FakeArticleUrlUseCase(),
             user_identity_service=FakeUserIdentityService(),
         )
 
-        result = use_case.execute(_telegram_message("/status"))
+        use_case.dispatcher.execute(_telegram_message("/settings"))
+        result = use_case.dispatcher.execute(_telegram_message("/status"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.PROFILE_STATUS)
-        self.assertEqual(result.app_user.id, 42)
+        self.assertIn("Профиль", response_text(result))
 
     def test_repository_url_starts_github_authorization_when_account_is_missing(
         self,
@@ -1204,10 +1205,11 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/name Влад"))
+        use_case.dispatcher.execute(_telegram_message("/settings"))
+        result = use_case.dispatcher.execute(_telegram_message("/name Влад"))
 
-        self.assertEqual(result.type, IncomingMessageResultType.NAME_UPDATED)
-        self.assertEqual(result.app_user.display_name, "Влад")
+        self.assertIn("Влад", response_text(result))
+        self.assertEqual(identity_service.app_user.display_name, "Влад")
 
     def test_execute_no_without_confirmation_reports_missing_action(self) -> None:
         """`нет` без pending-действия не сообщает о несуществующей отмене."""
@@ -1276,7 +1278,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/link ABC123"))
+        use_case.dispatcher.execute(_telegram_message("/settings"))
+        result = use_case.dispatcher.execute(_telegram_message("/link ABC123"))
 
         self.assertIn("адресной командой", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)

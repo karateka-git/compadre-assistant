@@ -10,6 +10,7 @@ from compadre_assistant.capabilities.ai.domain.errors import AiModelTimeoutError
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
@@ -49,7 +50,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
     def make_dispatcher(self, enabled=None):
         """Собирает ядро с общим состоянием и выбранным серверным каталогом."""
         return IncomingMessageDispatcher(
-            registry=CapabilityRegistry(enabled or (self.ask, self.obsidian, self.other)),
+            registry=CapabilityRegistry((*(enabled or (self.ask, self.obsidian, self.other)), SettingsCapability())),
             user_identity_service=self.identity, chat_mode_repository=self.modes,
             capability_preference_repository=self.preferences, pending_inputs=self.store,
         )
@@ -128,6 +129,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
 
     def test_linked_channel_disable_rechecks_owner(self):
         """Отключение в VK немедленно запрещает ожидаемое действие Telegram."""
+        self.send('/settings', channel='vk')
         for command, owner, value in (('/ask', 'ai', 'https://example.com/article'),
                                       ('/reanalyze', 'obsidian', '7')):
             with self.subTest(owner=owner):

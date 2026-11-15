@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock
 
+from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
+
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.domain.users.identity import InvalidDisplayNameError, InvalidLinkCodeError, IdentityAlreadyBoundError
@@ -33,9 +35,9 @@ class CorePendingInputTest(unittest.TestCase):
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
         self.key = ChatModeKey(23, "telegram", "chat-1")
-        self.modes.save(ChatMode(self.key, "selected"))
+        self.modes.save(ChatMode(self.key, "settings"))
         self.dispatcher = IncomingMessageDispatcher(
-            registry=CapabilityRegistry((self.capability,)), user_identity_service=self.identity,
+            registry=CapabilityRegistry((self.capability, SettingsCapability())), user_identity_service=self.identity,
             chat_mode_repository=self.modes, capability_preference_repository=self.preferences,
             pending_inputs=self.store,
         )
@@ -60,7 +62,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.send("Новое")
         self.assertIsNone(self.pending())
         self.identity.update_display_name.assert_called_with(app_user_id=23, display_name="Новое")
-        self.assertEqual(self.modes.get(self.key).capability_id, "selected")
+        self.assertEqual(self.modes.get(self.key).capability_id, "settings")
         self.assertFalse(self.capability.calls)
 
     def test_cancel_expiry_and_other_chat_do_not_apply_name(self):
@@ -68,6 +70,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.send("/name")
         self.send("обычный текст", "other")
         self.identity.update_display_name.assert_not_called()
+        self.send("/settings", "other")
         self.send("/name", "other")
         self.send("/cancel")
         self.assertIsNone(self.pending())
@@ -134,7 +137,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.send("/enable")
         self.send("selected")
         self.assertTrue(self.preferences.rows[(23, "selected")])
-        self.assertEqual(self.modes.get(self.key).capability_id, "selected")
+        self.assertEqual(self.modes.get(self.key).capability_id, "settings")
 
     def test_external_failures_clear_input(self):
         """Неизвестный исход записи не допускает автоматического повтора."""
@@ -182,7 +185,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.preferences.rows[(23, "selected")] = False
         self.send("/enable")
         original = self.pending()
-        self.dispatcher._registry = CapabilityRegistry((), (self.capability.descriptor,))
+        self.dispatcher._registry = CapabilityRegistry((SettingsCapability(),), (self.capability.descriptor,))
         self.assertIn("недоступна на сервере", self.send("selected"))
         self.assertFalse(self.preferences.rows[(23, "selected")])
         self.assertEqual(self.pending(), original)
@@ -197,3 +200,22 @@ class CorePendingInputTest(unittest.TestCase):
         self.send("/unknown")
         self.assertIsNone(self.pending())
         self.identity.update_display_name.assert_not_called()
+
+    def test_profile_commands_require_settings_in_the_current_chat(self):
+        """Изменение из другого чата и просроченный режим не применяют ввод."""
+        self.assertIn("/settings", self.send("/name Новое", "other"))
+        self.assertIsNone(self.pending("other"))
+        self.send("/name")
+        self.assertEqual(self.pending().required_mode, "settings")
+        self.modes.save(ChatMode(self.key, "selected"))
+        self.assertIn("Контекст ввода изменился", self.send("Новое"))
+        self.identity.update_display_name.assert_not_called()
+        self.assertIsNone(self.pending())
+
+    def test_settings_cannot_be_modified_by_personal_preferences(self):
+        """Настройки не включаются и не выключаются как личная возможность."""
+        for command in ("/enable settings", "/disable settings"):
+            self.assertIn("нельзя изменить", self.send(command))
+        self.assertFalse(self.preferences.rows)
+        self.assertIn("Личные возможности", self.send("/capabilities"))
+        self.assertNotIn("(settings)", self.send("/capabilities"))
