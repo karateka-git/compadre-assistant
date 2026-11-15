@@ -5,7 +5,6 @@ import logging
 import re
 import sqlite3
 import tempfile
-from dataclasses import replace
 from pathlib import Path
 
 from compadre_assistant import __version__
@@ -145,9 +144,7 @@ def main() -> int:
             () if args.process_url else args.channels
         )
         config = load_config(channels=channels)
-        config = replace(
-            config, enabled_capabilities=app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities),
-        )
+        app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
         obsidian_config = (
             app_bootstrap.load_obsidian_profile(config.enabled_capabilities)
             if not args.process_url
@@ -295,7 +292,7 @@ def check_runtime_configuration(
         `True`, если запуск выбранной конфигурации разрешён.
     """
     try:
-        enabled_capabilities = app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
+        app_bootstrap.validate_enabled_capabilities(config.enabled_capabilities)
     except ValueError as error:
         logger.error("Capability configuration is invalid: %s", error)
         return False
@@ -309,7 +306,7 @@ def check_runtime_configuration(
             logger.error("Unknown selected channel: %s", channel)
             results.append(False)
     results.append(check_capability_configuration(
-        enabled_capabilities=enabled_capabilities,
+        enabled_capabilities=config.enabled_capabilities,
         obsidian_config=obsidian_config,
         logger=logger,
     ))
@@ -655,12 +652,13 @@ def run_telegram_bot_command(
     """
     if not check_telegram_config(token, logger):
         return 2
+    if not check_capability_configuration(
+        enabled_capabilities=enabled_capabilities,
+        obsidian_config=obsidian_config, logger=logger,
+    ):
+        return 2
     try:
-        enabled_capabilities = app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
-        if not check_capability_configuration(
-            enabled_capabilities=enabled_capabilities, obsidian_config=obsidian_config, logger=logger,
-        ):
-            return 2
+        app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
         if not initialize_database(database_path, logger):
             return 1
         runtime = create_obsidian_process_runtime(
@@ -727,12 +725,14 @@ def run_vk_bot_command(
     """
     if not check_vk_config(token=token, group_id=group_id, logger=logger):
         return 2
+    if not check_capability_configuration(
+        enabled_capabilities=enabled_capabilities,
+        obsidian_config=obsidian_config, logger=logger,
+    ):
+        return 2
+
     try:
-        enabled_capabilities = app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
-        if not check_capability_configuration(
-            enabled_capabilities=enabled_capabilities, obsidian_config=obsidian_config, logger=logger,
-        ):
-            return 2
+        app_bootstrap.validate_enabled_capabilities(enabled_capabilities)
         if not initialize_database(database_path, logger):
             return 1
         runtime = create_obsidian_process_runtime(
