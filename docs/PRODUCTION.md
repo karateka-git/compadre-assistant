@@ -31,7 +31,19 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 15.11.2026, после 11:49 UTC
+## Последний проверенный снимок 15.11.2026, после 12:40 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | `v4.0.6`, SHA `a8dee3251503f5a44adc818ff96a655ac5c4849e`. Immutable Release `446050596`. Deployment `7803565338` принят со статусом `22245726250` в 12:40 UTC. Совместимость с принятой `v4.0.5` подтверждена в полном CI `43714090269`, попытка 1. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.0.6) · [CI](https://github.com/karateka-git/compadre-assistant/actions/runs/43714090269/attempts/1) |
+| SQLite и backup | Активное поколение `7f345884e8fe4a69a3fd2b955f5672f1`. Журнал по-прежнему заканчивается `0006_ai_capability_id.sql`. Финальный backup и штатная очистка прежнего поколения подтверждены. |
+| Каналы | Оба бота начали polling, контейнеры `healthy` без перезапусков, основной сервис и таймер backup активны. |
+| Администрирование | Доступ задан одному связанному профилю владельца. В обоих контейнерах стоимость и число запросов сверены с Timeweb. Владелец подтвердил ответы `/admin`, `/llm_costs DAY`, сводки `/llm_costs` и `/llm_costs YEAR` в личных чатах Telegram и VK. [Порядок включения](OPERATIONS.md#изменить-список-доверенных-профилей) |
+
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43714816325) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7803565338/statuses)
+
+## Исторический снимок 15.11.2026, после 11:49 UTC
 
 | Область | Результат проверки |
 | --- | --- |
