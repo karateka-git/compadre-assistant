@@ -2,6 +2,7 @@
 
 import sqlite3
 
+from compadre_assistant.core.data.sqlite.capability_ids import SQLiteCapabilityIds
 from compadre_assistant.core.data.sqlite.chat_mode_dtos import ChatModeDto
 from compadre_assistant.core.data.sqlite.chat_mode_mappers import (
     chat_mode_from_dto, chat_mode_state_from_dto, chat_mode_to_dto,
@@ -14,8 +15,10 @@ from compadre_assistant.core.domain.chat_modes import (
 class SQLiteChatModeRepository(ChatModeRepository):
     """Разделяет режимы связанных каналов и восстанавливает их между процессами."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: sqlite3.Connection, *, capability_ids: SQLiteCapabilityIds | None = None) -> None:
+        """Принимает рабочее соединение и сопоставление идентификаторов хранения."""
         self._connection = connection
+        self._capability_ids = capability_ids if capability_ids is not None else SQLiteCapabilityIds()
 
     def get(self, key: ChatModeKey) -> ChatMode | None:
         """Читает режим по полному адресу пользователя и чата."""
@@ -25,7 +28,9 @@ class SQLiteChatModeRepository(ChatModeRepository):
             "AND capability_id IS NOT NULL",
             (key.app_user_id, key.channel, key.chat_id),
         ).fetchone()
-        return chat_mode_from_dto(ChatModeDto(**dict(row))) if row is not None else None
+        if row is None:
+            return None
+        return chat_mode_from_dto(ChatModeDto(**dict(row)), self._capability_ids)
 
     def get_state(self, key: ChatModeKey) -> ChatModeState:
         """Читает ревизию даже после очистки маршрута."""
@@ -35,7 +40,7 @@ class SQLiteChatModeRepository(ChatModeRepository):
             (key.app_user_id, key.channel, key.chat_id),
         ).fetchone()
         return (
-            chat_mode_state_from_dto(ChatModeDto(**dict(row)))
+            chat_mode_state_from_dto(ChatModeDto(**dict(row)), self._capability_ids)
             if row is not None else ChatModeState(key, None, 0)
         )
 
@@ -51,6 +56,7 @@ class SQLiteChatModeRepository(ChatModeRepository):
             raise ValueError("expected_revision must not be negative")
         if capability_id is not None and not capability_id.strip():
             raise ValueError("capability_id must not be empty")
+        stored_id = self._capability_ids.encode(capability_id) if capability_id is not None else None
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
             current = self.get_state(key)
@@ -61,20 +67,20 @@ class SQLiteChatModeRepository(ChatModeRepository):
                     "INSERT INTO active_chat_modes "
                     "(app_user_id, channel, chat_id, capability_id, revision) "
                     "VALUES (?, ?, ?, ?, 1)",
-                    (key.app_user_id, key.channel, key.chat_id, capability_id),
+                    (key.app_user_id, key.channel, key.chat_id, stored_id),
                 )
             else:
                 self._connection.execute(
                     "UPDATE active_chat_modes SET capability_id = ?, "
                     "revision = revision + 1, updated_at = CURRENT_TIMESTAMP "
                     "WHERE app_user_id = ? AND channel = ? AND chat_id = ?",
-                    (capability_id, key.app_user_id, key.channel, key.chat_id),
+                    (stored_id, key.app_user_id, key.channel, key.chat_id),
                 )
             return True
 
     def save(self, mode: ChatMode) -> None:
         """Атомарно заменяет выбор конкретного чата."""
-        dto = chat_mode_to_dto(mode)
+        dto = chat_mode_to_dto(mode, self._capability_ids)
         with self._connection:
             self._connection.execute(
                 "INSERT INTO active_chat_modes (app_user_id, channel, chat_id, capability_id) "
@@ -96,7 +102,7 @@ class SQLiteChatModeRepository(ChatModeRepository):
         Raises:
             RuntimeError: Если записанный режим не удалось прочитать.
         """
-        dto = chat_mode_to_dto(mode)
+        dto = chat_mode_to_dto(mode, self._capability_ids)
         with self._connection:
             self._connection.execute(
                 "INSERT INTO active_chat_modes (app_user_id, channel, chat_id, capability_id) "

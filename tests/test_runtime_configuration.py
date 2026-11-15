@@ -358,7 +358,7 @@ class RuntimeConfigurationTest(unittest.TestCase):
     def test_ask_healthcheck_and_startup_matrix(self) -> None:
         """Все сочетания проверяют ASK_* только при включении и не вызывают API."""
         for channel in ("telegram", "vk"):
-            for enabled in ("", "obsidian", "ask", "obsidian,ask"):
+            for enabled in ("", "obsidian", "ai", "obsidian,ai", "obsidian,ask"):
                 for valid in (False, True):
                     env = self.env(channel, "obsidian" in enabled, "absent")
                     env["ENABLED_CAPABILITIES"] = enabled
@@ -366,10 +366,11 @@ class RuntimeConfigurationTest(unittest.TestCase):
                     for health in (False, True):
                         with self.subTest(channel=channel, enabled=enabled, valid=valid, health=health), patch("compadre_assistant.capabilities.ask.bootstrap.OpenAIAskModel") as model_type, patch(f"compadre_assistant.presentation.cli.main.run_{channel}_bot") as runner:
                             code, logger = self.run_cli(["--healthcheck"] if health else [f"--{channel}-bot"], env)
-                            invalid = "ask" in enabled and not valid
+                            ai_enabled = "ai" in enabled.split(",") or "ask" in enabled.split(",")
+                            invalid = ai_enabled and not valid
                             self.assertEqual(code, (1 if health else 2) if invalid else 0)
                             self.assertNotIn("ask-secret", str(logger.method_calls))
-                            if health or invalid or "ask" not in enabled:
+                            if health or invalid or not ai_enabled:
                                 model_type.assert_not_called()
                             if invalid:
                                 runner.assert_not_called()

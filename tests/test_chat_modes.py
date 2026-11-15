@@ -9,6 +9,7 @@ import unittest
 
 from channel_helpers import process_channel_incoming_message
 from compadre_assistant.capabilities.obsidian.data.configuration.config import ObsidianConfig
+from compadre_assistant.core.data.sqlite.capability_ids import SQLiteCapabilityIds
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
@@ -82,6 +83,30 @@ class ChatModesTest(unittest.TestCase):
             SQLiteChatModeRepository(connection).save(mode)
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get(mode.key), mode)
+
+    def test_renamed_mode_round_trips_between_release_versions(self) -> None:
+        """Оба формата ID видят один маршрут и одну ревизию в мигрированной SQLite."""
+        key = ChatModeKey(1, "telegram", "chat")
+        other = ChatMode(ChatModeKey(2, "telegram", "chat"), "obsidian")
+        current_mode, legacy_mode = ChatMode(key, "ai"), ChatMode(key, "ask")
+        with connect_database(self.database_path) as connection:
+            legacy = SQLiteChatModeRepository(connection)
+            current = SQLiteChatModeRepository(connection, capability_ids=SQLiteCapabilityIds({"ai": "ask"}))
+            legacy.save(legacy_mode)
+            legacy.save(other)
+            self.assertEqual(current.get(key), current_mode)
+            self.assertEqual(current.get_state(key).capability_id, "ai")
+            self.assertEqual(current.get_state(key).revision, 1)
+            self.assertFalse(current.replace_if_revision(key, 0, "obsidian"))
+            current.clear(key)
+            self.assertIsNone(legacy.get_state(key).capability_id)
+            self.assertEqual(current.activate_if_absent(current_mode), current_mode)
+            self.assertEqual(legacy.get(key), legacy_mode)
+            self.assertTrue(current.replace_if_revision(key, 3, "ai"))
+            self.assertEqual(legacy.get_state(key).revision, 4)
+            current.save(current_mode)
+            self.assertEqual(legacy.get(key), legacy_mode)
+            self.assertEqual(current.get(other.key), other)
 
     def test_concurrent_first_selection_does_not_replace_winner(self) -> None:
         """Два соединения получают одинаковый сохранённый маршрут при гонке."""

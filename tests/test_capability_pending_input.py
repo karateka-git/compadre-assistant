@@ -73,7 +73,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.assertEqual(self.model.answer.call_args.kwargs['question'], 'вопрос')
         self.send('/ask напрямую')
         self.assertEqual(self.model.answer.call_count, 2)
-        self.assertEqual(self.modes.get(self.key).capability_id, 'ask')
+        self.assertEqual(self.modes.get(self.key).capability_id, 'ai')
         self.assertFalse(self.articles.commands)
 
     def test_ask_expiry_and_failure_do_not_repeat(self):
@@ -128,11 +128,11 @@ class CapabilityPendingInputTest(unittest.TestCase):
 
     def test_linked_channel_disable_rechecks_owner(self):
         """Отключение в VK немедленно запрещает ожидаемое действие Telegram."""
-        for command, owner, value in (('/ask', 'ask', 'https://example.com/article'),
+        for command, owner, value in (('/ask', 'ai', 'https://example.com/article'),
                                       ('/reanalyze', 'obsidian', '7')):
             with self.subTest(owner=owner):
                 self.preferences.rows[(23, owner)] = True
-                self.send('/ai' if owner == 'ask' else '/obsidian')
+                self.send('/ai' if owner == 'ai' else '/obsidian')
                 self.send(command)
                 self.send('/disable ' + owner, channel='vk')
                 self.assertIn('выключена', response_text(self.send(value)))
@@ -158,7 +158,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         self.send('второй', 'chat-2')
         self.send('третий', channel='vk')
         self.assertEqual([c.kwargs['question'] for c in self.model.answer.call_args_list], ['второй', 'третий'])
-        self.assertEqual(self.modes.get(self.key).capability_id, 'ask')
+        self.assertEqual(self.modes.get(self.key).capability_id, 'ai')
 
     def test_profile_or_server_change_drops_value(self):
         """Смена профиля или удаление владельца не пересылает текст активной возможности."""

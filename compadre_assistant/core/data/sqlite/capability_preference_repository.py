@@ -2,6 +2,7 @@
 
 import sqlite3
 
+from compadre_assistant.core.data.sqlite.capability_ids import SQLiteCapabilityIds
 from compadre_assistant.core.data.sqlite.capability_preference_dtos import (
     UserCapabilityPreferenceDto,
 )
@@ -18,9 +19,10 @@ from compadre_assistant.core.domain.capability_preferences import (
 class SQLiteUserCapabilityPreferenceRepository(UserCapabilityPreferenceRepository):
     """Читает AppUser-настройки и атомарно меняет только один ID."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
-        """Принимает соединение с включёнными SQLite foreign keys."""
+    def __init__(self, connection: sqlite3.Connection, *, capability_ids: SQLiteCapabilityIds | None = None) -> None:
+        """Принимает соединение с SQLite foreign keys и идентификаторы хранения."""
         self._connection = connection
+        self._capability_ids = capability_ids if capability_ids is not None else SQLiteCapabilityIds()
 
     def get_for_user(self, app_user_id: int) -> tuple[UserCapabilityPreference, ...]:
         """Возвращает все явные строки AppUser без интерпретации каталога."""
@@ -32,7 +34,7 @@ class SQLiteUserCapabilityPreferenceRepository(UserCapabilityPreferenceRepositor
             (app_user_id,),
         ).fetchall()
         return tuple(
-            capability_preference_from_dto(UserCapabilityPreferenceDto(*row))
+            capability_preference_from_dto(UserCapabilityPreferenceDto(*row), self._capability_ids)
             for row in rows
         )
 
@@ -48,7 +50,7 @@ class SQLiteUserCapabilityPreferenceRepository(UserCapabilityPreferenceRepositor
         Raises:
             sqlite3.Error: SQLite не смогла зафиксировать изменение.
         """
-        dto = capability_preference_to_dto(preference)
+        dto = capability_preference_to_dto(preference, self._capability_ids)
         with self._connection:
             # Lock до чтения сохраняет смысл ответа «уже» при параллельных командах.
             self._connection.execute("BEGIN IMMEDIATE")
