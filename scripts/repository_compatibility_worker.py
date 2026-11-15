@@ -27,6 +27,7 @@ class CheckoutImports(importlib.abc.MetaPathFinder):
         self.checkout = checkout
         self.names = {"compadre_assistant", "document_chunker", "tests", "scripts"}
         self.names.update(p.stem for p in (checkout / "tests").glob("*.py"))
+        self.names.update(p.parent.name for p in (checkout / "tests").glob("*/__init__.py"))
         self.origins: dict[str, str] = {}
 
     def check(self, name: str, origin: str | None) -> None:
@@ -77,9 +78,31 @@ def assert_database(connection: sqlite3.Connection, names: list[str]) -> str:
     return hashlib.sha256(json.dumps(schema).encode()).hexdigest()
 
 
-def run_tests(modules: list[str], external_tests: Path | None = None) -> dict:
-    """Исполняет неизменные unittest и сохраняет IDs и раздельные ошибки."""
-    suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+class _RecordingTestResult(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.started: list[str] = []
+
+    def startTest(self, test: unittest.TestCase) -> None:
+        """Запоминает тест в момент фактического запуска unittest."""
+        self.started.append(test.id())
+        super().startTest(test)
+
+
+def run_tests(modules: list[str], external_tests: Path | None = None, *,
+              discover_dir: Path | None = None) -> dict:
+    """Запускает именованный набор или стандартный discovery unittest.
+
+    Args:
+        modules: Явные имена модулей для отдельного проверочного набора.
+        external_tests: Файл доверенных дополнительных проверок.
+        discover_dir: Каталог тестов принятой версии для полного прогона.
+
+    Returns:
+        Состав обнаруженных и начатых тестов, результаты и ошибки загрузки.
+    """
+    loader = unittest.TestLoader()
+    suite = loader.discover(str(discover_dir)) if discover_dir is not None else loader.loadTestsFromNames(modules)
     if external_tests is not None:
         spec = importlib.util.spec_from_file_location("repository_compatibility_cases", external_tests)
         if spec is None or spec.loader is None:
@@ -87,7 +110,7 @@ def run_tests(modules: list[str], external_tests: Path | None = None) -> dict:
         module = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = module
         spec.loader.exec_module(module)
-        suite.addTests(unittest.defaultTestLoader.loadTestsFromModule(module))
+        suite.addTests(loader.loadTestsFromModule(module))
 
     def ids(tests):
         for test in tests:
@@ -97,10 +120,20 @@ def run_tests(modules: list[str], external_tests: Path | None = None) -> dict:
                 yield test.id()
 
     test_ids = list(ids(suite))
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2, resultclass=_RecordingTestResult).run(suite)
+    # Пропуск на импорте скрывает от discover весь модуль за одним псевдотестом.
+    loader_errors = list(loader.errors)
+    loader_errors.extend(
+        f"test module skipped during import: {test_id}"
+        for test_id in test_ids if test_id.startswith("unittest.loader.ModuleSkipped.")
+    )
+    accepts_skips = discover_dir is not None or not (result.skipped or result.expectedFailures)
+    has_unskipped_test = not set(test_ids).issubset(test.id() for test, _ in result.skipped)
     return {"passed": result.wasSuccessful() and result.testsRun == len(test_ids) > 0
-            and len(set(test_ids)) == len(test_ids) and not result.skipped and not result.expectedFailures,
+            and len(set(test_ids)) == len(test_ids) and sorted(result.started) == sorted(test_ids)
+            and not loader_errors and accepts_skips and has_unskipped_test,
             "tests_run": result.testsRun, "test_ids": test_ids,
+            "started_test_ids": result.started, "loader_errors": loader_errors,
             "failures": [test.id() for test, _ in result.failures],
             "errors": [test.id() for test, _ in result.errors],
             "skips": [(test.id(), reason) for test, reason in result.skipped],
@@ -314,20 +347,24 @@ def candidate_migrations(database: Path, previous_sql: Path) -> dict:
 
 
 def old_behavior(modules: list[str], external_tests: Path | None = None,
-                 database: Path | None = None) -> dict:
+                 database: Path | None = None, *, discover_dir: Path | None = None) -> dict:
     """Наблюдает реальный старый apply_migrations, не заменяя его или assertions."""
     from compadre_assistant.core.data.sqlite import migration_runner
 
     names = sorted(p.name for p in migration_runner.MIGRATIONS_DIR.glob("*.sql"))
+    canonical_sql = migration_runner.MIGRATIONS_DIR.resolve()
+    migration_code = migration_runner.apply_migrations.__code__
     fingerprints: set[str] = set()
     failures: list[str] = []
     calls = 0
 
     def observe(frame, event, arg):
         nonlocal calls
-        if event != "return" or frame.f_code is not migration_runner.apply_migrations.__code__:
+        # Profiler посылает return с None и при исключении. Такой вызов
+        # не может свидетельствовать об успешно применённой схеме.
+        if event != "return" or frame.f_code is not migration_code or arg is None:
             return
-        if Path(frame.f_locals["migrations_dir"]).resolve() != migration_runner.MIGRATIONS_DIR.resolve():
+        if Path(frame.f_locals["migrations_dir"]).resolve() != canonical_sql:
             return
         try:
             fingerprints.add(assert_database(frame.f_locals["connection"], names))
@@ -337,8 +374,13 @@ def old_behavior(modules: list[str], external_tests: Path | None = None,
 
     sys.setprofile(observe)
     threading.setprofile(observe)
+    additional_tests = None
     try:
-        tests = run_tests(modules, external_tests)
+        if discover_dir is None:
+            tests = run_tests(modules, external_tests)
+        else:
+            tests = run_tests([], discover_dir=discover_dir)
+            additional_tests = run_tests([], external_tests)
     finally:
         sys.setprofile(None)
         threading.setprofile(None)
@@ -415,11 +457,18 @@ def old_behavior(modules: list[str], external_tests: Path | None = None,
                     content="Previous updated instruction"),),
             )
             assert_database(connection, names)
-    return {"passed": tests["passed"] and calls > 0 and not failures,
-            "old_tests": tests, "candidate_schema_observations": calls,
-            "schema_fingerprints": sorted(fingerprints), "schema_errors": failures,
-            "migration_names": names,
-            "coverage": "107-method audit matrix plus external cases; local mechanism, not trusted admission"}
+    suites_passed = tests["passed"] and (additional_tests is None or additional_tests["passed"])
+    report = {
+        "passed": suites_passed and calls > 0 and not failures,
+        "old_tests": tests, "candidate_schema_observations": calls,
+        "schema_fingerprints": sorted(fingerprints), "schema_errors": failures,
+        "migration_names": names,
+        "coverage": "targeted worker unittest",
+    }
+    if additional_tests is not None:
+        report["additional_tests"] = additional_tests
+        report["coverage"] = "full previous unittest discovery plus separate external cases"
+    return report
 
 
 def main() -> int:
@@ -430,7 +479,9 @@ def main() -> int:
     parser.add_argument("--result", required=True, type=Path)
     parser.add_argument("--database", type=Path)
     parser.add_argument("--previous-sql", type=Path)
-    parser.add_argument("--test-modules", nargs="+", default=[])
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--test-modules", nargs="+", default=[])
+    selection.add_argument("--full-discovery", action="store_true")
     parser.add_argument("--compatibility-tests", type=Path)
     args = parser.parse_args()
     checkout = args.checkout.resolve()
@@ -464,7 +515,8 @@ def main() -> int:
         elif args.mode == "candidate":
             result = candidate_migrations(args.database, args.previous_sql)
         elif args.mode == "behavior":
-            result = old_behavior(args.test_modules, args.compatibility_tests, args.database)
+            result = old_behavior(args.test_modules, args.compatibility_tests, args.database,
+                                  discover_dir=checkout / "tests" if args.full_discovery else None)
         else:
             from compadre_assistant.core.data.sqlite.connection import connect_database
             from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR

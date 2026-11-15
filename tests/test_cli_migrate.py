@@ -161,6 +161,7 @@ class MigrateCommandTest(unittest.TestCase):
     def test_module_entrypoint_exits_after_migrations(self) -> None:
         """Настоящий subprocess без токенов создаёт схему и завершается при повторе."""
         project_root = Path(__file__).resolve().parents[1]
+        expected = [path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql"))]
         env = os.environ.copy()
         env.update(PYTHONPATH=str(project_root), ENABLED_CHANNELS="invalid", APP_DEBUG="invalid")
         for _ in range(2):
@@ -169,8 +170,10 @@ class MigrateCommandTest(unittest.TestCase):
                 cwd=self.root, env=env, capture_output=True, text=True, timeout=30,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-        with connect_database(self.database) as connection:
-            self.assertEqual(connection.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0], 5)
+            with connect_database(self.database) as connection:
+                journal = [tuple(row) for row in connection.execute(
+                    "SELECT version, name FROM schema_migrations ORDER BY version")]
+                self.assertEqual(journal, list(enumerate(expected, start=1)))
 
 
 if __name__ == "__main__":

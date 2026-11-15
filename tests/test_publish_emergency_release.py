@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 import unittest
 from unittest.mock import patch
 
@@ -125,8 +126,10 @@ class EmergencyPublishTests(unittest.TestCase):
     """Проверяет снимок на момент merge и fail-closed запись выпуска."""
 
     def setUp(self) -> None:
-        """Изолирует локальный Git и родство кандидата."""
+        """Изолирует локальный Git, родство кандидата и время проверки."""
         self.api = FakeApi()
+        self.clock = self.enterContext(patch.object(emergency, "datetime", wraps=datetime))
+        self.clock.now.return_value = datetime.fromisoformat(MERGED_AT) + timedelta(hours=1)
         for name, value in (("_candidate", None), ("checked_main_head", SHA),
                             ("tag_commit", SHA)):
             mocked = patch.object(emergency, name, return_value=value)
@@ -148,6 +151,14 @@ class EmergencyPublishTests(unittest.TestCase):
         self.assertIn(f"Commit: `{SHA}`", result.body)
         self.assertIn("Причина: срочное исправление", result.body)
         self.assertEqual(self.api.posts, [])
+
+    def test_bypass_evidence_expires_after_thirty_days(self) -> None:
+        """Ровно через 30 дней журнал доступен, а после срока допуск не подтверждён."""
+        boundary = datetime.fromisoformat(MERGED_AT) + timedelta(days=30)
+        self.clock.now.return_value = boundary
+        self.assertEqual(self.prepared().pulls[0].bypass, "yes")
+        self.clock.now.return_value = boundary + timedelta(seconds=1)
+        self.assertEqual(self.prepared().pulls[0].bypass, "unverified")
 
     def test_fast_snapshot_uses_merge_time_not_later_result(self) -> None:
         """Успех после merge остаётся состоянием pending на момент merge."""
