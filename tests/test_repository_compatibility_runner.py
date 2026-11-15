@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -313,6 +314,76 @@ class AdditionalTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertEqual(result["test_ids"], result["started_test_ids"])
         self.assertEqual(len(result["skips"]), 1)
+
+    def test_full_discovery_applies_overlay_to_child_and_rejects_incompatible_sql(self) -> None:
+        """Новый тест автоматически проверяет схему в основном процессе и CLI."""
+        source = Path(__file__).resolve().parents[1]
+        checkout = self.root / "discover-runtime"
+        for package in ("compadre_assistant", "document_chunker"):
+            shutil.copytree(source / package, checkout / package, ignore=shutil.ignore_patterns("__pycache__"))
+        tests = checkout / "tests"
+        tests.mkdir()
+        (tests / "test_added_migration.py").write_text("""
+import os
+from pathlib import Path
+import subprocess
+import sys
+from tempfile import TemporaryDirectory
+import unittest
+
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+
+class MigrationTest(unittest.TestCase):
+    def test_current_schema(self):
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with connect_database(root / "direct.db") as connection:
+                apply_migrations(connection)
+                connection.execute("SELECT display_name FROM app_users")
+            subprocess.run(
+                [sys.executable, "-m", "compadre_assistant", "--migrate", "--database-path", str(root / "child.db")],
+                cwd=root, env=os.environ | {"PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                capture_output=True, check=True, timeout=30)
+            with connect_database(root / "child.db") as connection:
+                columns = {row[1] for row in connection.execute("PRAGMA table_info(app_users)")}
+            self.assertIn("discovered_fixture_column", columns)
+""", encoding="utf-8")
+        external = self.root / "additional.py"
+        external.write_text("""import unittest
+
+class AdditionalTest(unittest.TestCase):
+    def test_external(self):
+        pass
+""", encoding="utf-8")
+        original = snapshot(checkout)
+        candidate = self.root / "sql-source"
+        shutil.copytree(checkout / MIGRATIONS, candidate / MIGRATIONS)
+        version = len(list((candidate / MIGRATIONS).glob("*.sql"))) + 1
+        added = candidate / MIGRATIONS / f"{version:04d}_discovery_fixture.sql"
+        added.write_text("ALTER TABLE app_users ADD COLUMN discovered_fixture_column TEXT;\n", encoding="utf-8")
+        expected = overlay_sql(checkout, candidate, original)
+        test_id = "test_added_migration.MigrationTest.test_current_schema"
+        args = ["--full-discovery", "--compatibility-tests", str(external)]
+        compatible = self.root / "compatible"
+        compatible.mkdir()
+        result = run_worker(worker_python(), checkout, "behavior", compatible, args, 60)
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(result["old_tests"]["started_test_ids"], [test_id])
+        self.assertTrue(result["additional_tests"]["passed"])
+        self.assertEqual(result["candidate_schema_observations"], 1)
+        self.assertIn(added.name, result["migration_names"])
+        self.assertEqual(snapshot(checkout), expected)
+
+        added.write_text("ALTER TABLE app_users RENAME COLUMN display_name TO hidden_name;\n", encoding="utf-8")
+        overlay_sql(checkout, candidate, expected)
+        incompatible = self.root / "incompatible"
+        incompatible.mkdir()
+        result = run_worker(worker_python(), checkout, "behavior", incompatible, args, 60)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["old_tests"]["errors"], [test_id])
+        self.assertTrue(result["additional_tests"]["passed"])
+        self.assertEqual(result["candidate_schema_observations"], 1)
 
     def test_real_old_tests_observe_added_sql_and_report_sql_failure(self) -> None:
         """Старые repository tests используют новую SQL до импорта и видят её ошибку."""
