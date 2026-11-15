@@ -165,12 +165,13 @@ class IncomingBoundaryTest(unittest.TestCase):
             self.assertNotIn("vault", names)
         self.assertNotIn("app_user_id", {field.name for field in fields(IncomingEvent)})
 
-    def test_help_lists_every_entry_and_exit_without_calling_handlers(self) -> None:
+    def test_help_lists_entries_without_calling_handlers(self) -> None:
         """Справка всех входов доступна до активного режима и pending rebind."""
         self.identity.pending = True
         reply = self.dispatcher.execute(_event("/help"))
-        for command in ("/selected", "/other", "/exit", "/settings"):
+        for command in ("/selected", "/other", "/settings"):
             self.assertIn(command, response_text(reply))
+        self.assertNotIn("/exit", response_text(reply))
         self.assertNotIn("/name", response_text(reply))
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.capability.entries)
@@ -643,7 +644,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Отсутствие включённых возможностей не требует предметного обработчика."""
         dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
         self.assertIn("/settings", response_text(dispatcher.execute(_event("текст"))))
-        self.assertIn("/exit", response_text(dispatcher.execute(_event("/help"))))
+        self.assertIn("/settings", response_text(dispatcher.execute(_event("/help"))))
 
 
 if __name__ == "__main__":

@@ -160,7 +160,7 @@ class AiChannelsTest(unittest.TestCase):
             for command, text, expected_commands, expected_labels in (
                 ("/ai", "Режим ИИ включён", {"/ask", "/get_text_from_image", "/exit"},
                  ["Задать вопрос", "Извлечь текст с фото"]),
-                ("/exit", "Режим этого чата завершён", {"/help", "/ai"},
+                ("/exit", "Режим этого чата завершён", {"/settings", "/ai"},
                  ["Посмотреть команды"]),
             ):
                 with self.subTest(command=command):
@@ -174,7 +174,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.assertTrue(inline["inline"])
                     commands = {button["action"]["label"] for row in menu["buttons"] for button in row}
                     actions = [button["action"] for row in inline["buttons"] for button in row]
-                    self.assertLessEqual(expected_commands, commands)
+                    self.assertEqual(expected_commands, commands)
                     self.assertEqual([action["label"] for action in actions], expected_labels)
 
             _handle_update({"type": "message_event", "object": {
@@ -450,7 +450,7 @@ class AiChannelsTest(unittest.TestCase):
                         self.assertIn("Возможность «Режим ИИ» выключена", send("/disable ai"))
                         self.assertEqual(send("/ai"),
                                          "Возможность «Режим ИИ» лично выключена. "
-                                         "Включить: /enable ai. Список: /capabilities.")
+                                         "Включить: /settings, затем /enable ai.")
                         self.assertIn("«Режим ИИ» — /enable ai", send("/enable"))
                         self.assertEqual(
                             self.press_action(channel, processor, self.keyboard, "Включить «Режим ИИ»"),
@@ -562,7 +562,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.assertEqual(self.send(channel, processor, "/ai"),
-                                     "Возможность «Режим ИИ» недоступна на сервере. Список: /capabilities.")
+                                     "Возможность «Режим ИИ» недоступна на сервере. Список: /settings, затем /capabilities.")
                     self.assertIn("недоступна на сервере", self.send(channel, processor, "/ask вопрос"))
             loader.assert_not_called()
             model.assert_not_called()

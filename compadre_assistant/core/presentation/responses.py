@@ -14,7 +14,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
         case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS | IncomingMessageResultType.CAPABILITY_DISABLED:
             return text_content(result.capability_reply or "Выбери возможность через /help.")
         case IncomingMessageResultType.MODE_EXITED:
-            return compose_content('Режим этого чата завершён.\n' + str(result.capability_reply or '') + '\nКоманды: /help.')
+            return text_content('Режим этого чата завершён.\n' + (result.capability_reply or 'Справка: /help.'))
         case IncomingMessageResultType.MODE_UNAVAILABLE:
             return compose_content(
                 'Сохранённая возможность этого чата отключена или недоступна. Выйти: ',
@@ -47,7 +47,8 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             )
         case IncomingMessageResultType.REGISTRATION_NAME_SAVED:
             return compose_content(
-                'Приятно познакомиться, ' + str(_display_name(result)) + '.\nРегистрация завершена.\n' + str(result.capability_reply or '') + '\nКоманды: /help.',
+                'Приятно познакомиться, ', _display_name(result), '.\nРегистрация завершена.\n',
+                result.capability_reply or 'Справка: /help.',
             )
         case IncomingMessageResultType.NAME_COMMAND_INVALID:
             return (
@@ -82,6 +83,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
                     code_span(str(result.link_code.code)),
                     '\nОткрой другой канал и отправь: ',
                     code_span('/link ' + str(result.link_code.code)),
+                    '\nЕсли там уже есть профиль, сначала открой ', code_span('/settings'), '.',
                     '\nКод действует 10 минут.',
                 )
             )
@@ -93,9 +95,9 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             return compose_content('Этот канал уже привязан к пользователю.')
         case IncomingMessageResultType.LINK_CODE_INVALID:
             return compose_content(
-                'Код привязки не принят. Повтори /link <code> с действующим кодом. Если истёк сам код, получи новый через ',
-                code_span('/link_code'),
-                ' в уже привязанном канале; код действует 10 минут.',
+                'Код привязки не принят. Повтори ', code_span('/link <code>'), ' с действующим кодом. '
+                'Если код истёк, в уже привязанном канале открой ', code_span('/settings'),
+                ' и вызови ', code_span('/link_code'), '.',
             )
         case IncomingMessageResultType.LINK_REBOUND:
             if result.app_user is None:

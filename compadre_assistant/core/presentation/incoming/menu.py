@@ -1,6 +1,6 @@
 """Проекция публичного каталога в меню без зависимости от канала доставки."""
 
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand, PROFILE_COMMANDS
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CommandMenu, CommandSuggestion, ConfirmationQueryResult,
@@ -62,10 +62,6 @@ def build_command_menu(
         else:
             if mode_id:
                 common(ChatCommand.EXIT)
-            else:
-                for command in ChatCommand:
-                    if command not in PROFILE_COMMANDS and command not in (ChatCommand.CANCEL, ChatCommand.CONFIRM):
-                        common(command)
             for access in personal.access:
                 if access.effective and access.descriptor.capability_id != mode_id:
                     capability(access.descriptor.entry)

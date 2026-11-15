@@ -116,12 +116,14 @@ class CapabilityRegistry:
 
     def for_user(
         self, selections: tuple[UserCapabilitySelection, ...], *, app_user_id: int | None = None,
+        private_chat: bool = False,
     ) -> PersonalCapabilityRegistry:
         """Создаёт снимок допуска и личного выбора для одного события.
 
         Args:
             selections: Личный выбор профиля.
             app_user_id: ID AppUser из события с явным автором, если он известен.
+            private_chat: Адрес события проверен как личный чат его автора.
 
         Returns:
             Снимок серверной доступности, доверия к профилю и личного выбора.
@@ -136,6 +138,7 @@ class CapabilityRegistry:
                     (selected.get(descriptor.capability_id, descriptor.enabled_by_default)
                      if descriptor.personally_configurable else True),
                     self._profile_allows(descriptor, app_user_id),
+                    private_chat or descriptor.private_chat_hint is None,
                 )
                 for descriptor in self.descriptors()
             ),
@@ -173,11 +176,11 @@ class CapabilityRegistry:
         """Предлагает публичные серверные входы при отсутствии контекста профиля."""
         commands = ", ".join(
             command for command, capability in self._by_command.items()
-            if not capability.descriptor.requires_profile_access
+            if not capability.descriptor.requires_profile_access and capability.descriptor.private_chat_hint is None
         )
         if not commands:
-            return "Сейчас нет включённых возможностей. Выбор: /capabilities. Справка: /help."
-        return f"Выбери возможность: {commands}. Выбор: /capabilities. Справка: /help."
+            return "Сейчас нет включённых возможностей. Справка: /help."
+        return f"Выбери возможность: {commands}. Справка: /help."
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,11 +191,17 @@ class CapabilityAccess:
     server_available: bool
     user_enabled: bool
     profile_allowed: bool
+    chat_allowed: bool = True
+
+    @property
+    def visible(self) -> bool:
+        """Проверяет, разрешено ли показать возможность в этом чате."""
+        return self.profile_allowed and self.chat_allowed
 
     @property
     def effective(self) -> bool:
         """Возвращает допуск только при выполнении всех условий."""
-        return self.server_available and self.user_enabled and self.profile_allowed
+        return self.server_available and self.user_enabled and self.visible
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,15 +213,15 @@ class PersonalCapabilityRegistry:
 
     @property
     def visible_access(self) -> tuple[CapabilityAccess, ...]:
-        """Возвращает каталог без возможностей, скрытых от текущего профиля."""
-        return tuple(entry for entry in self.access if entry.profile_allowed)
+        """Возвращает каталог возможностей, видимых в текущем чате."""
+        return tuple(entry for entry in self.access if entry.visible)
 
     def visible_mode(self, mode_id: str | None) -> str | None:
-        """Скрывает сохранённый режим при отзыве доверенного доступа."""
+        """Скрывает режим, когда профиль или адрес не допускается."""
         if mode_id is None:
             return None
         status = self.status(mode_id)
-        return None if status is not None and not status.profile_allowed else mode_id
+        return None if status is not None and not status.visible else mode_id
 
     def status(self, capability_id: str) -> CapabilityAccess | None:
         """Возвращает состояние известного ID или None для неизвестного."""
@@ -254,5 +263,5 @@ class PersonalCapabilityRegistry:
             f"{entry.descriptor.entry.name}" for entry in self.access if entry.effective
         )
         if not commands:
-            return "Сейчас нет включённых возможностей. Выбор: /capabilities. Справка: /help."
-        return f"Выбери возможность: {commands}. Выбор: /capabilities. Справка: /help."
+            return "Сейчас нет включённых возможностей. Справка: /help."
+        return f"Выбери возможность: {commands}. Справка: /help."

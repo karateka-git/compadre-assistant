@@ -1,6 +1,6 @@
 """Контекстная справка из публичного каталога и проверенных снимков чата."""
 
-from compadre_assistant.core.presentation.incoming.commands import ChatCommand, CommandSection, PROFILE_COMMANDS
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, ConfirmationQueryResult, IncomingResponse,
@@ -74,11 +74,8 @@ def format_contextual_help(
                     line(f"Сохранённый режим {mode_id} устарел: эта возможность выполняет одноразовый запрос и не поддерживает постоянный режим. Выйти: /exit.")
                 else:
                     reason = "недоступна на сервере" if access is None or not access.server_available else "лично выключена"
-                    line(f"Режим {mode_id} недоступен: возможность {reason}. Выйти: /exit.")
-            line(CommandSection.BASIC.value + ":")
-            for item in ChatCommand:
-                if item not in PROFILE_COMMANDS and item not in (ChatCommand.CANCEL, ChatCommand.CONFIRM):
-                    command(item.usage, item.description)
+                    line(f"Режим {mode_id} недоступен: возможность {reason}.")
+                    command(ChatCommand.EXIT.value, ChatCommand.EXIT.description)
             available = [item for item in personal.access if item.effective]
             line("Возможности:" if available else "Сейчас нет доступных возможностей.")
             for item in available:

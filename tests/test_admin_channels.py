@@ -16,11 +16,14 @@ import httpx
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_channel_message_processor, create_user_identity_service
 from compadre_assistant.capabilities.admin.data.configuration import AdminConfigError
 from compadre_assistant.capabilities.admin.domain.cost_report import GetGatewayCostReport
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
 from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handler, _handle_update
 from tests.test_message_rendering import _HtmlReader
@@ -224,7 +227,7 @@ class AdminChannelsTest(unittest.TestCase):
                 self.assertIsNone(modes.get(tg_key))
                 self.assertIsNone(modes.get(vk_key))
                 modes.save(ChatMode(vk_key, "ask"))
-            self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs", chat=tg_group)[0])
+            self.assertEqual(self.telegram(processor, "/llm_costs", chat=tg_group)[0], private_hint)
             self.vk(processor, "/admin /llm_costs", peer=vk_group)
             with connect_database(self.path) as connection:
                 modes = SQLiteChatModeRepository(connection)
@@ -232,6 +235,25 @@ class AdminChannelsTest(unittest.TestCase):
                 # Проверяем защиту при состоянии, сохранённом старой сборкой.
                 modes.save(ChatMode(tg_key, "admin"))
                 modes.save(ChatMode(vk_key, "admin"))
+                dispatcher = IncomingMessageDispatcher(
+                    registry=processor._registry,
+                    user_identity_service=create_user_identity_service(connection),
+                    chat_mode_repository=modes,
+                    capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(connection),
+                )
+                for event in (IncomingEvent("telegram", str(tg_group), "1", "/help", "101"),
+                              IncomingEvent("vk", str(vk_group), "1", "/help", "202")):
+                    menu, complete = dispatcher.command_menu_snapshot(event)
+                    self.assertTrue(complete)
+                    self.assertEqual(tuple(item.command for item in menu.items), ("/settings",))
+            tg_help, tg_keyboard = self.telegram(processor, "/help", chat=tg_group)
+            vk_help = self.vk(processor, "/help", peer=vk_group)
+            for text in (tg_help, vk_help.messages[-1][1]):
+                self.assertIn("/settings", text)
+                self.assertNotIn("/admin", text)
+                self.assertNotIn("/llm_costs", text)
+            self.assertIsNone(tg_keyboard)
+            self.assertIsNone(vk_help.keyboards[-1])
             self.assertEqual(self.telegram(processor, "/llm_costs Invalid", chat=tg_group), (private_hint, None))
             reply = self.vk(processor, "/llm_costs Europe/Moscow", peer=vk_group)
             self.assertEqual(reply.messages[-1], (vk_group, private_hint))
@@ -246,6 +268,17 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertNotIn("/admin", self.telegram(processor, "/help", user=None)[0])
             execute.assert_not_called()
 
+    def test_main_menus_and_help_offer_only_available_entries(self) -> None:
+        """Главная в обоих каналах показывает доверенному профилю входы."""
+        self.configure(str(self.owner_id))
+        with create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
+            self.assert_channel_menus(processor, {"/admin", "/settings"})
+            for text in (self.telegram(processor, "/help")[0], self.vk(processor, "/help").messages[-1][1]):
+                self.assertIn("/admin", text)
+                self.assertIn("/settings", text)
+                for command in ("/exit", "/register", "/name", "/capabilities", "/link", "/llm_costs", "/cancel", "/confirm"):
+                    self.assertNotIn(command, text)
+
     def test_restart_revokes_existing_button_and_channel_menus(self) -> None:
         """Новая конфигурация блокирует сохранённый режим сразу после перезапуска."""
         self.configure(str(self.owner_id))
@@ -253,7 +286,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.telegram(processor, "/admin")
             vk_client = self.vk(processor, "/admin")
             payload = json.loads(vk_client.keyboards[-1])["buttons"][0][0]["action"]["payload"]
-            self.assert_channel_menus(processor, include_costs=True)
+            self.assert_channel_menus(processor, {"/llm_costs", "/exit"})
             # Активность в группе не должна скрывать ранее сохранённый личный чат
             # от фоновой сверки меню нового процесса.
             self.telegram(processor, "/admin", chat=-404)
@@ -262,7 +295,7 @@ class AdminChannelsTest(unittest.TestCase):
         self.configure("")
         with patch.object(GetGatewayCostReport, "execute", autospec=True) as execute, \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as restarted:
-            self.assert_channel_menus(restarted, include_costs=False)
+            self.assert_channel_menus(restarted, {"/settings"})
             self.assertIn("больше недоступна", self.select_vk(restarted, vk_client, payload))
             self.assertIn("нет доступа", self.telegram(restarted, "/llm_costs")[0])
             self.assertIn("нет доступа", self.vk(restarted, "/llm_costs").messages[-1][1])
@@ -321,7 +354,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertEqual(self.vk(processor, "/llm_costs").messages[-1][1], "Статистика Timeweb не настроена.")
             client.assert_not_called()
 
-    def assert_channel_menus(self, processor: ChannelMessageProcessor, *, include_costs: bool) -> None:
+    def assert_channel_menus(self, processor: ChannelMessageProcessor, expected: set[str]) -> None:
         """Публикует меню через настоящие обработчики двух каналов."""
         async def check_telegram() -> None:
             bot = MenuTelegramBot()
@@ -333,8 +366,8 @@ class AdminChannelsTest(unittest.TestCase):
                 lambda update: handler(update) if update.address.channel == "telegram" else False,
             )
             owner_commands = next(commands for commands, scope in bot.menu_calls if scope.chat_id == 101)
-            commands = {command.command for command in owner_commands}
-            self.assertEqual("llm_costs" in commands, include_costs)
+            commands = {"/" + command.command for command in owner_commands}
+            self.assertEqual(commands, expected)
 
         asyncio.run(check_telegram())
         vk_client = FakeVkClient()
@@ -345,7 +378,7 @@ class AdminChannelsTest(unittest.TestCase):
             logger=self.logger, menu_update_handler=vk_handler)
         menu = next(json.loads(item) for item in vk_client.keyboards if item and not json.loads(item)["inline"])
         commands = {button["action"]["label"] for row in menu["buttons"] for button in row}
-        self.assertEqual("/llm_costs" in commands, include_costs)
+        self.assertEqual(commands, expected)
         self.assertFalse(processor.menu_delivery_failures)
 
 

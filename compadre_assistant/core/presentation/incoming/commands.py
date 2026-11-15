@@ -80,7 +80,7 @@ class ChatCommand(StrEnum):
         "/status",
         CommandSection.BASIC,
         "",
-        "показать состояние подключения",
+        "показать профиль и доступные входы",
     )
     CAPABILITIES = (
         "/capabilities",

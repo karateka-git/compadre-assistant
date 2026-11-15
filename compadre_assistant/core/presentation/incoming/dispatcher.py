@@ -145,7 +145,11 @@ class IncomingMessageDispatcher:
         ).execute(user.id)
         # Профиль из резервного chat_id достаточен для открытых возможностей.
         explicit_user_id = user.id if event.external_user_id is not None else None
-        return self._registry.for_user(selections, app_user_id=explicit_user_id)
+        return self._registry.for_user(
+            selections,
+            app_user_id=explicit_user_id,
+            private_chat=is_private_chat_address(event.channel, event.external_user_id, event.chat_id),
+        )
 
     def _profile_link_allowed(self, event: IncomingEvent) -> bool:
         return not self._registry.requires_private_profile_link or is_private_chat_address(
@@ -177,7 +181,7 @@ class IncomingMessageDispatcher:
         return ActionContext(
             user.id if user else None, personal.visible_mode(state.capability_id) if state else None,
             state.revision if state else 0,
-            tuple((item.descriptor.capability_id, item.server_available, item.user_enabled, item.profile_allowed)
+            tuple((item.descriptor.capability_id, item.server_available, item.user_enabled, item.visible)
                   for item in personal.access) if personal else (),
             pending.request_id if pending and not self._pending_inputs.expired(pending) else None,
         )
@@ -310,22 +314,22 @@ class IncomingMessageDispatcher:
             for entry in self._registry.descriptors() if entry.personally_configurable
         )
 
-    @staticmethod
-    def _blocked_reply(access: CapabilityAccess) -> str:
+    def _blocked_reply(self, access: CapabilityAccess) -> str:
         """Объясняет причину отказа без открытия предметного обработчика."""
         if not access.profile_allowed:
-            return "У твоего профиля нет доступа к этой возможности. Список: /capabilities."
+            return "У твоего профиля нет доступа к этой возможности."
         descriptor = access.descriptor
+        if not access.chat_allowed and descriptor.private_chat_hint is not None:
+            return descriptor.private_chat_hint
         label = _capability_label(descriptor)
         if not access.server_available:
-            return (
-                f"Возможность {label} недоступна на сервере. "
-                "Список: /capabilities."
-            )
-        return (
-            f"Возможность {label} лично выключена. "
-            f"Включить: /enable {descriptor.capability_id}. Список: /capabilities."
-        )
+            owner = self._registry.mode_command_owner(ChatCommand.CAPABILITIES.value)
+            hint = f"Список: {owner.entry.name}, затем /capabilities." if owner else "Справка: /help."
+            return f"Возможность {label} недоступна на сервере. {hint}"
+        owner = self._registry.mode_command_owner(ChatCommand.ENABLE.value)
+        hint = (f"Включить: {owner.entry.name}, затем /enable {descriptor.capability_id}."
+                if owner else "Справка: /help.")
+        return f"Возможность {label} лично выключена. {hint}"
 
     @staticmethod
     def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
@@ -569,7 +573,7 @@ class IncomingMessageDispatcher:
                 user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
                 personal = self._personal_registry(user, event) if user is not None else None
                 access = personal.status(pending.owner_id) if personal is not None else None
-                if access is None or not access.profile_allowed:
+                if access is None or not access.visible:
                     return None
             return pending_expired_reply(pending)
         elif pending is not None:
@@ -634,7 +638,10 @@ class IncomingMessageDispatcher:
                     return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
-                        compose_content('Это действие устарело или истекло. Повтори /link в исходном чате, чтобы получить актуальные команды.'),
+                        compose_content(
+                            "Это действие устарело или истекло. В исходном чате открой ",
+                            code_span("/settings"), " и повтори ", code_span("/link"), ".",
+                        ),
                         error,
                     )
             user = self._user_identity_service.resolve(identity)
@@ -958,7 +965,7 @@ class IncomingMessageDispatcher:
                 if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
                     return IncomingResponse(text_content(
                         "Код привязки не принят. Отправь исправленный код ещё раз до истечения ожидания; отмена: /cancel. "
-                        "Если код истёк, получи новый через /link_code в уже привязанном канале; код действует 10 минут."
+                        "Если код истёк, в уже привязанном канале открой /settings и вызови /link_code."
                     ), result.error)
             elif pending.input_kind == "profile_name" and user is not None:
                 result = self._save_name(event.text, user)
@@ -1037,7 +1044,7 @@ class IncomingMessageDispatcher:
                 "Чтобы выбрать возможность следующим сообщением, вызови /enable или /disable без аргументов."
             ))
         access = personal.status(parts[0])
-        if access is None or not access.profile_allowed:
+        if access is None or not access.visible:
             return IncomingResponse(
                 compose_content(
                     'Неизвестная возможность. Введи известный ID ещё раз или /cancel. Прямой вызов: '
@@ -1140,6 +1147,11 @@ class IncomingMessageDispatcher:
                 )
             return result.response
         state = self._chat_mode_repository.get_state(key)
+        active_access = personal.status(state.capability_id) if state.capability_id else None
+        if active_access is not None and active_access.profile_allowed and not active_access.chat_allowed:
+            # Такой режим мог остаться от прежней сборки в чате, где вход закрыт.
+            self._chat_mode_repository.replace_if_revision(key, state.revision, None)
+            return IncomingResponse(text_content(self._blocked_reply(active_access)))
         parts = event.text.split(maxsplit=1)
         owner = self._registry.mode_command_owner(parts[0]) if parts else None
         if owner is not None:
@@ -1168,13 +1180,12 @@ class IncomingMessageDispatcher:
         if event.images and (capability is None or not capability.descriptor.accepts_images):
             return IncomingResponse(text_content(_TEXT_INPUT_HINT))
         if capability is None:
-            access = personal.status(state.capability_id)
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_UNAVAILABLE,
                 app_user=user,
                 capability_reply=(
-                    f"{self._blocked_reply(access)}\n{personal.entry_hint()}"
-                    if access is not None else personal.entry_hint()
+                    f"{self._blocked_reply(active_access)}\n{personal.entry_hint()}"
+                    if active_access is not None else personal.entry_hint()
                 ),
             )
         try:

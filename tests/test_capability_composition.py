@@ -235,7 +235,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", response_text(reply))
             self.assertIn("/exit", response_text(reply))
-            self.assertIn("/help", response_text(self.process("/help", enabled_capabilities=())))
+            self.assertIn("/settings", response_text(self.process("/help", enabled_capabilities=())))
             factory.assert_not_called()
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "obsidian")

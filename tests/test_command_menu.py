@@ -58,9 +58,7 @@ class CommandMenuTest(unittest.TestCase):
         """Параметры не становятся заполнителями, недоступные входы скрыты."""
         fixture = self.fixture
         commands = self.commands()
-        for command in ("/settings", "/ai", "/obsidian", "/other"):
-            self.assertIn(command, commands)
-        self.assertFalse(set(commands) & {"/name", "/enable", "/disable", "/link"})
+        self.assertEqual(set(commands), {"/settings", "/ai", "/obsidian", "/other"})
         self.assertNotIn("/ask", commands)
         self.assertNotIn("/reanalyze", commands)
         self.assertNotIn("/confirm", commands)
@@ -69,6 +67,9 @@ class CommandMenuTest(unittest.TestCase):
         self.assertEqual(len(commands), len(set(commands)))
         fixture.preferences.rows[(23, "other")] = False
         fixture.send("/settings")
+        self.assertEqual(set(self.commands()), {
+            "/status", "/name", "/link_code", "/link", "/capabilities", "/enable", "/disable", "/exit",
+        })
         for command, kind in (("/name", "profile_name"), ("/enable", "enable"), ("/disable", "disable"), ("/link", "link_code")):
             self.assertIn(command, self.commands())
             fixture.send(command)

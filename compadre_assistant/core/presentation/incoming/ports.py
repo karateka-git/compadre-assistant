@@ -214,6 +214,7 @@ class CapabilityDescriptor:
     display_name: str | None = None  # Публичное название для ответов о доступе.
     personally_configurable: bool = True  # Пользователь может менять личный выбор.
     profile_commands: frozenset[ChatCommand] = frozenset()  # Разрешённые операции профиля ядра.
+    private_chat_hint: str | None = None  # Пояснение для входа, доступного только в личном чате.
 
 
 class CapabilityMode(StrEnum):
