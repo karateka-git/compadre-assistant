@@ -1,7 +1,9 @@
 """Проверяет точные sources, SQL-only подстановку и границы imports runner 5.2."""
 
+from contextlib import redirect_stderr
 import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
@@ -15,7 +17,7 @@ from scripts import check_repository_compatibility as runner
 from scripts.check_repository_compatibility import (
     MIGRATIONS, export_commit, overlay_sql, run_worker, snapshot,
 )
-from scripts.repository_compatibility_worker import CheckoutImports
+from scripts.repository_compatibility_worker import CheckoutImports, run_tests
 from tests.compatibility_test_environment import worker_python
 
 
@@ -148,6 +150,106 @@ class RepositoryCompatibilityRunnerTest(unittest.TestCase):
         self.assertIn("missing checkout module", result["error"])
         self.assertTrue((output / "behavior.log").is_file())
         self.assertFalse(json.loads((output / "behavior.json").read_text())["passed"])
+
+    def _write_discovery_module(self, suffix: str, source: str) -> None:
+        name = f"test_compat_discovery_{suffix}"
+        (self.previous / "tests" / f"{name}.py").write_text(
+            "import unittest\n" + source, encoding="utf-8")
+        self.addCleanup(sys.modules.pop, name, None)
+
+    def _discover(self) -> dict:
+        with patch.object(sys, "path", sys.path.copy()), redirect_stderr(io.StringIO()):
+            return run_tests([], discover_dir=self.previous / "tests")
+
+    def test_discovery_runs_new_module_and_reports_declared_skips(self) -> None:
+        """Новый файл проходит discovery без правки списка и виден в отчёте."""
+        self._write_discovery_module("common", """
+class OrdinaryTest(unittest.TestCase):
+    @unittest.skip('platform')
+    def test_skip(self):
+        self.fail('skip must prevent this assertion')
+
+    @unittest.expectedFailure
+    def test_expected_failure(self):
+        self.fail('expected')
+""")
+        self._write_discovery_module("new", """
+class AddedTest(unittest.TestCase):
+    def test_new_case(self):
+        self.assertEqual(2 + 2, 4)
+""")
+        result = self._discover()
+        self.assertTrue(result["passed"], result)
+        self.assertEqual(result["test_ids"], result["started_test_ids"])
+        self.assertIn("test_compat_discovery_new.AddedTest.test_new_case", result["started_test_ids"])
+        self.assertEqual(result["skips"], [("test_compat_discovery_common.OrdinaryTest.test_skip", "platform")])
+        self.assertEqual(result["expected_failures"], ["test_compat_discovery_common.OrdinaryTest.test_expected_failure"])
+
+    def test_discovery_fails_if_cases_are_not_started(self) -> None:
+        """Пропуск через setup модуля и вызов без startTest делают прогон неполным."""
+        self._write_discovery_module("setup_skip", """
+def setUpModule():
+    raise unittest.SkipTest('module fixture')
+
+class SkippedBySetup(unittest.TestCase):
+    def test_case(self):
+        self.fail('module fixture must prevent this assertion')
+""")
+        self._write_discovery_module("dropped", """
+class DroppedTest(unittest.TestCase):
+    def run(self, result=None):
+        return result
+
+    def test_case(self):
+        self.fail('overridden run must prevent this assertion')
+""")
+        result = self._discover()
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["test_ids"]), 2)
+        self.assertEqual(result["started_test_ids"], [])
+        self.assertEqual(result["skips"][0][1], "module fixture")
+
+    def test_discovery_fails_if_loading_a_module_errors_or_skips(self) -> None:
+        """Ошибка загрузки или пропуск на импорте видны в результате discovery."""
+        self._write_discovery_module("import_error", "raise RuntimeError('import failed')\n")
+        self._write_discovery_module("import_skip", "raise unittest.SkipTest('module import')\n")
+        result = self._discover()
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["loader_errors"]), 2)
+        self.assertIn("import failed", result["loader_errors"][0])
+        self.assertIn("skipped during import", result["loader_errors"][1])
+
+    def test_discovery_rejects_duplicate_ids(self) -> None:
+        """Два запуска одного ID не могут подтвердить полноту набора."""
+        self._write_discovery_module("duplicate", """
+class DuplicateTest(unittest.TestCase):
+    def test_case(self):
+        pass
+
+def load_tests(loader, tests, pattern):
+    tests.addTest(DuplicateTest('test_case'))
+    return tests
+""")
+        result = self._discover()
+        self.assertFalse(result["passed"])
+        self.assertEqual(len(result["started_test_ids"]), 2)
+        self.assertEqual(len(set(result["started_test_ids"])), 1)
+
+    def test_external_suite_rejects_declared_skip(self) -> None:
+        """Для доверенных дополнительных проверок отказ действует и на обычные skips."""
+        external = self.root / "external.py"
+        external.write_text("""import unittest
+
+class AdditionalTest(unittest.TestCase):
+    @unittest.skip('disabled')
+    def test_case(self):
+        pass
+""", encoding="utf-8")
+        with patch.dict(sys.modules), redirect_stderr(io.StringIO()):
+            result = run_tests([], external)
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["test_ids"], result["started_test_ids"])
+        self.assertEqual(len(result["skips"]), 1)
 
     def test_real_old_tests_observe_added_sql_and_report_sql_failure(self) -> None:
         """Старые repository tests используют новую SQL до импорта и видят её ошибку."""

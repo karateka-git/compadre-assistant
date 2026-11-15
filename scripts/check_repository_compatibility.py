@@ -198,6 +198,8 @@ def main() -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--full-discovery", action="store_true",
+                        help="run the complete previous unittest suite in addition to the external cases")
     args = parser.parse_args()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
@@ -230,11 +232,12 @@ def main() -> int:
                 report["candidate_migrations_data_integrity"] = run_worker(
                     new_python, candidate, "candidate", output,
                     ["--database", str(database), "--previous-sql", str(old_sql)], args.timeout)
+            selection = (["--full-discovery"] if args.full_discovery
+                         else ["--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]])
             report["old_repository_behavior"] = run_worker(
                 old_python, previous, "behavior", output,
                 [*(["--database", str(database)] if report["candidate_migrations_data_integrity"]["passed"] else []),
-                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()),
-                 "--test-modules", *[f"tests.test_{name}" for name in BEHAVIOR_MODULES]], args.timeout)
+                 "--compatibility-tests", str(COMPATIBILITY_TESTS.resolve()), *selection], args.timeout)
             if report["old_repository_behavior"]["passed"] and report["candidate_migrations_data_integrity"]["passed"]:
                 report["candidate_verified_previous_updates"] = run_worker(
                     new_python, candidate, "verify", output, ["--database", str(database)], args.timeout)
