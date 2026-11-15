@@ -8,7 +8,6 @@ import logging
 from html import escape
 import json
 import re
-import sqlite3
 import threading
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -613,8 +612,8 @@ class AskChannelsTest(unittest.TestCase):
         }}, incoming_message_processor=processor, client=client, logger=self.logger)
         return client.messages[-1][1]
 
-    def test_ocr_modes_callbacks_pending_input_and_real_shared_usage(self) -> None:
-        """Проводит ожидание и OCR через каналы, SDK transport и общую SQLite."""
+    def test_ocr_modes_callbacks_pending_input_and_shared_sdk(self) -> None:
+        """Проводит ожидание, вопрос и OCR через оба канала и один клиент."""
         command = "/get_text_from_image"
         image = b"\xff\xd8\xffsynthetic-photo"
         timestamp = datetime.now(UTC)
@@ -637,7 +636,7 @@ class AskChannelsTest(unittest.TestCase):
                 raise RuntimeError("provider filename must remain private")
             return image
 
-        profile = replace(self.config, usage_provider="test-gateway")
+        profile = self.config
         with httpx.Client(transport=httpx.MockTransport(handle)) as transport, \
                 OpenAI(base_url=profile.base_url, api_key=profile.api_key, max_retries=0, http_client=transport) as client, \
                 patch("compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI", return_value=client) as sdk, \
@@ -706,12 +705,7 @@ class AskChannelsTest(unittest.TestCase):
 
         sdk.assert_called_once()
         with connect_database(self.path) as connection:
-            observations = connection.execute("SELECT provider, actual_model, tokens_json FROM ask_usage").fetchall()
-        self.assertEqual(len(observations), 8)
-        for provider, model, tokens in observations:
-            self.assertEqual((provider, model), ("test-gateway", "fallback"))
-            self.assertEqual(json.loads(tokens)["prompt_tokens"], 19)
-            self.assertEqual(json.loads(tokens)["completion_tokens"], 2)
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM ask_usage").fetchone()[0], 0)
 
     def test_ocr_competing_photos_claim_one_pending_input(self) -> None:
         """Второе фото получает подсказку, пока первый загрузчик заблокирован."""
@@ -883,11 +877,7 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertNotIn("Лишний итог", sent)
                     self.assertEqual(reports, ["пошаговый" if channel == "telegram" else "прямой"])
 
-        with connect_database(self.path) as connection:
-            rows = connection.execute("SELECT actual_model, tokens_json FROM ask_usage").fetchall()
-        self.assertEqual([(name, json.loads(tokens)["prompt_tokens"]) for name, tokens in rows], [("test-ask", 15)] * 2)
-
-    def test_ocr_cancels_during_download_or_model_and_drains_usage(self) -> None:
+    def test_ocr_cancels_during_download_or_model(self) -> None:
         """VK очередь и Telegram handler принимают отмену при заблокированной сети."""
         receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
         marker = "Распознанный ответ"
@@ -1177,11 +1167,6 @@ class AskChannelsTest(unittest.TestCase):
                                          "receipt", "download:broken", "receipt", "download:fast", "model"])
                 self.assertEqual(sum(marker in answer for _, answer in messages), 1)
 
-        with connect_database(self.path) as connection:
-            rows = connection.execute("SELECT actual_model, tokens_json FROM ask_usage").fetchall()
-        self.assertEqual([(name, json.loads(tokens)["prompt_tokens"]) for name, tokens in rows],
-                         [("test-ocr", 15)] * 4)
-
     def test_linked_channel_disables_ocr_completion_in_origin_chat(self) -> None:
         """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
         release, menu_restored = threading.Event(), threading.Event()
@@ -1349,14 +1334,17 @@ class AskChannelsTest(unittest.TestCase):
                     processor.reconcile_menus(publish)
                     self.assertEqual(len(menus), before)
 
-    def test_cli_channel_runtime_drains_real_usage_to_shared_database(self) -> None:
-        """Сохраняет доступные метаданные всех вызовов после выхода каждого канала."""
-        profile = replace(self.config, usage_provider="test-gateway")
+    def test_cli_channel_runtime_keeps_historical_usage_unchanged(self) -> None:
+        """Ответы и ошибки обоих CLI не меняют историческую запись SQLite."""
+        profile = self.config
+        historical = ("00000000-0000-0000-0000-000000000001", 0, "old-provider", "old-model", '{"prompt_tokens": 7}')
+        with connect_database(self.path) as connection, connection:
+            connection.execute("INSERT INTO ask_usage VALUES (?, ?, ?, ?, ?)", historical)
         success = {"model": "fallback", "choices": [{"message": {"content": "Ответ"}}],
                    "usage": {"prompt_tokens": 19, "completion_tokens": 2}}
-        for index, (channel, command, extra) in enumerate((
+        for channel, command, extra in (
             ("telegram", run_telegram_bot_command, {}), ("vk", run_vk_bot_command, {"group_id": 123}),
-        ), start=1):
+        ):
             with self.subTest(channel=channel):
                 responses = iter((
                     httpx.Response(200, json=success),
@@ -1380,7 +1368,7 @@ class AskChannelsTest(unittest.TestCase):
                     self.assertEqual(self.send(channel, incoming_message_processor, "ожидаемый вопрос"), "Ответ")
                     self.assertIn("Не удалось получить ответ", self.send(channel, incoming_message_processor, "/ask пустой"))
                     self.assertIn("Не удалось получить ответ", self.send(channel, incoming_message_processor, "/ask сбой"))
-                    self.assertEqual(self.send(channel, incoming_message_processor, "/ask без учёта"), "Ответ")
+                    self.assertEqual(self.send(channel, incoming_message_processor, "/ask после сбоя"), "Ответ")
 
                 with httpx.Client(transport=httpx.MockTransport(handle)) as transport, \
                         OpenAI(base_url=profile.base_url, api_key=profile.api_key,
@@ -1393,43 +1381,8 @@ class AskChannelsTest(unittest.TestCase):
                                              logger=self.logger, enabled_capabilities=("ai",), **extra), 0)
                 self.assertEqual(len(requests), 4)
                 with connect_database(self.path) as connection:
-                    observations = connection.execute("SELECT provider, actual_model, tokens_json FROM ask_usage").fetchall()
-                self.assertEqual(len(observations), index * 4)
-                self.assertTrue(all(row["provider"] == "test-gateway" for row in observations))
-                self.assertCountEqual([
-                    (row["actual_model"], row["tokens_json"] is not None) for row in observations
-                ], [("fallback", True), ("fallback", True), (None, False), ("fallback", False)] * index)
-
-    def test_usage_write_error_preserves_answer_and_later_observations(self) -> None:
-        """Ошибка реальной SQLite-записи не влияет на доставку и следующий вопрос."""
-        with connect_database(self.path) as connection, connection:
-            connection.execute("""
-                CREATE TRIGGER reject_usage BEFORE INSERT ON ask_usage
-                BEGIN SELECT RAISE(ABORT, 'private error'); END
-            """)
-        sdk_path = "compadre_assistant.capabilities.ask.data.llm.openai_ask_model.OpenAI"
-        with patch(sdk_path) as sdk:
-            sdk.return_value.chat.completions.create.return_value = SimpleNamespace(
-                model="untargeted", choices=[SimpleNamespace(message=SimpleNamespace(content="Ответ"))],
-                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
-            )
-            with self.assertLogs("compadre_assistant.capabilities.ask.data.background_usage_recorder", "ERROR") as logs:
-                with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ai",),
-                                                      ask_config=self.config) as processor:
-                    self.send("telegram", processor, "/register")
-                    self.send("telegram", processor, "Тест")
-                    self.send("telegram", processor, "/ai")
-                    self.assertEqual(self.send("telegram", processor, "/ask первый"), "Ответ")
-            self.assertEqual([record.getMessage() for record in logs.records], [
-                f"AI usage recording failed: error_type={sqlite3.IntegrityError.__name__}",
-            ])
-            with connect_database(self.path) as connection, connection:
-                connection.execute("DROP TRIGGER reject_usage")
-            with create_channel_message_processor(database_path=self.path, enabled_capabilities=("ai",),
-                                                  ask_config=self.config) as processor:
-                self.assertEqual(self.send("telegram", processor, "/ask второй"), "Ответ")
-        with connect_database(self.path) as connection:
-            self.assertEqual([row[0] for row in connection.execute("SELECT actual_model FROM ask_usage")], ["untargeted"])
+                    rows = connection.execute("SELECT * FROM ask_usage").fetchall()
+                self.assertEqual([tuple(row) for row in rows], [historical])
 
     def test_registry_failure_closes_created_ask_client(self) -> None:
         """Сбой регистрации после сборки Ask освобождает принадлежащий ему клиент."""

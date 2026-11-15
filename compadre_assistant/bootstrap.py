@@ -630,8 +630,7 @@ def create_channel_message_processor(
         ) if "obsidian" in enabled_capabilities else None
         with (
             create_admin_runtime(enabled=admin_enabled) as admin,
-            create_ask_runtime(enabled=AI_CAPABILITY_ID in enabled_capabilities,
-                               database_path=database_path, config=ask_config) as ask,
+            create_ask_runtime(enabled=AI_CAPABILITY_ID in enabled_capabilities, config=ask_config) as ask,
         ):
             capabilities = (entry,) if entry is not None else ()
             disabled = () if entry is not None else (

@@ -9,7 +9,6 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
-from uuid import uuid4
 
 import aiogram
 import httpx
@@ -17,8 +16,6 @@ import httpx
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_channel_message_processor, create_user_identity_service
 from compadre_assistant.capabilities.admin.data.configuration import AdminConfigError
 from compadre_assistant.capabilities.admin.domain.cost_report import GetGatewayCostReport
-from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
-from compadre_assistant.capabilities.ask.domain.usage import TokenUsage, UsageObservation
 from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -35,7 +32,7 @@ class AdminChannelsTest(unittest.TestCase):
     """Проверяет общий отчёт и независимые режимы связанных чатов."""
 
     def setUp(self) -> None:
-        """Готовит двух пользователей, два канала владельца и историю учёта."""
+        """Готовит двух пользователей и два канала владельца."""
         directory = self.enterContext(TemporaryDirectory(prefix="admin-channels-"))
         self.path = Path(directory) / "app.db"
         self.logger = logging.getLogger("test.admin.channels")
@@ -96,10 +93,10 @@ class AdminChannelsTest(unittest.TestCase):
     def test_report_uses_timeweb_in_both_channels_without_ask_runtime(self) -> None:
         """Отчёт берёт цены и число запросов из API, сохраняя историю SQLite."""
         self.configure(str(self.owner_id))
-        moment = datetime(2026, 11, 14, 17, tzinfo=UTC)
-        tokens = TokenUsage(prompt_tokens=100_000_000, completion_tokens=0)
-        observation = UsageObservation(uuid4(), moment, "test", "model", tokens)
-        self.assertTrue(SQLiteUsageRepository(self.path).store(observation))
+        historical = ("00000000-0000-0000-0000-000000000001", 0, "test", "model",
+                      '{"prompt_tokens": 100000000, "completion_tokens": 0}')
+        with connect_database(self.path) as connection, connection:
+            connection.execute("INSERT INTO ask_usage VALUES (?, ?, ?, ?, ?)", historical)
         end = datetime(2026, 11, 14, 20, tzinfo=UTC)
         requests = []
 
@@ -158,9 +155,8 @@ class AdminChannelsTest(unittest.TestCase):
                              {"token-usage", "calls"})
             self.assertEqual(first.url.params, second.url.params)
         with connect_database(self.path) as connection:
-            saved = connection.execute("SELECT call_id, tokens_json FROM ask_usage").fetchall()
-        self.assertEqual([row["call_id"] for row in saved], [str(observation.call_id)])
-        self.assertEqual(json.loads(saved[0]["tokens_json"])["prompt_tokens"], tokens.prompt_tokens)
+            saved = connection.execute("SELECT * FROM ask_usage").fetchall()
+        self.assertEqual([tuple(row) for row in saved], [historical])
 
     def test_fractional_timezone_requires_complete_utc_hours_in_both_channels(self) -> None:
         """Проверяет границы DAY и отличает известный ноль от дефекта покрытия."""

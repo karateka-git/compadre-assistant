@@ -1,14 +1,10 @@
 """Проверяет переход с выпущенной 0004 к метаданным вызовов Ask."""
 
-from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
-from uuid import uuid4
 
-from compadre_assistant.capabilities.ask.data.sqlite.usage_repository import SQLiteUsageRepository
-from compadre_assistant.capabilities.ask.domain.usage import UsageObservation
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, MigrationError, apply_migrations
 from compadre_assistant.core.data.sqlite.runtime_schema import (
@@ -56,7 +52,7 @@ class AskUsageMigrationTest(unittest.TestCase):
 
     def test_upgrade_preserves_existing_data_and_matches_fresh_schema(self) -> None:
         """Обе установки дают идентичный журнал и пять полей метаданных."""
-        observation = UsageObservation(uuid4(), datetime(2026, 11, 14, tzinfo=UTC), "timeweb", None, None)
+        call_id = "00000000-0000-0000-0000-000000000001"
         with connect_database(self.root / "fresh.db") as fresh:
             self.assertEqual([item.version for item in apply_migrations(fresh, self.target_sql)], [1, 2, 3, 4, 5])
             fresh_fingerprint = schema_fingerprint(fresh)
@@ -69,9 +65,10 @@ class AskUsageMigrationTest(unittest.TestCase):
             self.assertEqual([row[1] for row in db.execute("PRAGMA table_info('ask_usage')")],
                              ["call_id", "started_at_us", "provider", "actual_model", "tokens_json"])
             self.assertEqual(db.execute("PRAGMA index_info('idx_ask_usage_started_at')").fetchone()[2], "started_at_us")
-            self.assertTrue(SQLiteUsageRepository(self.database).store(observation))
+            with db:
+                db.execute("INSERT INTO ask_usage VALUES (?, ?, ?, ?, ?)", (call_id, 0, "timeweb", None, None))
             self.assertEqual(apply_migrations(db, self.target_sql), [])
-            self.assertEqual(db.execute("SELECT call_id FROM ask_usage").fetchone()[0], str(observation.call_id))
+            self.assertEqual(db.execute("SELECT call_id FROM ask_usage").fetchone()[0], call_id)
             self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
             self.assertEqual(db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
