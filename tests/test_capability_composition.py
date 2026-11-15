@@ -73,7 +73,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
     def test_composition_rejects_unknown_or_duplicate_enabled_ids(self) -> None:
         """Ошибки выбранных сборок появляются до запуска канала."""
-        for identifiers in (("unknown",), ("obsidian", "obsidian")):
+        for identifiers in (("unknown",), ("obsidian", "obsidian"), ("ai", "ask")):
             with self.subTest(identifiers=identifiers), self.assertRaises(ValueError):
                 validate_enabled_capabilities(identifiers)
 
@@ -81,7 +81,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         """Выключенная возможность не читает свои настройки и не влияет на будущий Ask."""
         profile = ObsidianConfig()
         with patch("compadre_assistant.bootstrap.load_obsidian_config", return_value=profile) as loader:
-            self.assertIsNone(load_obsidian_profile(("ask",)))
+            self.assertIsNone(load_obsidian_profile(("ai",)))
             loader.assert_not_called()
             self.assertIs(load_obsidian_profile(("obsidian",)), profile)
             loader.assert_called_once_with()

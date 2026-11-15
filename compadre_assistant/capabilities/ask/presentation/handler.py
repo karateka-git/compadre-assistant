@@ -28,7 +28,7 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
     """Открывает режим ИИ для независимых вопросов и распознавания текста."""
 
     descriptor = CapabilityDescriptor(
-        "ask", CapabilityCommand("/ai", (), "войти в режим ИИ"),
+        "ai", CapabilityCommand("/ai", (), "войти в режим ИИ"),
         CapabilityHelp(sections=(HelpSection("Режим ИИ", (
             CapabilityCommand("/ask", (CommandParameter("вопрос", "<question>", False),),
                               "задать один вопрос модели без истории"),
@@ -95,8 +95,8 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         question = parts[1] if len(parts) > 1 else ""
         if not question.strip() and context.pending_inputs is not None:
             context.pending_inputs.begin(
-                event.reply_address, "ask", "ask_question",
-                app_user_id=context.app_user.id, required_mode="ask",
+                event.reply_address, self.descriptor.capability_id, "ask_question",
+                app_user_id=context.app_user.id, required_mode=self.descriptor.capability_id,
                 value_label="вопрос для модели", retry_command="/ask", cancel_only_menu=True,
             )
             return CapabilityResult(IncomingResponse(text_content(
@@ -133,8 +133,8 @@ class AskCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         if context.pending_inputs is None:
             return IncomingResponse(text_content("Ожидание фото недоступно. Попробуй позже."))
         context.pending_inputs.begin(
-            event.reply_address, "ask", _OCR_INPUT_KIND,
-            app_user_id=context.app_user.id, required_mode="ask", accepts_images=True,
+            event.reply_address, self.descriptor.capability_id, _OCR_INPUT_KIND,
+            app_user_id=context.app_user.id, required_mode=self.descriptor.capability_id, accepts_images=True,
             value_label="фото для распознавания", retry_command=_OCR_COMMAND, cancel_only_menu=True,
         )
         return IncomingResponse(compose_content(

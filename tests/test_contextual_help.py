@@ -150,7 +150,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.assertIn("/ask", text)
         self.assertNotIn("/vault_sync", text)
         self.assertIn("/cancel", text)
-        self.assertEqual(self.modes.get(self.key).capability_id, "ask")
+        self.assertEqual(self.modes.get(self.key).capability_id, "ai")
         self.identity.resolve.return_value = None
         self.send("/link")
         text = self.send()
@@ -183,8 +183,8 @@ class ContextualHelpTest(unittest.TestCase):
 
     def test_active_ask_disabled_and_no_available_entries(self):
         """Личный запрет скрывает команды режима, пустой каталог даёт следующий шаг."""
-        self.modes.save(ChatMode(self.key, "ask"))
-        self.preferences.rows[(23, "ask")] = False
+        self.modes.save(ChatMode(self.key, "ai"))
+        self.preferences.rows[(23, "ai")] = False
         self.assertNotIn("/ask", self.send())
         self.modes.clear(self.key)
         self.preferences.rows[(23, "obsidian")] = False

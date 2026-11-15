@@ -48,10 +48,10 @@ class ConfigTest(unittest.TestCase):
             "embedding", "chunking", "obsidian_created_note_tag",
         })
         with patch.dict(os.environ, _env(
-            ENABLED_CAPABILITIES="ask", OPENAI_API_KEY="partial",
+            ENABLED_CAPABILITIES="ai", OPENAI_API_KEY="partial",
             GITHUB_APP_ID="bad", EMBEDDING_PRICE_PER_MILLION_TOKENS="bad",
         ), clear=True):
-            self.assertEqual(load_config().enabled_capabilities, ("ask",))
+            self.assertEqual(load_config().enabled_capabilities, ("ai",))
 
     def test_load_config_reads_optional_debug_flag(self) -> None:
         """APP_DEBUG включает debug-режим, но остаётся опциональным."""

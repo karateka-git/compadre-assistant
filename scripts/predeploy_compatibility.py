@@ -38,6 +38,8 @@ from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprin
 
 # Лимиты защищают контроллер от чрезмерного artifact и распаковки ZIP.
 MAX_ARTIFACT = 64 * 1024 * 1024
+_AI_ID_MIGRATION = "0006_ai_capability_id.sql"
+_AI_ID_TABLES = frozenset({"active_chat_modes", "user_capability_preferences"})
 
 
 class PredeployError(ValueError):
@@ -470,6 +472,9 @@ def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
         require_copy_foreign_keys(new)
         if schema_fingerprint(new) != fingerprint:
             raise PredeployError("SAFE_COPY_FINGERPRINT")
+        renames_ai_id = _AI_ID_MIGRATION in expected and old.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = ?", (_AI_ID_MIGRATION,),
+        ).fetchone() is None
         # Общие поля сравниваются как мультимножество: порядок строк не имеет смысла,
         # а multiplicity сохраняет доказательство отсутствия удаления дубликатов.
         tables = old.execute("SELECT name FROM sqlite_schema WHERE type='table'").fetchall()
@@ -484,5 +489,13 @@ def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
                 raise PredeployError("SAFE_COPY_TABLE_LOSS")
             columns = ",".join('"' + column.replace('"', '""') + '"' for column in common)
             query = f"SELECT {columns} FROM {quoted}"
-            if Counter(old.execute(query)) != Counter(new.execute(query)):
+            old_query = query
+            if renames_ai_id and name in _AI_ID_TABLES:
+                if "capability_id" not in common:
+                    raise PredeployError("SAFE_COPY_DATA_LOSS")
+                # Проверяем точную ожидаемую замену и сохраняем сравнение всех остальных значений.
+                old_columns = columns.replace('"capability_id"',
+                    "CASE capability_id COLLATE BINARY WHEN 'ask' THEN 'ai' ELSE capability_id END")
+                old_query = f"SELECT {old_columns} FROM {quoted}"
+            if Counter(old.execute(old_query)) != Counter(new.execute(query)):
                 raise PredeployError("SAFE_COPY_DATA_LOSS")
