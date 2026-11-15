@@ -73,7 +73,7 @@ class CapabilityCompositionTest(unittest.TestCase):
 
     def test_composition_rejects_unknown_or_duplicate_enabled_ids(self) -> None:
         """Ошибки выбранных сборок появляются до запуска канала."""
-        for identifiers in (("unknown",), ("obsidian", "obsidian"), ("ai", "ask")):
+        for identifiers in (("unknown",), ("obsidian", "obsidian"), ("ask",), ("ai", "ask")):
             with self.subTest(identifiers=identifiers), self.assertRaises(ValueError):
                 validate_enabled_capabilities(identifiers)
 
