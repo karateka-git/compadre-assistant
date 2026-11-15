@@ -17,38 +17,74 @@ Compadre Assistant — модульный личный ассистент в Tel
 ## Границы модулей
 
 ```mermaid
-flowchart LR
-    TG[Telegram Bot API] --> TA[Telegram adapter]
-    VK[VK Bots Long Poll] --> VA[VK adapter]
-    CLI[CLI: process-url и smoke] --> OB[Obsidian bootstrap и smoke]
-    OB --> OD[Obsidian domain: модели, сценарии и ports]
-    TA --> IN[Core presentation: общий вход и диспетчер]
-    VA --> IN
-    IN --> MODE[(Режим пользователя в чате канала)]
-    IN --> OP[Obsidian presentation: команды, URL и ответы]
-    OP --> OD
-    IN --> AP[ai presentation: режим ИИ, вопрос и распознавание фото]
-    AP --> AD[ai domain: use case и port]
-    AM[ai data: LLM adapter] -. реализует port .-> AD
-    IN -->|доверенный AppUser| ADM[Admin presentation: проверка личного чата]
-    ADM --> AR[Admin domain: календарные периоды]
-    AR --> UR[Admin domain: порт статистики расходов]
-    TW[Admin data: HTTP-клиент статистики] -. реализует порт .-> UR
-    TW --> API[Timeweb Cloud API]
-    ODATA[Obsidian data: SQLite, HTTP, GitHub, LLM и embeddings] -. реализует ports .-> OD
-    ODATA --> DB[(Единая SQLite-БД)]
-    IN --> USERS[Core domain: пользователи и identity use cases]
-    CDATA[Core data: config и SQLite repositories] -. реализует ports .-> USERS
-    CDATA --> MODE
-    CDATA --> DB
-    ODATA --> GH[GitHub App и Obsidian vault]
-    ODATA --> DC[Независимый document_chunker]
+flowchart TB
+    Channels["Адаптеры Telegram и VK"]
+    CLI["CLI"]
+    Bootstrap["Сборка приложения: compadre_assistant/bootstrap.py"]
+
+    subgraph Core["Модуль core"]
+        CP["presentation<br/>Общий вход, диспетчер и меню"]
+        CD["domain<br/>Профили, доступ и режимы чатов"]
+        CT["data<br/>Конфигурация и хранилища ядра"]
+        CP --> CD
+        CT -. реализует порты .-> CD
+    end
+
+    subgraph Settings["Модуль settings"]
+        SP["presentation<br/>Режим настроек профиля"]
+    end
+
+    subgraph AI["Модуль ai"]
+        AP["presentation<br/>Режим ИИ"]
+        AD["domain<br/>Вопросы и распознавание текста на фото"]
+        AT["data<br/>Клиент LLM"]
+        AP --> AD
+        AT -. реализует порт .-> AD
+    end
+
+    subgraph Obs["Модуль obsidian"]
+        OP["presentation<br/>Команды и подтверждения"]
+        OD["domain<br/>Статьи, vault, поиск и предложения"]
+        OT["data<br/>HTTP, GitHub, SQLite, LLM и embeddings"]
+        OP --> OD
+        OT -. реализует порты .-> OD
+    end
+
+    subgraph Admin["Модуль admin"]
+        MP["presentation<br/>Допуск в режиме администрирования"]
+        MD["domain<br/>Отчёт о расходах"]
+        MT["data<br/>Клиент статистики Timeweb"]
+        MP --> MD
+        MT -. реализует порт .-> MD
+    end
+
+    Channels -->|IncomingEvent| CP
+    CLI -->|точки сборки и служебные сценарии| Bootstrap
+    Bootstrap -->|регистрирует обработчики| CP
+    CP -->|публичный вход| SP
+    CP -->|публичный вход| AP
+    CP -->|публичный вход| OP
+    CP -->|публичный вход| MP
+    SP -->|операция профиля через HandlerContext| CP
+
+    CT --> DB[(Общая SQLite-БД)]
+    OT --> DB
+    OT --> GH["GitHub App и Obsidian vault"]
+    OT --> Chunker["document_chunker"]
+    AT --> LLM["OpenAI-совместимый API"]
+    OT --> LLM
+    MT --> Timeweb["Timeweb Cloud API"]
 ```
 
-Стрелки показывают путь вызова или зависимость от порта. Ядро выбирает
-возможность по активному режиму чата; правила статьи и vault остаются внутри
-Obsidian. Адаптеры Telegram и VK преобразуют события и ответы канала, но не
-решают, какой предметный сценарий запустить.
+Стрелка «публичный вход» показывает передачу события через
+`IncomingCapabilityPort` во время работы приложения. Сборка передаёт
+конкретные обработчики реестру ядра. Пунктир показывает, какой data-адаптер
+реализует порт своего domain. Адаптеры Telegram и VK преобразуют события
+и ответы канала, а CLI вызывает сборку приложения и отдельные сценарии
+Obsidian через её точки входа.
+
+У `settings` есть только `presentation`. Операции профиля, связей между
+каналами и личного выбора выполняет ядро через `HandlerContext.profile_operation`.
 
 | Часть | Ответственность |
 | --- | --- |
@@ -61,6 +97,7 @@ Obsidian. Адаптеры Telegram и VK преобразуют события 
 | `capabilities/obsidian/bootstrap.py` | Сборка зависимостей возможности и её публичного входа. |
 | `capabilities/ai/` | Режим ИИ, вопросы, распознавание фото и адаптер LLM. |
 | `capabilities/admin/` | Режим администрирования, доверенные профили, календарный отчёт и HTTP-адаптер статистики Timeweb. |
+| `capabilities/settings/presentation/` | Режим настроек и передача команд публичным операциям ядра. |
 | `presentation/telegram/`, `presentation/vk/`, `presentation/cli/` | Адаптеры каналов и CLI вне presentation возможностей. |
 
 ## Как проходит сообщение
