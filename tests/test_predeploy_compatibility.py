@@ -430,6 +430,48 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CopyTests(unittest.TestCase):
+    def test_only_exact_ai_id_rename_is_allowed_when_0006_is_pending(self) -> None:
+        """Сравнение сохраняет личный выбор, ревизию и все значения вне замены ID."""
+        migration = "0006_ai_capability_id.sql"
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            historical_sql = root / "historical"
+            historical_sql.mkdir()
+            for source in MIGRATIONS_DIR.glob("000[1-5]_*.sql"):
+                shutil.copyfile(source, historical_sql / source.name)
+            original = root / "original.db"
+            candidate = root / "candidate.db"
+            with closing(sqlite3.connect(original)) as db:
+                apply_migrations(db, historical_sql)
+                db.execute("INSERT INTO app_users (id, display_name) VALUES (1, 'Fixture')")
+                db.execute("INSERT INTO active_chat_modes VALUES (1, 'vk', '42', 'ask', 3, 'stamp')")
+                db.executemany("INSERT INTO user_capability_preferences VALUES (1, ?, ?)",
+                               [("ask", 0), ("obsidian", 1)])
+                db.commit()
+                before = [row[0] for row in db.execute("SELECT name FROM schema_migrations ORDER BY version")]
+                fingerprint = gate.schema_fingerprint(db)
+                for extra in ("", "mode", "missing", "access", "other", "applied"):
+                    with self.subTest(extra=extra), closing(sqlite3.connect(candidate)) as new:
+                        db.backup(new)
+                        if extra != "mode":
+                            new.execute("UPDATE active_chat_modes SET capability_id = 'ai'")
+                        if extra != "missing":
+                            new.execute("UPDATE user_capability_preferences SET capability_id = 'ai' WHERE capability_id = 'ask'")
+                        if extra == "access":
+                            new.execute("UPDATE user_capability_preferences SET enabled = 1 WHERE capability_id = 'ai'")
+                        if extra == "other":
+                            new.execute("UPDATE user_capability_preferences SET enabled = 0 WHERE capability_id = 'obsidian'")
+                        new.execute("INSERT INTO schema_migrations (version, name) VALUES (6, ?)", (migration,))
+                        new.commit()
+                        if extra == "applied":
+                            db.execute("INSERT INTO schema_migrations (version, name) VALUES (6, ?)", (migration,))
+                            db.commit()
+                        if not extra:
+                            gate.verify_migrated_copy(original, candidate, before + [migration], fingerprint)
+                        else:
+                            with self.assertRaisesRegex(gate.PredeployError, "SAFE_COPY_DATA_LOSS"):
+                                gate.verify_migrated_copy(original, candidate, before + [migration], fingerprint)
+
     """Проверяет реальные online-копии, WAL, FK и сохранение данных миграцией."""
 
     def test_real_candidate_migrator_on_project_schema(self):

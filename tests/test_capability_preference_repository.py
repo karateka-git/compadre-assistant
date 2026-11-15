@@ -7,6 +7,7 @@ from threading import Barrier
 import sqlite3
 import unittest
 
+from compadre_assistant.core.data.sqlite.capability_ids import SQLiteCapabilityIds
 from compadre_assistant.core.data.sqlite.capability_preference_repository import (
     SQLiteUserCapabilityPreferenceRepository,
 )
@@ -22,6 +23,27 @@ from compadre_assistant.core.domain.capability_preferences import (
 
 class CapabilityPreferenceRepositoryTest(unittest.TestCase):
     """Проверяет устойчивость выбора и атомарность отдельного ключа."""
+
+    def test_renamed_preference_round_trips_between_release_versions(self) -> None:
+        """Изменение через ai обновляет прежний ключ ask и выбор того же профиля."""
+        with TemporaryDirectory(prefix="capability-preferences-") as directory:
+            with connect_database(Path(directory) / "test.db") as connection:
+                apply_migrations(connection)
+                connection.execute("INSERT INTO app_users (id) VALUES (1), (2)")
+                connection.commit()
+                legacy = SQLiteUserCapabilityPreferenceRepository(connection)
+                current = SQLiteUserCapabilityPreferenceRepository(
+                    connection, capability_ids=SQLiteCapabilityIds({"ai": "ask"}),
+                )
+                legacy.upsert(UserCapabilityPreference(1, "ask", False))
+                legacy.upsert(UserCapabilityPreference(2, "ask", False))
+                self.assertEqual(current.get_for_user(1), (UserCapabilityPreference(1, "ai", False),))
+                self.assertIs(current.upsert(UserCapabilityPreference(1, "ai", True)), False)
+                with self.assertRaises(sqlite3.IntegrityError):
+                    current.upsert(UserCapabilityPreference(999, "ai", True))
+                self.assertEqual(legacy.get_for_user(1), (UserCapabilityPreference(1, "ask", True),))
+                self.assertEqual(current.get_for_user(2), (UserCapabilityPreference(2, "ai", False),))
+                self.assertEqual(current.get_for_user(999), ())
 
     def test_concurrent_distinct_ids_and_new_connection(self) -> None:
         """Конкурентные записи разных ID сохраняются независимо после reconnect."""

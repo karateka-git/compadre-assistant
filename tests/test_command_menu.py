@@ -89,7 +89,7 @@ class CommandMenuTest(unittest.TestCase):
         self.assertEqual(self.menu().pending_input_label, "вопрос для модели")
         self.assertNotIn("/cancel", self.commands(chat="other"))
         self.assertNotIn("/reanalyze", self.commands(channel="vk"))
-        fixture.preferences.rows[(23, "ask")] = False
+        fixture.preferences.rows[(23, "ai")] = False
         self.assertNotIn("/ask", self.commands())
         self.assertNotIn("/get_text_from_image", self.commands())
         self.assertNotIn("/cancel", self.commands())
@@ -97,12 +97,12 @@ class CommandMenuTest(unittest.TestCase):
     def test_unavailable_modes_only_offer_exit_and_alternatives(self):
         """Недоступный или устаревший режим не выглядит активной возможностью."""
         fixture = self.fixture
-        for mode in ("obsidian", "missing", "ask"):
+        for mode in ("obsidian", "missing", "ai"):
             with self.subTest(mode=mode):
                 fixture.modes.save(ChatMode(fixture.key, mode))
                 fixture.preferences.rows[(23, "obsidian")] = False
-                fixture.preferences.rows[(23, "ask")] = mode != "ask"
-                expected = ("/exit", "/other") if mode == "ask" else ("/exit", "/ai", "/other")
+                fixture.preferences.rows[(23, "ai")] = mode != "ai"
+                expected = ("/exit", "/other") if mode == "ai" else ("/exit", "/ai", "/other")
                 self.assertEqual(self.commands(), expected)
 
     def test_pending_expiration_and_context_validation_match_help(self):
@@ -211,7 +211,7 @@ class CommandMenuUpdateTest(unittest.TestCase):
         self.assertIn("/exit", [item.command for item in self.updates[-1].menu.items])
         self.assertNotIn("/name", [item.command for item in self.updates[-1].menu.items])
         self.send("/exit")
-        self.send("/disable ask")
+        self.send("/disable ai")
         self.assertNotIn("/ai", [item.command for item in self.updates[-1].menu.items])
         count = len(self.updates)
         self.send("/status", chat="other")
