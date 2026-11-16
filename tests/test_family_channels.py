@@ -233,8 +233,10 @@ class FamilyChannelsTest(unittest.TestCase):
                 with self.subTest(bad=bad):
                     invalid = self._send(processor, self.owner_tg, f"/delete 1 {bad}")
                     self.assertIn("положительных номеров", response_text(invalid))
-            deleted = self._send(processor, self.owner_tg, "/delete 1 91")
+            deleted = self._send(processor, self.owner_tg, "/delete 1 2 91")
             self.assertNotIn("1. Хлеб", response_text(deleted))
+            self.assertIn("№2 уже куплен.", response_text(deleted))
+            self.assertIn("Купленные товары\n2. Чай\n4. Молоко, 2 л", response_text(deleted))
             self.assertIn("№91 нет в списке.", response_text(deleted))
             self.assertIsNone(deleted.view_delivery.target_message_id)
             cleared = self._send(processor, self.owner_tg, "/family_clear_bought")

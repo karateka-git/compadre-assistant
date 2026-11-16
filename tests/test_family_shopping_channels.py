@@ -157,7 +157,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
 
         await self._send("/delete")
         deleting = self._actions(self.bot.edit_message_text.await_args)
-        self.assertEqual(list(deleting), ["2. Молоко, 2 л", "3. Яблоки", "1. Хлеб", "Назад"])
+        self.assertEqual(list(deleting), ["2. Молоко, 2 л", "3. Яблоки", "Назад"])
         await self._press(deleting["3. Яблоки"], active_list)
         deleted = self.bot.edit_message_text.await_args
         self.assertNotIn("3. Яблоки", deleted.kwargs["text"])

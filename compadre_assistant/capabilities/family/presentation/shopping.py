@@ -32,7 +32,7 @@ class ShoppingSelection(StrEnum):
     """Различает действия при последовательном выборе товара."""
 
     BUY = "buy"  # Можно выбрать только покупку из группы «Нужно купить».
-    DELETE = "delete"  # Можно удалить покупку с любым известным состоянием.
+    DELETE = "delete"  # Можно удалить только покупку из «Нужно купить».
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +108,7 @@ def shopping_notices(changes: tuple[ItemChange, ...]) -> tuple[str, ...]:
     descriptions = {
         ItemChangeStatus.ALREADY_BOUGHT: "уже куплен.",
         ItemChangeStatus.NOT_FOUND: "нет в списке.",
+        ItemChangeStatus.POSITION_CHANGED: "сменил позицию в списке.",
         ItemChangeStatus.UNKNOWN: "не изменён из-за неизвестного состояния.",
     }
     return tuple(f"№{change.number} {descriptions[change.status]}"
@@ -185,7 +186,7 @@ def shopping_list(
             ("Выбери, что купил", BUY_COMMAND) if selection == ShoppingSelection.BUY
             else ("Выбери, что удалить", DELETE_COMMAND)
         )
-        eligible = [item for item in visible if _can_select(item, selection)]
+        eligible = [item for item in visible if item.status is ShoppingItemStatus.NEEDED]
         if eligible:
             parts.extend((f"\n\n{instruction}, или введи ", code_span(f"{command} <numbers>"), "."))
         else:
@@ -232,12 +233,6 @@ def shopping_list(
     return IncomingResponse(
         compose_content(*parts), suggested_actions=tuple(actions),
         view=ResponseView(f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None),
-    )
-
-
-def _can_select(item: ShoppingItem, selection: ShoppingSelection) -> bool:
-    return item.status == ShoppingItemStatus.NEEDED or (
-        selection == ShoppingSelection.DELETE and item.status == ShoppingItemStatus.BOUGHT
     )
 
 
