@@ -9,12 +9,16 @@ from compadre_assistant.capabilities.family.domain.invitations import (
 )
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
 from compadre_assistant.capabilities.family.domain.membership import (
-    AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, InvalidFamilyName,
+    AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, InvalidFamilyName,
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
+from compadre_assistant.capabilities.family.domain.shopping import MAX_ITEM_NUMBER, ManageShopping
 from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
 from compadre_assistant.capabilities.family.presentation.members import (
     CLOSE_COMMAND, LEAVE_COMMAND, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, MemberDisplayNames, MembersView,
+)
+from compadre_assistant.capabilities.family.presentation.shopping import (
+    SHOPPING_COMMAND, ShoppingSection, ShoppingSections, shopping_list,
 )
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -51,6 +55,7 @@ class FamilyCapability(
             CapabilityCommand(REMOVE_COMMAND, (CommandParameter("member", "<member>", False),), "исключить участника"),
             CapabilityCommand(TRANSFER_COMMAND, (CommandParameter("member", "<member>", False),), "передать роль владельца"),
             CapabilityCommand(CLOSE_COMMAND, (), "закрыть семью"),
+            CapabilityCommand(SHOPPING_COMMAND, (CommandParameter("view", "<view>", False),), "открыть покупки"),
         )),)),
         enabled_by_default=True,
         display_name="«Семья»",
@@ -58,13 +63,14 @@ class FamilyCapability(
     )
 
     def __init__(
-        self, open_scenarios: Callable[[], AbstractContextManager[tuple[ManageFamily, ManageInvitations]]],
+        self, open_scenarios: Callable[[], AbstractContextManager[tuple[ManageFamily, ManageInvitations, ManageShopping]]],
         display_names: MemberDisplayNames,
     ) -> None:
         """Принимает фабрику предметных сценариев на одно событие."""
         self._open_scenarios = open_scenarios
         self._members_view = MembersView(display_names)
         self._confirmations = MemberConfirmations()
+        self._shopping_sections = ShoppingSections()
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Открывает начальный экран или показывает текущую семью.
@@ -82,7 +88,7 @@ class FamilyCapability(
                 IncomingResponse(compose_content("Используй ", code_span("/family"), " без аргументов.")),
                 CapabilityMode.COMPLETE,
             )
-        with self._open_scenarios() as (families, _):
+        with self._open_scenarios() as (families, _, _):
             return CapabilityResult(self._home(families.find_for_member(context.app_user.id)))
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
@@ -99,8 +105,11 @@ class FamilyCapability(
         command = parts[0] if parts else ""
         arguments = parts[1] if len(parts) > 1 else ""
         app_user_id = context.app_user.id
-        with self._open_scenarios() as (families, invitations):
+        with self._open_scenarios() as (families, invitations, shopping):
             family = families.find_for_member(app_user_id)
+            if command == SHOPPING_COMMAND:
+                return CapabilityResult(self._shopping(context, event, families, family, shopping, arguments))
+            self._shopping_sections.close(app_user_id, event.reply_address)
             if command in (_CREATE, _JOIN):
                 return CapabilityResult(self._begin_input(context, event, family, command, arguments))
             if command == _INVITE:
@@ -121,7 +130,7 @@ class FamilyCapability(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
     ) -> frozenset[str]:
         """Показывает команды активного режима по текущему членству профиля."""
-        with self._open_scenarios() as (families, _):
+        with self._open_scenarios() as (families, _, _):
             family = families.find_for_member(app_user.id)
             if family is None:
                 return frozenset((_CREATE, _JOIN))
@@ -130,11 +139,20 @@ class FamilyCapability(
             except FamilyAccessEnded:
                 return frozenset((_CREATE, _JOIN))
             actor = next(member for member in members if member.app_user_id == app_user.id)
-            if not actor.is_owner:
-                return frozenset((_INVITE, MEMBERS_COMMAND, LEAVE_COMMAND))
-            if len(members) == 1:
-                return frozenset((_INVITE, MEMBERS_COMMAND, CLOSE_COMMAND))
-            return frozenset((_INVITE, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND))
+            sections = self._member_commands(actor, len(members))
+            if self._shopping_sections.current(app_user.id, address, mode_revision) == ShoppingSection(
+                mode_revision, family.id, actor.joined_at,
+            ):
+                return frozenset((SHOPPING_COMMAND,))
+            return sections | {SHOPPING_COMMAND}
+
+    @staticmethod
+    def _member_commands(actor: FamilyMember, member_count: int) -> frozenset[str]:
+        if not actor.is_owner:
+            return frozenset((_INVITE, MEMBERS_COMMAND, LEAVE_COMMAND))
+        if member_count == 1:
+            return frozenset((_INVITE, MEMBERS_COMMAND, CLOSE_COMMAND))
+        return frozenset((_INVITE, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND))
 
     def list_pending_confirmations(
         self, context: HandlerContext, origin: ReplyAddress,
@@ -143,7 +161,7 @@ class FamilyCapability(
         pending = self._confirmations.current(context, origin)
         if pending is None:
             return ConfirmationQueryResult("complete")
-        with self._open_scenarios() as (families, _):
+        with self._open_scenarios() as (families, _, _):
             if not self._member_action_is_current(families, pending):
                 return ConfirmationQueryResult("complete")
         return ConfirmationQueryResult("complete", (pending.confirmation,))
@@ -300,7 +318,7 @@ class FamilyCapability(
             return PendingInputResult(IncomingResponse(compose_content(
                 "Открой ", code_span("/family"), " и начни действие заново.",
             )), PendingInputOutcome.COMPLETE)
-        with self._open_scenarios() as (families, invitations):
+        with self._open_scenarios() as (families, invitations, _):
             try:
                 if command == _CREATE:
                     family = families.create(app_user_id, event.text)
@@ -360,12 +378,62 @@ class FamilyCapability(
                 "\nВступить по коду: ", code_span(_JOIN),
             ), suggested_actions=(ReplyAction("Создать семью", _CREATE), ReplyAction("Вступить по коду", _JOIN)))
         return IncomingResponse(compose_content(
-            introduction, f"Семья «{family.name}»\n\nУчастники: ", code_span(MEMBERS_COMMAND),
+            introduction, f"Семья «{family.name}»\n\nПокупки: ", code_span(SHOPPING_COMMAND),
+            "\nУчастники: ", code_span(MEMBERS_COMMAND),
             "\nПригласить: ", code_span(_INVITE),
         ), suggested_actions=(
+            ReplyAction("Покупки", f"{SHOPPING_COMMAND} open {family.id}"),
             ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),
             ReplyAction("Пригласить", f"{_INVITE} open {family.id}"),
         ))
+
+    def _shopping(
+        self, context: HandlerContext, event: IncomingEvent, families: ManageFamily,
+        family: Family | None, shopping: ManageShopping, arguments: str,
+    ) -> IncomingResponse:
+        app_user_id = context.app_user.id
+        address = event.reply_address
+        revision = context.mode_revision
+        parts = arguments.split()
+        if family is None or revision is None:
+            return self._family_access_ended()
+        if len(parts) == 2 and parts[0] == "open" and parts[1] != str(family.id):
+            return self._family_access_ended()
+        try:
+            actor = next(member for member in families.list_members(app_user_id, family.id)
+                         if member.app_user_id == app_user_id)
+            section = ShoppingSection(revision, family.id, actor.joined_at)
+            if not parts or parts == ["open", str(family.id)]:
+                items = shopping.list_items(app_user_id, family.id)
+                self._shopping_sections.open(app_user_id, address, section)
+                return shopping_list(items)
+            current = self._shopping_sections.current(app_user_id, address, revision)
+            if current is not None and current != section:
+                return self._family_access_ended()
+            if current is None:
+                return self._open_shopping_hint()
+            if parts == ["home"]:
+                self._shopping_sections.close(app_user_id, address)
+                return self._home(family)
+            if len(parts) != 2 or parts[0] not in ("page", "item"):
+                return self._open_shopping_hint()
+            value = parts[1]
+            if len(value) > 19 or not value.isascii() or not value.isdecimal() or not 0 < int(value) <= MAX_ITEM_NUMBER:
+                return self._open_shopping_hint()
+            number = int(value)
+            items = shopping.list_items(app_user_id, family.id)
+        except FamilyAccessEnded:
+            return self._family_access_ended()
+        if parts[0] == "page":
+            return shopping_list(items, number, update=event.callback_message_id is not None)
+        item = next((item for item in items if item.number == number), None)
+        if item is None:
+            return IncomingResponse(text_content(f"№{number} нет в списке."))
+        return IncomingResponse(text_content(f"{item.number}. {item.name}"))
+
+    @staticmethod
+    def _open_shopping_hint() -> IncomingResponse:
+        return IncomingResponse(compose_content("Открой список командой ", code_span(SHOPPING_COMMAND), "."))
 
     def _members(
         self, context: HandlerContext, address: ReplyAddress, families: ManageFamily,

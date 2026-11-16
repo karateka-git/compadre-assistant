@@ -7,6 +7,7 @@ from pathlib import Path
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.invitations import ManageInvitations
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
+from compadre_assistant.capabilities.family.domain.shopping import ManageShopping
 from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.family.presentation.members import MemberDisplayNames
 from compadre_assistant.core.data.sqlite.connection import connect_database
@@ -24,9 +25,9 @@ def create_family_capability(database_path: Path, display_names: MemberDisplayNa
     """
 
     @contextmanager
-    def open_scenarios() -> Iterator[tuple[ManageFamily, ManageInvitations]]:
+    def open_scenarios() -> Iterator[tuple[ManageFamily, ManageInvitations, ManageShopping]]:
         with connect_database(database_path) as connection:
             repository = SQLiteFamilyRepository(connection)
-            yield ManageFamily(repository), ManageInvitations(repository)
+            yield ManageFamily(repository), ManageInvitations(repository), ManageShopping(repository)
 
     return FamilyCapability(open_scenarios, display_names)
