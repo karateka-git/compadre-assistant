@@ -99,7 +99,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
         asyncio.run(choose())
         self.assertEqual(self.name("telegram", "1001"), "Новое")
         self.assertIn("больше недоступна", bot.sent[-1]["text"])
-        self.assertEqual(len(bot.edits), 2)
+        self.assertEqual(bot.edits, [{"chat_id": 1001, "message_id": 7, "reply_markup": None}])
 
         with patch.object(IncomingMessageDispatcher, "execute", return_value=response):
             old = self.processor(event).bound_actions[0].token
@@ -107,6 +107,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
         asyncio.run(aiogram.dispatcher.included_router.callback_handler(Callback(old, bot)))
         self.assertEqual(self.name("telegram", "1001"), "Новое")
         self.assertIn("больше недоступна", bot.sent[-1]["text"])
+        self.assertEqual(len(bot.edits), 1)
 
     def test_vk_callback_and_text_only_path_use_exact_commands(self) -> None:
         """VK payload передаёт token; ручной путь исполняет тот же текст."""

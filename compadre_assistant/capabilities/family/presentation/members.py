@@ -84,6 +84,8 @@ class MembersView:
         elif len(members) == 1:
             parts.extend(("\nЗакрыть семью: ", code_span(CLOSE_COMMAND)))
             actions.append(ReplyAction("Закрыть семью", f"{CLOSE_COMMAND} {family.id}"))
+        parts.extend(("\n\nНазад · ", code_span("/family")))
+        actions.append(ReplyAction("Назад", "/family"))
         return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
 
     def details(
@@ -98,13 +100,15 @@ class MembersView:
             ), suggested_actions=(ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),))
         name = self.display_name(member)
         role = "Владелец семьи" if member.is_owner else "Участник семьи"
-        parts = [name, "\n", f"{role} «{family.name}».\n", "Посмотреть состав: ", code_span(MEMBERS_COMMAND)]
-        actions = [ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}")]
+        parts = [name, "\n", f"{role} «{family.name}»."]
+        actions = []
         if not member.is_owner and any(item.is_owner and item.app_user_id == context.app_user.id for item in members):
             for label, command in (("Исключить из семьи", REMOVE_COMMAND), ("Передать роль владельца", TRANSFER_COMMAND)):
                 command = f"{command} {reference}"
                 parts.extend(("\n", label, ": ", code_span(command)))
                 actions.append(ReplyAction(label, command))
+        parts.extend(("\n\nНазад · ", code_span(MEMBERS_COMMAND)))
+        actions.append(ReplyAction("Назад", f"{MEMBERS_COMMAND} open {family.id}"))
         return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
 
     def display_name(self, member: FamilyMember) -> str:

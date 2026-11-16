@@ -371,14 +371,10 @@ def _register_handlers(
         managed_target = result.view_delivery.target_message_id if result.view_delivery is not None else None
         if source_id is not None and not result.preserve_source_actions and source_id != managed_target:
             try:
-                await callback.bot.edit_message_reply_markup(
-                    chat_id=chat.id, message_id=int(source_id), reply_markup=None,
-                )
+                await _clear_telegram_inline_keyboard(target, source_id, logger)
             except asyncio.CancelledError:
                 await _notify_telegram_delivery(result, False)
                 raise
-            except Exception:
-                logger.exception("Telegram callback keyboard removal failed")
         await safe_send_telegram_reply(target, result, logger=logger)
 
     dispatcher.include_router(router)
@@ -733,8 +729,21 @@ async def safe_send_telegram_reply(
             message, response, logger=logger, limit=limit, sleeper=sleeper,
             include_bound_actions=include_bound_actions,
         )
+        if delivered and response.retire_views_after_delivery is not None:
+            for message_id in response.retire_views_after_delivery():
+                await _clear_telegram_inline_keyboard(message, message_id, logger)
     finally:
         await _notify_telegram_delivery(response, delivered)
+
+
+async def _clear_telegram_inline_keyboard(message: Any, message_id: str, logger: logging.Logger) -> None:
+    """Снимает кнопки старого сообщения, сохраняя уже доставленный ответ."""
+    try:
+        await message.bot.edit_message_reply_markup(
+            chat_id=int(message.chat.id), message_id=int(message_id), reply_markup=None,
+        )
+    except Exception:
+        logger.exception("Telegram inline keyboard removal failed")
 
 
 def _telegram_message_id(message: Any) -> str | None:
@@ -793,7 +802,8 @@ async def _send_telegram_view(
                     sleeper=sleeper, include_bound_actions=False,
                 )
         finally:
-            delivery.finish(confirmed_id)
+            for message_id in delivery.finish(confirmed_id):
+                await _clear_telegram_inline_keyboard(message, message_id, logger)
 
     if delivery.unavailable is not None and target is not None:
         await _send_telegram_reply(

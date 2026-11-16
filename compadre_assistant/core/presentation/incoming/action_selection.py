@@ -41,13 +41,20 @@ class RegisteredAction:
 
 
 @dataclass(frozen=True, slots=True)
-class _ViewScope:
-    """Отделяет представления разных владельцев, чатов и ревизий."""
+class _ViewOwner:
+    """Ограничивает замену экранов одним профилем, чатом и возможностью."""
 
     origin: ReplyAddress
     external_user_id: str
     app_user_id: int
     mode_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ViewScope:
+    """Связывает экран с владельцем и конкретной ревизией режима."""
+
+    owner: _ViewOwner
     mode_revision: int
     key: str
 
@@ -71,6 +78,8 @@ class _ViewSlot:
     delivered_message_id: str | None = None
     started: bool = False
     sending: bool = False
+    cleanup_previous: bool = False
+    retired: bool = False  # Новый экран уже доставлен, но этот ещё отправляется.
 
 
 class ResponseActionStore:
@@ -86,6 +95,7 @@ class ResponseActionStore:
         self._clock = clock
         self._entries: dict[str, RegisteredAction] = {}
         self._views: dict[_ViewScope, _ViewSlot] = {}
+        self._retirements: dict[_ViewOwner, tuple[int, float]] = {}
         self._generation = 0
         self._lock = RLock()
 
@@ -110,20 +120,20 @@ class ResponseActionStore:
             Резерв доставки и поколение кнопок либо None при устаревшей
             операции, недоступном исходном сообщении или занятой доставке.
         """
-        if not event.external_user_id or context.app_user_id is None or context.mode_id is None:
+        owner = self._view_owner(event, context)
+        if owner is None:
             return None
-        scope = _ViewScope(
-            event.reply_address, event.external_user_id, context.app_user_id,
-            context.mode_id, context.mode_revision, view.key,
-        )
+        scope = _ViewScope(owner, context.mode_revision, view.key)
         with self._lock:
             self._prune()
+            if view.cleanup_previous and generation <= self._retirements.get(owner, (0, 0))[0]:
+                return None
             slot = self._views.get(scope)
-            if slot is not None and (slot.sending or generation <= slot.generation):
+            if slot is not None and (slot.sending or slot.retired or generation <= slot.generation):
                 return None
             target = None
             if view.update:
-                target = slot.delivered_message_id if slot is not None else None
+                target = slot.delivered_message_id if slot is not None and slot.delivered_generation is not None else None
                 if target is None or event.callback_message_id not in (None, target):
                     return None
             if slot is None:
@@ -136,10 +146,11 @@ class ResponseActionStore:
             slot.generation = generation
             slot.expires_at = self._clock() + self._ttl
             slot.started = False
+            slot.cleanup_previous = view.cleanup_previous
         delivery = ResponseViewDelivery(
             target, view.unavailable,
             lambda: self._start_view(scope, generation),
-            lambda message_id: self._finish_view(scope, generation, target, message_id),
+            lambda message_id: self._finish_view(scope, generation, target, message_id, view.on_delivered),
         )
         return PreparedResponseView(scope, generation, delivery)
 
@@ -147,26 +158,92 @@ class ResponseActionStore:
         with self._lock:
             self._prune()
             slot = self._views.get(scope)
-            if slot is None or slot.generation != generation or slot.started:
+            if slot is None or slot.generation != generation or slot.started or slot.retired:
                 return False
             slot.started = True
             slot.sending = True
             return True
 
-    def _finish_view(self, scope: _ViewScope, generation: int, target: str | None, message_id: str | None) -> None:
+    def _finish_view(
+        self, scope: _ViewScope, generation: int, target: str | None, message_id: str | None,
+        on_delivered: Callable[[], None] | None,
+    ) -> tuple[str, ...]:
         with self._lock:
             slot = self._views.get(scope)
             if slot is None or slot.generation != generation or not slot.sending:
-                return
+                return ()
             slot.sending = False
             slot.expires_at = self._clock() + self._ttl
-            if message_id and (target is None or target == message_id):
+            previous_id = slot.delivered_message_id
+            confirmed = bool(message_id and (target is None or target == message_id))
+            if slot.retired:
+                del self._views[scope]
+                return tuple(dict.fromkeys(value for value in (previous_id, message_id if confirmed else None) if value))
+            retired = ()
+            if confirmed:
                 slot.delivered_generation = generation
                 slot.delivered_message_id = message_id
+                if slot.cleanup_previous:
+                    retired = self._retire_views(scope.owner, generation)
+                    if previous_id is not None and previous_id != message_id:
+                        retired = (*retired, previous_id)
             elif target is not None:
                 # Неопределённый результат edit требует открыть представление снова.
                 slot.delivered_generation = None
-                slot.delivered_message_id = None
+        if confirmed and on_delivered is not None:
+            on_delivered()
+        return retired
+
+    def retire_views(self, event: IncomingEvent, context: ActionContext, generation: int) -> tuple[str, ...]:
+        """Снимает с учёта прежние отслеживаемые экраны после доставки замены.
+
+        Args:
+            event: Проверенный адрес и автор исходного события.
+            context: Профиль и режим прежнего экрана.
+            generation: Номер события, доставившего замену.
+
+        Returns:
+            ID сообщений, которые больше нельзя обновить как представления.
+        """
+        owner = self._view_owner(event, context)
+        with self._lock:
+            self._prune()
+            return self._retire_views(owner, generation) if owner is not None else ()
+
+    @staticmethod
+    def _view_owner(event: IncomingEvent, context: ActionContext) -> _ViewOwner | None:
+        if not event.external_user_id or context.app_user_id is None or context.mode_id is None:
+            return None
+        return _ViewOwner(event.reply_address, event.external_user_id, context.app_user_id, context.mode_id)
+
+    def _retire_views(self, owner: _ViewOwner, generation: int) -> tuple[str, ...]:
+        # Незавершённый запрос к каналу сам отдаст свой ID на очистку. Иначе
+        # его edit мог бы вернуть клавиатуру уже после отдельного снятия.
+        self._retirements[owner] = (max(generation, self._retirements.get(owner, (0, 0))[0]),
+                                    self._clock() + self._ttl)
+        if len(self._retirements) > self._limit:
+            del self._retirements[next(iter(self._retirements))]
+        retired = []
+        for scope, slot in tuple(self._views.items()):
+            if scope.owner != owner or not slot.cleanup_previous or slot.generation >= generation or slot.retired:
+                continue
+            if slot.sending:
+                slot.retired = True
+            else:
+                del self._views[scope]
+                if slot.delivered_message_id is not None:
+                    retired.append(slot.delivered_message_id)
+        return tuple(retired)
+
+    def managed_action_owner(self, event: IncomingEvent, token: str) -> str | None:
+        """Возвращает режим известной кнопки только для её исходного автора и чата."""
+        with self._lock:
+            self._prune()
+            entry = self._entries.get(token) if isinstance(token, str) else None
+            if (entry is None or entry.view is None or entry.origin != event.reply_address
+                    or entry.external_user_id != event.external_user_id):
+                return None
+            return entry.context.mode_id
 
     def protects_keyboard(self, event: IncomingEvent, token: str) -> bool:
         """Проверяет, могло ли нажатие прийти с управляемой клавиатуры."""
@@ -177,13 +254,14 @@ class ResponseActionStore:
             action = self._entries.get(token) if isinstance(token, str) else None
             return (
                 action is not None and action.view is not None and action.origin == event.reply_address
-                or any(scope.origin == event.reply_address and slot.delivered_message_id == event.callback_message_id
+                or any(scope.owner.origin == event.reply_address and slot.delivered_message_id == event.callback_message_id
                        for scope, slot in self._views.items())
             )
 
     def register(self, event: IncomingEvent, context: ActionContext,
                  actions: tuple[tuple[str, str, PendingConfirmation | None, ConfirmationAction | None], ...],
                  *, view: PreparedResponseView | None = None,
+                 rows: dict[str, int] | None = None,
                  ) -> tuple[BoundReplyAction, ...]:
         """Связывает действия одного ответа с непрозрачными случайными токенами.
 
@@ -192,6 +270,7 @@ class ResponseActionStore:
             context: Снимок допуска именно этого ответа.
             actions: Подпись, точная команда и необязательное адресное ожидание.
             view: Поколение управляемого ответа, требующее подтверждения доставки.
+            rows: Явные ряды кнопок по их точным командам.
 
         Returns:
             Контракт сериализации адаптером; команда в callback не передаётся.
@@ -210,7 +289,7 @@ class ResponseActionStore:
                     response_id, event.reply_address, event.external_user_id, context,
                     command, self._clock() + self._ttl, confirmation, action, view,
                 )
-                result.append(BoundReplyAction(label, token, response_id))
+                result.append(BoundReplyAction(label, token, response_id, rows.get(command) if rows else None))
             return tuple(result)
 
     def claim(
@@ -239,7 +318,7 @@ class ResponseActionStore:
                 return None
             if entry.view is not None:
                 slot = self._views.get(entry.view.scope)
-                if (context != entry.context or slot is None or slot.sending
+                if (context != entry.context or slot is None or slot.sending or slot.retired
                         or slot.delivered_generation != entry.view.generation
                         or event.callback_message_id != slot.delivered_message_id):
                     return None
@@ -260,3 +339,6 @@ class ResponseActionStore:
         for scope, slot in tuple(self._views.items()):
             if not slot.sending and now >= slot.expires_at:
                 del self._views[scope]
+        for owner, (_, expires_at) in tuple(self._retirements.items()):
+            if now >= expires_at:
+                del self._retirements[owner]

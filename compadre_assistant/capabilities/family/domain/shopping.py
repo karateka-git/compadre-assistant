@@ -50,7 +50,8 @@ class ItemChangeStatus(StrEnum):
 
     CHANGED = "changed"  # Пункт обновили или удалили.
     NOT_FOUND = "not_found"  # Номера больше нет в текущем списке.
-    ALREADY_BOUGHT = "already_bought"  # Состояние уже установлено.
+    ALREADY_BOUGHT = "already_bought"  # Пункт уже в «Купленных товарах».
+    POSITION_CHANGED = "position_changed"  # Постоянный номер больше не соответствует позиции.
     UNKNOWN = "unknown"  # Пункт оставили без изменений из-за неизвестного статуса.
 
 
@@ -108,14 +109,47 @@ class ShoppingRepository(Protocol):
 
     def buy_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], now: datetime, *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Отмечает найденные пункты купленными и сообщает о результате каждого номера."""
+        """Отмечает нужные покупки и возвращает результат вместе со списком.
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Проверенные постоянные номера покупок.
+            now: Время отметки.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Для одного номера позиция из показанного списка
+                «Нужно купить», начиная с 1. Сверяется в транзакции записи.
+
+        Returns:
+            Результаты для номеров и актуальный список.
+
+        Raises:
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
         ...
 
     def delete_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Удаляет найденные пункты и сообщает о результате каждого номера."""
+        """Удаляет позиции из «Нужно купить» и возвращает актуальный список.
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Проверенные постоянные номера покупок.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Для одного номера позиция из показанного списка
+                «Нужно купить», начиная с 1. Сверяется в транзакции записи.
+
+        Returns:
+            Результаты для номеров и актуальный список.
+
+        Raises:
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
         ...
 
     def clear_bought(
@@ -165,18 +199,56 @@ class ManageShopping:
 
     def buy(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Отмечает покупки по проверенным номерам; отклоняет весь ввод при неверном номере."""
+        """Отмечает ещё нужные покупки купленными по их постоянным номерам.
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Постоянные номера покупок.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Показанная позиция при выборе одного товара
+                по видимому номеру из «Нужно купить».
+
+        Returns:
+            Статусы изменений и актуальный список.
+
+        Raises:
+            InvalidItemNumbers: Пустой набор, неверный номер или позиция
+                для нескольких номеров.
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
         return self._repository.buy_items(
-            app_user_id, family_id, _validate_numbers(numbers), self._clock(), actor_joined_at=actor_joined_at,
+            app_user_id, family_id, _validate_numbers(numbers, expected_position), self._clock(),
+            actor_joined_at=actor_joined_at, expected_position=expected_position,
         )
 
     def delete(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Удаляет покупки по проверенным номерам; отклоняет весь ввод при неверном номере."""
+        """Удаляет покупки из «Нужно купить» по их постоянным номерам.
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Постоянные номера покупок.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Показанная позиция при выборе одного товара
+                по видимому номеру из «Нужно купить».
+
+        Returns:
+            Статусы изменений и актуальный список.
+
+        Raises:
+            InvalidItemNumbers: Пустой набор, неверный номер или позиция
+                для нескольких номеров.
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
         return self._repository.delete_items(
-            app_user_id, family_id, _validate_numbers(numbers), actor_joined_at=actor_joined_at,
+            app_user_id, family_id, _validate_numbers(numbers, expected_position),
+            actor_joined_at=actor_joined_at, expected_position=expected_position,
         )
 
     def clear_bought(
@@ -186,7 +258,11 @@ class ManageShopping:
         return self._repository.clear_bought(app_user_id, family_id, actor_joined_at=actor_joined_at)
 
 
-def _validate_numbers(numbers: tuple[int, ...]) -> tuple[int, ...]:
+def _validate_numbers(numbers: tuple[int, ...], expected_position: int | None) -> tuple[int, ...]:
     if not numbers or any(type(number) is not int or not 0 < number <= MAX_ITEM_NUMBER for number in numbers):
         raise InvalidItemNumbers("Укажи положительные целые номера покупок")
+    if expected_position is not None and (
+        len(numbers) != 1 or type(expected_position) is not int or not 0 < expected_position <= MAX_ITEM_NUMBER
+    ):
+        raise InvalidItemNumbers("Видимая позиция должна соответствовать одному номеру покупки")
     return numbers

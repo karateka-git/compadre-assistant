@@ -272,17 +272,54 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
 
     def buy_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], now: datetime, *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Помечает нужные покупки купленными; повтор сохраняет первую отметку."""
+        """Помечает нужные покупки купленными и сохраняет первую отметку.
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Проверенные постоянные номера покупок.
+            now: Время отметки.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Позиция одного товара из показанного списка
+                «Нужно купить», начиная с 1.
+
+        Returns:
+            Статусы изменений и актуальный список из той же транзакции.
+
+        Raises:
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
         return self._change_items(
             app_user_id, family_id, numbers, bought_at=_format_timestamp(now), actor_joined_at=actor_joined_at,
+            expected_position=expected_position,
         )
 
     def delete_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,
+        expected_position: int | None = None,
     ) -> ShoppingChangeResult:
-        """Удаляет указанные покупки с известным состоянием."""
-        return self._change_items(app_user_id, family_id, numbers, bought_at=None, actor_joined_at=actor_joined_at)
+        """Удаляет указанные позиции из «Нужно купить».
+
+        Args:
+            app_user_id: Профиль участника.
+            family_id: Ожидаемая семья.
+            numbers: Проверенные постоянные номера покупок.
+            actor_joined_at: Время начала ожидаемого членства.
+            expected_position: Позиция одного товара из показанного списка
+                «Нужно купить», начиная с 1.
+
+        Returns:
+            Статусы изменений и актуальный список из той же транзакции.
+
+        Raises:
+            FamilyAccessEnded: Членство участника завершилось или сменилось.
+        """
+        return self._change_items(
+            app_user_id, family_id, numbers, bought_at=None, actor_joined_at=actor_joined_at,
+            expected_position=expected_position,
+        )
 
     def clear_bought(
         self, app_user_id: int, family_id: int, *, actor_joined_at: datetime,
@@ -297,20 +334,28 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
 
     def _change_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, bought_at: str | None,
-        actor_joined_at: datetime,
+        actor_joined_at: datetime, expected_position: int | None,
     ) -> ShoppingChangeResult:
         with self._write():
             items = {item.number: item for item in self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)}
+            number_at_position = None
+            if expected_position is not None:
+                # list_items возвращает товары по возрастанию постоянного номера.
+                needed = tuple(item.number for item in items.values() if item.status is ShoppingItemStatus.NEEDED)
+                if 1 <= expected_position <= len(needed):
+                    number_at_position = needed[expected_position - 1]
             changes = []
             changed_numbers = []
             for number in dict.fromkeys(numbers):
                 item = items.get(number)
                 if item is None:
                     status = ItemChangeStatus.NOT_FOUND
-                elif item.status is ShoppingItemStatus.UNKNOWN:
-                    status = ItemChangeStatus.UNKNOWN
-                elif bought_at is not None and item.status is ShoppingItemStatus.BOUGHT:
+                elif item.status is ShoppingItemStatus.BOUGHT:
                     status = ItemChangeStatus.ALREADY_BOUGHT
+                elif item.status is not ShoppingItemStatus.NEEDED:
+                    status = ItemChangeStatus.UNKNOWN
+                elif expected_position is not None and number != number_at_position:
+                    status = ItemChangeStatus.POSITION_CHANGED
                 else:
                     status = ItemChangeStatus.CHANGED
                     changed_numbers.append(number)

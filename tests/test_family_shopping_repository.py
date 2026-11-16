@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Barrier
+from threading import Barrier, Event
 
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
@@ -79,6 +79,10 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             self.shopping.buy(1, self.home, (1, 0), actor_joined_at=_NOW)
         with self.assertRaises(InvalidItemNumbers):
             self.shopping.delete(1, self.home, (1, MAX_ITEM_NUMBER + 1), actor_joined_at=_NOW)
+        with self.assertRaises(InvalidItemNumbers):
+            self.shopping.buy(1, self.home, (1, 2), actor_joined_at=_NOW, expected_position=1)
+        with self.assertRaises(InvalidItemNumbers):
+            self.shopping.delete(1, self.home, (1,), actor_joined_at=_NOW, expected_position=0)
         self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), result.items)
 
     def test_delete_and_clear_do_not_reuse_numbers_or_touch_other_family(self) -> None:
@@ -88,8 +92,10 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         self.shopping.buy(3, self.other, (1,), actor_joined_at=_NOW)
         self.shopping.buy(1, self.home, (1, 2), actor_joined_at=_NOW)
         deleted = self.shopping.delete(2, self.home, (1, 3, 1, 7), actor_joined_at=_NOW)
-        self.assertEqual(deleted.changes, (ItemChange(1, _CHANGED), ItemChange(3, _CHANGED), ItemChange(7, _MISSING)))
-        self.assertEqual([item.number for item in deleted.items], [2, 4])
+        self.assertEqual(deleted.changes, (
+            ItemChange(1, ItemChangeStatus.ALREADY_BOUGHT), ItemChange(3, _CHANGED), ItemChange(7, _MISSING),
+        ))
+        self.assertEqual([item.number for item in deleted.items], [1, 2, 4])
         self.assertEqual([item.number for item in self.shopping.clear_bought(2, self.home, actor_joined_at=_NOW)], [4])
         self.shopping.delete(2, self.home, (4,), actor_joined_at=_NOW)
 
@@ -195,8 +201,7 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
 
     def test_delete_and_clear_roll_back_an_earlier_deletion(self) -> None:
         """Сбой при удалении сохраняет все пункты пакета и очистки."""
-        self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
-        before = self.shopping.buy(2, self.home, (1, 2), actor_joined_at=_NOW).items
+        before = self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
         with self.db:
             self.db.execute(
                 "CREATE TRIGGER fail_delete BEFORE DELETE ON family_shopping_items WHEN OLD.number = 2 "
@@ -204,9 +209,11 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
             self.shopping.delete(1, self.home, (1, 2), actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), before)
+        bought = self.shopping.buy(2, self.home, (1, 2), actor_joined_at=_NOW).items
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
             self.shopping.clear_bought(1, self.home, actor_joined_at=_NOW)
-        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), before)
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), bought)
         self.assertFalse(self.db.in_transaction)
 
     def test_number_limit_rejects_unfittable_batch_without_using_last_number(self) -> None:
@@ -240,3 +247,100 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         self.assertEqual([item.number for item in items], [1, 2, 3, 4])
         self.assertCountEqual([item.created_by_app_user_id for item in items], [1, 1, 2, 2])
         self.assertEqual(items[0].bought_by_app_user_id, winner)
+
+    def test_competing_writes_report_the_result_of_the_transaction_that_won(self) -> None:
+        """Два писателя не применяют действие повторно и учитывают состояние исходной цели."""
+        for winner, contender, loser_status in (
+            ("buy", "buy", ItemChangeStatus.ALREADY_BOUGHT),
+            ("delete", "delete", _MISSING),
+            ("buy", "delete", ItemChangeStatus.ALREADY_BOUGHT),
+            ("delete", "buy", _MISSING),
+        ):
+            with self.subTest(winner=winner, contender=contender):
+                self.shopping.clear_bought(1, self.home, actor_joined_at=_NOW)
+                target, = self.shopping.add(1, self.home, "Хлеб", actor_joined_at=_NOW)
+                winning_write_locked = Event()
+                contender_started = Event()
+
+                def mark_winning_write() -> int:
+                    winning_write_locked.set()
+                    if not contender_started.wait(timeout=5):
+                        raise RuntimeError("Второе соединение не попыталось начать запись")
+                    return 1
+
+                def run_winner() -> ItemChangeStatus:
+                    with connect_database(self.path) as db:
+                        db.create_function("mark_winning_write", 0, mark_winning_write)
+                        statement = "UPDATE" if winner == "buy" else "DELETE"
+                        db.execute(
+                            f"CREATE TEMP TRIGGER watch_write BEFORE {statement} ON family_shopping_items "
+                            "BEGIN SELECT mark_winning_write(); END"
+                        )
+                        shopping = ManageShopping(SQLiteFamilyRepository(db), clock=lambda: _NOW)
+                        operation = shopping.buy if winner == "buy" else shopping.delete
+                        return operation(1, self.home, (target.number,), actor_joined_at=_NOW).changes[0].status
+
+                def trace_begin(sql: str) -> None:
+                    if sql == "BEGIN IMMEDIATE":
+                        contender_started.set()
+
+                def run_contender() -> ItemChangeStatus:
+                    with connect_database(self.path) as db:
+                        if not winning_write_locked.wait(timeout=5):
+                            raise RuntimeError("Первое соединение не успело заблокировать запись")
+                        db.set_trace_callback(trace_begin)
+                        shopping = ManageShopping(SQLiteFamilyRepository(db), clock=lambda: _NOW)
+                        operation = shopping.buy if contender == "buy" else shopping.delete
+                        return operation(
+                            2, self.home, (target.number,), actor_joined_at=_NOW, expected_position=1,
+                        ).changes[0].status
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    first = pool.submit(run_winner)
+                    second = pool.submit(run_contender)
+                    self.assertIs(first.result(), _CHANGED)
+                    self.assertIs(second.result(), loser_status)
+                items = self.shopping.list_items(1, self.home, actor_joined_at=_NOW)
+                if winner == "buy":
+                    item, = items
+                    self.assertEqual((item.status, item.bought_by_app_user_id), (ShoppingItemStatus.BOUGHT, 1))
+                else:
+                    self.assertEqual(items, ())
+
+    def test_visible_position_must_match_full_needed_list_when_transaction_writes(self) -> None:
+        """Сдвиг от покупки в другом чате подтверждается по полной группе «Нужно купить»."""
+        self.shopping.add(1, self.home, "Хлеб\nМолоко\nЯблоки\nСыр", actor_joined_at=_NOW)
+        self.shopping.buy(1, self.home, (1,), actor_joined_at=_NOW)
+        with connect_database(self.path) as other_db:
+            other = ManageShopping(SQLiteFamilyRepository(other_db))
+            self.assertEqual(other.delete(2, self.home, (2,), actor_joined_at=_NOW, expected_position=1).changes,
+                             (ItemChange(2, _CHANGED),))
+
+        for operation in (self.shopping.buy, self.shopping.delete):
+            shifted = operation(1, self.home, (3,), actor_joined_at=_NOW, expected_position=2)
+            self.assertEqual(shifted.changes, (ItemChange(3, ItemChangeStatus.POSITION_CHANGED),))
+            self.assertEqual([item.status for item in shifted.items], [
+                ShoppingItemStatus.BOUGHT, ShoppingItemStatus.NEEDED, ShoppingItemStatus.NEEDED,
+            ])
+
+        # Стабильная кнопка переживает сдвиг, а ручной ввод принимает обновлённую позицию.
+        self.assertEqual(self.shopping.delete(1, self.home, (4,), actor_joined_at=_NOW).changes,
+                         (ItemChange(4, _CHANGED),))
+        self.assertEqual(self.shopping.buy(1, self.home, (3,), actor_joined_at=_NOW, expected_position=1).changes,
+                         (ItemChange(3, _CHANGED),))
+
+    def test_position_operations_respect_clear_and_membership_changes_from_other_connection(self) -> None:
+        """После очистки или потери членства действует состояние, подтверждённое другой транзакцией."""
+        self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
+        with connect_database(self.path) as other_db:
+            repository = SQLiteFamilyRepository(other_db)
+            other = ManageShopping(repository)
+            other.buy(2, self.home, (1,), actor_joined_at=_NOW, expected_position=1)
+            self.assertEqual([item.number for item in self.shopping.clear_bought(1, self.home, actor_joined_at=_NOW)], [2])
+            self.assertEqual(other.delete(2, self.home, (1,), actor_joined_at=_NOW, expected_position=1).changes,
+                             (ItemChange(1, _MISSING),))
+            self.repository.remove_member(1, self.home, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
+            with self.assertRaises(FamilyAccessEnded):
+                other.buy(2, self.home, (2,), actor_joined_at=_NOW, expected_position=1)
+        milk, = self.shopping.list_items(1, self.home, actor_joined_at=_NOW)
+        self.assertIs(milk.status, ShoppingItemStatus.NEEDED)
