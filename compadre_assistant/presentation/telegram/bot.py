@@ -339,6 +339,7 @@ def _register_handlers(
 
         source = getattr(callback, "message", None)
         chat = getattr(source, "chat", None)
+        source_id = _telegram_message_id(source)
         author = getattr(callback, "from_user", None)
         callback_id = getattr(callback, "id", None)
         if (chat is None or getattr(chat, "id", None) is None
@@ -356,6 +357,7 @@ def _register_handlers(
             username=getattr(author, "username", None),
             display_name=(getattr(author, "full_name", None)
                           or getattr(author, "first_name", None)),
+            callback_message_id=source_id,
         )
         target = _TelegramReplyTarget(callback.bot, event.chat_id)
         completion_handler = _create_telegram_completion_handler(
@@ -366,10 +368,11 @@ def _register_handlers(
         result = await _process_telegram_update(select_action, (event, token, completion_handler), menu_update_handler)
         if result.error is not None:
             logger.error("Telegram callback processing failed: %s", result.error)
-        if not result.preserve_source_actions:
+        managed_target = result.view_delivery.target_message_id if result.view_delivery is not None else None
+        if source_id is not None and not result.preserve_source_actions and source_id != managed_target:
             try:
                 await callback.bot.edit_message_reply_markup(
-                    chat_id=chat.id, message_id=source.message_id, reply_markup=None,
+                    chat_id=chat.id, message_id=int(source_id), reply_markup=None,
                 )
             except asyncio.CancelledError:
                 await _notify_telegram_delivery(result, False)
@@ -524,18 +527,18 @@ def _create_telegram_completion_handler(
 
 
 class _TelegramReplyTarget:
-    """Отправляет фоновый ответ через Bot без удержания исходного Message."""
+    """Доставляет ответ через Bot без удержания исходного Message."""
 
     def __init__(self, bot: Any, chat_id: str) -> None:
         self.chat = SimpleNamespace(id=chat_id)
-        self._bot = bot
+        self.bot = bot
 
-    async def answer(self, text: str, *, parse_mode: str, reply_markup: Any = None) -> None:
-        """Доставляет один фрагмент ответа в сохранённый чат."""
+    async def answer(self, text: str, *, parse_mode: str, reply_markup: Any = None) -> Any:
+        """Доставляет один фрагмент в сохранённый чат и возвращает сообщение Bot API."""
         kwargs: dict[str, Any] = {"chat_id": self.chat.id, "text": text, "parse_mode": parse_mode}
         if reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
-        await self._bot.send_message(**kwargs)
+        return await self.bot.send_message(**kwargs)
 
 
 class _PhotoBuffer(BytesIO):
@@ -710,7 +713,7 @@ async def safe_send_telegram_reply(
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
     include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
 ) -> None:
-    """Отправляет Telegram-ответ с per-chunk retries временных ошибок.
+    """Доставляет Telegram-ответ и обновляет управляемое сообщение целиком.
 
     Args:
         message: Aiogram message или совместимый fake.
@@ -718,18 +721,86 @@ async def safe_send_telegram_reply(
         logger: Logger Telegram adapter'а.
         limit: Безопасный предел длины одного сообщения.
         sleeper: Асинхронное ожидание между тестируемыми retry-попытками.
+        include_bound_actions: Показывать ли inline-кнопки общего ответа.
 
     Raises:
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
     delivered = False
     try:
-        delivered = await _send_telegram_reply(
+        send = _send_telegram_view if response.view_delivery is not None else _send_telegram_reply
+        delivered = await send(
             message, response, logger=logger, limit=limit, sleeper=sleeper,
             include_bound_actions=include_bound_actions,
         )
     finally:
         await _notify_telegram_delivery(response, delivered)
+
+
+def _telegram_message_id(message: Any) -> str | None:
+    """Извлекает ID сообщения из объекта Telegram, исключая служебный ноль."""
+    identifier = getattr(message, "message_id", None)
+    return str(identifier) if type(identifier) is int and identifier > 0 else None
+
+
+async def _send_telegram_view(
+    message: Any, response: IncomingResponse, *, logger: logging.Logger, limit: int,
+    sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
+) -> bool:
+    """Подтверждает ID одного сообщения и даёт ручной путь при сбое обновления."""
+    delivery = response.view_delivery
+    assert delivery is not None
+    target = delivery.target_message_id
+    confirmed_id = None
+    if delivery.start():
+        try:
+            chunks = render_telegram_content(response.content, response.actions, limit=limit)
+            if len(chunks) == 1:
+                chunk = chunks[0]
+                keyboard = _optional_telegram_inline_keyboard(response, logger) if include_bound_actions else None
+                target_id = str(message.chat.id)
+
+                async def deliver() -> None:
+                    nonlocal confirmed_id
+                    kwargs = {"parse_mode": chunk.parse_mode}
+                    if target is None:
+                        if keyboard is not None:
+                            kwargs["reply_markup"] = keyboard
+                        published = await message.answer(chunk.text, **kwargs)
+                        confirmed_id = _telegram_message_id(published)
+                    else:
+                        # Пустая клавиатура снимает кнопки в том же запросе, что меняет текст.
+                        markup = keyboard if keyboard is not None else _load_aiogram().types.InlineKeyboardMarkup(
+                            inline_keyboard=[],
+                        )
+                        updated = await message.bot.edit_message_text(
+                            text=chunk.text, chat_id=message.chat.id, message_id=int(target),
+                            reply_markup=markup, **kwargs,
+                        )
+                        if _telegram_message_id(updated) == target:
+                            confirmed_id = target
+
+                sent = await safe_send_async(
+                    deliver, logger=logger, channel="Telegram", target_id=target_id,
+                    retry_delay_resolver=_telegram_retry_delay, sleeper=sleeper,
+                )
+                if confirmed_id is not None or target is None:
+                    return sent
+            elif target is None:
+                # Разбитый на части ответ сохраняет ручной путь, но не получает цель редактирования.
+                return await _send_telegram_reply(
+                    message, response, logger=logger, limit=limit,
+                    sleeper=sleeper, include_bound_actions=False,
+                )
+        finally:
+            delivery.finish(confirmed_id)
+
+    if delivery.unavailable is not None and target is not None:
+        await _send_telegram_reply(
+            message, IncomingResponse(delivery.unavailable), logger=logger, limit=limit,
+            sleeper=sleeper, include_bound_actions=False,
+        )
+    return False
 
 
 async def _send_telegram_reply(
