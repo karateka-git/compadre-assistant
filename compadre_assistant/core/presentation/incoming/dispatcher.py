@@ -17,7 +17,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
-    CapabilityHelp, ContextualCommandQueryPort,
+    CapabilityHelp, ContextualCommandQueryPort, ResponseView,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -188,20 +188,35 @@ class IncomingMessageDispatcher:
             pending.request_id if pending and not self._pending_inputs.expired(pending) else None,
         )
 
-    def bind_response_actions(self, event: IncomingEvent, response: IncomingResponse,
-                              store: ResponseActionStore) -> IncomingResponse:
+    def bind_response_actions(
+        self, event: IncomingEvent, response: IncomingResponse, store: ResponseActionStore, *,
+        view_origin: ActionContext | None = None, generation: int | None = None,
+    ) -> IncomingResponse:
         """Регистрирует только действия конкретного ответа после проверки контекста.
 
         Ошибка чтения отключает кнопки, сохраняя текстовый ручной путь.
         Адресные подтверждения связываются только с актуальным публичным ожиданием.
+
+        Args:
+            event: Нормализованное событие с автором и адресом ответа.
+            response: Ответ владельца сценария.
+            store: Процессный реестр действий и управляемых представлений.
+            view_origin: Контекст до исполнения запроса на представление.
+            generation: Порядок события среди операций с представлениями.
+
+        Returns:
+            Ответ, готовый к доставке, либо подсказка для недоступного обновления.
         """
-        response = replace(response, bound_actions=())
-        if not response.actions and not response.suggested_actions:
+        view = response.view
+        response = replace(response, bound_actions=(), view=None, view_delivery=None)
+        if not response.actions and not response.suggested_actions and view is None:
             return response
         if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
-            return response
+            return self._unavailable_view(response, view) if view is not None else response
         try:
             context = self.action_context(event)
+            if view is not None and not self._may_deliver_view(view_origin, context):
+                return self._unavailable_view(response, view)
             snapshot = self._action_confirmations(event) if response.actions else None
             actions = []
             for action in response.actions:
@@ -223,10 +238,39 @@ class IncomingMessageDispatcher:
                         or not self._suggestion_allowed(action.command, context)):
                     continue
                 actions.append((action.label, action.command, None, None))
-            return replace(response, bound_actions=store.register(event, context, tuple(actions)))
+            prepared = None
+            if view is not None:
+                if generation is not None:
+                    prepared = store.prepare_view(event, context, generation, view)
+                if prepared is None:
+                    return self._unavailable_view(response, view)
+            return replace(
+                response, bound_actions=store.register(event, context, tuple(actions), view=prepared),
+                view_delivery=prepared.delivery if prepared is not None else None,
+            )
         except Exception:
             LOGGER.exception("Could not bind response actions")
-            return response
+            return self._unavailable_view(response, view) if view is not None else response
+
+    @staticmethod
+    def _may_deliver_view(before: ActionContext | None, after: ActionContext) -> bool:
+        return (
+            before is not None and before.app_user_id is not None and before.mode_id is not None
+            and (before.app_user_id, before.mode_id, before.mode_revision)
+            == (after.app_user_id, after.mode_id, after.mode_revision)
+            and any(identifier == after.mode_id and server and enabled and allowed
+                    for identifier, server, enabled, allowed in after.access)
+        )
+
+    @staticmethod
+    def _unavailable_view(response: IncomingResponse, view: ResponseView) -> IncomingResponse:
+        return replace(
+            response,
+            content=view.unavailable if view.unavailable is not None else text_content(
+                "Состояние чата изменилось. Открой нужный раздел заново."
+            ),
+            actions=(), suggested_actions=(), view=None,
+        )
 
     def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
                       completion_handler: ChannelCompletionHandler | None = None,
@@ -246,11 +290,18 @@ class IncomingMessageDispatcher:
         """
         rejected = IncomingResponse(text_content(
             "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
-        ))
+        ), preserve_source_actions=store.protects_keyboard(event, token))
+        context = None
+        if rejected.preserve_source_actions:
+            try:
+                context = self.action_context(event)
+            except Exception:
+                LOGGER.exception("Could not validate selected managed response action")
+                return rejected
         with self._pending_inputs.lock(event.reply_address):
             if busy := self._busy_response(event, allow_cancel=False):
                 return replace(busy, preserve_source_actions=True)
-            entry = store.claim(event, token)
+            entry = store.claim(event, token, context=context)
         if entry is None:
             return rejected
         try:
@@ -272,7 +323,8 @@ class IncomingMessageDispatcher:
             LOGGER.exception("Could not validate selected response action")
             return rejected
         # Команда берётся только из серверной записи, никогда из callback/подписи.
-        return self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
+        response = self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
+        return replace(response, preserve_source_actions=True) if entry.view is not None else response
 
     def _suggestion_allowed(self, text: str, context: ActionContext) -> bool:
         """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
@@ -896,6 +948,8 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
             ), error)
+        if result.response.view is not None and context.mode_revision is None:
+            result = replace(result, response=self._unavailable_view(result.response, result.response.view))
         if result.cancellable_action is not None and self._can_defer(event, completion_handler):
             return self._defer_action(
                 event, user.id, pending.owner_id, pending.required_mode, result.response,
@@ -1153,7 +1207,8 @@ class IncomingMessageDispatcher:
                 self._chat_mode_repository.replace_if_revision(
                     key, state.revision, entry.descriptor.capability_id
                 )
-            return result.response
+            response = result.response
+            return self._unavailable_view(response, response.view) if response.view is not None else response
         state = self._chat_mode_repository.get_state(key)
         active_access = personal.status(state.capability_id) if state.capability_id else None
         if active_access is not None and active_access.profile_allowed and not active_access.chat_allowed:

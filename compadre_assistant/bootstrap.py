@@ -506,6 +506,7 @@ class ChannelMessageProcessor:
                  completion_handler: ChannelCompletionHandler | None,
                  menu_update_handler: CommandMenuUpdateHandler | None,
                  *, token: str | None = None, defer_origin_menu: bool = False) -> IncomingResponse:
+        generation = self._response_actions.event_generation()
         menu_updates: list[CommandMenuUpdate] = []
         origin = IncomingEvent(
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
@@ -566,7 +567,10 @@ class ChannelMessageProcessor:
                 response = dispatcher.select_action(
                     incoming_message, token, self._response_actions, completion, menu_handler,
                 )
-            response = dispatcher.bind_response_actions(incoming_message, response, self._response_actions)
+            response = dispatcher.bind_response_actions(
+                incoming_message, response, self._response_actions, view_origin=original_context,
+                generation=generation,
+            )
         if menu_update_handler is not None:
             with self._menu_lock:
                 # Первое сообщение личного чата также требует публикации:
