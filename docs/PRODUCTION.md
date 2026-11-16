@@ -1,7 +1,7 @@
 # Production VPS
 
 Здесь находятся доступ, ограничения и **последний документированный снимок** VPS.
-Он зафиксирован 15.11.2026. Перед
+Он зафиксирован 16.11.2026. Перед
 любой работой повторно проверьте факты на VPS. Установка, диагностика, backup и
 восстановление описаны в [OPERATIONS.md](OPERATIONS.md), допуск версии — в
 [RELEASES.md](RELEASES.md).
@@ -31,7 +31,20 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 15.11.2026, после 12:40 UTC
+## Последний проверенный снимок 16.11.2026, после 06:45 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | `v4.1.0`, SHA `18e8dd0cec81857f1c80b8a8d8fba34c1a057afd`. Immutable Release `446688661`. Deployment `7817397631` принят со статусом `22291053468` в 06:45:53 UTC. Полный CI `43759989997`, попытка 1, подтвердил совместимость с принятой `v4.0.6`. Повторный полный CI `43819258984`, попытка 1, подтвердил `v4.1.0` как принятую базу. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.1.0) · [CI до выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/43759989997/attempts/1) · [CI после выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/43819258984/attempts/1) |
+| Контроллер | Snapshot `6de377cf402483c32faa63b805f6420df434fe70`. GitHub variable `COMPATIBILITY_POLICY_SHA` и локальная policy закреплены на `e65ba164780d066eebfdfff0f335bbbf81cbf1e8`. |
+| SQLite и backup | Активное поколение `2ffd93975cf041c9af127c1fc0880303`, последняя миграция `0006_ai_capability_id.sql`. Повторная техническая приёмка подтвердила целостность SQLite, финальный backup и завершённую очистку прежнего поколения. |
+| Каналы | Telegram и VK начали polling. Оба контейнера `healthy`, перезапусков ноль. Основной сервис и таймер backup активны, backup service не выполняется. |
+| Пользовательская приёмка | Владелец сообщил об общей работоспособности после проверки в Telegram и VK. |
+
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43818497730) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7817397631/statuses)
+
+## Исторический снимок 15.11.2026, после 12:40 UTC
 
 | Область | Результат проверки |
 | --- | --- |
