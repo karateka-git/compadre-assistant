@@ -18,6 +18,8 @@ from compadre_assistant.capabilities.admin.presentation.handler import AdminCapa
 from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
 from compadre_assistant.capabilities.ai.data.configuration import AiConfig, load_ai_config
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.capabilities.family.bootstrap import create_family_capability
+from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
@@ -144,7 +146,9 @@ def validate_enabled_capabilities(enabled_capabilities: tuple[str, ...]) -> None
     """
     if len(set(enabled_capabilities)) != len(enabled_capabilities):
         raise ValueError("Конфликт ID включённых возможностей")
-    unknown = set(enabled_capabilities) - {"obsidian", AI_CAPABILITY_ID, AdminCapability.descriptor.capability_id}
+    unknown = set(enabled_capabilities) - {
+        "obsidian", AI_CAPABILITY_ID, AdminCapability.descriptor.capability_id, FamilyCapability.descriptor.capability_id,
+    }
     if unknown:
         raise ValueError(
             f"Неизвестные возможности в конфигурации: {', '.join(sorted(unknown))}"
@@ -653,6 +657,10 @@ def create_channel_message_processor(
                 capabilities += (admin,)
             else:
                 disabled += (AdminCapability.descriptor,)
+            if FamilyCapability.descriptor.capability_id in enabled_capabilities:
+                capabilities += (create_family_capability(database_path),)
+            else:
+                disabled += (FamilyCapability.descriptor,)
             processor = ChannelMessageProcessor(
                 database_path=database_path,
                 capabilities=capabilities,
