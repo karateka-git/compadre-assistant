@@ -31,7 +31,20 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 16.11.2026, после 06:45 UTC
+## Последний проверенный снимок 16.11.2026, после 13:39 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | `v4.1.1`, SHA `89ea292aba736d572f5d6f35011271f7e6daa945`. Immutable Release `447083891`. Deployment `7825559095` получил статус `22316990110` (`success`). Полный CI `43873138601`, попытка 1, подтвердил совместимость с `v4.1.0`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.1.1) · [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/43873138601/attempts/1) |
+| Контроллер | Snapshot `6de377cf402483c32faa63b805f6420df434fe70`. GitHub variable `COMPATIBILITY_POLICY_SHA` закреплена на `e65ba164780d066eebfdfff0f335bbbf81cbf1e8`. |
+| SQLite и backup | Активное поколение `92bb952f1e564b2a967429afc41c55a4`, последняя миграция `0006_ai_capability_id.sql`. Техническая приёмка и проверка backup подтвердили активное поколение. Финальная копия на месте, прежнее поколение очищено штатно. |
+| Каналы | Telegram и VK работают, оба контейнера `healthy` без перезапусков. Основной сервис и таймер backup активны. Подтверждена техническая приёмка. |
+| Длительность | GitHub Actions начал установку в 13:36:10.890 UTC и подтвердил Deployment в 13:39:29.443 UTC. Выкладка заняла 198,553 с. Отчёт контроллера зафиксировал 160,077 с установки и 79,235 с простоя. Расход токенов Codex за этот интервал `unknown`. |
+
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43877284834) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7825559095/statuses)
+
+## Исторический снимок 16.11.2026, после 06:45 UTC
 
 | Область | Результат проверки |
 | --- | --- |

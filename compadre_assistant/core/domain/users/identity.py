@@ -33,6 +33,10 @@ class InvalidLinkCodeError(UserIdentityError):
     """Ошибка использования несуществующего, просроченного или погашенного кода."""
 
 
+class SourceProfileInUseError(UserIdentityError):
+    """Исходный профиль ещё используется и не может лишиться последнего канала."""
+
+
 class InvalidDisplayNameError(UserIdentityError):
     """Ошибка недопустимого имени внутреннего профиля пользователя."""
 
@@ -295,6 +299,7 @@ class UserIdentityService:
 
         Raises:
             InvalidLinkCodeError: Решение недоступно, устарело или истекло.
+            SourceProfileInUseError: Перенос требует удаления используемого профиля.
         """
         user_id = self._rebind_confirmation_repository.decide(
             identity=identity,

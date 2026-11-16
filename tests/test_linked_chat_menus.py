@@ -118,6 +118,30 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.assertNotIn(moved, original(self.user))
         self.assertNotIn(self.vk, original(self.user))
 
+    def test_blocked_rebind_reports_unchanged_profile_and_keeps_confirmation(self) -> None:
+        """Общий вход объясняет отказ и сохраняет адресное ожидание в исходном чате."""
+        with self.connection as db:
+            family = db.execute(
+                "INSERT INTO families (name, owner_app_user_id, created_at) VALUES ('Дом', ?, 'fixture')",
+                (self.other.id,),
+            ).lastrowid
+            db.execute("INSERT INTO family_members VALUES (?, ?, 'fixture')", (family, self.other.id))
+        pending = self.service.request_rebind_confirmation(
+            code=self.service.create_link_code(self.user.id).code, identity=self.foreign,
+        )
+        approve = f"/confirm core identity {pending.id} {pending.version} yes"
+
+        response = self.send(approve, self.foreign)
+
+        self.assertIsNone(response.error)
+        self.assertEqual(
+            response_text(response),
+            "Канал остался в исходном профиле, потому что этот профиль ещё используется. "
+            "Привяжи к нему другой канал и открой /confirm, чтобы повторить перенос.",
+        )
+        self.assertIn(approve, [action.command for action in self.send("/confirm", self.foreign).actions])
+        self.assertEqual(self.service.resolve_without_touch(self.foreign), self.other)
+
     def test_enumeration_rejects_blank_ambiguous_and_deleted_addresses(self):
         """Некорректные записи и чужие адреса не проходят публичный контракт."""
         repository = SQLiteExternalIdentityRepository(self.connection)

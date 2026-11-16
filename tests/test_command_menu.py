@@ -14,15 +14,57 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.chat_modes import ChatMode
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CommandParameter, ConfirmationQueryResult, IncomingResponse,
-    ReplyAction,
+    CapabilityCommand, CapabilityHelp, CommandParameter, ConfirmationQueryResult,
+    ContextualCommandQueryPort, HelpSection, IncomingResponse, PendingConfirmationQueryPort, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.message_content import text_content
 from tests import test_contextual_help as help_tests
-from tests.test_incoming_boundary import _event
+from tests.test_incoming_boundary import FakeCapability, _event
 from tests.response_assertions import response_text
+
+
+class SectionCapability(FakeCapability, ContextualCommandQueryPort, PendingConfirmationQueryPort):
+    """Тестовая возможность с отдельным разделом на ревизию чата."""
+
+    def __init__(self):
+        """Объявляет команды раздела и сохраняет снимки прочитанных контекстов."""
+        super().__init__("section", "/section")
+        self._descriptor = replace(self.descriptor, help=CapabilityHelp((
+            HelpSection("Раздел", (CapabilityCommand("/open_section", (), "открыть раздел"),)),
+            HelpSection("Действия", (CapabilityCommand("/inspect", (), "заглянуть в раздел"),)),
+        )))
+        self.opened = set()
+        self.reads = []
+        self.enter_revisions = []
+        self.read_error = None
+
+    def enter(self, context, event, arguments):
+        """Фиксирует отсутствие выбранной ревизии до активации."""
+        self.enter_revisions.append(context.mode_revision)
+        return super().enter(context, event, arguments)
+
+    def handle(self, context, event):
+        """Открывает раздел только для адреса и ревизии текущего события."""
+        if event.text == "/open_section":
+            self.opened.add((context.app_user.id, event.reply_address, context.mode_revision))
+        return super().handle(context, event)
+
+    def visible_mode_commands(self, app_user, address, mode_revision):
+        """Читает команды открытого раздела и одну постороннюю команду."""
+        key = (app_user.id, address, mode_revision)
+        self.reads.append(key)
+        if self.read_error:
+            raise self.read_error
+        commands = {"/open_section", "/ask"}
+        if key in self.opened:
+            commands.add("/inspect")
+        return frozenset(commands)
+
+    def list_pending_confirmations(self, context, origin):
+        """Подтверждает, что у тестового раздела нет адресных ожиданий."""
+        return ConfirmationQueryResult("complete")
 
 
 class CommandMenuTest(unittest.TestCase):
@@ -172,6 +214,75 @@ class CommandMenuTest(unittest.TestCase):
         self.assertEqual(response.actions, confirmation.actions)
         self.assertEqual(IncomingResponse(text_content("Готово")).suggested_actions, ())
         self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
+
+
+class ContextualCommandProjectionTest(unittest.TestCase):
+    """Проверяет одну контекстную проекцию справки и меню через диспетчер."""
+
+    def setUp(self):
+        """Собирает два независимых чата с обычным и контекстным каталогом."""
+        self.fixture = help_tests.ContextualHelpTest()
+        self.fixture.setUp()
+        self.capability = SectionCapability()
+        self.install(self.capability)
+
+    def install(self, capability):
+        """Собирает новый обработчик, сохраняя уже выбранные режимы чатов."""
+        self.fixture.registry = CapabilityRegistry((capability, self.fixture.ask))
+        self.fixture.dispatcher = self.fixture.build()
+
+    def assert_catalog(self, chat, expected):
+        """Сверяет команды меню и соответствующие записи справки."""
+        event = _event("/help", chat)
+        menu = self.fixture.dispatcher.command_menu(event)
+        self.assertEqual(tuple(item.command for item in menu.items), expected)
+        help_text = self.fixture.send(chat=chat)
+        for command in ("/open_section", "/inspect", "/ask", "/exit"):
+            self.assertEqual(command in help_text, command in expected, help_text)
+
+    def test_projection_is_scoped_by_chat_and_reset_by_new_mode_revision(self):
+        """Раздел одного чата не меняет другой и не переходит в новый вход."""
+        fixture = self.fixture
+        for chat in ("chat-1", "chat-2"):
+            fixture.send("/section", chat=chat)
+        fixture.send("/open_section", chat="chat-1")
+        first_revision = fixture.modes.get_state(fixture.key).revision
+        self.assert_catalog("chat-1", ("/open_section", "/inspect", "/exit"))
+        self.assert_catalog("chat-2", ("/open_section", "/exit"))
+        self.assertIn("заглянуть в раздел", fixture.send())
+        self.assertIn((23, _event("x").reply_address, first_revision), self.capability.reads)
+        fixture.send("/open_section", chat="chat-2")
+        fixture.send("/section", chat="chat-1")
+        self.assertEqual(self.capability.enter_revisions, [None, None, None])
+        self.assertGreater(fixture.modes.get_state(fixture.key).revision, first_revision)
+        self.assert_catalog("chat-1", ("/open_section", "/exit"))
+        self.assert_catalog("chat-2", ("/open_section", "/inspect", "/exit"))
+        self.install(SectionCapability())
+        self.assert_catalog("chat-2", ("/open_section", "/exit"))
+
+    def test_query_only_runs_for_an_effective_active_mode(self):
+        """Выключение и смена режима прекращают чтение контекстного каталога."""
+        fixture = self.fixture
+        fixture.send("/section")
+        fixture.send("/open_section")
+        self.capability.reads.clear()
+        fixture.preferences.rows[(23, "section")] = False
+        self.assert_catalog("chat-1", ("/exit", "/ai"))
+        fixture.preferences.rows[(23, "section")] = True
+        fixture.send("/ai")
+        self.assert_catalog("chat-1", ("/ask", "/get_text_from_image", "/exit"))
+        self.assertEqual(self.capability.reads, [])
+
+    def test_query_error_preserves_exit_and_addressed_confirmation(self):
+        """Ошибка раздела скрывает его команды и оставляет другие действия."""
+        fixture = self.fixture
+        fixture.send("/section")
+        fixture.rebind()
+        self.capability.read_error = RuntimeError("снимок недоступен")
+        with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
+            self.assert_catalog("chat-1", ("/exit", "/confirm"))
+        response = fixture.dispatcher.execute(_event("/confirm"))
+        self.assertIn("/confirm core identity 4 1 yes", [action.command for action in response.actions])
 
 
 class CommandMenuUpdateTest(unittest.TestCase):

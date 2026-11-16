@@ -10,7 +10,8 @@ import sqlite3
 import unittest
 
 from compadre_assistant.core.domain.users.identity import (
-    IdentityAlreadyBoundError, InvalidDisplayNameError, InvalidLinkCodeError, UserIdentityService,
+    IdentityAlreadyBoundError, InvalidDisplayNameError, InvalidLinkCodeError,
+    SourceProfileInUseError, UserIdentityService,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -238,6 +239,63 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                     _service(connection).register_with_name(_identity("vk", "vk-1", "chat-1"), display_name="Анатолий")
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM app_users").fetchone()[0], 0)
                 self.assertEqual(connection.execute("SELECT COUNT(*) FROM external_identities").fetchone()[0], 0)
+
+    def test_protected_source_profile_rolls_back_last_identity_rebind(self) -> None:
+        """Откат сохраняет оба профиля, канал, код и адресное подтверждение."""
+        for resolution in ("cancel", "remove_guard", "add_identity"):
+            with self.subTest(resolution=resolution), TemporaryDirectory(prefix="protected-profile-") as directory:
+                with connect_database(Path(directory) / "app.db") as db:
+                    apply_migrations(db)
+                    service = _service(db)
+                    source = _identity("telegram", "11", "11")
+                    target = _identity("vk", "22", "22")
+                    old_user = service.register_with_name(source, display_name="Оля")
+                    new_user = service.register_with_name(target, display_name="Илья")
+                    link = service.create_link_code(new_user.id)
+                    pending = service.request_rebind_confirmation(code=link.code, identity=source)
+                    with db:
+                        family = db.execute(
+                            "INSERT INTO families (name, owner_app_user_id, created_at) VALUES ('Дом', ?, 'fixture')",
+                            (old_user.id,),
+                        ).lastrowid
+                        db.execute("INSERT INTO family_members VALUES (?, ?, 'fixture')", (family, old_user.id))
+
+                    decision = {"confirmation_id": pending.id, "version": pending.version}
+                    with self.assertRaises(SourceProfileInUseError):
+                        service.confirm_rebind(source, **decision)
+                    self.assertEqual(service.resolve_without_touch(source), old_user)
+                    self.assertEqual(service.resolve_without_touch(target), new_user)
+                    self.assertEqual(service.get_pending_rebind(source), pending)
+                    self.assertIsNone(db.execute(
+                        "SELECT used_at FROM identity_link_tokens WHERE app_user_id = ?", (new_user.id,)
+                    ).fetchone()[0])
+                    self.assertEqual(tuple(db.execute(
+                        "SELECT family_id, app_user_id FROM family_members"
+                    ).fetchone()), (family, old_user.id))
+
+                    if resolution == "cancel":
+                        service.cancel_rebind(source, **decision)
+                        self.assertIsNone(service.get_pending_rebind(source))
+                        self.assertEqual(service.resolve_without_touch(source), old_user)
+                        self.assertIsNone(db.execute(
+                            "SELECT used_at FROM identity_link_tokens WHERE app_user_id = ?", (new_user.id,)
+                        ).fetchone()[0])
+                        continue
+                    if resolution == "remove_guard":
+                        with db:
+                            db.execute("DELETE FROM families WHERE id = ?", (family,))
+                    else:
+                        other = _identity("vk", "33", "33")
+                        SQLiteExternalIdentityRepository(db).create(app_user_id=old_user.id, identity=other)
+                    self.assertEqual(service.confirm_rebind(source, **decision), new_user)
+                    self.assertEqual(service.resolve_without_touch(source), new_user)
+                    if resolution == "add_identity":
+                        self.assertEqual(service.resolve_without_touch(other), old_user)
+                        self.assertEqual(tuple(db.execute(
+                            "SELECT family_id, app_user_id FROM family_members"
+                        ).fetchone()), (family, old_user.id))
+                    else:
+                        self.assertIsNone(SQLiteAppUserRepository(db).get_by_id(old_user.id))
 
     def test_link_rolls_back_code_when_identity_insert_violates_unique(self) -> None:
         """Ошибка UNIQUE после погашения возвращает код в активное состояние."""

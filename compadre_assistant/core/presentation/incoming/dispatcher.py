@@ -17,6 +17,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
+    CapabilityHelp, ContextualCommandQueryPort, ResponseView,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -30,6 +31,7 @@ from compadre_assistant.core.domain.users.identity import (
     IdentityAlreadyBoundError,
     InvalidDisplayNameError,
     InvalidLinkCodeError,
+    SourceProfileInUseError,
     UserIdentityService,
 )
 from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
@@ -186,20 +188,35 @@ class IncomingMessageDispatcher:
             pending.request_id if pending and not self._pending_inputs.expired(pending) else None,
         )
 
-    def bind_response_actions(self, event: IncomingEvent, response: IncomingResponse,
-                              store: ResponseActionStore) -> IncomingResponse:
+    def bind_response_actions(
+        self, event: IncomingEvent, response: IncomingResponse, store: ResponseActionStore, *,
+        view_origin: ActionContext | None = None, generation: int | None = None,
+    ) -> IncomingResponse:
         """Регистрирует только действия конкретного ответа после проверки контекста.
 
         Ошибка чтения отключает кнопки, сохраняя текстовый ручной путь.
         Адресные подтверждения связываются только с актуальным публичным ожиданием.
+
+        Args:
+            event: Нормализованное событие с автором и адресом ответа.
+            response: Ответ владельца сценария.
+            store: Процессный реестр действий и управляемых представлений.
+            view_origin: Контекст до исполнения запроса на представление.
+            generation: Порядок события среди операций с представлениями.
+
+        Returns:
+            Ответ, готовый к доставке, либо подсказка для недоступного обновления.
         """
-        response = replace(response, bound_actions=())
-        if not response.actions and not response.suggested_actions:
+        view = response.view
+        response = replace(response, bound_actions=(), view=None, view_delivery=None)
+        if not response.actions and not response.suggested_actions and view is None:
             return response
         if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
-            return response
+            return self._unavailable_view(response, view) if view is not None else response
         try:
             context = self.action_context(event)
+            if view is not None and not self._may_deliver_view(view_origin, context):
+                return self._unavailable_view(response, view)
             snapshot = self._action_confirmations(event) if response.actions else None
             actions = []
             for action in response.actions:
@@ -221,10 +238,39 @@ class IncomingMessageDispatcher:
                         or not self._suggestion_allowed(action.command, context)):
                     continue
                 actions.append((action.label, action.command, None, None))
-            return replace(response, bound_actions=store.register(event, context, tuple(actions)))
+            prepared = None
+            if view is not None:
+                if generation is not None:
+                    prepared = store.prepare_view(event, context, generation, view)
+                if prepared is None:
+                    return self._unavailable_view(response, view)
+            return replace(
+                response, bound_actions=store.register(event, context, tuple(actions), view=prepared),
+                view_delivery=prepared.delivery if prepared is not None else None,
+            )
         except Exception:
             LOGGER.exception("Could not bind response actions")
-            return response
+            return self._unavailable_view(response, view) if view is not None else response
+
+    @staticmethod
+    def _may_deliver_view(before: ActionContext | None, after: ActionContext) -> bool:
+        return (
+            before is not None and before.app_user_id is not None and before.mode_id is not None
+            and (before.app_user_id, before.mode_id, before.mode_revision)
+            == (after.app_user_id, after.mode_id, after.mode_revision)
+            and any(identifier == after.mode_id and server and enabled and allowed
+                    for identifier, server, enabled, allowed in after.access)
+        )
+
+    @staticmethod
+    def _unavailable_view(response: IncomingResponse, view: ResponseView) -> IncomingResponse:
+        return replace(
+            response,
+            content=view.unavailable if view.unavailable is not None else text_content(
+                "Состояние чата изменилось. Открой нужный раздел заново."
+            ),
+            actions=(), suggested_actions=(), view=None,
+        )
 
     def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
                       completion_handler: ChannelCompletionHandler | None = None,
@@ -244,11 +290,18 @@ class IncomingMessageDispatcher:
         """
         rejected = IncomingResponse(text_content(
             "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
-        ))
+        ), preserve_source_actions=store.protects_keyboard(event, token))
+        context = None
+        if rejected.preserve_source_actions:
+            try:
+                context = self.action_context(event)
+            except Exception:
+                LOGGER.exception("Could not validate selected managed response action")
+                return rejected
         with self._pending_inputs.lock(event.reply_address):
             if busy := self._busy_response(event, allow_cancel=False):
                 return replace(busy, preserve_source_actions=True)
-            entry = store.claim(event, token)
+            entry = store.claim(event, token, context=context)
         if entry is None:
             return rejected
         try:
@@ -270,7 +323,8 @@ class IncomingMessageDispatcher:
             LOGGER.exception("Could not validate selected response action")
             return rejected
         # Команда берётся только из серверной записи, никогда из callback/подписи.
-        return self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
+        response = self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
+        return replace(response, preserve_source_actions=True) if entry.view is not None else response
 
     def _suggestion_allowed(self, text: str, context: ActionContext) -> bool:
         """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
@@ -305,7 +359,7 @@ class IncomingMessageDispatcher:
             ChatModeKey(user.id, event.channel, event.chat_id)
         ) if user else None
         active = self._personal_registry(user, event).by_id(state.capability_id) if state and state.capability_id else None
-        return self._confirmation_snapshot(event, user, active)
+        return self._confirmation_snapshot(event, user, active, mode_revision=state.revision if state else None)
 
     def _capability_defaults(self) -> tuple[CapabilityDefault, ...]:
         """Передаёт domain только устойчивые ID и defaults общего каталога."""
@@ -636,6 +690,11 @@ class IncomingMessageDispatcher:
                         identity, confirmation_id=int(parts[2]), version=int(parts[3])
                     )
                     return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
+                except SourceProfileInUseError:
+                    return IncomingResponse(compose_content(
+                        "Канал остался в исходном профиле, потому что этот профиль ещё используется. "
+                        "Привяжи к нему другой канал и открой ", code_span("/confirm"), ", чтобы повторить перенос.",
+                    ))
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
                         compose_content(
@@ -867,10 +926,10 @@ class IncomingMessageDispatcher:
             ))
         if event.images and not owner.descriptor.accepts_images:
             return IncomingResponse(text_content(_TEXT_INPUT_HINT))
-        mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+        mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
         if ((pending.app_user_id is not None and pending.app_user_id != user.id)
                 or (pending.required_mode is not None
-                    and (mode is None or mode.capability_id != pending.required_mode))):
+                    and mode.capability_id != pending.required_mode)):
             self._pending_inputs.clear(event.reply_address, pending.request_id)
             return IncomingResponse(text_content(
                 "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
@@ -878,6 +937,7 @@ class IncomingMessageDispatcher:
         context = HandlerContext(
             user, CallbackReplyDelivery(completion_handler) if completion_handler else None,
             self._pending_inputs,
+            mode_revision=mode.revision if mode.capability_id == pending.owner_id else None,
         )
         try:
             result = owner.continue_input(context, pending, event)
@@ -888,6 +948,8 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
             ), error)
+        if result.response.view is not None and context.mode_revision is None:
+            result = replace(result, response=self._unavailable_view(result.response, result.response.view))
         if result.cancellable_action is not None and self._can_defer(event, completion_handler):
             return self._defer_action(
                 event, user.id, pending.owner_id, pending.required_mode, result.response,
@@ -1145,7 +1207,8 @@ class IncomingMessageDispatcher:
                 self._chat_mode_repository.replace_if_revision(
                     key, state.revision, entry.descriptor.capability_id
                 )
-            return result.response
+            response = result.response
+            return self._unavailable_view(response, response.view) if response.view is not None else response
         state = self._chat_mode_repository.get_state(key)
         active_access = personal.status(state.capability_id) if state.capability_id else None
         if active_access is not None and active_access.profile_allowed and not active_access.chat_allowed:
@@ -1189,6 +1252,7 @@ class IncomingMessageDispatcher:
                 ),
             )
         try:
+            context = replace(context, mode_revision=state.revision)
             if capability.descriptor.profile_commands:
                 context = replace(context, profile_operation=lambda command, arguments: self._profile_operation(
                     command, arguments, user, event, capability.descriptor.capability_id, personal,
@@ -1226,9 +1290,10 @@ class IncomingMessageDispatcher:
         """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
         from compadre_assistant.core.presentation.incoming.help import format_contextual_help
 
-        personal, mode_id, pending, snapshot = self._command_context(event)
+        personal, mode_id, pending, snapshot, active_help = self._command_context(event)
         return format_contextual_help(
             personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
+            active_help=active_help,
         )
 
     def command_menu(self, event: IncomingEvent) -> CommandMenu:
@@ -1294,18 +1359,21 @@ class IncomingMessageDispatcher:
         # Работа может быть принята во время чтения источников подтверждений.
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
-        pending, snapshot = context[2:]
+        personal, mode_id, pending, snapshot, active_help = context
         complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
-        return build_command_menu(*context), complete
+        return build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help), complete
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,
         known_user: AppUser | None = None, preserve_expired: bool = False,
-    ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
+    ) -> tuple[
+        PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult,
+        CapabilityHelp | None,
+    ]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = known_user or self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user, event) if user is not None else None
-        mode = self._chat_mode_repository.get(
+        mode = self._chat_mode_repository.get_state(
             ChatModeKey(user.id, event.channel, event.chat_id)
         ) if user is not None else None
         with self._pending_inputs.lock(event.reply_address):
@@ -1319,10 +1387,35 @@ class IncomingMessageDispatcher:
                     if not (preserve_expired and expired and applicable and pending.retry_command):
                         self._pending_inputs.clear(event.reply_address, pending.request_id)
                     pending = None
-        active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
-        snapshot = self._confirmation_snapshot(event, user, active)
+        active = (
+            personal.by_id(mode.capability_id)
+            if personal is not None and mode is not None and mode.capability_id is not None else None
+        )
+        snapshot = self._confirmation_snapshot(event, user, active, mode_revision=mode.revision if mode else None)
         mode_id = personal.visible_mode(mode.capability_id) if personal is not None and mode else None
-        return personal, mode_id, pending, snapshot
+        active_help = (
+            self._project_command_help(active, user, event.reply_address, mode.revision)
+            if active is not None and user is not None and mode is not None else None
+        )
+        return personal, mode_id, pending, snapshot, active_help
+
+    def _project_command_help(
+        self, capability: IncomingCapabilityPort, user: AppUser, address: ReplyAddress, mode_revision: int,
+    ) -> CapabilityHelp | None:
+        if not capability.descriptor.persistent_mode or not isinstance(capability, ContextualCommandQueryPort):
+            return None
+        try:
+            names = capability.visible_mode_commands(user, address, mode_revision)
+            catalog = capability.descriptor.help
+            sections = tuple(
+                replace(section, commands=commands)
+                for section in catalog.sections
+                if (commands := tuple(command for command in section.commands if command.name in names))
+            )
+            return replace(catalog, sections=sections)
+        except Exception:
+            LOGGER.exception("Could not read contextual commands: capability_id=%s", capability.descriptor.capability_id)
+            return CapabilityHelp()
 
     def _pending_is_applicable(
         self, event: IncomingEvent, pending: PendingInput, user: AppUser | None,
@@ -1353,21 +1446,24 @@ class IncomingMessageDispatcher:
         """
         user = None
         active = None
+        mode_revision = None
         complete = True
         try:
             user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
             if user is not None:
                 personal = self._personal_registry(user, event)
-                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
-                active = personal.by_id(mode.capability_id) if mode is not None else None
+                mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
+                if mode.capability_id is not None:
+                    active = personal.by_id(mode.capability_id)
+                    mode_revision = mode.revision
         except Exception:
             LOGGER.exception("Could not resolve confirmation context")
             complete = False
-        return self._confirmation_snapshot(event, user, active, complete)
+        return self._confirmation_snapshot(event, user, active, complete, mode_revision=mode_revision)
 
     def _confirmation_snapshot(
         self, event: IncomingEvent, user: AppUser | None,
-        capability: IncomingCapabilityPort | None, complete: bool = True,
+        capability: IncomingCapabilityPort | None, complete: bool = True, *, mode_revision: int | None,
     ) -> ConfirmationQueryResult:
         """Опрашивает источники по одному снимку допуска, сохраняя известные действия."""
         identity = _incoming_identity_from_event(event)
@@ -1393,7 +1489,9 @@ class IncomingMessageDispatcher:
                 if not isinstance(capability, PendingConfirmationQueryPort):
                     complete = False
                 else:
-                    result = capability.list_pending_confirmations(HandlerContext(user), event.reply_address)
+                    result = capability.list_pending_confirmations(
+                        HandlerContext(user, mode_revision=mode_revision), event.reply_address,
+                    )
                     complete = complete and result.status == "complete"
                     confirmations.extend(item for item in result.confirmations
                                          if item.origin == event.reply_address

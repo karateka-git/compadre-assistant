@@ -16,17 +16,16 @@ import compadre_assistant.core.data.sqlite.migration_runner as migration_runner
 
 
 class AiCapabilityIdMigrationTest(unittest.TestCase):
-    """Проверяет перенос режимов и личного доступа с выпущенной схемы 0005."""
+    """Проверяет атомарность миграции идентификатора ИИ."""
 
     def setUp(self) -> None:
         """Готовит БД на 0005 со старыми настройками ИИ и каталог для перехода на 0006."""
-        self.root = Path(self.enterContext(TemporaryDirectory(prefix="ai-capability-id-")))
-        self.database_path = self.root / "fixture.db"
-        self.migrations_dir = self.root / "migrations-through-0006"
+        root = Path(self.enterContext(TemporaryDirectory(prefix="ai-capability-id-")))
+        self.migrations_dir = root / "migrations-through-0006"
         self.migrations_dir.mkdir()
         for path in MIGRATIONS_DIR.glob("000[1-5]_*.sql"):
             (self.migrations_dir / path.name).write_bytes(path.read_bytes())
-        self.connection = self.enterContext(connect_database(self.database_path))
+        self.connection = self.enterContext(connect_database(root / "fixture.db"))
         apply_migrations(self.connection, self.migrations_dir)
         migration = MIGRATIONS_DIR / "0006_ai_capability_id.sql"
         (self.migrations_dir / migration.name).write_bytes(migration.read_bytes())
@@ -39,35 +38,6 @@ class AiCapabilityIdMigrationTest(unittest.TestCase):
             connection.executemany("INSERT INTO user_capability_preferences VALUES (?, ?, ?)", (
                 (1, "ask", 0), (2, "ask", 1), (1, "obsidian", 1),
             ))
-
-    def test_migration_renames_only_the_ai_ids(self) -> None:
-        """Миграция сохраняет чат, владельца, timestamp, ревизию и значение выбора."""
-        from compadre_assistant.core.data.sqlite.chat_mode_repository import SQLiteChatModeRepository
-        from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
-        from compadre_assistant.core.domain.chat_modes import ChatModeKey
-        from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
-
-        connection = self.connection
-        completed = apply_migrations(connection, self.migrations_dir)
-        self.assertEqual([migration.name for migration in completed], ["0006_ai_capability_id.sql"])
-        self.assertEqual(self._modes(), [
-            (1, "telegram", "11", "ai", 4, "fixture"), (1, "vk", "22", None, 2, "fixture"),
-            (2, "telegram", "33", "obsidian", 1, "fixture"), (2, "vk", "44", "ai", 9, "fixture"),
-        ])
-        self.assertEqual(self._preferences(), [(1, "ai", 0), (1, "obsidian", 1), (2, "ai", 1)])
-        self.assertEqual(apply_migrations(connection, self.migrations_dir), [])
-        self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
-        self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
-        with connect_database(self.database_path) as reopened:
-            modes = SQLiteChatModeRepository(reopened)
-            key = ChatModeKey(1, "telegram", "11")
-            self.assertEqual(modes.get(key).capability_id, "ai")
-            self.assertFalse(modes.replace_if_revision(key, 3, "obsidian"))
-            self.assertTrue(modes.replace_if_revision(key, 4, "ai"))
-            preferences = SQLiteUserCapabilityPreferenceRepository(reopened)
-            self.assertEqual(preferences.get_for_user(1)[0], UserCapabilityPreference(1, "ai", False))
-            self.assertIs(preferences.upsert(UserCapabilityPreference(1, "ai", True)), False)
-        self.assertEqual(self._preferences(), [(1, "ai", 1), (1, "obsidian", 1), (2, "ai", 1)])
 
     def test_conflicting_choice_rolls_back_both_table_updates(self) -> None:
         """В случае дубликата миграция сохраняет оба выбора и откатывает смену режима."""

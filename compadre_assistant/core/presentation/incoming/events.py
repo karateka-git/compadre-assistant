@@ -69,6 +69,8 @@ class IncomingEvent:
         username: Публичное имя автора, если оно доступно.
         display_name: Отображаемое имя автора, если оно доступно.
         images: Ленивые ссылки на самостоятельные фото в порядке сообщения.
+        callback_message_id: ID ответа бота, к которому прикреплена нажатая кнопка.
+            Отдельный от ID события нажатия в message_id.
 
     Raises:
         ValueError: Если обязательное поле пусто.
@@ -82,6 +84,7 @@ class IncomingEvent:
     username: str | None = None
     display_name: str | None = None
     images: tuple[ImageAttachment, ...] = ()
+    callback_message_id: str | None = None
 
     @property
     def reply_address(self) -> ReplyAddress:
@@ -98,3 +101,5 @@ class IncomingEvent:
             raise ValueError("text must not be empty without attachments")
         if self.external_user_id is not None and not self.external_user_id.strip():
             raise ValueError("external_user_id must not be empty")
+        if self.callback_message_id is not None and not self.callback_message_id.strip():
+            raise ValueError("callback_message_id must not be empty")

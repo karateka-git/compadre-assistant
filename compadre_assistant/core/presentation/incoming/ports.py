@@ -130,6 +130,50 @@ class BoundReplyAction:
 
 
 @dataclass(frozen=True, slots=True)
+class ResponseView:
+    """Просит опубликовать или обновить одно именованное представление чата.
+
+    Args:
+        key: Имя представления внутри активной возможности.
+        update: При True изменить последнюю подтверждённую доставку
+            представления, с кнопки только сообщение, на котором её нажали.
+        unavailable: Ответ для случая, когда обновление не состоялось.
+            Владелец указывает, как заново открыть представление.
+    """
+
+    key: str
+    update: bool = False
+    unavailable: MessageContent | None = None
+
+    def __post_init__(self) -> None:
+        """Требует устойчивое имя и подсказку для недоступного обновления."""
+        if not self.key or self.key.strip() != self.key or len(self.key) > 64:
+            raise ValueError("response view key must contain 1–64 characters without surrounding spaces")
+        if self.update and self.unavailable is None:
+            raise ValueError("response view update must supply a recovery message")
+
+
+@dataclass(frozen=True, slots=True)
+class ResponseViewDelivery:
+    """Диспетчер выдаёт адаптеру одну попытку доставки представления.
+
+    Args:
+        target_message_id: Подтверждённый ID редактируемого сообщения канала.
+            None означает публикацию нового сообщения.
+        unavailable: Текст подсказки при невозможности обновить сообщение.
+        start: Проверяет, что попытка ещё актуальна, и резервирует доставку.
+            True допускает один сетевой вызов или его транспортные повторы.
+        finish: После допуска фиксирует ID сообщения только при успехе.
+            При редактировании передаётся тот же ID, при сбое или отмене None.
+    """
+
+    target_message_id: str | None
+    unavailable: MessageContent | None
+    start: Callable[[], bool] = field(repr=False, compare=False)
+    finish: Callable[[str | None], None] = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
 class IncomingResponse:
     """Передаёт содержимое и явно выбранные владельцем действия ответа.
 
@@ -145,8 +189,10 @@ class IncomingResponse:
     bound_actions: tuple[BoundReplyAction, ...] = ()
     # Адаптер исходного ответа сообщает результат отправки ровно один раз.
     after_delivery: Callable[[bool], None] | None = field(default=None, repr=False, compare=False)
-    # Отклонённый из-за занятости выбор не потребляет токен и сохраняет клавиатуру.
+    # Адаптер оставляет клавиатуру до управляемой замены или после отклонённого выбора.
     preserve_source_actions: bool = False
+    view: ResponseView | None = None  # Намерение владельца ответа до привязки.
+    view_delivery: ResponseViewDelivery | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +225,29 @@ class HandlerContext:
     pending_inputs: PendingInputStore | None = None
     # Привязано к текущему событию и выдаётся зарегистрированному владельцу команд.
     profile_operation: Callable[[ChatCommand, str], IncomingResponse] | None = None
+    # Ревизия режима владельца, уже выбранного в этом чате. При входе её ещё нет.
+    mode_revision: int | None = None
+
+
+@runtime_checkable
+class ContextualCommandQueryPort(Protocol):
+    """Отбирает объявленные команды активной возможности для справки и меню."""
+
+    def visible_mode_commands(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
+    ) -> frozenset[str]:
+        """Читает видимые команды раздела без исполнения действий.
+
+        Args:
+            app_user: Проверенный профиль с действующим доступом к режиму.
+            address: Адрес чата, где выбран этот режим.
+            mode_revision: Ревизия активного режима в указанном чате.
+
+        Returns:
+            Имена команд из статического каталога возможности. Пустое
+            множество оставляет только общие команды и другие доступные входы.
+        """
+        ...
 
 
 @runtime_checkable
@@ -191,7 +260,7 @@ class PendingConfirmationQueryPort(Protocol):
         """Читает действия пользователя в исходном чате без выбора решения.
 
         Args:
-            context: Проверенный пользователь текущего события.
+            context: Проверенный пользователь и ревизия активного режима в исходном чате.
             origin: Канал и чат, для которых запрошены действия.
 
         Returns:
