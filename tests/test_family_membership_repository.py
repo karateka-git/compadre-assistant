@@ -3,7 +3,7 @@
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -92,18 +92,18 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
         """Владелец получает подсказку по составу, а обычный участник может выйти."""
         home = self.family.create(1, "Дом")
         with self.assertRaises(OwnerCannotLeave) as alone:
-            self.family.leave(1, home.id)
+            self.family.leave(1, home.id, actor_joined_at=_NOW)
         self.assertFalse(alone.exception.has_other_members)
         self._join(home.id, 2)
         with self.assertRaises(OwnerCannotLeave) as with_people:
-            self.family.leave(1, home.id)
+            self.family.leave(1, home.id, actor_joined_at=_NOW)
         self.assertTrue(with_people.exception.has_other_members)
 
-        self.family.leave(2, home.id)
+        self.family.leave(2, home.id, actor_joined_at=_NOW)
         self.assertIsNone(self.family.find_for_member(2))
         other = self.family.create(2, "Другая семья")
         with self.assertRaises(FamilyAccessEnded):
-            self.family.leave(2, home.id)
+            self.family.leave(2, home.id, actor_joined_at=_NOW)
         self.assertEqual(self.family.find_for_member(2), other)
         self.assertEqual(self.family.list_members(1, home.id), (FamilyMember(1, _NOW, True),))
 
@@ -113,18 +113,18 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
         other = self.family.create(3, "Другая семья")
         self._join(home.id, 2)
         with self.assertRaises(FamilyAccessEnded):
-            self.family.remove_member(3, home.id, 2)
+            self.family.remove_member(3, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
         with self.assertRaises(OwnerRequired):
-            self.family.remove_member(2, home.id, 1)
+            self.family.remove_member(2, home.id, 1, actor_joined_at=_NOW, target_joined_at=_NOW)
         with self.assertRaises(OtherMemberRequired):
-            self.family.remove_member(1, home.id, 1)
+            self.family.remove_member(1, home.id, 1, actor_joined_at=_NOW, target_joined_at=_NOW)
         with self.assertRaises(OtherMemberRequired):
-            self.family.remove_member(1, home.id, 3)
+            self.family.remove_member(1, home.id, 3, actor_joined_at=_NOW, target_joined_at=_NOW)
 
-        self.family.remove_member(1, home.id, 2)
+        self.family.remove_member(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
         self.assertIsNone(self.family.find_for_member(2))
         with self.assertRaises(OtherMemberRequired):
-            self.family.remove_member(1, home.id, 2)
+            self.family.remove_member(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
         self.assertEqual(self.family.find_for_member(3), other)
         self.assertEqual(self.family.list_members(1, home.id), (FamilyMember(1, _NOW, True),))
 
@@ -133,16 +133,16 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
         home = self.family.create(1, "Дом")
         self._join(home.id, 2)
         self._join(home.id, 3)
-        self.family.leave(3, home.id)
+        self.family.leave(3, home.id, actor_joined_at=_NOW)
         with self.assertRaises(OtherMemberRequired):
-            self.family.transfer_ownership(1, home.id, 3)
+            self.family.transfer_ownership(1, home.id, 3, actor_joined_at=_NOW, target_joined_at=_NOW)
         self.assertEqual(self.family.find_for_member(1), home)
 
-        self.family.transfer_ownership(1, home.id, 2)
+        self.family.transfer_ownership(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
         self.assertEqual(self.family.list_members(1, home.id), (FamilyMember(2, _NOW, True), FamilyMember(1, _NOW, False)))
         with self.assertRaises(OwnerRequired):
-            self.family.transfer_ownership(1, home.id, 2)
-        self.family.leave(1, home.id)
+            self.family.transfer_ownership(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
+        self.family.leave(1, home.id, actor_joined_at=_NOW)
         self.assertIsNone(self.family.find_for_member(1))
         self.assertEqual(self._families(), [(home.id, 2)])
 
@@ -156,11 +156,11 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
                 "BEGIN SELECT RAISE(ABORT, 'test write failure'); END"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test write failure"):
-            self.family.transfer_ownership(1, home.id, 2)
+            self.family.transfer_ownership(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
         self.assertEqual(self.family.find_for_member(1), home)
         self.assertEqual(len(self.family.list_members(1, home.id)), 2)
 
-        self.family.leave(2, home.id)
+        self.family.leave(2, home.id, actor_joined_at=_NOW)
         self._seed_family_data(home.id)
         with self.db:
             self.db.execute(
@@ -168,7 +168,7 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
                 "BEGIN SELECT RAISE(ABORT, 'test delete failure'); END"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
-            self.family.close(1, home.id)
+            self.family.close(1, home.id, actor_joined_at=_NOW)
         self.assertEqual(self.family.find_for_member(1), home)
         self.assertEqual(self._family_data_counts(home.id), (1, 1))
         self.assertFalse(self.db.in_transaction)
@@ -181,23 +181,65 @@ class SQLiteFamilyRepositoryTest(unittest.TestCase):
         self._seed_family_data(other.id)
         self._join(home.id, 2)
         with self.assertRaises(FamilyHasOtherMembers):
-            self.family.close(1, home.id)
+            self.family.close(1, home.id, actor_joined_at=_NOW)
         with self.assertRaises(OwnerRequired):
-            self.family.close(2, home.id)
+            self.family.close(2, home.id, actor_joined_at=_NOW)
         with self.assertRaises(FamilyAccessEnded):
-            self.family.close(1, other.id)
+            self.family.close(1, other.id, actor_joined_at=_NOW)
         self.assertEqual(self._family_data_counts(home.id), (1, 1))
-        self.family.remove_member(1, home.id, 2)
+        self.family.remove_member(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
 
-        self.family.close(1, home.id)
+        self.family.close(1, home.id, actor_joined_at=_NOW)
         self.assertIsNone(self.family.find_for_member(1))
         self.assertEqual(self._families(), [(other.id, 3)])
         self.assertEqual(self._family_data_counts(home.id), (0, 0))
         self.assertEqual(self._family_data_counts(other.id), (1, 1))
 
-    def _join(self, family_id: int, app_user_id: int) -> None:
+    def test_membership_mutations_reject_a_replaced_actor_or_target(self) -> None:
+        """Повторное вступление не оживляет ни одно решение по старому членству."""
+        home = self.family.create(1, "Дом")
+        self._join(home.id, 2)
+        self.family.leave(2, home.id, actor_joined_at=_NOW)
+        new_joined_at = _NOW + timedelta(seconds=1)
+        self._join(home.id, 2, joined_at=new_joined_at)
+
+        with self.assertRaises(FamilyAccessEnded):
+            self.family.leave(2, home.id, actor_joined_at=_NOW)
+        for change in (self.family.remove_member, self.family.transfer_ownership):
+            with self.subTest(change=change.__name__):
+                with self.assertRaises(FamilyAccessEnded):
+                    change(1, home.id, 2, actor_joined_at=new_joined_at, target_joined_at=new_joined_at)
+                with self.assertRaises(OtherMemberRequired):
+                    change(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
+                self.assertEqual(self.family.find_for_member(2), home)
+                self.assertFalse(self.db.in_transaction)
+
+        self.family.transfer_ownership(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=new_joined_at)
+        self.family.leave(1, home.id, actor_joined_at=_NOW)
+        with self.assertRaises(FamilyAccessEnded):
+            self.family.close(2, home.id, actor_joined_at=_NOW)
+        self.assertEqual(self._families(), [(home.id, 2)])
+        self.assertFalse(self.db.in_transaction)
+
+    def test_leave_and_remove_roll_back_if_delete_fails(self) -> None:
+        """Сбой удаления сохраняет запись членства при самостоятельном выходе и исключении."""
+        home = self.family.create(1, "Дом")
+        self._join(home.id, 2)
         with self.db:
-            self.db.execute("INSERT INTO family_members VALUES (?, ?, ?)", (family_id, app_user_id, _NOW.isoformat()))
+            self.db.execute(
+                "CREATE TRIGGER fail_member_delete BEFORE DELETE ON family_members "
+                "BEGIN SELECT RAISE(ABORT, 'test delete failure'); END"
+            )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
+            self.family.leave(2, home.id, actor_joined_at=_NOW)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
+            self.family.remove_member(1, home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW)
+        self.assertEqual(self.family.list_members(1, home.id), (FamilyMember(1, _NOW, True), FamilyMember(2, _NOW, False)))
+        self.assertFalse(self.db.in_transaction)
+
+    def _join(self, family_id: int, app_user_id: int, *, joined_at: datetime = _NOW) -> None:
+        with self.db:
+            self.db.execute("INSERT INTO family_members VALUES (?, ?, ?)", (family_id, app_user_id, joined_at.isoformat()))
 
     def _families(self) -> list[tuple]:
         return [tuple(row) for row in self.db.execute("SELECT id, owner_app_user_id FROM families ORDER BY id")]

@@ -14,6 +14,10 @@ from compadre_assistant.core.presentation.message_content import code_span, comp
 
 
 MEMBERS_COMMAND = "/family_members"
+LEAVE_COMMAND = "/family_leave"
+REMOVE_COMMAND = "/family_remove"
+TRANSFER_COMMAND = "/family_transfer"
+CLOSE_COMMAND = "/family_close"
 _PAGE_SIZE = 10  # Оставляет место для кнопок перехода в Telegram и VK.
 
 
@@ -58,11 +62,12 @@ class MembersView:
         if total_pages > 1:
             parts.append(f" · {page}/{total_pages}")
         actions = []
+        actor = next(member for member in members if member.app_user_id == context.app_user.id)
         for member in visible:
             name = names.get(member.app_user_id) or "Участник"
             role = "владелец" if member.is_owner else "участник"
             own_label = ", ты" if member.app_user_id == context.app_user.id else ""
-            reference = self._reference(context, address, family.id, member)
+            reference = self._reference(context, address, family.id, actor, member)
             command = f"{MEMBERS_COMMAND} {reference}"
             parts.extend(("\n", name, f" ({role}{own_label}) — ", code_span(command)))
             label = name if len(name) <= 24 else name[:23] + "…"
@@ -73,6 +78,12 @@ class MembersView:
                 command = f"{MEMBERS_COMMAND} page {destination}"
                 parts.extend(("\n", label, " — ", code_span(command)))
                 actions.append(ReplyAction(label, f"{command} {family.id}"))
+        if not actor.is_owner:
+            parts.extend(("\nВыйти из семьи: ", code_span(LEAVE_COMMAND)))
+            actions.append(ReplyAction("Выйти из семьи", f"{LEAVE_COMMAND} {family.id}"))
+        elif len(members) == 1:
+            parts.extend(("\nЗакрыть семью: ", code_span(CLOSE_COMMAND)))
+            actions.append(ReplyAction("Закрыть семью", f"{CLOSE_COMMAND} {family.id}"))
         return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
 
     def details(
@@ -85,11 +96,20 @@ class MembersView:
             return IncomingResponse(compose_content(
                 "Выбор участника устарел. Открой ", code_span(MEMBERS_COMMAND), ", чтобы увидеть актуальный состав.",
             ), suggested_actions=(ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),))
-        name = self._display_names((member.app_user_id,)).get(member.app_user_id) or "Участник"
+        name = self.display_name(member)
         role = "Владелец семьи" if member.is_owner else "Участник семьи"
-        return IncomingResponse(compose_content(
-            name, "\n", f"{role} «{family.name}».\n", "Посмотреть состав: ", code_span(MEMBERS_COMMAND),
-        ), suggested_actions=(ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),))
+        parts = [name, "\n", f"{role} «{family.name}».\n", "Посмотреть состав: ", code_span(MEMBERS_COMMAND)]
+        actions = [ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}")]
+        if not member.is_owner and any(item.is_owner and item.app_user_id == context.app_user.id for item in members):
+            for label, command in (("Исключить из семьи", REMOVE_COMMAND), ("Передать роль владельца", TRANSFER_COMMAND)):
+                command = f"{command} {reference}"
+                parts.extend(("\n", label, ": ", code_span(command)))
+                actions.append(ReplyAction(label, command))
+        return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
+
+    def display_name(self, member: FamilyMember) -> str:
+        """Возвращает имя уже проверенного участника или нейтральную подпись."""
+        return self._display_names((member.app_user_id,)).get(member.app_user_id) or "Участник"
 
     def resolve(
         self, context: HandlerContext, address: ReplyAddress, family_id: int,
@@ -109,15 +129,18 @@ class MembersView:
         """
         if len(reference) != 16 or not reference.isascii():
             return None
+        actor = next(member for member in members if member.app_user_id == context.app_user.id)
         return next((
             member for member in members
-            if compare_digest(self._reference(context, address, family_id, member), reference)
+            if compare_digest(self._reference(context, address, family_id, actor, member), reference)
         ), None)
 
-    def _reference(self, context: HandlerContext, address: ReplyAddress, family_id: int, member: FamilyMember) -> str:
-        # Дата вступления отличает прежнее членство того же профиля после повторного вступления.
+    def _reference(
+        self, context: HandlerContext, address: ReplyAddress, family_id: int, actor: FamilyMember, member: FamilyMember,
+    ) -> str:
+        # Даты вступления отличают прежнее членство исполнителя и цели от текущего.
         scope = dumps((
-            context.app_user.id, address.channel, address.chat_id, context.mode_revision, family_id,
+            actor.app_user_id, actor.joined_at.isoformat(), address.channel, address.chat_id, context.mode_revision, family_id,
             member.app_user_id, member.joined_at.isoformat(),
         )).encode("utf-8")
         return urlsafe_b64encode(digest(self._key, scope, "sha256")[:12]).decode("ascii")

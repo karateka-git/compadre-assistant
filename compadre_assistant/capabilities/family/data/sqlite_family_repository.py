@@ -96,31 +96,37 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
             raise FamilyAccessEnded("Доступ к указанной семье завершён")
         return tuple(family_member_from_dto(FamilyMemberDto(**dict(row))) for row in rows)
 
-    def leave(self, app_user_id: int, family_id: int) -> None:
+    def leave(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Удаляет членство по решению участника, если он не владелец."""
         with self._write():
-            family = self._require_membership(app_user_id, family_id)
+            family = self._require_membership(app_user_id, family_id, actor_joined_at)
             family.require_may_leave(app_user_id, has_other_members=self._has_other_members(family_id, app_user_id))
             self._delete_member(family_id, app_user_id)
 
-    def remove_member(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def remove_member(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Удаляет членство другого профиля по решению текущего владельца."""
         with self._write():
-            self._require_other_member(app_user_id, family_id, member_id)
+            self._require_other_member(app_user_id, family_id, member_id, actor_joined_at, target_joined_at)
             self._delete_member(family_id, member_id)
 
-    def transfer_ownership(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def transfer_ownership(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Меняет владельца на другого действующего участника указанной семьи."""
         with self._write():
-            self._require_other_member(app_user_id, family_id, member_id)
+            self._require_other_member(app_user_id, family_id, member_id, actor_joined_at, target_joined_at)
             self._connection.execute(
                 "UPDATE families SET owner_app_user_id = ? WHERE id = ?", (member_id, family_id),
             )
 
-    def close(self, app_user_id: int, family_id: int) -> None:
+    def close(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Удаляет семью вместе с её данными по решению единственного владельца."""
         with self._write():
-            family = self._require_membership(app_user_id, family_id)
+            family = self._require_membership(app_user_id, family_id, actor_joined_at)
             family.require_owner(app_user_id)
             if self._has_other_members(family_id, app_user_id):
                 raise FamilyHasOtherMembers("Закрыть семью может единственный участник")
@@ -313,18 +319,28 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
             self._connection.execute("BEGIN IMMEDIATE")
             yield
 
-    def _require_membership(self, app_user_id: int, family_id: int) -> Family:
+    def _require_membership(
+        self, app_user_id: int, family_id: int, expected_joined_at: datetime | None = None,
+    ) -> Family:
         family = self.find_for_member(app_user_id)
         if family is None or family.id != family_id:
             raise FamilyAccessEnded("Доступ к указанной семье завершён")
+        if expected_joined_at is not None and not self._has_membership(app_user_id, family_id, expected_joined_at):
+            raise FamilyAccessEnded("Членство исполнителя сменилось")
         return family
 
-    def _require_other_member(self, app_user_id: int, family_id: int, member_id: int) -> None:
-        self._require_membership(app_user_id, family_id).require_owner(app_user_id)
-        if member_id == app_user_id or self._connection.execute(
-            "SELECT 1 FROM family_members WHERE family_id = ? AND app_user_id = ?", (family_id, member_id),
-        ).fetchone() is None:
+    def _require_other_member(
+        self, app_user_id: int, family_id: int, member_id: int, actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
+        self._require_membership(app_user_id, family_id, actor_joined_at).require_owner(app_user_id)
+        if member_id == app_user_id or not self._has_membership(member_id, family_id, target_joined_at):
             raise OtherMemberRequired("Действие требует другого участника указанной семьи")
+
+    def _has_membership(self, app_user_id: int, family_id: int, expected_joined_at: datetime) -> bool:
+        row = self._connection.execute(
+            "SELECT joined_at FROM family_members WHERE family_id = ? AND app_user_id = ?", (family_id, app_user_id),
+        ).fetchone()
+        return row is not None and datetime.fromisoformat(row["joined_at"]) == expected_joined_at
 
     def _has_other_members(self, family_id: int, app_user_id: int) -> bool:
         return self._connection.execute(

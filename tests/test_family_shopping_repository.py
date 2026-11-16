@@ -103,7 +103,9 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
     def test_each_operation_rejects_stale_family_even_with_matching_item_number(self) -> None:
         """После перехода в другую семью старые операции не читают и не меняют ни один список."""
         old_list = self.shopping.add(1, self.home, "Хлеб")
-        self.repository.remove_member(1, self.home, 2)
+        self.repository.remove_member(
+            1, self.home, 2, actor_joined_at=_NOW, target_joined_at=_NOW,
+        )
         new_family = self.repository.create(2, "Новая семья", _NOW).id
         new_list = self.shopping.add(2, new_family, "Рис")
 

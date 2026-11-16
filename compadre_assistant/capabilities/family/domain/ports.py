@@ -26,38 +26,47 @@ class FamilyRepository(Protocol):
         """Возвращает участников с владельцем первым или сообщает об FamilyAccessEnded."""
         ...
 
-    def leave(self, app_user_id: int, family_id: int) -> None:
+    def leave(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Исключает профиль по его решению с проверкой FamilyAccessEnded и OwnerCannotLeave."""
         ...
 
-    def remove_member(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def remove_member(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Исключает другого участника по решению владельца.
 
         Args:
             app_user_id: Профиль, выполняющий действие.
             family_id: Семья, указанная в подтверждении.
             member_id: Профиль участника, указанного в подтверждении.
+            actor_joined_at: Время вступления исполнителя на момент запроса.
+            target_joined_at: Время вступления выбранного участника на момент запроса.
 
         Raises:
-            FamilyAccessEnded: Исполнитель больше не состоит в указанной семье.
+            FamilyAccessEnded: Членство исполнителя завершилось или сменилось.
             OwnerRequired: Исполнитель больше не владелец указанной семьи.
-            OtherMemberRequired: Цель совпадает с исполнителем или больше не состоит в семье.
+            OtherMemberRequired: Цель совпадает с исполнителем или её членство завершилось или сменилось.
         """
         ...
 
-    def transfer_ownership(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def transfer_ownership(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Передаёт владение другому участнику с теми же проверками, что remove_member."""
         ...
 
-    def close(self, app_user_id: int, family_id: int) -> None:
+    def close(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Закрывает семью, если действующий владелец остался в ней один.
 
         Args:
             app_user_id: Профиль, выполняющий действие.
             family_id: Семья, указанная в подтверждении.
+            actor_joined_at: Время вступления владельца на момент запроса.
 
         Raises:
-            FamilyAccessEnded: Исполнитель больше не состоит в указанной семье.
+            FamilyAccessEnded: Членство исполнителя завершилось или сменилось.
             OwnerRequired: Исполнитель больше не владелец указанной семьи.
             FamilyHasOtherMembers: В семье есть другие участники.
         """

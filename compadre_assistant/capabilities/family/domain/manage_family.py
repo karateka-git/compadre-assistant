@@ -42,18 +42,28 @@ class ManageFamily:
         """Возвращает состав указанной семьи, если профиль в ней состоит."""
         return self._repository.list_members(app_user_id, family_id)
 
-    def leave(self, app_user_id: int, family_id: int) -> None:
+    def leave(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Выполняет решение участника выйти из указанной семьи."""
-        self._repository.leave(app_user_id, family_id)
+        self._repository.leave(app_user_id, family_id, actor_joined_at=actor_joined_at)
 
-    def remove_member(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def remove_member(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Выполняет решение владельца исключить другого участника указанной семьи."""
-        self._repository.remove_member(app_user_id, family_id, member_id)
+        self._repository.remove_member(
+            app_user_id, family_id, member_id, actor_joined_at=actor_joined_at, target_joined_at=target_joined_at,
+        )
 
-    def transfer_ownership(self, app_user_id: int, family_id: int, member_id: int) -> None:
+    def transfer_ownership(
+        self, app_user_id: int, family_id: int, member_id: int, *,
+        actor_joined_at: datetime, target_joined_at: datetime,
+    ) -> None:
         """Выполняет решение владельца передать свою роль другому участнику."""
-        self._repository.transfer_ownership(app_user_id, family_id, member_id)
+        self._repository.transfer_ownership(
+            app_user_id, family_id, member_id, actor_joined_at=actor_joined_at, target_joined_at=target_joined_at,
+        )
 
-    def close(self, app_user_id: int, family_id: int) -> None:
+    def close(self, app_user_id: int, family_id: int, *, actor_joined_at: datetime) -> None:
         """Выполняет решение единственного участника закрыть свою семью."""
-        self._repository.close(app_user_id, family_id)
+        self._repository.close(app_user_id, family_id, actor_joined_at=actor_joined_at)

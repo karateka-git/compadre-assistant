@@ -1,4 +1,4 @@
-"""Ведёт диалог о создании семьи и вступлении по приглашению."""
+"""Ведёт семейные диалоги в активном режиме личного чата."""
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -9,9 +9,13 @@ from compadre_assistant.capabilities.family.domain.invitations import (
 )
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
 from compadre_assistant.capabilities.family.domain.membership import (
-    AlreadyInFamily, Family, FamilyAccessEnded, InvalidFamilyName,
+    AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, InvalidFamilyName,
+    OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
-from compadre_assistant.capabilities.family.presentation.members import MEMBERS_COMMAND, MemberDisplayNames, MembersView
+from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
+from compadre_assistant.capabilities.family.presentation.members import (
+    CLOSE_COMMAND, LEAVE_COMMAND, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, MemberDisplayNames, MembersView,
+)
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
@@ -27,6 +31,7 @@ from compadre_assistant.core.presentation.message_content import code_span, comp
 _CREATE = "/family_create"
 _JOIN = "/family_join"
 _INVITE = "/family_invite"
+_MEMBER_ACTIONS = (LEAVE_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, CLOSE_COMMAND)
 
 
 class FamilyCapability(
@@ -42,6 +47,10 @@ class FamilyCapability(
             CapabilityCommand(_JOIN, (), "вступить по коду"),
             CapabilityCommand(_INVITE, (CommandParameter("action", "create", False),), "пригласить в семью"),
             CapabilityCommand(MEMBERS_COMMAND, (CommandParameter("member", "<member>", False),), "посмотреть участников"),
+            CapabilityCommand(LEAVE_COMMAND, (), "выйти из семьи"),
+            CapabilityCommand(REMOVE_COMMAND, (CommandParameter("member", "<member>", False),), "исключить участника"),
+            CapabilityCommand(TRANSFER_COMMAND, (CommandParameter("member", "<member>", False),), "передать роль владельца"),
+            CapabilityCommand(CLOSE_COMMAND, (), "закрыть семью"),
         )),)),
         enabled_by_default=True,
         display_name="«Семья»",
@@ -55,6 +64,7 @@ class FamilyCapability(
         """Принимает фабрику предметных сценариев на одно событие."""
         self._open_scenarios = open_scenarios
         self._members_view = MembersView(display_names)
+        self._confirmations = MemberConfirmations()
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Открывает начальный экран или показывает текущую семью.
@@ -83,7 +93,7 @@ class FamilyCapability(
             event: Текстовая команда или действие ответа из этого чата.
 
         Returns:
-            Экран семьи, запрос ввода или результат выпуска приглашения.
+            Экран семьи, запрос ввода, приглашение или результат действия с участниками.
         """
         parts = event.text.split(maxsplit=1)
         command = parts[0] if parts else ""
@@ -97,6 +107,14 @@ class FamilyCapability(
                 return CapabilityResult(self._invite(invitations, app_user_id, family, arguments))
             if command == MEMBERS_COMMAND:
                 return CapabilityResult(self._members(context, event.reply_address, families, family, arguments))
+            if command in _MEMBER_ACTIONS:
+                return CapabilityResult(self._begin_member_action(
+                    context, event.reply_address, families, family, command, arguments,
+                ))
+            if command == "/confirm" and arguments and arguments.split(maxsplit=1)[0] == "family":
+                return CapabilityResult(self._confirm_member_action(
+                    context, event.reply_address, families, family, " ".join(event.text.split()),
+                ))
             return CapabilityResult(self._home(family))
 
     def visible_mode_commands(
@@ -104,15 +122,164 @@ class FamilyCapability(
     ) -> frozenset[str]:
         """Показывает команды активного режима по текущему членству профиля."""
         with self._open_scenarios() as (families, _):
-            if families.find_for_member(app_user.id) is None:
+            family = families.find_for_member(app_user.id)
+            if family is None:
                 return frozenset((_CREATE, _JOIN))
-            return frozenset((_INVITE, MEMBERS_COMMAND))
+            try:
+                members = families.list_members(app_user.id, family.id)
+            except FamilyAccessEnded:
+                return frozenset((_CREATE, _JOIN))
+            actor = next(member for member in members if member.app_user_id == app_user.id)
+            if not actor.is_owner:
+                return frozenset((_INVITE, MEMBERS_COMMAND, LEAVE_COMMAND))
+            if len(members) == 1:
+                return frozenset((_INVITE, MEMBERS_COMMAND, CLOSE_COMMAND))
+            return frozenset((_INVITE, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND))
 
     def list_pending_confirmations(
         self, context: HandlerContext, origin: ReplyAddress,
     ) -> ConfirmationQueryResult:
-        """Сообщает ядру, что сейчас нет семейных действий для подтверждения."""
-        return ConfirmationQueryResult("complete")
+        """Возвращает адресное подтверждение, пока его исходные условия действуют."""
+        pending = self._confirmations.current(context, origin)
+        if pending is None:
+            return ConfirmationQueryResult("complete")
+        with self._open_scenarios() as (families, _):
+            if not self._member_action_is_current(families, pending):
+                return ConfirmationQueryResult("complete")
+        return ConfirmationQueryResult("complete", (pending.confirmation,))
+
+    @staticmethod
+    def _member_action_is_current(families: ManageFamily, pending: MemberConfirmation) -> bool:
+        # Снимок для меню и отмены. При выполнении записи репозиторий проверит условия в транзакции.
+        try:
+            members = families.list_members(pending.actor.app_user_id, pending.family_id)
+        except FamilyAccessEnded:
+            return False
+        return (
+            pending.actor in members
+            and (pending.target is None or pending.target in members)
+            and (pending.confirmation.operation != "close" or len(members) == 1)
+        )
+
+    def _begin_member_action(
+        self, context: HandlerContext, address: ReplyAddress, families: ManageFamily,
+        family: Family | None, command: str, arguments: str,
+    ) -> IncomingResponse:
+        if family is None or (command in (LEAVE_COMMAND, CLOSE_COMMAND) and arguments and arguments != str(family.id)):
+            return self._family_access_ended()
+        try:
+            members = families.list_members(context.app_user.id, family.id)
+        except FamilyAccessEnded:
+            return self._family_access_ended()
+        actor = next(member for member in members if member.app_user_id == context.app_user.id)
+        target = None
+        if command == LEAVE_COMMAND:
+            if actor.is_owner:
+                return self._owner_cannot_leave(len(members) > 1)
+            question, label = f"Выйти из семьи «{family.name}»? Ты потеряешь доступ к общим покупкам.", "Выйти из семьи"
+        elif not actor.is_owner:
+            return IncomingResponse(text_content("Это действие доступно только владельцу семьи."))
+        elif command == CLOSE_COMMAND:
+            if len(members) > 1:
+                return self._cannot_close()
+            question = f"Закрыть семью «{family.name}»? Общий список покупок удалится, а коды перестанут действовать."
+            label = "Закрыть семью"
+        else:
+            if not arguments:
+                return self._members_view.show(context, address, family, members, 1)
+            target = self._members_view.resolve(context, address, family.id, members, arguments)
+            if target is None or target.app_user_id == actor.app_user_id:
+                return self._target_changed()
+            name = self._members_view.display_name(target)
+            if command == REMOVE_COMMAND:
+                question, label = f"Исключить участника «{name}» из семьи «{family.name}»?", "Исключить из семьи"
+            else:
+                question, label = f"Передать роль владельца семьи «{family.name}» участнику «{name}»?", "Передать роль"
+        pending = self._confirmations.begin(
+            context, address, command.removeprefix("/family_"), family.id, actor, target, label,
+        )
+        approve, cancel = pending.actions
+        return IncomingResponse(compose_content(
+            question, "\n\nПодтверждение действует 10 минут.\nПодтвердить: ", code_span(approve.command),
+            "\nОтменить: ", code_span(cancel.command),
+        ), actions=pending.actions)
+
+    def _confirm_member_action(
+        self, context: HandlerContext, address: ReplyAddress, families: ManageFamily,
+        family: Family | None, command: str,
+    ) -> IncomingResponse:
+        taken = self._confirmations.take(context, address, command)
+        if taken is None:
+            return self._confirmation_unavailable()
+        pending, approved = taken
+        if family is None or family.id != pending.family_id:
+            return self._family_access_ended()
+        if not approved:
+            if not self._member_action_is_current(families, pending):
+                return self._confirmation_unavailable()
+            return self._home(family, prefix="Действие отменено.")
+        actor_id = pending.actor.app_user_id
+        actor_joined_at = pending.actor.joined_at
+        operation = pending.confirmation.operation
+        try:
+            if operation == "leave":
+                families.leave(actor_id, pending.family_id, actor_joined_at=actor_joined_at)
+                return self._home(None, prefix="Ты вышел из семьи.")
+            if operation == "close":
+                families.close(actor_id, pending.family_id, actor_joined_at=actor_joined_at)
+                return self._home(None, prefix="Семья закрыта.")
+            target = pending.target
+            if target is None:
+                raise ValueError("Для этого подтверждения нужен другой участник")
+            if operation == "remove":
+                families.remove_member(
+                    actor_id, pending.family_id, target.app_user_id,
+                    actor_joined_at=actor_joined_at, target_joined_at=target.joined_at,
+                )
+                return self._home(family, prefix="Участник исключён из семьи.")
+            families.transfer_ownership(
+                actor_id, pending.family_id, target.app_user_id,
+                actor_joined_at=actor_joined_at, target_joined_at=target.joined_at,
+            )
+            return self._home(family, prefix="Роль владельца передана.")
+        except FamilyAccessEnded:
+            return self._family_access_ended()
+        except OwnerCannotLeave as error:
+            return self._owner_cannot_leave(error.has_other_members)
+        except FamilyHasOtherMembers:
+            return self._cannot_close()
+        except OwnerRequired:
+            return IncomingResponse(text_content("Это действие доступно только владельцу семьи."))
+        except OtherMemberRequired:
+            return self._target_changed()
+
+    @staticmethod
+    def _owner_cannot_leave(has_other_members: bool) -> IncomingResponse:
+        if has_other_members:
+            return IncomingResponse(compose_content(
+                "Перед выходом передай роль владельца. Выбери участника через ", code_span(MEMBERS_COMMAND), ".",
+            ))
+        return IncomingResponse(compose_content(
+            "Ты единственный участник. Чтобы закрыть семью, отправь ", code_span(CLOSE_COMMAND), ".",
+        ))
+
+    @staticmethod
+    def _cannot_close() -> IncomingResponse:
+        return IncomingResponse(compose_content(
+            "Закрыть семью может единственный участник. Открой ", code_span(MEMBERS_COMMAND), ", чтобы увидеть состав.",
+        ))
+
+    @staticmethod
+    def _target_changed() -> IncomingResponse:
+        return IncomingResponse(compose_content(
+            "Выбери другого действующего участника через ", code_span(MEMBERS_COMMAND), ".",
+        ))
+
+    @staticmethod
+    def _confirmation_unavailable() -> IncomingResponse:
+        return IncomingResponse(compose_content(
+            "Подтверждение недоступно. Открой ", code_span("/family"), " и начни действие заново.",
+        ))
 
     def continue_input(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,

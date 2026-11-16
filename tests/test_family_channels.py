@@ -68,6 +68,18 @@ class FamilyChannelsTest(unittest.TestCase):
         self._send(processor, self.guest, "/family_join")
         self._send(processor, self.guest, code[1])
 
+    def _decision(self, response: IncomingResponse, choice: str = "yes") -> str:
+        return next(action.command for action in response.actions if action.command.endswith(f" {choice}"))
+
+    def _member_command(
+        self, processor: ChannelMessageProcessor, identity: IncomingIdentity, name: str, operation: str,
+    ) -> str:
+        roster = self._send(processor, identity, "/family_members")
+        member = self._choose(processor, identity, roster, name)
+        command = re.search(rf"(/family_{operation} [\w-]+)", response_text(member))
+        self.assertIsNotNone(command)
+        return command[1]
+
     def test_family_is_server_opt_in_and_private_only(self) -> None:
         """Семейный вход недоступен без включения, регистрации и личного чата."""
         with self._runtime() as processor:
@@ -205,3 +217,166 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("/family_members page 1", response_text(second))
             manual = self._send(processor, self.owner_tg, "/family_members page 2")
             self.assertEqual(response_text(manual), response_text(second))
+
+    def test_member_confirmation_is_addressed_and_one_use(self) -> None:
+        """Решение привязано к профилю, чату, операции, версии и текущему запросу."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.owner_vk, "/family")
+            command = self._member_command(processor, self.owner_tg, "Илья", "remove")
+            pending = self._send(processor, self.owner_tg, command)
+            self.assertIn("Исключить участника «Илья»", response_text(pending))
+            approve = self._decision(pending)
+            for identity in (self.guest, self.owner_vk):
+                with self.subTest(identity=identity):
+                    self.assertNotIn(approve, response_text(self._send(processor, identity, "/confirm")))
+                    self.assertIn("Подтверждение недоступно", response_text(self._send(processor, identity, approve)))
+                    self.assertIn("кнопка больше недоступна", response_text(self._choose(
+                        processor, identity, pending, "Исключить из семьи",
+                    )))
+            for invalid in (approve.replace(" remove ", " transfer "), approve.replace(" 1 yes", " 2 yes")):
+                self.assertIn("Подтверждение недоступно", response_text(self._send(processor, self.owner_tg, invalid)))
+
+            listed = self._send(processor, self.owner_tg, "/confirm")
+            self.assertIn(approve, response_text(listed))
+            self.assertIn(approve, response_text(self._send(processor, self.owner_tg, "/help")))
+            self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
+            self.assertIn("Действие отменено", response_text(self._send(
+                processor, self.owner_tg, self._decision(pending, "no"),
+            )))
+            self.assertIn("Подтверждение недоступно", response_text(self._send(processor, self.owner_tg, approve)))
+            self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
+
+            replaced = self._send(processor, self.owner_tg, command)
+            pending = self._send(processor, self.owner_tg, command)
+            self.assertIn("Подтверждение недоступно", response_text(self._send(
+                processor, self.owner_tg, self._decision(replaced),
+            )))
+            member_roster = self._send(processor, self.guest, "/family_members")
+            self.assertIn("Участник исключён", response_text(self._choose(
+                processor, self.owner_tg, pending, "Исключить из семьи",
+            )))
+            self.assertIn("Подтверждение недоступно", response_text(self._send(
+                processor, self.owner_tg, self._decision(pending),
+            )))
+            stale_selection = self._choose(processor, self.guest, member_roster, "Оля (владелец)")
+            self.assertIn("Доступ к семье завершён", response_text(stale_selection))
+            self.assertNotIn("Дом", response_text(stale_selection))
+
+    def test_transfer_and_leave_update_both_linked_channels(self) -> None:
+        """Прежний владелец выходит после передачи роли, а оба канала видят результат."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.owner_vk, "/family")
+            self.assertIn("Перед выходом передай", response_text(self._send(processor, self.owner_tg, "/family_leave")))
+            self.assertIn("только владельцу", response_text(self._send(processor, self.guest, "/family_remove")))
+
+            stale_remove = self._send(processor, self.owner_tg, self._member_command(
+                processor, self.owner_tg, "Илья", "remove",
+            ))
+            transfer = self._send(processor, self.owner_vk, self._member_command(
+                processor, self.owner_vk, "Илья", "transfer",
+            ))
+            self.assertIn("Роль владельца передана", response_text(self._send(
+                processor, self.owner_vk, self._decision(transfer),
+            )))
+            self.assertNotIn(self._decision(stale_remove), response_text(self._send(processor, self.owner_tg, "/confirm")))
+            self.assertIn("только владельцу", response_text(self._send(
+                processor, self.owner_tg, self._decision(stale_remove),
+            )))
+            self.assertIn("Илья (владелец", response_text(self._send(processor, self.owner_vk, "/family_members")))
+
+            roster = self._send(processor, self.owner_tg, "/family_members")
+            leave = self._choose(processor, self.owner_tg, roster, "Выйти из семьи")
+            result = self._choose(processor, self.owner_tg, leave, "Выйти из семьи")
+            self.assertIn("Ты вышел из семьи", response_text(result))
+            self.assertEqual([action.label for action in result.bound_actions], ["Создать семью", "Вступить по коду"])
+            self.assertNotIn("Семья «Дом»", response_text(self._send(processor, self.owner_vk, "/family")))
+            self.assertIn("Илья (владелец, ты)", response_text(self._send(processor, self.guest, "/family_members")))
+
+    def test_confirmation_expires_after_ttl_and_mode_change(self) -> None:
+        """Команда из прошлой ревизии или истёкшего ожидания ничего не меняет."""
+        now = 500.0
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.capabilities.family.presentation.confirmations.monotonic", lambda: now,
+        ):
+            self._joined_family(processor)
+            pending = self._send(processor, self.guest, "/family_leave")
+            now += 599
+            self.assertIn(self._decision(pending), response_text(self._send(processor, self.guest, "/confirm")))
+            now += 1
+            self.assertNotIn(self._decision(pending), response_text(self._send(processor, self.guest, "/confirm")))
+            self.assertIn("Подтверждение недоступно", response_text(self._send(
+                processor, self.guest, self._decision(pending),
+            )))
+
+            pending = self._send(processor, self.guest, "/family_leave")
+            self._send(processor, self.guest, "/exit")
+            self._send(processor, self.guest, "/family")
+            self.assertNotIn(self._decision(pending), response_text(self._send(processor, self.guest, "/help")))
+            self.assertIn("Подтверждение недоступно", response_text(self._send(
+                processor, self.guest, self._decision(pending),
+            )))
+            self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
+
+    def test_rejoining_family_invalidates_the_previous_target(self) -> None:
+        """Запрос исключения не применяется к новому членству того же профиля."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            remove = self._send(processor, self.owner_tg, self._member_command(
+                processor, self.owner_tg, "Илья", "remove",
+            ))
+            leave = self._send(processor, self.guest, "/family_leave")
+            self._send(processor, self.guest, self._decision(leave))
+            issued = self._send(processor, self.owner_tg, "/family_invite create")
+            code = re.search(r"Код: ([A-Z2-9-]+)", response_text(issued))
+            self.assertIsNotNone(code)
+            self._send(processor, self.guest, "/family_join")
+            self.assertIn("Ты вступил в семью", response_text(self._send(processor, self.guest, code[1])))
+            self.assertNotIn(self._decision(remove), response_text(self._send(processor, self.owner_tg, "/confirm")))
+            self.assertIn("Выбери другого действующего участника", response_text(self._send(
+                processor, self.owner_tg, self._decision(remove),
+            )))
+            self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
+
+    def test_close_rechecks_membership_and_revokes_invitations(self) -> None:
+        """Подтверждение закрытия защищает нового участника и затем погашает код."""
+        with self._runtime("family") as processor:
+            self._send(processor, self.owner_tg, "/family")
+            self._send(processor, self.owner_tg, "/family_create")
+            self._send(processor, self.owner_tg, "Дом")
+            close = self._send(processor, self.owner_tg, "/family_close")
+            for guest in (self.guest, self.other):
+                issued = self._send(processor, self.owner_tg, "/family_invite create")
+                code = re.search(r"Код: ([A-Z2-9-]+)", response_text(issued))
+                self.assertIsNotNone(code)
+                self._send(processor, guest, "/family")
+                self._send(processor, guest, "/family_join")
+                if guest == self.guest:
+                    self._send(processor, guest, code[1])
+
+            self.assertIn("единственный участник", response_text(self._send(
+                processor, self.owner_tg, self._decision(close),
+            )))
+            leave = self._send(processor, self.guest, "/family_leave")
+            self._send(processor, self.guest, self._decision(leave))
+            roster = self._send(processor, self.owner_tg, "/family_members")
+            close = self._choose(processor, self.owner_tg, roster, "Закрыть семью")
+            result = self._choose(processor, self.owner_tg, close, "Закрыть семью")
+            self.assertIn("Семья закрыта", response_text(result))
+            self.assertIn("/family_create", response_text(result))
+            self.assertIn("Код недействителен", response_text(self._send(processor, self.other, code[1])))
+
+    def test_server_disabling_preserves_family_and_invalidates_old_confirmation(self) -> None:
+        """Серверное отключение сохраняет данные и старый запрос не переживает сборку."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            leave = self._send(processor, self.guest, "/family_leave")
+        with self._runtime() as processor:
+            self.assertFalse(self._send(processor, self.guest, "/family").bound_actions)
+        with self._runtime("family") as processor:
+            self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
+            self.assertIn("Подтверждение недоступно", response_text(self._send(
+                processor, self.guest, self._decision(leave),
+            )))
+            self.assertIn("Семья «Дом»", response_text(self._send(processor, self.guest, "/family")))

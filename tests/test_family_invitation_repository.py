@@ -60,7 +60,9 @@ class SQLiteFamilyInvitationRepositoryTest(unittest.TestCase):
         ))
         with self.assertRaises(FamilyAccessEnded):
             self.invites.issue(2, self.other.id)
-        self.repository.remove_member(1, self.home.id, 2)
+        self.repository.remove_member(
+            1, self.home.id, 2, actor_joined_at=_NOW, target_joined_at=_NOW,
+        )
         with self.assertRaises(FamilyAccessEnded):
             self.invites.issue(2, self.home.id)
         with self.db:
@@ -122,7 +124,7 @@ class SQLiteFamilyInvitationRepositoryTest(unittest.TestCase):
     def test_close_invalidates_invitation(self) -> None:
         """Любой оставшийся код закрытой семьи прекращает действие."""
         issued = self.invites.issue(1, self.home.id)
-        self.repository.close(1, self.home.id)
+        self.repository.close(1, self.home.id, actor_joined_at=_NOW)
         with self.assertRaises(InvalidInvitation):
             self.invites.join(2, issued.code)
         self.assertIsNone(self.repository.find_for_member(2))

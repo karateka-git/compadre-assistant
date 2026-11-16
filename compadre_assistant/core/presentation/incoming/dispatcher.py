@@ -359,7 +359,7 @@ class IncomingMessageDispatcher:
             ChatModeKey(user.id, event.channel, event.chat_id)
         ) if user else None
         active = self._personal_registry(user, event).by_id(state.capability_id) if state and state.capability_id else None
-        return self._confirmation_snapshot(event, user, active)
+        return self._confirmation_snapshot(event, user, active, mode_revision=state.revision if state else None)
 
     def _capability_defaults(self) -> tuple[CapabilityDefault, ...]:
         """Передаёт domain только устойчивые ID и defaults общего каталога."""
@@ -1391,7 +1391,7 @@ class IncomingMessageDispatcher:
             personal.by_id(mode.capability_id)
             if personal is not None and mode is not None and mode.capability_id is not None else None
         )
-        snapshot = self._confirmation_snapshot(event, user, active)
+        snapshot = self._confirmation_snapshot(event, user, active, mode_revision=mode.revision if mode else None)
         mode_id = personal.visible_mode(mode.capability_id) if personal is not None and mode else None
         active_help = (
             self._project_command_help(active, user, event.reply_address, mode.revision)
@@ -1446,21 +1446,24 @@ class IncomingMessageDispatcher:
         """
         user = None
         active = None
+        mode_revision = None
         complete = True
         try:
             user = self._user_identity_service.resolve(_incoming_identity_from_event(event))
             if user is not None:
                 personal = self._personal_registry(user, event)
-                mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
-                active = personal.by_id(mode.capability_id) if mode is not None else None
+                mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
+                if mode.capability_id is not None:
+                    active = personal.by_id(mode.capability_id)
+                    mode_revision = mode.revision
         except Exception:
             LOGGER.exception("Could not resolve confirmation context")
             complete = False
-        return self._confirmation_snapshot(event, user, active, complete)
+        return self._confirmation_snapshot(event, user, active, complete, mode_revision=mode_revision)
 
     def _confirmation_snapshot(
         self, event: IncomingEvent, user: AppUser | None,
-        capability: IncomingCapabilityPort | None, complete: bool = True,
+        capability: IncomingCapabilityPort | None, complete: bool = True, *, mode_revision: int | None,
     ) -> ConfirmationQueryResult:
         """Опрашивает источники по одному снимку допуска, сохраняя известные действия."""
         identity = _incoming_identity_from_event(event)
@@ -1486,7 +1489,9 @@ class IncomingMessageDispatcher:
                 if not isinstance(capability, PendingConfirmationQueryPort):
                     complete = False
                 else:
-                    result = capability.list_pending_confirmations(HandlerContext(user), event.reply_address)
+                    result = capability.list_pending_confirmations(
+                        HandlerContext(user, mode_revision=mode_revision), event.reply_address,
+                    )
                     complete = complete and result.status == "complete"
                     confirmations.extend(item for item in result.confirmations
                                          if item.origin == event.reply_address
