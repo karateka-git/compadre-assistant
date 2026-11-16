@@ -6,6 +6,7 @@ import random
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
+from functools import partial
 from hashlib import blake2s
 from random import randint
 from threading import Condition, Event, Lock, Thread
@@ -794,6 +795,11 @@ def _safe_send_vk_message(
 ) -> None:
     """Доставляет VK-ответ, учитывая отдельное подтверждение нижнего меню."""
     delivered = False
+    replacement_confirmed = False
+
+    def confirm_replacement() -> None:
+        nonlocal replacement_confirmed
+        replacement_confirmed = True
 
     def send(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
         keyboard = None
@@ -802,7 +808,8 @@ def _safe_send_vk_message(
                 keyboard = _serialize_vk_command_menu(update)
             except ValueError:
                 logger.warning("VK command menu omitted: invalid keyboard layout")
-        deliver = _send_vk_view if response.view_delivery is not None else _send_vk_message
+        deliver = (_send_vk_view if response.view_delivery is not None
+                   else partial(_send_vk_message, on_confirmed_reply=confirm_replacement))
         return deliver(
             client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
             limit=limit, include_bound_actions=include_bound_actions, menu_keyboard=keyboard,
@@ -811,7 +818,7 @@ def _safe_send_vk_message(
     try:
         delivered = (deliver_menu(send) if deliver_menu is not None and response.command_menu_delivery != "preserve"
                      else send(None)[0])
-        if delivered and response.retire_views_after_delivery is not None:
+        if replacement_confirmed and response.retire_views_after_delivery is not None:
             _clear_vk_managed_keyboards(client, peer_id, response.retire_views_after_delivery(), logger)
     finally:
         if response.after_delivery is not None:
@@ -896,7 +903,7 @@ def _send_vk_view(
 def _send_vk_message(
     client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
     sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
-    menu_keyboard: str | None, plain: bool = False,
+    menu_keyboard: str | None, plain: bool = False, on_confirmed_reply: Callable[[], None] | None = None,
 ) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
@@ -914,6 +921,7 @@ def _send_vk_message(
         menu_index = len(chunks) - (2 if keyboard is not None else 1)
     has_menu = menu_keyboard is not None and menu_index >= 0
     menu_delivered = False if has_menu else None
+    main_confirmed = True
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
@@ -925,6 +933,7 @@ def _send_vk_message(
         chunk_keyboard = (menu_keyboard if has_menu and index == menu_index
                           else keyboard if index == len(chunks) - 1 else None)
         def deliver_chunk() -> None:
+            nonlocal main_confirmed
             message_id = client.send_message(
                 peer_id=peer_id,
                 text=chunk.text,
@@ -932,8 +941,8 @@ def _send_vk_message(
                 keyboard=chunk_keyboard,
                 random_id=random_id,
             )
-            if response.retire_views_after_delivery is not None and message_id is None:
-                raise VkBotError("VK send returned no confirmed message ID")
+            if index < reply_chunk_count and message_id is None:
+                main_confirmed = False
 
         sent = safe_send(
             deliver_chunk,
@@ -953,6 +962,8 @@ def _send_vk_message(
             return index >= reply_chunk_count, menu_delivered
         if has_menu and index == menu_index:
             menu_delivered = True
+        if index == reply_chunk_count - 1 and main_confirmed and on_confirmed_reply is not None:
+            on_confirmed_reply()
     logger.info(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,

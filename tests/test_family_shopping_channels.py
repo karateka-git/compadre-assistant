@@ -495,9 +495,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         delete = self._actions(second)["1. Хлеб"]
         self.confirm_sends = False
         before = len(self.calls)
-        with self.assertLogs(self.logger, level="ERROR"):
-            self._menu_press("Добавить")
+        prompt = self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.send"])
+        self.assertNotIn("peer_ids", prompt)
         self.confirm_sends = True
         # Чат уже ждёт добавления. Ручное открытие списка отменяет ввод и снова
         # подтверждает доставку замены, после которой можно снять старую клавиатуру.
