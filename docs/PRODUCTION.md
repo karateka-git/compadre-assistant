@@ -31,7 +31,26 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 16.11.2026, после 14:33 UTC
+## Последний проверенный снимок 16.11.2026, после 18:48 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | Установлена `v4.2.1`, SHA `4a6ab957f54c233f7972007492b4f90c0272a4cd`. Immutable Release `447444043`. Deployment `7833239413` получил статус `22341585758` (`success`). Полный CI `43930342487`, попытка 1, подтвердил совместимость с `v4.2.0`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.1) · [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/43930342487/attempts/1) |
+| Контроллер | Snapshot `6de377cf402483c32faa63b805f6420df434fe70`. |
+| SQLite и backup | Активное поколение `0e512bbd671d4d6abcdb5ffcc8440fe9`, последняя миграция `0007_family.sql`. Проверены финальная резервная копия, выбор активной базы для планового backup и отсутствие файлов прежнего поколения после штатной очистки. |
+| Каналы | Контейнеры Telegram и VK `healthy`, перезапусков 0. Основной сервис и таймер backup активны, `family` включена в обоих контейнерах. |
+| Длительность | GitHub Actions начал установку в 18:45:19.100 UTC и подтвердил Deployment в 18:48:28.043 UTC. Выкладка заняла 188,943 с. Контроллер зафиксировал 152,838 с установки и 71,812 с простоя. Расход токенов Codex за этот интервал `unknown`. |
+
+Первый запуск завершился до публикации из-за расхождения SHA. Workflow открыл
+коммит из `main`, а публикатор потребовал вершину `release/4.2`. Release опубликовали
+штатным публикатором из чистого checkout релизного SHA. Повторный запуск
+workflow установил опубликованную версию и записал приёмку.
+
+[Первый запуск](https://github.com/karateka-git/compadre-assistant/actions/runs/43931387409) ·
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43932077777) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7833239413/statuses)
+
+## Исторический снимок 16.11.2026, после 14:33 UTC
 
 | Область | Результат проверки |
 | --- | --- |
