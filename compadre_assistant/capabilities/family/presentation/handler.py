@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from dataclasses import replace
 from datetime import UTC
 
 from compadre_assistant.capabilities.family.domain.invitations import (
@@ -12,13 +13,17 @@ from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, InvalidFamilyName,
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
-from compadre_assistant.capabilities.family.domain.shopping import MAX_ITEM_NUMBER, ManageShopping
+from compadre_assistant.capabilities.family.domain.shopping import (
+    InvalidItemNumbers, InvalidShoppingNames, ItemNumbersExhausted, ManageShopping,
+)
 from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
 from compadre_assistant.capabilities.family.presentation.members import (
     CLOSE_COMMAND, LEAVE_COMMAND, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, MemberDisplayNames, MembersView,
 )
 from compadre_assistant.capabilities.family.presentation.shopping import (
-    SHOPPING_COMMAND, ShoppingSection, ShoppingSections, shopping_list,
+    ADD_COMMAND, BUY_COMMAND, CLEAR_BOUGHT_COMMAND, DELETE_COMMAND, SHOPPING_COMMAND,
+    ShoppingSection, ShoppingSections, needs_notice_pages, parse_item_number, shopping_list, shopping_notices,
+    shopping_report,
 )
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -36,6 +41,7 @@ _CREATE = "/family_create"
 _JOIN = "/family_join"
 _INVITE = "/family_invite"
 _MEMBER_ACTIONS = (LEAVE_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, CLOSE_COMMAND)
+_SHOPPING_ACTIONS = (ADD_COMMAND, BUY_COMMAND, DELETE_COMMAND, CLEAR_BOUGHT_COMMAND)
 
 
 class FamilyCapability(
@@ -56,7 +62,12 @@ class FamilyCapability(
             CapabilityCommand(TRANSFER_COMMAND, (CommandParameter("member", "<member>", False),), "передать роль владельца"),
             CapabilityCommand(CLOSE_COMMAND, (), "закрыть семью"),
             CapabilityCommand(SHOPPING_COMMAND, (CommandParameter("view", "<view>", False),), "открыть покупки"),
-        )),)),
+        )), HelpSection("Покупки", (
+            CapabilityCommand(ADD_COMMAND, (CommandParameter("items", "<items>", False),), "добавить покупки"),
+            CapabilityCommand(BUY_COMMAND, (CommandParameter("numbers", "<numbers>", True),), "отметить купленными"),
+            CapabilityCommand(DELETE_COMMAND, (CommandParameter("numbers", "<numbers>", True),), "удалить из списка"),
+            CapabilityCommand(CLEAR_BOUGHT_COMMAND, (), "очистить купленное"),
+        )))),
         enabled_by_default=True,
         display_name="«Семья»",
         private_chat_hint="Открой /family в личном чате с ботом.",
@@ -107,8 +118,8 @@ class FamilyCapability(
         app_user_id = context.app_user.id
         with self._open_scenarios() as (families, invitations, shopping):
             family = families.find_for_member(app_user_id)
-            if command == SHOPPING_COMMAND:
-                return CapabilityResult(self._shopping(context, event, families, family, shopping, arguments))
+            if command == SHOPPING_COMMAND or command in _SHOPPING_ACTIONS:
+                return CapabilityResult(self._shopping(context, event, families, family, shopping, command, arguments))
             self._shopping_sections.close(app_user_id, event.reply_address)
             if command in (_CREATE, _JOIN):
                 return CapabilityResult(self._begin_input(context, event, family, command, arguments))
@@ -143,7 +154,7 @@ class FamilyCapability(
             if self._shopping_sections.current(app_user.id, address, mode_revision) == ShoppingSection(
                 mode_revision, family.id, actor.joined_at,
             ):
-                return frozenset((SHOPPING_COMMAND,))
+                return frozenset((SHOPPING_COMMAND, ADD_COMMAND, BUY_COMMAND, DELETE_COMMAND))
             return sections | {SHOPPING_COMMAND}
 
     @staticmethod
@@ -302,7 +313,7 @@ class FamilyCapability(
     def continue_input(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
     ) -> PendingInputResult:
-        """Принимает название или код в чате, где начато ожидание.
+        """Принимает название, код или покупки в чате, где начато ожидание.
 
         Args:
             context: Повторно допущенный профиль.
@@ -314,6 +325,8 @@ class FamilyCapability(
         """
         app_user_id = context.app_user.id
         command = pending.input_kind
+        if command == ADD_COMMAND:
+            return self._continue_shopping_add(context, pending, event)
         if command not in (_CREATE, _JOIN):
             return PendingInputResult(IncomingResponse(compose_content(
                 "Открой ", code_span("/family"), " и начни действие заново.",
@@ -389,7 +402,7 @@ class FamilyCapability(
 
     def _shopping(
         self, context: HandlerContext, event: IncomingEvent, families: ManageFamily,
-        family: Family | None, shopping: ManageShopping, arguments: str,
+        family: Family | None, shopping: ManageShopping, command: str, arguments: str,
     ) -> IncomingResponse:
         app_user_id = context.app_user.id
         address = event.reply_address
@@ -397,14 +410,14 @@ class FamilyCapability(
         parts = arguments.split()
         if family is None or revision is None:
             return self._family_access_ended()
-        if len(parts) == 2 and parts[0] == "open" and parts[1] != str(family.id):
+        if command == SHOPPING_COMMAND and len(parts) == 2 and parts[0] == "open" and parts[1] != str(family.id):
             return self._family_access_ended()
         try:
             actor = next(member for member in families.list_members(app_user_id, family.id)
                          if member.app_user_id == app_user_id)
             section = ShoppingSection(revision, family.id, actor.joined_at)
-            if not parts or parts == ["open", str(family.id)]:
-                items = shopping.list_items(app_user_id, family.id)
+            if command == SHOPPING_COMMAND and (not parts or parts == ["open", str(family.id)]):
+                items = shopping.list_items(app_user_id, family.id, actor_joined_at=section.joined_at)
                 self._shopping_sections.open(app_user_id, address, section)
                 return shopping_list(items)
             current = self._shopping_sections.current(app_user_id, address, revision)
@@ -412,24 +425,108 @@ class FamilyCapability(
                 return self._family_access_ended()
             if current is None:
                 return self._open_shopping_hint()
+            if command in _SHOPPING_ACTIONS:
+                return self._shopping_action(context, event, shopping, current, command, arguments)
             if parts == ["home"]:
                 self._shopping_sections.close(app_user_id, address)
                 return self._home(family)
-            if len(parts) != 2 or parts[0] not in ("page", "item"):
+            if len(parts) != 2 or parts[0] not in ("page", "item", "result"):
                 return self._open_shopping_hint()
-            value = parts[1]
-            if len(value) > 19 or not value.isascii() or not value.isdecimal() or not 0 < int(value) <= MAX_ITEM_NUMBER:
+            number = parse_item_number(parts[1])
+            if number is None:
                 return self._open_shopping_hint()
-            number = int(value)
-            items = shopping.list_items(app_user_id, family.id)
+            items = shopping.list_items(app_user_id, family.id, actor_joined_at=current.joined_at)
         except FamilyAccessEnded:
             return self._family_access_ended()
+        if parts[0] == "result":
+            if not current.report:
+                return IncomingResponse(text_content("В этом разделе нет подробного результата операции."))
+            return shopping_report(current.report, number)
         if parts[0] == "page":
             return shopping_list(items, number, update=event.callback_message_id is not None)
         item = next((item for item in items if item.number == number), None)
         if item is None:
             return IncomingResponse(text_content(f"№{number} нет в списке."))
         return IncomingResponse(text_content(f"{item.number}. {item.name}"))
+
+    def _shopping_action(
+        self, context: HandlerContext, event: IncomingEvent, shopping: ManageShopping,
+        section: ShoppingSection, command: str, arguments: str,
+    ) -> IncomingResponse:
+        app_user_id = context.app_user.id
+        family_id = section.family_id
+        address = event.reply_address
+        if command == ADD_COMMAND:
+            if not arguments:
+                return self._begin_shopping_add(context, address, section)
+            try:
+                return shopping_list(shopping.add(app_user_id, family_id, arguments, actor_joined_at=section.joined_at))
+            except ItemNumbersExhausted:
+                return self._shopping_numbers_exhausted()
+        if command == CLEAR_BOUGHT_COMMAND:
+            if arguments:
+                return IncomingResponse(compose_content("Отправь ", code_span(command), " без аргументов."))
+            return shopping_list(shopping.clear_bought(app_user_id, family_id, actor_joined_at=section.joined_at))
+
+        try:
+            numbers = tuple(parse_item_number(value) or 0 for value in arguments.split())
+            change = shopping.buy if command == BUY_COMMAND else shopping.delete
+            result = change(app_user_id, family_id, numbers, actor_joined_at=section.joined_at)
+        except InvalidItemNumbers:
+            return IncomingResponse(compose_content(
+                "Укажи один или несколько положительных номеров через пробел. Например, ",
+                code_span(f"{command} 1 2"), ".",
+            ))
+        notices = shopping_notices(result.changes)
+        if needs_notice_pages(notices):
+            self._shopping_sections.replace(app_user_id, address, section, replace(section, report=notices))
+        return shopping_list(result.items, notices=notices)
+
+    def _begin_shopping_add(
+        self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection,
+    ) -> IncomingResponse:
+        if context.pending_inputs is None:
+            return IncomingResponse(text_content("Не удалось начать ввод. Попробуй ещё раз."))
+        app_user_id = context.app_user.id
+        with context.pending_inputs.lock(address):
+            current = self._shopping_sections.current(app_user_id, address, section.revision)
+            if current is None or current != section:
+                return self._family_access_ended()
+            pending = context.pending_inputs.begin(
+                address, self.descriptor.capability_id, ADD_COMMAND, app_user_id=app_user_id,
+                required_mode=self.descriptor.capability_id, value_label="список покупок", retry_command=ADD_COMMAND,
+                cancel_only_menu=True,
+            )
+            self._shopping_sections.replace(
+                app_user_id, address, current, replace(current, add_request_id=pending.request_id),
+            )
+        return IncomingResponse(compose_content(
+            "Напиши, что купить. Можно отправить несколько покупок одним сообщением, по одной на строку. "
+            "Ожидание действует 10 минут. Для отмены введи ", code_span("/cancel"), ".",
+        ))
+
+    def _continue_shopping_add(
+        self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
+    ) -> PendingInputResult:
+        revision = context.mode_revision
+        app_user_id = context.app_user.id
+        section = None if revision is None else self._shopping_sections.current(app_user_id, event.reply_address, revision)
+        if section is None or section.add_request_id != pending.request_id:
+            return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
+        with self._open_scenarios() as (_, _, shopping):
+            try:
+                items = shopping.add(app_user_id, section.family_id, event.text, actor_joined_at=section.joined_at)
+            except FamilyAccessEnded:
+                return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
+            except InvalidShoppingNames:
+                return self._retry_input("Напиши хотя бы одну покупку.")
+            except ItemNumbersExhausted:
+                return PendingInputResult(self._shopping_numbers_exhausted(), PendingInputOutcome.COMPLETE)
+        return PendingInputResult(shopping_list(items), PendingInputOutcome.COMPLETE)
+
+    @staticmethod
+    def _shopping_numbers_exhausted() -> IncomingResponse:
+        return IncomingResponse(text_content("Новые покупки добавить не удалось, номера списка закончились."))
 
     @staticmethod
     def _open_shopping_hint() -> IncomingResponse:

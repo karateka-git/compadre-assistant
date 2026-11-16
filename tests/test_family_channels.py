@@ -18,6 +18,8 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+from compadre_assistant.presentation.vk.rendering import render_vk_content
 from tests.response_assertions import response_text
 
 
@@ -89,10 +91,12 @@ class FamilyChannelsTest(unittest.TestCase):
             repository = SQLiteFamilyRepository(connection)
             family = repository.find_for_member(owner.id)
             self.assertIsNotNone(family)
+            joined_at = next(member.joined_at for member in repository.list_members(owner.id, family.id)
+                             if member.app_user_id == owner.id)
             shopping = ManageShopping(repository)
-            shopping.add(owner.id, family.id, text)
+            shopping.add(owner.id, family.id, text, actor_joined_at=joined_at)
             if buy:
-                shopping.buy(owner.id, family.id, buy)
+                shopping.buy(owner.id, family.id, buy, actor_joined_at=joined_at)
 
     def test_shopping_section_is_scoped_to_tab_chat_and_revision(self) -> None:
         """Покупки открываются участнику и меняют каталог только одного чата."""
@@ -154,13 +158,101 @@ class FamilyChannelsTest(unittest.TestCase):
                 self.assertIsNotNone(old)
                 actor = next(member for member in repository.list_members(user.id, old.id) if member.app_user_id == user.id)
                 repository.leave(user.id, old.id, actor_joined_at=actor.joined_at)
-                new = repository.create(user.id, "Новый дом", datetime.now(UTC))
-                ManageShopping(repository).add(user.id, new.id, "Секретный список")
+                joined_at = datetime.now(UTC)
+                new = repository.create(user.id, "Новый дом", joined_at)
+                ManageShopping(repository).add(user.id, new.id, "Секретный список", actor_joined_at=joined_at)
             stale = self._send(processor, self.guest, "/family_shopping page 1")
             self.assertIn("Доступ к семье завершён", response_text(stale))
             self.assertNotIn("Секретный список", response_text(stale))
             fresh = self._send(processor, self.guest, "/family_shopping")
             self.assertIn("Секретный список", response_text(fresh))
+
+    def test_shopping_text_commands_require_open_section_and_publish_new_lists(self) -> None:
+        """Ручные команды работают в разделе, а покупки разделяют все его участники."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self.assertNotIn("/buy", response_text(self._send(processor, self.owner_tg, "/help")))
+            self.assertIn("Открой список", response_text(self._send(processor, self.owner_tg, "/add Чай")))
+            self._send(processor, self.owner_tg, "/family_shopping")
+            help_text = response_text(self._send(processor, self.owner_tg, "/help"))
+            for command in ("/add", "/buy", "/delete"):
+                self.assertIn(command, help_text)
+            direct = self._send(processor, self.owner_tg, "/add Хлеб\n\n Чай ")
+            self.assertIn("1. Хлеб\n2. Чай", response_text(direct))
+            self.assertIsNone(direct.view_delivery.target_message_id)
+            self.assertTrue(direct.view_delivery.start())
+            direct.view_delivery.finish("100")
+            self.assertIn("Ожидание действует 10 минут", response_text(self._send(processor, self.owner_tg, "/add")))
+            added = self._send(processor, self.owner_tg, "Чай\n\nМолоко, 2 л")
+            self.assertIn("3. Чай\n4. Молоко, 2 л", response_text(added))
+            self.assertIsNone(added.view_delivery.target_message_id)
+            self._send(processor, self.guest, "/family_shopping")
+            bought = self._send(processor, self.guest, "/buy 2")
+            self.assertIn("Купленные товары\n2. Чай", response_text(bought))
+            self.assertIsNone(bought.view_delivery.target_message_id)
+            edited = self._send(processor, self.owner_tg, "/buy 2 4 90")
+            self.assertIn("№2 уже куплен.", response_text(edited))
+            self.assertIn("№90 нет в списке.", response_text(edited))
+            self.assertIn("Купленные товары\n2. Чай\n4. Молоко, 2 л", response_text(edited))
+            self.assertIsNone(edited.view_delivery.target_message_id)
+            for bad in ("0", "-4", "1,2", "9223372036854775807"):
+                with self.subTest(bad=bad):
+                    invalid = self._send(processor, self.owner_tg, f"/delete 1 {bad}")
+                    self.assertIn("положительных номеров", response_text(invalid))
+            deleted = self._send(processor, self.owner_tg, "/delete 1 91")
+            self.assertNotIn("1. Хлеб", response_text(deleted))
+            self.assertIn("№91 нет в списке.", response_text(deleted))
+            self.assertIsNone(deleted.view_delivery.target_message_id)
+            cleared = self._send(processor, self.owner_tg, "/family_clear_bought")
+            self.assertIn("3. Чай", response_text(cleared))
+            self.assertNotIn("Купленные товары", response_text(cleared))
+            self.assertNotIn("Очистить купленное", response_text(cleared))
+
+    def test_old_shopping_add_input_cannot_continue_after_rejoining_same_family(self) -> None:
+        """Ожидание не добавляет текст после выхода и повторного вступления в ту же семью."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.guest, "/family_shopping")
+            self._send(processor, self.guest, "/add")
+            with connect_database(self.database_path) as connection:
+                profiles = create_user_identity_service(connection)
+                guest = profiles.resolve_without_touch(self.guest)
+                owner = profiles.resolve_without_touch(self.owner_tg)
+                repository = SQLiteFamilyRepository(connection)
+                family = repository.find_for_member(guest.id)
+                actor = next(member for member in repository.list_members(guest.id, family.id)
+                             if member.app_user_id == guest.id)
+                repository.leave(guest.id, family.id, actor_joined_at=actor.joined_at)
+                invitations = ManageInvitations(repository, clock=lambda: actor.joined_at + timedelta(minutes=1))
+                invitations.join(guest.id, invitations.issue(owner.id, family.id).code)
+            stale = self._send(processor, self.guest, "Старое ожидание")
+            self.assertIn("Доступ к семье завершён", response_text(stale))
+            stale = self._send(processor, self.guest, "/add Устаревшая команда")
+            self.assertIn("Доступ к семье завершён", response_text(stale))
+            self.assertIn("Список пуст", response_text(self._send(processor, self.guest, "/family_shopping")))
+            self.assertIn("1. Свежая покупка", response_text(self._send(processor, self.guest, "/add Свежая покупка")))
+
+    def test_long_batch_report_keeps_editable_list_and_all_notices(self) -> None:
+        """Длинный результат читается по страницам, а список остаётся целым сообщением."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._seed_shopping("\n".join("'" * 110 for _ in range(5)))
+            self._send(processor, self.guest, "/family_shopping")
+            numbers = " ".join(str(number) for number in range(500, 560))
+            updated = self._send(processor, self.guest, f"/buy 1 {numbers}")
+            self.assertEqual(len(render_telegram_content(updated.content)), 1)
+            self.assertEqual(len(render_vk_content(updated.content)), 1)
+            self.assertIsNone(updated.view_delivery.target_message_id)
+            self.assertTrue(updated.view_delivery.start())
+            updated.view_delivery.finish("100")
+            self.assertIn("Без изменений: 60", response_text(updated))
+            self.assertIn("/family_shopping result 1", response_text(updated))
+            pages = []
+            for page in (1, 2, 3):
+                report = self._send(processor, self.guest, f"/family_shopping result {page}")
+                self.assertIsNone(report.view_delivery)
+                pages.append(response_text(report))
+            self.assertEqual(re.findall(r"№(\d+) нет в списке", "\n".join(pages)), numbers.split())
 
     def test_family_is_server_opt_in_and_private_only(self) -> None:
         """Семейный вход недоступен без включения, регистрации и личного чата."""

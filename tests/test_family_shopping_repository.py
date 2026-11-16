@@ -43,11 +43,11 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
 
     def test_add_each_nonempty_line_and_share_list_in_number_order(self) -> None:
         """Равные строки получают разные номера и видны всем участникам."""
-        self.assertEqual(self.shopping.list_items(2, self.home), ())
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), ())
         with self.assertRaises(InvalidShoppingNames):
-            self.shopping.add(1, self.home, " \n\t")
+            self.shopping.add(1, self.home, " \n\t", actor_joined_at=_NOW)
 
-        added = self.shopping.add(2, self.home, "  Молоко, 2 л\r\n\nЯблоки\nМолоко, 2 л  ")
+        added = self.shopping.add(2, self.home, "  Молоко, 2 л\r\n\nЯблоки\nМолоко, 2 л  ", actor_joined_at=_NOW)
         self.assertEqual([(item.number, item.name) for item in added], [
             (1, "Молоко, 2 л"), (2, "Яблоки"), (3, "Молоко, 2 л"),
         ])
@@ -56,16 +56,16 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             and item.status is ShoppingItemStatus.NEEDED and item.bought_at is None
             for item in added
         ))
-        self.assertEqual(self.shopping.list_items(1, self.home), added)
-        self.assertEqual(self.shopping.list_items(3, self.other), ())
+        self.assertEqual(self.shopping.list_items(1, self.home, actor_joined_at=_NOW), added)
+        self.assertEqual(self.shopping.list_items(3, self.other, actor_joined_at=_NOW), ())
 
     def test_buy_deduplicates_numbers_and_preserves_first_mark(self) -> None:
         """Пакет сохраняет порядок номеров и не меняет отметку другого участника."""
-        self.shopping.add(1, self.home, "Хлеб\nМолоко\nЯблоки")
-        self.assertEqual(self.shopping.buy(2, self.home, (2,)).changes, (ItemChange(2, _CHANGED),))
+        self.shopping.add(1, self.home, "Хлеб\nМолоко\nЯблоки", actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.buy(2, self.home, (2,), actor_joined_at=_NOW).changes, (ItemChange(2, _CHANGED),))
         self.now += timedelta(minutes=1)
 
-        result = self.shopping.buy(1, self.home, (2, 9, 3, 3, 2))
+        result = self.shopping.buy(1, self.home, (2, 9, 3, 3, 2), actor_joined_at=_NOW)
 
         self.assertEqual(result.changes, (
             ItemChange(2, ItemChangeStatus.ALREADY_BOUGHT), ItemChange(9, _MISSING), ItemChange(3, _CHANGED),
@@ -76,38 +76,39 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             (3, ShoppingItemStatus.BOUGHT, 1, self.now),
         ])
         with self.assertRaises(InvalidItemNumbers):
-            self.shopping.buy(1, self.home, (1, 0))
+            self.shopping.buy(1, self.home, (1, 0), actor_joined_at=_NOW)
         with self.assertRaises(InvalidItemNumbers):
-            self.shopping.delete(1, self.home, (1, MAX_ITEM_NUMBER + 1))
-        self.assertEqual(self.shopping.list_items(2, self.home), result.items)
+            self.shopping.delete(1, self.home, (1, MAX_ITEM_NUMBER + 1), actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), result.items)
 
     def test_delete_and_clear_do_not_reuse_numbers_or_touch_other_family(self) -> None:
         """Удаление и очистка сохраняют чужие и оставшиеся номера."""
-        self.shopping.add(1, self.home, "Хлеб\nМолоко\nЯблоки\nСыр")
-        self.shopping.add(3, self.other, "Другой хлеб")
-        self.shopping.buy(3, self.other, (1,))
-        self.shopping.buy(1, self.home, (1, 2))
-        deleted = self.shopping.delete(2, self.home, (1, 3, 1, 7))
+        self.shopping.add(1, self.home, "Хлеб\nМолоко\nЯблоки\nСыр", actor_joined_at=_NOW)
+        self.shopping.add(3, self.other, "Другой хлеб", actor_joined_at=_NOW)
+        self.shopping.buy(3, self.other, (1,), actor_joined_at=_NOW)
+        self.shopping.buy(1, self.home, (1, 2), actor_joined_at=_NOW)
+        deleted = self.shopping.delete(2, self.home, (1, 3, 1, 7), actor_joined_at=_NOW)
         self.assertEqual(deleted.changes, (ItemChange(1, _CHANGED), ItemChange(3, _CHANGED), ItemChange(7, _MISSING)))
         self.assertEqual([item.number for item in deleted.items], [2, 4])
-        self.assertEqual([item.number for item in self.shopping.clear_bought(2, self.home)], [4])
-        self.shopping.delete(2, self.home, (4,))
+        self.assertEqual([item.number for item in self.shopping.clear_bought(2, self.home, actor_joined_at=_NOW)], [4])
+        self.shopping.delete(2, self.home, (4,), actor_joined_at=_NOW)
 
-        added = self.shopping.add(1, self.home, "Новый хлеб")
+        added = self.shopping.add(1, self.home, "Новый хлеб", actor_joined_at=_NOW)
 
         self.assertEqual([item.number for item in added], [5])
-        self.assertEqual(self.shopping.buy(2, self.home, (1,)).changes, (ItemChange(1, _MISSING),))
-        self.assertEqual(self.shopping.delete(2, self.home, (4,)).changes, (ItemChange(4, _MISSING),))
-        self.assertEqual([item.status for item in self.shopping.list_items(3, self.other)], [ShoppingItemStatus.BOUGHT])
+        self.assertEqual(self.shopping.buy(2, self.home, (1,), actor_joined_at=_NOW).changes, (ItemChange(1, _MISSING),))
+        self.assertEqual(self.shopping.delete(2, self.home, (4,), actor_joined_at=_NOW).changes, (ItemChange(4, _MISSING),))
+        other_items = self.shopping.list_items(3, self.other, actor_joined_at=_NOW)
+        self.assertEqual([item.status for item in other_items], [ShoppingItemStatus.BOUGHT])
 
     def test_each_operation_rejects_stale_family_even_with_matching_item_number(self) -> None:
         """После перехода в другую семью старые операции не читают и не меняют ни один список."""
-        old_list = self.shopping.add(1, self.home, "Хлеб")
+        old_list = self.shopping.add(1, self.home, "Хлеб", actor_joined_at=_NOW)
         self.repository.remove_member(
             1, self.home, 2, actor_joined_at=_NOW, target_joined_at=_NOW,
         )
         new_family = self.repository.create(2, "Новая семья", _NOW).id
-        new_list = self.shopping.add(2, new_family, "Рис")
+        new_list = self.shopping.add(2, new_family, "Рис", actor_joined_at=_NOW)
 
         for operation, args in (
             (self.shopping.list_items, ()),
@@ -117,13 +118,36 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             (self.shopping.clear_bought, ()),
         ):
             with self.subTest(operation=operation.__name__), self.assertRaises(FamilyAccessEnded):
-                operation(2, self.home, *args)
-        self.assertEqual(self.shopping.list_items(1, self.home), old_list)
-        self.assertEqual(self.shopping.list_items(2, new_family), new_list)
+                operation(2, self.home, *args, actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(1, self.home, actor_joined_at=_NOW), old_list)
+        self.assertEqual(self.shopping.list_items(2, new_family, actor_joined_at=_NOW), new_list)
+
+    def test_each_operation_checks_membership_after_rejoining_same_family(self) -> None:
+        """Прежнее членство не даёт читать, писать или расходовать номера прежней семьи."""
+        self.shopping.add(1, self.home, "Хлеб\nЧай", actor_joined_at=_NOW)
+        previous = self.shopping.buy(1, self.home, (1,), actor_joined_at=_NOW).items
+        self.repository.leave(2, self.home, actor_joined_at=_NOW)
+        rejoined_at = _NOW + timedelta(minutes=1)
+        with self.db:
+            self.db.execute("INSERT INTO family_members VALUES (?, 2, ?)", (self.home, rejoined_at.isoformat()))
+
+        for operation, args in (
+            (self.shopping.list_items, ()),
+            (self.shopping.add, ("Сыр",)),
+            (self.shopping.buy, ((2,),)),
+            (self.shopping.delete, ((2,),)),
+            (self.shopping.clear_bought, ()),
+        ):
+            with self.subTest(operation=operation.__name__), self.assertRaises(FamilyAccessEnded):
+                operation(2, self.home, *args, actor_joined_at=_NOW)
+
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=rejoined_at), previous)
+        current = self.shopping.add(2, self.home, "Сыр", actor_joined_at=rejoined_at)
+        self.assertEqual([item.number for item in current], [1, 2, 3])
 
     def test_unknown_status_remains_visible_and_unchanged(self) -> None:
         """Адаптер не считает незнакомое состояние нужной или купленной покупкой."""
-        self.shopping.add(1, self.home, "Хлеб\nМолоко\nРис")
+        self.shopping.add(1, self.home, "Хлеб\nМолоко\nРис", actor_joined_at=_NOW)
         self.db.execute("PRAGMA ignore_check_constraints = ON")
         try:
             with self.db:
@@ -134,12 +158,13 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         finally:
             self.db.execute("PRAGMA ignore_check_constraints = OFF")
 
-        self.assertIs(self.shopping.list_items(2, self.home)[0].status, ShoppingItemStatus.UNKNOWN)
+        self.assertIs(self.shopping.list_items(2, self.home, actor_joined_at=_NOW)[0].status, ShoppingItemStatus.UNKNOWN)
         expected = ItemChange(1, ItemChangeStatus.UNKNOWN)
-        self.assertEqual(self.shopping.buy(2, self.home, (1, 2)).changes, (expected, ItemChange(2, _CHANGED)))
-        self.assertEqual(self.shopping.delete(2, self.home, (1,)).changes, (expected,))
+        bought = self.shopping.buy(2, self.home, (1, 2), actor_joined_at=_NOW)
+        self.assertEqual(bought.changes, (expected, ItemChange(2, _CHANGED)))
+        self.assertEqual(self.shopping.delete(2, self.home, (1,), actor_joined_at=_NOW).changes, (expected,))
         self.assertEqual(
-            [(item.number, item.status) for item in self.shopping.clear_bought(2, self.home)],
+            [(item.number, item.status) for item in self.shopping.clear_bought(2, self.home, actor_joined_at=_NOW)],
             [(1, ShoppingItemStatus.UNKNOWN), (3, ShoppingItemStatus.NEEDED)],
         )
         self.assertEqual(self.db.execute(
@@ -154,34 +179,34 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
                 "BEGIN SELECT RAISE(ABORT, 'test add failure'); END"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test add failure"):
-            self.shopping.add(1, self.home, "Хлеб\nМолоко")
-        self.assertEqual(self.shopping.list_items(1, self.home), ())
+            self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(1, self.home, actor_joined_at=_NOW), ())
         with self.db:
             self.db.execute("DROP TRIGGER fail_add")
             self.db.execute(
                 "CREATE TRIGGER fail_buy BEFORE UPDATE ON family_shopping_items WHEN NEW.number = 2 "
                 "BEGIN SELECT RAISE(ABORT, 'test buy failure'); END"
             )
-        added = self.shopping.add(2, self.home, "Хлеб\nМолоко")
+        added = self.shopping.add(2, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
         self.assertEqual([item.number for item in added], [1, 2])
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test buy failure"):
-            self.shopping.buy(1, self.home, (1, 2))
-        self.assertEqual(self.shopping.list_items(2, self.home), added)
+            self.shopping.buy(1, self.home, (1, 2), actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), added)
 
     def test_delete_and_clear_roll_back_an_earlier_deletion(self) -> None:
         """Сбой при удалении сохраняет все пункты пакета и очистки."""
-        self.shopping.add(1, self.home, "Хлеб\nМолоко")
-        before = self.shopping.buy(2, self.home, (1, 2)).items
+        self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
+        before = self.shopping.buy(2, self.home, (1, 2), actor_joined_at=_NOW).items
         with self.db:
             self.db.execute(
                 "CREATE TRIGGER fail_delete BEFORE DELETE ON family_shopping_items WHEN OLD.number = 2 "
                 "BEGIN SELECT RAISE(ABORT, 'test delete failure'); END"
             )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
-            self.shopping.delete(1, self.home, (1, 2))
+            self.shopping.delete(1, self.home, (1, 2), actor_joined_at=_NOW)
         with self.assertRaisesRegex(sqlite3.IntegrityError, "test delete failure"):
-            self.shopping.clear_bought(1, self.home)
-        self.assertEqual(self.shopping.list_items(2, self.home), before)
+            self.shopping.clear_bought(1, self.home, actor_joined_at=_NOW)
+        self.assertEqual(self.shopping.list_items(2, self.home, actor_joined_at=_NOW), before)
         self.assertFalse(self.db.in_transaction)
 
     def test_number_limit_rejects_unfittable_batch_without_using_last_number(self) -> None:
@@ -189,10 +214,11 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         with self.db:
             self.db.execute("UPDATE families SET next_item_number = ? WHERE id = ?", (MAX_ITEM_NUMBER, self.home))
         with self.assertRaises(ItemNumbersExhausted):
-            self.shopping.add(1, self.home, "Хлеб\nМолоко")
-        self.assertEqual([item.number for item in self.shopping.add(1, self.home, "Хлеб")], [MAX_ITEM_NUMBER])
+            self.shopping.add(1, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
+        added = self.shopping.add(1, self.home, "Хлеб", actor_joined_at=_NOW)
+        self.assertEqual([item.number for item in added], [MAX_ITEM_NUMBER])
         with self.assertRaises(ItemNumbersExhausted):
-            self.shopping.add(1, self.home, "Молоко")
+            self.shopping.add(1, self.home, "Молоко", actor_joined_at=_NOW)
 
     def test_concurrent_writers_allocate_distinct_numbers_and_preserve_first_mark(self) -> None:
         """Два соединения не теряют покупки и не перезаписывают факт покупки."""
@@ -202,15 +228,15 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
             with connect_database(self.path) as db:
                 shopping = ManageShopping(SQLiteFamilyRepository(db), clock=lambda: _NOW)
                 ready.wait()
-                shopping.add(actor, self.home, "Хлеб\nМолоко")
+                shopping.add(actor, self.home, "Хлеб\nМолоко", actor_joined_at=_NOW)
                 ready.wait()
-                return actor, shopping.buy(actor, self.home, (1,)).changes[0].status
+                return actor, shopping.buy(actor, self.home, (1,), actor_joined_at=_NOW).changes[0].status
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             results = dict(pool.map(work, (1, 2)))
         self.assertCountEqual(results.values(), (_CHANGED, ItemChangeStatus.ALREADY_BOUGHT))
         winner = next(actor for actor, status in results.items() if status is _CHANGED)
-        items = self.shopping.list_items(1, self.home)
+        items = self.shopping.list_items(1, self.home, actor_joined_at=_NOW)
         self.assertEqual([item.number for item in items], [1, 2, 3, 4])
         self.assertCountEqual([item.created_by_app_user_id for item in items], [1, 1, 2, 2])
         self.assertEqual(items[0].bought_by_app_user_id, winner)

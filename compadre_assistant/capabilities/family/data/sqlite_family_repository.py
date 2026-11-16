@@ -197,34 +197,43 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
             )
             return family_from_dto(FamilyDto(row["id"], row["name"], row["owner_app_user_id"], row["created_at"]))
 
-    def list_items(self, app_user_id: int, family_id: int) -> tuple[ShoppingItem, ...]:
+    def list_items(
+        self, app_user_id: int, family_id: int, *, actor_joined_at: datetime,
+    ) -> tuple[ShoppingItem, ...]:
         """Читает список и проверяет членство одним запросом.
 
         Args:
             app_user_id: Профиль, который открывает список.
             family_id: Ожидаемая семья.
+            actor_joined_at: Время начала ожидаемого членства.
 
         Returns:
             Список покупок по возрастанию номеров, включая неизвестные состояния.
 
         Raises:
-            FamilyAccessEnded: Профиль не состоит в ожидаемой семье.
+            FamilyAccessEnded: Членство исполнителя завершилось или сменилось.
         """
         rows = self._connection.execute(
             """SELECT item.number, item.name, item.status, item.created_by_app_user_id, item.created_at,
-                      item.bought_by_app_user_id, item.bought_at
+                      item.bought_by_app_user_id, item.bought_at, actor.joined_at
                FROM family_members AS actor
                LEFT JOIN family_shopping_items AS item ON item.family_id = actor.family_id
                WHERE actor.app_user_id = ? AND actor.family_id = ?
                ORDER BY item.number""",
             (app_user_id, family_id),
         ).fetchall()
-        if not rows:
+        if not rows or datetime.fromisoformat(rows[0]["joined_at"]) != actor_joined_at:
             raise FamilyAccessEnded("Доступ к указанной семье завершён")
-        return tuple(shopping_item_from_dto(ShoppingItemDto(**dict(row))) for row in rows if row["number"] is not None)
+        return tuple(
+            shopping_item_from_dto(ShoppingItemDto(
+                row["number"], row["name"], row["status"], row["created_by_app_user_id"], row["created_at"],
+                row["bought_by_app_user_id"], row["bought_at"],
+            ))
+            for row in rows if row["number"] is not None
+        )
 
     def add_items(
-        self, app_user_id: int, family_id: int, names: tuple[str, ...], now: datetime,
+        self, app_user_id: int, family_id: int, names: tuple[str, ...], now: datetime, *, actor_joined_at: datetime,
     ) -> tuple[ShoppingItem, ...]:
         """Резервирует последовательность номеров и пишет все покупки одной транзакцией.
 
@@ -233,16 +242,17 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
             family_id: Ожидаемая семья.
             names: Проверенные названия покупок в порядке ввода.
             now: Время добавления покупок.
+            actor_joined_at: Время начала ожидаемого членства.
 
         Returns:
             Обновлённый список.
 
         Raises:
-            FamilyAccessEnded: Профиль не состоит в ожидаемой семье.
+            FamilyAccessEnded: Членство исполнителя завершилось или сменилось.
             ItemNumbersExhausted: В списке не осталось номеров для пакета.
         """
         with self._write():
-            self._require_membership(app_user_id, family_id)
+            self._require_membership(app_user_id, family_id, actor_joined_at)
             counter = self._connection.execute(
                 """UPDATE families SET next_item_number = next_item_number + ?
                    WHERE id = ? AND next_item_number <= ?
@@ -258,32 +268,39 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
                    VALUES (?, ?, ?, 'needed', ?, ?)""",
                 ((family_id, number, name, app_user_id, stamp) for number, name in enumerate(names, first_number)),
             )
-            return self.list_items(app_user_id, family_id)
+            return self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)
 
     def buy_items(
-        self, app_user_id: int, family_id: int, numbers: tuple[int, ...], now: datetime,
+        self, app_user_id: int, family_id: int, numbers: tuple[int, ...], now: datetime, *, actor_joined_at: datetime,
     ) -> ShoppingChangeResult:
         """Помечает нужные покупки купленными; повтор сохраняет первую отметку."""
-        return self._change_items(app_user_id, family_id, numbers, bought_at=_format_timestamp(now))
+        return self._change_items(
+            app_user_id, family_id, numbers, bought_at=_format_timestamp(now), actor_joined_at=actor_joined_at,
+        )
 
-    def delete_items(self, app_user_id: int, family_id: int, numbers: tuple[int, ...]) -> ShoppingChangeResult:
+    def delete_items(
+        self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,
+    ) -> ShoppingChangeResult:
         """Удаляет указанные покупки с известным состоянием."""
-        return self._change_items(app_user_id, family_id, numbers, bought_at=None)
+        return self._change_items(app_user_id, family_id, numbers, bought_at=None, actor_joined_at=actor_joined_at)
 
-    def clear_bought(self, app_user_id: int, family_id: int) -> tuple[ShoppingItem, ...]:
+    def clear_bought(
+        self, app_user_id: int, family_id: int, *, actor_joined_at: datetime,
+    ) -> tuple[ShoppingItem, ...]:
         """Удаляет купленные позиции, проверяя текущее членство и семью."""
         with self._write():
-            self._require_membership(app_user_id, family_id)
+            self._require_membership(app_user_id, family_id, actor_joined_at)
             self._connection.execute(
                 "DELETE FROM family_shopping_items WHERE family_id = ? AND status = 'bought'", (family_id,),
             )
-            return self.list_items(app_user_id, family_id)
+            return self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)
 
     def _change_items(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, bought_at: str | None,
+        actor_joined_at: datetime,
     ) -> ShoppingChangeResult:
         with self._write():
-            items = {item.number: item for item in self.list_items(app_user_id, family_id)}
+            items = {item.number: item for item in self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)}
             changes = []
             changed_numbers = []
             for number in dict.fromkeys(numbers):
@@ -310,7 +327,9 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
                     "DELETE FROM family_shopping_items WHERE family_id = ? AND number = ?",
                     ((family_id, number) for number in changed_numbers),
                 )
-            return ShoppingChangeResult(tuple(changes), self.list_items(app_user_id, family_id))
+            return ShoppingChangeResult(tuple(changes), self.list_items(
+                app_user_id, family_id, actor_joined_at=actor_joined_at,
+            ))
 
     @contextmanager
     def _write(self) -> Iterator[None]:
