@@ -11,6 +11,7 @@ from compadre_assistant.capabilities.family.data.invitation_dtos import (
 from compadre_assistant.capabilities.family.data.membership_dtos import (
     FamilyDto, FamilyMemberDto, family_from_dto, family_member_from_dto,
 )
+from compadre_assistant.capabilities.family.data.shopping_dtos import ShoppingItemDto, shopping_item_from_dto
 from compadre_assistant.capabilities.family.domain.invitations import (
     InvalidInvitation, InvitationPeriod, InvitationRepository,
 )
@@ -18,10 +19,14 @@ from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, OtherMemberRequired,
 )
 from compadre_assistant.capabilities.family.domain.ports import FamilyRepository
+from compadre_assistant.capabilities.family.domain.shopping import (
+    MAX_ITEM_NUMBER, ItemChange, ItemChangeStatus, ItemNumbersExhausted, ShoppingChangeResult,
+    ShoppingItem, ShoppingItemStatus, ShoppingRepository,
+)
 
 
-class SQLiteFamilyRepository(FamilyRepository, InvitationRepository):
-    """Хранит семью и проверяет актуальный состав перед каждым изменением."""
+class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRepository):
+    """Хранит семейные данные и проверяет актуальный состав перед изменениями."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         """Принимает настроенное соединение без открытой транзакции."""
@@ -41,7 +46,7 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository):
         Raises:
             AlreadyInFamily: Профиль уже состоит в семье.
         """
-        stamp = (now if now.tzinfo is not None else now.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
+        stamp = _format_timestamp(now)
         with self._write():
             if self._connection.execute(
                 "SELECT 1 FROM family_members WHERE app_user_id = ?", (app_user_id,),
@@ -186,6 +191,121 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository):
             )
             return family_from_dto(FamilyDto(row["id"], row["name"], row["owner_app_user_id"], row["created_at"]))
 
+    def list_items(self, app_user_id: int, family_id: int) -> tuple[ShoppingItem, ...]:
+        """Читает список и проверяет членство одним запросом.
+
+        Args:
+            app_user_id: Профиль, который открывает список.
+            family_id: Ожидаемая семья.
+
+        Returns:
+            Список покупок по возрастанию номеров, включая неизвестные состояния.
+
+        Raises:
+            FamilyAccessEnded: Профиль не состоит в ожидаемой семье.
+        """
+        rows = self._connection.execute(
+            """SELECT item.number, item.name, item.status, item.created_by_app_user_id, item.created_at,
+                      item.bought_by_app_user_id, item.bought_at
+               FROM family_members AS actor
+               LEFT JOIN family_shopping_items AS item ON item.family_id = actor.family_id
+               WHERE actor.app_user_id = ? AND actor.family_id = ?
+               ORDER BY item.number""",
+            (app_user_id, family_id),
+        ).fetchall()
+        if not rows:
+            raise FamilyAccessEnded("Доступ к указанной семье завершён")
+        return tuple(shopping_item_from_dto(ShoppingItemDto(**dict(row))) for row in rows if row["number"] is not None)
+
+    def add_items(
+        self, app_user_id: int, family_id: int, names: tuple[str, ...], now: datetime,
+    ) -> tuple[ShoppingItem, ...]:
+        """Резервирует последовательность номеров и пишет все покупки одной транзакцией.
+
+        Args:
+            app_user_id: Профиль участника, добавляющего покупки.
+            family_id: Ожидаемая семья.
+            names: Проверенные названия покупок в порядке ввода.
+            now: Время добавления покупок.
+
+        Returns:
+            Обновлённый список.
+
+        Raises:
+            FamilyAccessEnded: Профиль не состоит в ожидаемой семье.
+            ItemNumbersExhausted: В списке не осталось номеров для пакета.
+        """
+        with self._write():
+            self._require_membership(app_user_id, family_id)
+            counter = self._connection.execute(
+                """UPDATE families SET next_item_number = next_item_number + ?
+                   WHERE id = ? AND next_item_number <= ?
+                   RETURNING next_item_number""",
+                (len(names), family_id, MAX_ITEM_NUMBER + 1 - len(names)),
+            ).fetchone()
+            if counter is None:
+                raise ItemNumbersExhausted("Номера покупок закончились")
+            first_number = counter[0] - len(names)
+            stamp = _format_timestamp(now)
+            self._connection.executemany(
+                """INSERT INTO family_shopping_items (family_id, number, name, status, created_by_app_user_id, created_at)
+                   VALUES (?, ?, ?, 'needed', ?, ?)""",
+                ((family_id, number, name, app_user_id, stamp) for number, name in enumerate(names, first_number)),
+            )
+            return self.list_items(app_user_id, family_id)
+
+    def buy_items(
+        self, app_user_id: int, family_id: int, numbers: tuple[int, ...], now: datetime,
+    ) -> ShoppingChangeResult:
+        """Помечает нужные покупки купленными; повтор сохраняет первую отметку."""
+        return self._change_items(app_user_id, family_id, numbers, bought_at=_format_timestamp(now))
+
+    def delete_items(self, app_user_id: int, family_id: int, numbers: tuple[int, ...]) -> ShoppingChangeResult:
+        """Удаляет указанные покупки с известным состоянием."""
+        return self._change_items(app_user_id, family_id, numbers, bought_at=None)
+
+    def clear_bought(self, app_user_id: int, family_id: int) -> tuple[ShoppingItem, ...]:
+        """Удаляет купленные позиции, проверяя текущее членство и семью."""
+        with self._write():
+            self._require_membership(app_user_id, family_id)
+            self._connection.execute(
+                "DELETE FROM family_shopping_items WHERE family_id = ? AND status = 'bought'", (family_id,),
+            )
+            return self.list_items(app_user_id, family_id)
+
+    def _change_items(
+        self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, bought_at: str | None,
+    ) -> ShoppingChangeResult:
+        with self._write():
+            items = {item.number: item for item in self.list_items(app_user_id, family_id)}
+            changes = []
+            changed_numbers = []
+            for number in dict.fromkeys(numbers):
+                item = items.get(number)
+                if item is None:
+                    status = ItemChangeStatus.NOT_FOUND
+                elif item.status is ShoppingItemStatus.UNKNOWN:
+                    status = ItemChangeStatus.UNKNOWN
+                elif bought_at is not None and item.status is ShoppingItemStatus.BOUGHT:
+                    status = ItemChangeStatus.ALREADY_BOUGHT
+                else:
+                    status = ItemChangeStatus.CHANGED
+                    changed_numbers.append(number)
+                changes.append(ItemChange(number, status))
+
+            if bought_at is not None:
+                self._connection.executemany(
+                    """UPDATE family_shopping_items SET status = 'bought', bought_by_app_user_id = ?, bought_at = ?
+                       WHERE family_id = ? AND number = ?""",
+                    ((app_user_id, bought_at, family_id, number) for number in changed_numbers),
+                )
+            else:
+                self._connection.executemany(
+                    "DELETE FROM family_shopping_items WHERE family_id = ? AND number = ?",
+                    ((family_id, number) for number in changed_numbers),
+                )
+            return ShoppingChangeResult(tuple(changes), self.list_items(app_user_id, family_id))
+
     @contextmanager
     def _write(self) -> Iterator[None]:
         # Блокировка записи перед чтением исключает смену состава между проверкой и изменением.
@@ -216,3 +336,7 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository):
         self._connection.execute(
             "DELETE FROM family_members WHERE family_id = ? AND app_user_id = ?", (family_id, member_id),
         )
+
+
+def _format_timestamp(value: datetime) -> str:
+    return (value if value.tzinfo is not None else value.replace(tzinfo=UTC)).astimezone(UTC).isoformat()
