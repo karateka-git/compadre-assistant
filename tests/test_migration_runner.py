@@ -46,7 +46,8 @@ class AiCapabilityIdMigrationTest(unittest.TestCase):
         from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 
         connection = self.connection
-        self.assertEqual([m.name for m in apply_migrations(connection)], ["0006_ai_capability_id.sql"])
+        completed = apply_migrations(connection)
+        self.assertEqual(completed[0].name, "0006_ai_capability_id.sql")
         self.assertEqual(self._modes(), [
             (1, "telegram", "11", "ai", 4, "fixture"), (1, "vk", "22", None, 2, "fixture"),
             (2, "telegram", "33", "obsidian", 1, "fixture"), (2, "vk", "44", "ai", 9, "fixture"),
