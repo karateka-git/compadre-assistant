@@ -42,6 +42,7 @@ class ShoppingSection:
     revision: int
     family_id: int
     joined_at: datetime
+    inline_commands: bool = False  # Команды обычного списка видны под сообщением.
     add_request_id: str | None = field(default=None, compare=False)
     report: tuple[str, ...] = field(default=(), compare=False)
     # После переоткрытия прежнее сообщение не станет целевым даже при сбое новой отправки.
@@ -194,9 +195,20 @@ def shopping_list(
             if len(label) > _BUTTON_LABEL_LIMIT:
                 label = label[:_BUTTON_LABEL_LIMIT - 1] + "…"
             actions.append(_shopping_button(section, label, f"pick {page} {selection} {item.number}"))
-    elif totals[ShoppingItemStatus.BOUGHT]:
-        parts.extend(("\n\nОчистить купленное · ", code_span(CLEAR_BOUGHT_COMMAND)))
-        actions.append(_shopping_button(section, "Очистить купленное", f"clear {page}"))
+    else:
+        if section.inline_commands:
+            parts.extend(("\n\nДобавить · ", code_span(ADD_COMMAND)))
+            actions.append(_shopping_button(section, "Добавить", f"add {page}"))
+            if totals[ShoppingItemStatus.NEEDED]:
+                for label, command, view in (
+                    ("Купить", BUY_COMMAND, ShoppingSelection.BUY),
+                    ("Удалить", DELETE_COMMAND, ShoppingSelection.DELETE),
+                ):
+                    parts.extend((f"\n{label} · ", code_span(command)))
+                    actions.append(_shopping_button(section, label, f"show {page} {view}"))
+        if totals[ShoppingItemStatus.BOUGHT]:
+            parts.extend(("\n\nОчистить купленное · ", code_span(CLEAR_BOUGHT_COMMAND)))
+            actions.append(_shopping_button(section, "Очистить купленное", f"clear {page}"))
 
     view_name = str(selection) if selection is not None else "page"
     for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
@@ -205,8 +217,8 @@ def shopping_list(
             parts.extend(("\n", label, " · ", code_span(command)))
             actions.append(_shopping_button(section, label, f"show {destination} {view_name}"))
     if selection is None:
-        parts.extend(("\n\nК семье · ", code_span(f"{SHOPPING_COMMAND} home")))
-        actions.append(_shopping_button(section, "К семье", "home"))
+        parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} home")))
+        actions.append(_shopping_button(section, "Назад", "home"))
     else:
         parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} back")))
         actions.append(_shopping_button(section, "Назад", f"show {page} page"))

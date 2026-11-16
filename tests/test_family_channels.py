@@ -127,7 +127,7 @@ class FamilyChannelsTest(unittest.TestCase):
             opened.view_delivery.finish("1")
             self.assertNotIn("/family_members", response_text(self._send(processor, self.owner_tg, "/help")))
             self.assertIn("/family_members", response_text(self._send(processor, self.owner_vk, "/help")))
-            home_action = next(action for action in opened.bound_actions if action.label == "К семье")
+            home_action = next(action for action in opened.bound_actions if action.label == "Назад")
             event = replace(self._event(self.owner_tg, "callback"), callback_message_id="1")
             back = processor.select_action(event, home_action.token)
             self.assertIn("Семья «Дом»", response_text(back))
@@ -136,6 +136,25 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.owner_tg, "/family")
             self.assertIn("/family_members", response_text(self._send(processor, self.owner_tg, "/help")))
             self.assertIn("Открой список", response_text(self._send(processor, self.owner_tg, "/family_shopping page 2")))
+
+    def test_nested_member_and_invitation_navigation_opens_parent(self) -> None:
+        """Возврат из вложенных экранов открывает их родителя в обоих каналах."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            for identity in (self.owner_tg, self.owner_vk):
+                with self.subTest(channel=identity.channel):
+                    home = self._send(processor, identity, "/family")
+                    roster = self._choose(processor, identity, home, "Участники")
+                    member = self._choose(processor, identity, roster, "Илья")
+                    roster = self._choose(processor, identity, member, "Назад")
+                    self.assertIn("Участники семьи «Дом»", response_text(roster))
+                    home = self._choose(processor, identity, roster, "Назад")
+                    self.assertIn("Семья «Дом»", response_text(home))
+                    invitation = self._choose(processor, identity, home, "Пригласить")
+                    issued = self._choose(processor, identity, invitation, "Создать код")
+                    invitation = self._choose(processor, identity, issued, "Назад")
+                    self.assertIn("Чтобы получить одноразовый код", response_text(invitation))
+                    self.assertIn("Семья «Дом»", response_text(self._choose(processor, identity, invitation, "Назад")))
 
     def test_shopping_pages_preserve_groups_numbers_and_full_titles(self) -> None:
         """На странице остаются номера, а полное длинное название доступно отдельно."""

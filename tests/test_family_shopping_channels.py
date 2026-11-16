@@ -97,6 +97,35 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._send("/family_shopping")
         self.assertTrue({"/add", "/buy", "/delete"} <= self.menus[-1])
 
+    async def test_inline_shopping_commands_reflect_items_and_cancel_add(self) -> None:
+        """Покупки доступны кнопками, а отмена пошагового ввода сохраняет список."""
+        await self._open()
+        empty_list = self.last_sent
+        empty_controls = self._actions(self.bot.send_message.await_args)
+        self.assertEqual(list(empty_controls), ["Добавить", "Назад"])
+        await self._press(empty_controls["Добавить"], empty_list)
+        self.assertIn("/cancel", self.bot.send_message.await_args.kwargs["text"])
+        prompt_controls = self._actions(self.bot.send_message.await_args)
+        await self._press(prompt_controls["Отмена"], self.last_sent)
+        self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
+
+        await self._send("/add Хлеб")
+        active_list = self.last_sent
+        controls = self._actions(self.bot.send_message.await_args)
+        self.assertEqual(list(controls), ["Добавить", "Купить", "Удалить", "Назад"])
+        await self._press(controls["Удалить"], active_list)
+        delete_pick = self.bot.edit_message_text.await_args
+        self.assertEqual(delete_pick.kwargs["message_id"], active_list)
+        self.assertIn("Выбери, что удалить", delete_pick.kwargs["text"])
+        await self._press(self._actions(delete_pick)["Назад"], active_list)
+        await self._press(self._actions(self.bot.edit_message_text.await_args)["Купить"], active_list)
+        buy_pick = self.bot.edit_message_text.await_args
+        self.assertEqual(buy_pick.kwargs["message_id"], active_list)
+        await self._press(self._actions(buy_pick)["1. Хлеб"], active_list)
+        await self._press(self._actions(self.bot.edit_message_text.await_args)["Назад"], active_list)
+        self.assertEqual(list(self._actions(self.bot.edit_message_text.await_args)),
+                         ["Добавить", "Очистить купленное", "Назад"])
+
     async def test_choice_back_delete_and_clear_edit_the_newest_list(self) -> None:
         """Покупка и удаление, возврат и очистка меняют текст и кнопки одного сообщения."""
         await self._open()
@@ -259,6 +288,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertTrue({"/add", "/buy", "/delete"} <= self._visible_menu())
         self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 9))]))
         cmid = self.last_cmid
+        published = next(params for method, params in reversed(self.calls)
+                         if method == "messages.send" and "peer_ids" in params)
+        self.assertEqual(list(self._actions(published)), ["Следующая страница", "Назад"])
 
         self._send("/buy")
         first = self._latest_edit()

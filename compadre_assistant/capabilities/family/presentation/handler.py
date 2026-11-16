@@ -415,7 +415,7 @@ class FamilyCapability(
             actor = next(member for member in families.list_members(app_user_id, family.id)
                          if member.app_user_id == app_user_id)
             if command == SHOPPING_COMMAND and (not parts or parts == ["open", str(family.id)]):
-                section = ShoppingSection(revision, family.id, actor.joined_at)
+                section = ShoppingSection(revision, family.id, actor.joined_at, inline_commands=event.channel == "telegram")
                 items = shopping.list_items(app_user_id, family.id, actor_joined_at=section.joined_at)
                 self._shopping_sections.open(app_user_id, address, section)
                 return shopping_list(items, section)
@@ -436,7 +436,7 @@ class FamilyCapability(
                 if parts[2:] == ["home"]:
                     self._shopping_sections.close(app_user_id, address)
                     return self._home(family)
-                return self._shopping_click(shopping, app_user_id, current, parts[2:])
+                return self._shopping_click(context, address, shopping, current, parts[2:])
             if parts == ["home"]:
                 self._shopping_sections.close(app_user_id, address)
                 return self._home(family)
@@ -465,15 +465,19 @@ class FamilyCapability(
         return IncomingResponse(text_content(f"{item.number}. {item.name}"))
 
     def _shopping_click(
-        self, shopping: ManageShopping, app_user_id: int, section: ShoppingSection, action: list[str],
+        self, context: HandlerContext, address: ReplyAddress, shopping: ManageShopping, section: ShoppingSection,
+        action: list[str],
     ) -> IncomingResponse:
         # У ядра уже есть адрес и подтверждённое поколение сообщения. Ключ раздела
         # дополнительно исключает нажатия до повторного вступления или открытия раздела.
         if len(action) < 2 or (page := parse_item_number(action[1])) is None:
             return self._open_shopping_hint()
+        app_user_id = context.app_user.id
         family_id = section.family_id
         joined_at = section.joined_at
         match action:
+            case ["add", _]:
+                return self._begin_shopping_add(context, address, section)
             case ["clear", _]:
                 items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=joined_at)
                 return shopping_list(items, section, page, update=True)
@@ -553,7 +557,7 @@ class FamilyCapability(
         return IncomingResponse(compose_content(
             "Напиши, что купить. Можно отправить несколько покупок одним сообщением, по одной на строку. "
             "Ожидание действует 10 минут. Для отмены введи ", code_span("/cancel"), ".",
-        ))
+        ), suggested_actions=(ReplyAction("Отмена", "/cancel"),) if section.inline_commands else ())
 
     def _continue_shopping_add(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
@@ -635,8 +639,9 @@ class FamilyCapability(
         if action == "open":
             return IncomingResponse(compose_content(
                 f"Приглашение в семью «{family.name}». Чтобы получить одноразовый код, отправь ",
-                code_span(f"{_INVITE} create"), ".",
-            ), suggested_actions=(ReplyAction("Создать код", f"{_INVITE} create {family.id}"),))
+                code_span(f"{_INVITE} create"), ".\n\nНазад · ", code_span("/family"),
+            ), suggested_actions=(ReplyAction("Создать код", f"{_INVITE} create {family.id}"),
+                                  ReplyAction("Назад", "/family")))
         try:
             issued = invitations.issue(app_user_id, family.id)
         except FamilyAccessEnded:
@@ -648,5 +653,5 @@ class FamilyCapability(
         deadline = issued.expires_at.astimezone(UTC).strftime("%d.%m.%Y, %H:%M UTC")
         return IncomingResponse(compose_content(
             f"Приглашение в семью «{issued.family.name}»\n\nКод: ", code_span(issued.code),
-            f"\nДействует до {deadline}. По коду можно вступить один раз.",
-        ))
+            f"\nДействует до {deadline}. По коду можно вступить один раз.\n\nНазад · ", code_span(_INVITE),
+        ), suggested_actions=(ReplyAction("Назад", f"{_INVITE} open {issued.family.id}"),))
