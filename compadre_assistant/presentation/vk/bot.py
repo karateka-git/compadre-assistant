@@ -39,6 +39,8 @@ VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_UPDATE_WORKER_COUNT = 4
 VK_UPDATE_QUEUE_SIZE = 128
 VK_INLINE_ACTIONS_ENABLED = True
+# Пустая inline-клавиатура удаляет кнопки редактируемого сообщения.
+VK_EMPTY_INLINE_KEYBOARD = '{"inline":true,"buttons":[]}'
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
 VK_LONG_POLL_RETRY_MAX_EXPONENT = 6
 RetryResult = TypeVar("RetryResult")
@@ -328,16 +330,10 @@ class VkApiClient:
             keyboard: JSON VK-клавиатуры; `None` оставляет обычное сообщение без клавиатуры.
         """
         # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
-        params = {
-            "peer_id": str(peer_id),
-            "message": text,
-            "random_id": str(random_id if random_id is not None else randint(1, 2_147_483_647)),
-        }
+        params = {"peer_id": str(peer_id)}
         if format_data is not None:
             params["format_data"] = format_data
-        if keyboard is not None:
-            params["keyboard"] = keyboard
-        result = self._api_call("messages.send", params).get("response")
+        result = self._send_message(params, text=text, random_id=random_id, keyboard=keyboard)
         if (keyboard is not None and format_data is None and isinstance(result, int)
                 and not isinstance(result, bool) and result > 0):
             try:
@@ -349,6 +345,69 @@ class VkApiClient:
                     self._inline_messages[peer_id, result] = text
                     if len(self._inline_messages) > 512:
                         self._inline_messages.popitem(last=False)
+
+    def send_editable_message(
+        self, *, peer_id: int, text: str, random_id: int, keyboard: str | None,
+    ) -> int:
+        """Публикует обычный текст и получает ID сообщения внутри одного диалога.
+
+        Args:
+            peer_id: ID диалога-получателя.
+            text: Готовый текст одного сообщения без format_data.
+            random_id: Стабильный ID retry-серии.
+            keyboard: Необязательная inline-клавиатура.
+
+        Returns:
+            Положительный conversation_message_id из результата для этого peer.
+
+        Raises:
+            VkBotError: VK не подтвердил отправку или не вернул ID диалога и сообщения.
+        """
+        # Форма peer_ids возвращает cmid, используемый и в callback, и в messages.edit.
+        result = self._send_message({"peer_ids": str(peer_id)}, text=text, random_id=random_id, keyboard=keyboard)
+        item = result[0] if isinstance(result, list) and len(result) == 1 else None
+        if isinstance(item, dict) and type(item.get("peer_id")) is int and item["peer_id"] == peer_id:
+            if item.get("error") is not None:
+                error = item["error"]
+                code = error.get("error_code") if isinstance(error, dict) else None
+                if type(code) is int and code in VK_TRANSIENT_API_ERROR_CODES:
+                    raise VkTransientError(f"VK individual send error (code {code})")
+                raise VkBotError("VK did not send editable message to its recipient")
+            cmid = item.get("conversation_message_id")
+            if type(cmid) is int and cmid > 0:
+                return cmid
+        raise VkBotError("VK send returned no confirmed conversation message ID")
+
+    def _send_message(
+        self, params: dict[str, str], *, text: str, random_id: int | None, keyboard: str | None,
+    ) -> object:
+        """Передаёт один готовый текст выбранной форме messages.send."""
+        params["message"] = text
+        params["random_id"] = str(random_id if random_id is not None else randint(1, 2_147_483_647))
+        if keyboard is not None:
+            params["keyboard"] = keyboard
+        return self._api_call("messages.send", params).get("response")
+
+    def edit_message(
+        self, *, peer_id: int, conversation_message_id: int, text: str, keyboard: str | None,
+    ) -> None:
+        """За один вызов заменяет обычный текст сообщения и его inline-кнопки.
+
+        Args:
+            peer_id: Диалог, в котором был доставлен редактируемый ответ.
+            conversation_message_id: ID сообщения внутри этого диалога.
+            text: Новый текст без format_data.
+            keyboard: Новая inline-клавиатура или None для снятия кнопок.
+
+        Raises:
+            VkBotError: VK не подтвердил изменение сообщения.
+        """
+        result = self._api_call("messages.edit", {
+            "peer_id": str(peer_id), "cmid": str(conversation_message_id),
+            "message": text, "keyboard": keyboard if keyboard is not None else VK_EMPTY_INLINE_KEYBOARD,
+        }).get("response")
+        if type(result) is not int or result != 1:
+            raise VkBotError("VK did not confirm message edit")
 
     def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
         """Подтверждает нажатие callback-кнопки до обработки действия.
@@ -386,7 +445,7 @@ class VkApiClient:
         self._api_call("messages.edit", {
             "peer_id": str(peer_id), "cmid": str(conversation_message_id),
             "message": original_text,
-            "keyboard": '{"inline":true,"buttons":[]}',
+            "keyboard": VK_EMPTY_INLINE_KEYBOARD,
         })
         with self._inline_lock:
             self._inline_messages.pop((peer_id, message_id), None)
@@ -549,9 +608,11 @@ def _handle_message_event(
     select_action = getattr(incoming_message_processor, "select_action", None)
     if not callable(select_action):
         return
+    cmid = data.get("conversation_message_id")
+    source_id = str(cmid) if type(cmid) is int and cmid > 0 else None
     event = IncomingEvent(
         channel="vk", chat_id=str(peer_id), message_id=event_id,
-        text=token, external_user_id=str(user_id),
+        text=token, external_user_id=str(user_id), callback_message_id=source_id,
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(client, logger=logger, origin=event, deliver_menu=deliver_menu)
@@ -563,10 +624,10 @@ def _handle_message_event(
         result = select_action(event, token, completion_handler, menu_update_handler, defer_origin_menu=True)
     if result.error is not None:
         logger.error("VK action selection failed: %s", result.error)
-    cmid = data.get("conversation_message_id")
-    if not result.preserve_source_actions and isinstance(cmid, int) and not isinstance(cmid, bool) and cmid > 0:
+    managed_target = result.view_delivery.target_message_id if result.view_delivery is not None else None
+    if source_id is not None and not result.preserve_source_actions and source_id != managed_target:
         try:
-            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=cmid)
+            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=int(source_id))
         except VkBotError as error:
             logger.warning("VK inline keyboard cleanup failed: %s", error)
     _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger,
@@ -703,7 +764,7 @@ def _safe_send_vk_message(
     include_bound_actions: bool | None = None,
     deliver_menu: Callable[[_SendWithMenu], bool] | None = None,
 ) -> None:
-    """Отправляет VK-сообщение с per-chunk retries и стабильным `random_id`."""
+    """Доставляет VK-ответ, учитывая отдельное подтверждение нижнего меню."""
     delivered = False
 
     def send(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
@@ -713,7 +774,8 @@ def _safe_send_vk_message(
                 keyboard = _serialize_vk_command_menu(update)
             except ValueError:
                 logger.warning("VK command menu omitted: invalid keyboard layout")
-        return _send_vk_message(
+        deliver = _send_vk_view if response.view_delivery is not None else _send_vk_message
+        return deliver(
             client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
             limit=limit, include_bound_actions=include_bound_actions, menu_keyboard=keyboard,
         )
@@ -725,25 +787,80 @@ def _safe_send_vk_message(
             response.after_delivery(delivered)
 
 
-def _send_vk_message(
+def _send_vk_view(
     client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
     sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
     menu_keyboard: str | None,
 ) -> tuple[bool, bool | None]:
+    """Доставляет одно редактируемое сообщение и, при изменении, нижнее меню."""
+    delivery = response.view_delivery
+    assert delivery is not None
+    target = delivery.target_message_id
+    confirmed_id = None
+    if delivery.start():
+        try:
+            chunks = render_vk_content(response.content, response.actions, limit=limit)
+            if len(chunks) == 1:
+                text = chunks[0].text
+                keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+                random_id = randint(1, 2_147_483_647)
+
+                def publish() -> None:
+                    nonlocal confirmed_id
+                    cmid = client.send_editable_message(
+                        peer_id=peer_id, text=text, keyboard=keyboard, random_id=random_id,
+                    )
+                    confirmed_id = str(cmid)
+
+                def edit() -> None:
+                    nonlocal confirmed_id
+                    client.edit_message(
+                        peer_id=peer_id, conversation_message_id=int(target), text=text, keyboard=keyboard,
+                    )
+                    confirmed_id = target
+
+                safe_send(
+                    publish if target is None else edit,
+                    logger=logger, channel="VK", target_id=str(peer_id),
+                    retry_delay_resolver=_vk_retry_delay, sleeper=sleeper,
+                )
+            elif target is None:
+                # Несколько сообщений сохраняют ручной путь без активных inline-кнопок.
+                return _send_vk_message(
+                    client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
+                    limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
+                    plain=True,
+                )
+        finally:
+            delivery.finish(confirmed_id)
+
+    if confirmed_id is not None:
+        if menu_keyboard is None:
+            return True, None
+        # Одна клавиатура на сообщение VK: нижнее меню сопровождает следующую команду.
+        followup = IncomingResponse(text_content("Что сделать дальше?"))
+        _, menu_delivered = _send_vk_message(
+            client, peer_id=peer_id, response=followup, logger=logger, sleeper=sleeper,
+            limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
+        )
+        return True, menu_delivered
+    if target is not None and delivery.unavailable is not None:
+        _, menu_delivered = _send_vk_message(
+            client, peer_id=peer_id, response=IncomingResponse(delivery.unavailable), logger=logger,
+            sleeper=sleeper, limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
+        )
+        return False, menu_delivered
+    return False, None
+
+
+def _send_vk_message(
+    client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
+    sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
+    menu_keyboard: str | None, plain: bool = False,
+) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
-    show_bound_actions = (
-        VK_INLINE_ACTIONS_ENABLED
-        if include_bound_actions is None else include_bound_actions
-    )
-    keyboard = None
-    if show_bound_actions:
-        try:
-            keyboard = _serialize_vk_inline_keyboard(response)
-        except ValueError:
-            # Необязательная клавиатура не должна скрывать текстовые команды.
-            # Решение принимается до API-вызова, поэтому повторной отправки нет.
-            logger.warning("VK inline keyboard omitted: invalid action layout")
+    keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
     # VK принимает одну клавиатуру на сообщение. У короткого ответа
     # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.
     reply_chunk_count = len(chunks)
@@ -769,7 +886,7 @@ def _send_vk_message(
             lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
                 peer_id=peer_id,
                 text=chunk.text,
-                format_data=chunk.format_data,
+                format_data=None if plain else chunk.format_data,
                 keyboard=chunk_keyboard,
                 random_id=random_id,
             ),
@@ -795,6 +912,19 @@ def _send_vk_message(
         time.monotonic() - started_at,
     )
     return bool(chunks), menu_delivered
+
+
+def _optional_vk_inline_keyboard(
+    response: IncomingResponse, logger: logging.Logger, enabled: bool | None,
+) -> str | None:
+    """Сохраняет ручной путь при локальной ошибке сериализации кнопок."""
+    if not (VK_INLINE_ACTIONS_ENABLED if enabled is None else enabled):
+        return None
+    try:
+        return _serialize_vk_inline_keyboard(response)
+    except ValueError:
+        logger.warning("VK inline keyboard omitted: invalid action layout")
+        return None
 
 
 def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
