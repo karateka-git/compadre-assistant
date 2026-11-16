@@ -510,7 +510,8 @@ class ChannelMessageProcessor:
                  completion_handler: ChannelCompletionHandler | None,
                  menu_update_handler: CommandMenuUpdateHandler | None,
                  *, token: str | None = None, defer_origin_menu: bool = False) -> IncomingResponse:
-        generation = self._response_actions.event_generation()
+        action_store = self._response_actions
+        generation = action_store.event_generation()
         menu_updates: list[CommandMenuUpdate] = []
         origin = IncomingEvent(
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
@@ -557,7 +558,7 @@ class ChannelMessageProcessor:
                             )
                             if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
-                                    origin, response, self._response_actions,
+                                    origin, response, action_store,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
@@ -569,10 +570,25 @@ class ChannelMessageProcessor:
                 response = dispatcher.execute(incoming_message, completion, menu_handler)
             else:
                 response = dispatcher.select_action(
-                    incoming_message, token, self._response_actions, completion, menu_handler,
+                    incoming_message, token, action_store, completion, menu_handler,
                 )
+            if (response.view is None and response.error is None and original_context is not None
+                    and original_context.mode_id is not None):
+                close_views = response.close_managed_views
+                if not close_views:
+                    try:
+                        current = dispatcher.action_context(origin)
+                        close_views = (current.app_user_id, current.mode_id, current.mode_revision) != (
+                            original_context.app_user_id, original_context.mode_id, original_context.mode_revision,
+                        )
+                    except Exception:
+                        LOGGER.exception("Could not validate managed view transition")
+                if close_views:
+                    response = replace(response, retire_views_after_delivery=lambda: action_store.retire_views(
+                        origin, original_context, generation,
+                    ))
             response = dispatcher.bind_response_actions(
-                incoming_message, response, self._response_actions, view_origin=original_context,
+                incoming_message, response, action_store, view_origin=original_context,
                 generation=generation,
             )
         if menu_update_handler is not None:

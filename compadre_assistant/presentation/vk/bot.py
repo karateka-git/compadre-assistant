@@ -6,6 +6,7 @@ import random
 import time
 from collections import OrderedDict, deque
 from collections.abc import Callable
+from functools import partial
 from hashlib import blake2s
 from random import randint
 from threading import Condition, Event, Lock, Thread
@@ -319,7 +320,7 @@ class VkApiClient:
         random_id: int | None = None,
         format_data: str | None = None,
         keyboard: str | None = None,
-    ) -> None:
+    ) -> int | None:
         """Отправляет одну готовую часть VK без повторного разбиения.
 
         Args:
@@ -328,14 +329,18 @@ class VkApiClient:
             random_id: Стабильный ID одной retry-серии или `None` для нового ID.
             format_data: JSON диапазонов именно этой части или `None` для plain.
             keyboard: JSON VK-клавиатуры; `None` оставляет обычное сообщение без клавиатуры.
+
+        Returns:
+            Подтверждённый ID сообщения, если VK его вернул.
         """
         # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
         params = {"peer_id": str(peer_id)}
         if format_data is not None:
             params["format_data"] = format_data
         result = self._send_message(params, text=text, random_id=random_id, keyboard=keyboard)
-        if (keyboard is not None and format_data is None and isinstance(result, int)
-                and not isinstance(result, bool) and result > 0):
+        if type(result) is not int or result <= 0:
+            return None
+        if keyboard is not None and format_data is None:
             try:
                 is_inline = json.loads(keyboard).get("inline") is True
             except (ValueError, AttributeError):
@@ -345,6 +350,7 @@ class VkApiClient:
                     self._inline_messages[peer_id, result] = text
                     if len(self._inline_messages) > 512:
                         self._inline_messages.popitem(last=False)
+        return result
 
     def send_editable_message(
         self, *, peer_id: int, text: str, random_id: int, keyboard: str | None,
@@ -421,11 +427,18 @@ class VkApiClient:
             "event_id": event_id, "user_id": str(user_id), "peer_id": str(peer_id),
         })
 
-    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
-        """Убирает кнопки исходного plain-сообщения при сохранённом тексте.
+    def clear_inline_keyboard(
+        self, *, peer_id: int, conversation_message_id: int, managed: bool = False,
+    ) -> None:
+        """Убирает кнопки plain-сообщения, сохраняя его текст.
 
-        Если исходный ответ не найден в памяти или имел format_data, редактирование
-        пропускается: VK messages.edit не принимает format_data.
+        Args:
+            peer_id: Исходный диалог.
+            conversation_message_id: ID сообщения в этом диалоге.
+            managed: Ядро подтвердило вывод plain-сообщения из обращения.
+
+        Raises:
+            VkBotError: API отклонил получение текста или снятие клавиатуры.
         """
         result = self._api_call("messages.getByConversationMessageId", {
             "peer_id": str(peer_id),
@@ -438,15 +451,17 @@ class VkApiClient:
         message_id = message.get("id")
         if not isinstance(message_id, int) or isinstance(message_id, bool):
             return
-        with self._inline_lock:
-            original_text = self._inline_messages.get((peer_id, message_id))
-        if original_text is None or message.get("text") != original_text:
+        # Для callback без подтверждённого перехода нужны локальные следы plain
+        # отправки. У управляемого представления plain гарантирован транспортом.
+        original_text = message.get("text")
+        if not isinstance(original_text, str):
             return
-        self._api_call("messages.edit", {
-            "peer_id": str(peer_id), "cmid": str(conversation_message_id),
-            "message": original_text,
-            "keyboard": VK_EMPTY_INLINE_KEYBOARD,
-        })
+        if not managed:
+            with self._inline_lock:
+                if self._inline_messages.get((peer_id, message_id)) != original_text:
+                    return
+        self.edit_message(peer_id=peer_id, conversation_message_id=conversation_message_id,
+                          text=original_text, keyboard=None)
         with self._inline_lock:
             self._inline_messages.pop((peer_id, message_id), None)
 
@@ -543,6 +558,7 @@ def _handle_update(
         text=text,
         external_user_id=str(from_id),
         images=images,
+        menu_choice=not images and _is_vk_menu_choice(message.get("payload")),
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(
@@ -568,6 +584,16 @@ def _handle_update(
         logger=logger,
         deliver_menu=_menu_delivery_for_event(deliver_menu, incoming_message),
     )
+
+
+def _is_vk_menu_choice(payload: object) -> bool:
+    """Распознаёт маркер текстовой кнопки, который не содержит команд."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return False
+    return isinstance(payload, dict) and set(payload) == {"menu"} and payload["menu"] is True
 
 
 def _handle_message_event(
@@ -665,10 +691,13 @@ def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
     for start in range(0, len(items), columns):
         row: list[dict[str, object]] = []
         for item in items[start:start + columns]:
-            label = item.command
+            label = item.label if item.label is not None else item.command
             if not label or len(label) > 40:
-                raise ValueError("VK text button command must contain 1-40 characters")
-            row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+                raise ValueError("VK text button label must contain 1-40 characters")
+            action = {"type": "text", "label": label}
+            if item.label is not None:
+                action["payload"] = '{"menu":true}'
+            row.append({"action": action, "color": "secondary"})
         rows.append(row)
     return json.dumps(
         {"one_time": False, "inline": False, "buttons": rows},
@@ -766,6 +795,11 @@ def _safe_send_vk_message(
 ) -> None:
     """Доставляет VK-ответ, учитывая отдельное подтверждение нижнего меню."""
     delivered = False
+    replacement_confirmed = False
+
+    def confirm_replacement() -> None:
+        nonlocal replacement_confirmed
+        replacement_confirmed = True
 
     def send(update: CommandMenuUpdate | None) -> tuple[bool, bool | None]:
         keyboard = None
@@ -774,17 +808,30 @@ def _safe_send_vk_message(
                 keyboard = _serialize_vk_command_menu(update)
             except ValueError:
                 logger.warning("VK command menu omitted: invalid keyboard layout")
-        deliver = _send_vk_view if response.view_delivery is not None else _send_vk_message
+        deliver = (_send_vk_view if response.view_delivery is not None
+                   else partial(_send_vk_message, on_confirmed_reply=confirm_replacement))
         return deliver(
             client, peer_id=peer_id, response=response, logger=logger, sleeper=sleeper,
             limit=limit, include_bound_actions=include_bound_actions, menu_keyboard=keyboard,
         )
 
     try:
-        delivered = deliver_menu(send) if deliver_menu is not None else send(None)[0]
+        delivered = (deliver_menu(send) if deliver_menu is not None and response.command_menu_delivery != "preserve"
+                     else send(None)[0])
+        if replacement_confirmed and response.retire_views_after_delivery is not None:
+            _clear_vk_managed_keyboards(client, peer_id, response.retire_views_after_delivery(), logger)
     finally:
         if response.after_delivery is not None:
             response.after_delivery(delivered)
+
+
+def _clear_vk_managed_keyboards(client: Any, peer_id: int, message_ids: tuple[str, ...], logger: logging.Logger) -> None:
+    """Снимает клавиатуры по ID завершённых представлений своего диалога."""
+    for message_id in message_ids:
+        try:
+            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=int(message_id), managed=True)
+        except VkBotError as error:
+            logger.warning("VK inline keyboard removal failed: %s", error)
 
 
 def _send_vk_view(
@@ -832,7 +879,7 @@ def _send_vk_view(
                     plain=True,
                 )
         finally:
-            delivery.finish(confirmed_id)
+            _clear_vk_managed_keyboards(client, peer_id, delivery.finish(confirmed_id), logger)
 
     if confirmed_id is not None:
         if menu_keyboard is None:
@@ -856,11 +903,13 @@ def _send_vk_view(
 def _send_vk_message(
     client: Any, *, peer_id: int, response: IncomingResponse, logger: logging.Logger,
     sleeper: Callable[[float], None], limit: int, include_bound_actions: bool | None,
-    menu_keyboard: str | None, plain: bool = False,
+    menu_keyboard: str | None, plain: bool = False, on_confirmed_reply: Callable[[], None] | None = None,
 ) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
-    keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+    keyboard = None if menu_keyboard is not None and response.command_menu_delivery == "prefer" else (
+        _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+    )
     # VK принимает одну клавиатуру на сообщение. У короткого ответа
     # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.
     reply_chunk_count = len(chunks)
@@ -872,6 +921,7 @@ def _send_vk_message(
         menu_index = len(chunks) - (2 if keyboard is not None else 1)
     has_menu = menu_keyboard is not None and menu_index >= 0
     menu_delivered = False if has_menu else None
+    main_confirmed = True
     started_at = time.monotonic()
     logger.info(
         "VK response send started: peer_id=%s chunk_count=%s",
@@ -882,14 +932,20 @@ def _send_vk_message(
         random_id = randint(1, 2_147_483_647)
         chunk_keyboard = (menu_keyboard if has_menu and index == menu_index
                           else keyboard if index == len(chunks) - 1 else None)
-        sent = safe_send(
-            lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
+        def deliver_chunk() -> None:
+            nonlocal main_confirmed
+            message_id = client.send_message(
                 peer_id=peer_id,
                 text=chunk.text,
                 format_data=None if plain else chunk.format_data,
                 keyboard=chunk_keyboard,
                 random_id=random_id,
-            ),
+            )
+            if index < reply_chunk_count and message_id is None:
+                main_confirmed = False
+
+        sent = safe_send(
+            deliver_chunk,
             logger=logger,
             channel="VK",
             target_id=str(peer_id),
@@ -906,6 +962,8 @@ def _send_vk_message(
             return index >= reply_chunk_count, menu_delivered
         if has_menu and index == menu_index:
             menu_delivered = True
+        if index == reply_chunk_count - 1 and main_confirmed and on_confirmed_reply is not None:
+            on_confirmed_reply()
     logger.info(
         "VK response send completed: peer_id=%s duration_seconds=%.3f",
         peer_id,
@@ -949,28 +1007,32 @@ def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
     if len({action.response_id for action in actions}) != 1:
         raise ValueError("VK inline buttons must belong to one response")
     seen_tokens: set[str] = set()
-    rows: list[list[dict[str, object]]] = []
-    for start in range(0, len(actions), 5):
-        row: list[dict[str, object]] = []
-        for action in actions[start:start + 5]:
-            token = action.token
-            if not token:
-                raise ValueError("VK callback token must not be empty")
-            if token in seen_tokens:
-                raise ValueError("VK callback tokens must be unique")
-            seen_tokens.add(token)
-            if not action.label or len(action.label) > 40:
-                raise ValueError("VK callback label must contain 1-40 characters")
-            payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
-            if len(payload.encode("utf-8")) > 255:
-                raise ValueError("VK callback payload must contain at most 255 bytes")
-            row.append({
-                "action": {"type": "callback", "label": action.label, "payload": payload},
-                "color": "secondary",
-            })
-        rows.append(row)
+    rows: dict[int, list[dict[str, object]]] = {}
+    explicit_rows = any(action.row is not None for action in actions)
+    for index, action in enumerate(actions):
+        row_number = action.row if explicit_rows else index // 5
+        if row_number is None or not 0 <= row_number < 6:
+            raise ValueError("VK inline keyboard row must be between 0 and 5")
+        row = rows.setdefault(row_number, [])
+        if len(row) >= 5:
+            raise ValueError("VK inline keyboard supports at most 5 buttons per row")
+        token = action.token
+        if not token:
+            raise ValueError("VK callback token must not be empty")
+        if token in seen_tokens:
+            raise ValueError("VK callback tokens must be unique")
+        seen_tokens.add(token)
+        if not action.label or len(action.label) > 40:
+            raise ValueError("VK callback label must contain 1-40 characters")
+        payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > 255:
+            raise ValueError("VK callback payload must contain at most 255 bytes")
+        row.append({
+            "action": {"type": "callback", "label": action.label, "payload": payload},
+            "color": "secondary",
+        })
     return json.dumps(
-        {"one_time": False, "inline": True, "buttons": rows},
+        {"one_time": False, "inline": True, "buttons": [rows[index] for index in sorted(rows)]},
         ensure_ascii=False,
         separators=(",", ":"),
     )

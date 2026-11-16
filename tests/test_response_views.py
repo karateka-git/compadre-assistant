@@ -37,6 +37,7 @@ class EditableCapability(FakeCapability):
         )))
         self.choices = []
         self.before_reply = None
+        self.cleanup_previous = False
 
     def handle(self, context, event):
         """Выполняет одно действие и возвращает новый вид с оставшимися кнопками."""
@@ -52,7 +53,9 @@ class EditableCapability(FakeCapability):
         return CapabilityResult(IncomingResponse(
             text_content(f"Состояние: {', '.join(self.choices)}. Открыть: /show_view."),
             suggested_actions=remaining,
-            view=ResponseView("panel", update=command != "/show_view", unavailable=text_content(RECOVERY)),
+            view=ResponseView("other" if command == "/show_view" and value == "other" else "panel",
+                              update=command != "/show_view", unavailable=text_content(RECOVERY),
+                              cleanup_previous=self.cleanup_previous),
         ))
 
 
@@ -223,3 +226,35 @@ class ResponseViewsTest(unittest.TestCase):
         self.deliver(self.send("/show_view"), "43")
         self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability,))
         self.assertEqual(response_text(self.send("/adjust_view")), RECOVERY)
+
+    def test_cleanup_defers_inflight_retired_edit_and_keeps_fresh_message(self):
+        """Ожидающий старый edit сам отдаёт ID очистке после запоздалого завершения."""
+        self.capability.cleanup_previous = True
+        opening = self.send("/show_view")
+        self.deliver(opening, "42")
+        old_edit = self.send("/adjust_view").view_delivery
+        self.assertTrue(old_edit.start())
+        failed_replacement = self.send("/show_view other").view_delivery
+        self.assertTrue(failed_replacement.start())
+        self.assertEqual(failed_replacement.finish(None), ())
+
+        replacement = self.send("/show_view other")
+        self.assertTrue(replacement.view_delivery.start())
+        self.assertEqual(replacement.view_delivery.finish("43"), ())
+        self.assertEqual(old_edit.finish("42"), ("42",))
+        self.assertEqual(old_edit.finish("42"), ())
+        self.assertIn("больше недоступна", response_text(self.select(opening.bound_actions[0])))
+        self.assertTrue(self.select(opening.bound_actions[0], source="43").preserve_source_actions)
+
+    def test_cleanup_on_manual_exit_cannot_retire_a_newer_view(self):
+        """Доставка выхода очищает прежний ID только до нового поколения режима."""
+        self.capability.cleanup_previous = True
+        self.deliver(self.send("/show_view"), "42")
+        exited = self.send("/exit")
+        self.assertIsNotNone(exited.retire_views_after_delivery)
+        self.send("/selected")
+        latest = self.send("/show_view")
+        self.assertTrue(latest.view_delivery.start())
+        self.assertEqual(latest.view_delivery.finish("43"), ("42",))
+        self.assertEqual(exited.retire_views_after_delivery(), ())
+        self.assertEqual(self.send("/adjust_view").view_delivery.target_message_id, "43")

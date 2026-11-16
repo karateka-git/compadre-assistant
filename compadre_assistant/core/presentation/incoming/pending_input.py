@@ -26,6 +26,7 @@ class PendingInput:
     retry_command: str | None = None  # Команда владельца для нового ввода после истечения срока.
     accepts_images: bool = False  # Ожидание может принять событие с изображениями.
     cancel_only_menu: bool = False  # Меню ожидания содержит только команду отмены.
+    cancel_return_command: str | None = None  # Ручной переход после явной отмены ввода.
 
 
 class PendingInputStore:
@@ -57,7 +58,7 @@ class PendingInputStore:
         self, chat_key: ReplyAddress, owner_id: str, input_kind: str, *,
         app_user_id: int | None = None, required_mode: str | None = None,
         value_label: str = "значение", retry_command: str | None = None, accepts_images: bool = False,
-        cancel_only_menu: bool = False,
+        cancel_only_menu: bool = False, cancel_return_command: str | None = None,
     ) -> PendingInput:
         """Заменяет ожидание новым ID и сроком ровно десять минут.
 
@@ -71,6 +72,7 @@ class PendingInputStore:
             retry_command: Точная команда владельца для повторного начала ввода.
             accepts_images: Можно ли передать событие с изображениями владельцу.
             cancel_only_menu: Оставить ли в меню только отмену.
+            cancel_return_command: Точная команда возврата после отмены ввода.
 
         Returns:
             Новая неизменяемая запись.
@@ -79,7 +81,7 @@ class PendingInputStore:
             now = self._now()
             pending = PendingInput(chat_key, owner_id, input_kind, uuid4().hex,
                                    now, now + timedelta(minutes=10), app_user_id, value_label, required_mode,
-                                   retry_command, accepts_images, cancel_only_menu)
+                                   retry_command, accepts_images, cancel_only_menu, cancel_return_command)
             with self._entries_lock:
                 self._entries[chat_key] = pending
             return pending
