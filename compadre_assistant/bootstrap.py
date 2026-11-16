@@ -658,7 +658,17 @@ def create_channel_message_processor(
             else:
                 disabled += (AdminCapability.descriptor,)
             if FamilyCapability.descriptor.capability_id in enabled_capabilities:
-                capabilities += (create_family_capability(database_path),)
+                def family_member_names(app_user_ids: tuple[int, ...]) -> Mapping[int, str | None]:
+                    """Передаёт имена профилей, уже проверенных семейным сценарием."""
+                    with connect_database(database_path) as connection:
+                        profiles = SQLiteAppUserRepository(connection)
+                        return {
+                            app_user_id: profile.display_name
+                            for app_user_id in app_user_ids
+                            if (profile := profiles.get_by_id(app_user_id)) is not None
+                        }
+
+                capabilities += (create_family_capability(database_path, family_member_names),)
             else:
                 disabled += (FamilyCapability.descriptor,)
             processor = ChannelMessageProcessor(

@@ -9,6 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_channel_message_processor, create_user_identity_service
+from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
+from compadre_assistant.capabilities.family.domain.invitations import ManageInvitations
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
@@ -54,6 +56,17 @@ class FamilyChannelsTest(unittest.TestCase):
     ) -> IncomingResponse:
         action = next(action for action in response.bound_actions if action.label == label)
         return processor.select_action(self._event(identity, "callback"), action.token)
+
+    def _joined_family(self, processor: ChannelMessageProcessor) -> None:
+        self._send(processor, self.owner_tg, "/family")
+        self._send(processor, self.owner_tg, "/family_create")
+        self._send(processor, self.owner_tg, "Дом")
+        issued = self._send(processor, self.owner_tg, "/family_invite create")
+        code = re.search(r"Код: ([A-Z2-9-]+)", response_text(issued))
+        self.assertIsNotNone(code)
+        self._send(processor, self.guest, "/family")
+        self._send(processor, self.guest, "/family_join")
+        self._send(processor, self.guest, code[1])
 
     def test_family_is_server_opt_in_and_private_only(self) -> None:
         """Семейный вход недоступен без включения, регистрации и личного чата."""
@@ -129,3 +142,66 @@ class FamilyChannelsTest(unittest.TestCase):
             expired = self._send(processor, self.guest, "опоздавший код")
             self.assertIn("/family_join", response_text(expired))
             self.assertNotIn("Код недействителен", response_text(expired))
+
+    def test_members_actions_use_current_chat_and_names(self) -> None:
+        """Участник и владелец видят общий состав, а команда выбора относится к одному чату."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            home = self._send(processor, self.owner_tg, "/family")
+            roster = self._choose(processor, self.owner_tg, home, "Участники")
+            text = response_text(roster)
+            self.assertIn("Оля (владелец, ты)", text)
+            self.assertIn("Илья (участник)", text)
+            reference = re.search(r"Илья \(участник\) — (/family_members [\w-]+)", text)
+            self.assertIsNotNone(reference)
+            command = reference[1]
+
+            self._send(processor, self.owner_vk, "/family")
+            self.assertIn("Выбор участника устарел", response_text(self._send(processor, self.owner_vk, command)))
+            guest_roster = self._send(processor, self.guest, "/family_members")
+            self.assertIn("Оля (владелец)", response_text(guest_roster))
+            self.assertIn("Илья (участник, ты)", response_text(guest_roster))
+            self.assertIn("Илья\nУчастник семьи «Дом»", response_text(self._send(processor, self.owner_tg, command)))
+            self.assertIn("Илья\nУчастник семьи «Дом»", response_text(self._choose(processor, self.owner_tg, roster, "Илья")))
+
+            self._send(processor, self.owner_tg, "/family")
+            self.assertIn("Выбор участника устарел", response_text(self._send(processor, self.owner_tg, command)))
+            self._send(processor, self.other, "/family")
+            other_view = response_text(self._send(processor, self.other, "/family_members"))
+            self.assertNotIn("Илья", other_view)
+
+    def test_members_with_equal_names_have_distinct_references(self) -> None:
+        """Совпадение имени не подменяет участника в ручной команде."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.guest, "/settings")
+            self._send(processor, self.guest, "/name Оля")
+            roster = response_text(self._send(processor, self.owner_tg, "/family_members"))
+            references = re.findall(r"Оля \([^)]+\) — (/family_members [\w-]+)", roster)
+            self.assertEqual(len(set(references)), 2)
+            self.assertIn("Владелец семьи", response_text(self._send(processor, self.owner_tg, references[0])))
+            self.assertIn("Участник семьи", response_text(self._send(processor, self.owner_tg, references[1])))
+
+    def test_members_list_paginates_without_losing_text_navigation(self) -> None:
+        """Кнопка и ручная команда второй страницы открывают оставшихся участников."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            with connect_database(self.database_path) as connection:
+                profiles = create_user_identity_service(connection)
+                owner = profiles.resolve_without_touch(self.owner_tg)
+                repository = SQLiteFamilyRepository(connection)
+                family = repository.find_for_member(owner.id)
+                invitations = ManageInvitations(repository)
+                for number in range(301, 310):
+                    identity = IncomingIdentity("vk", str(number), str(number))
+                    member = profiles.register_with_name(identity, display_name=f"Участник {number}")
+                    invitations.join(member.id, invitations.issue(owner.id, family.id).code)
+            first = self._send(processor, self.owner_tg, "/family_members")
+            self.assertIn("1/2", response_text(first))
+            self.assertIn("/family_members page 2", response_text(first))
+            self.assertNotIn("Участник 309", response_text(first))
+            second = self._choose(processor, self.owner_tg, first, "Следующая страница")
+            self.assertIn("Участник 309", response_text(second))
+            self.assertIn("/family_members page 1", response_text(second))
+            manual = self._send(processor, self.owner_tg, "/family_members page 2")
+            self.assertEqual(response_text(manual), response_text(second))

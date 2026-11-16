@@ -11,6 +11,7 @@ from compadre_assistant.capabilities.family.domain.manage_family import ManageFa
 from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, InvalidFamilyName,
 )
+from compadre_assistant.capabilities.family.presentation.members import MEMBERS_COMMAND, MemberDisplayNames, MembersView
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
@@ -40,6 +41,7 @@ class FamilyCapability(
             CapabilityCommand(_CREATE, (), "создать семью"),
             CapabilityCommand(_JOIN, (), "вступить по коду"),
             CapabilityCommand(_INVITE, (CommandParameter("action", "create", False),), "пригласить в семью"),
+            CapabilityCommand(MEMBERS_COMMAND, (CommandParameter("member", "<member>", False),), "посмотреть участников"),
         )),)),
         enabled_by_default=True,
         display_name="«Семья»",
@@ -48,9 +50,11 @@ class FamilyCapability(
 
     def __init__(
         self, open_scenarios: Callable[[], AbstractContextManager[tuple[ManageFamily, ManageInvitations]]],
+        display_names: MemberDisplayNames,
     ) -> None:
         """Принимает фабрику предметных сценариев на одно событие."""
         self._open_scenarios = open_scenarios
+        self._members_view = MembersView(display_names)
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Открывает начальный экран или показывает текущую семью.
@@ -91,6 +95,8 @@ class FamilyCapability(
                 return CapabilityResult(self._begin_input(context, event, family, command, arguments))
             if command == _INVITE:
                 return CapabilityResult(self._invite(invitations, app_user_id, family, arguments))
+            if command == MEMBERS_COMMAND:
+                return CapabilityResult(self._members(context, event.reply_address, families, family, arguments))
             return CapabilityResult(self._home(family))
 
     def visible_mode_commands(
@@ -98,7 +104,9 @@ class FamilyCapability(
     ) -> frozenset[str]:
         """Показывает команды активного режима по текущему членству профиля."""
         with self._open_scenarios() as (families, _):
-            return frozenset((_CREATE, _JOIN)) if families.find_for_member(app_user.id) is None else frozenset((_INVITE,))
+            if families.find_for_member(app_user.id) is None:
+                return frozenset((_CREATE, _JOIN))
+            return frozenset((_INVITE, MEMBERS_COMMAND))
 
     def list_pending_confirmations(
         self, context: HandlerContext, origin: ReplyAddress,
@@ -185,8 +193,51 @@ class FamilyCapability(
                 "\nВступить по коду: ", code_span(_JOIN),
             ), suggested_actions=(ReplyAction("Создать семью", _CREATE), ReplyAction("Вступить по коду", _JOIN)))
         return IncomingResponse(compose_content(
-            introduction, f"Семья «{family.name}»\n\nПригласить: ", code_span(_INVITE),
-        ), suggested_actions=(ReplyAction("Пригласить", f"{_INVITE} open {family.id}"),))
+            introduction, f"Семья «{family.name}»\n\nУчастники: ", code_span(MEMBERS_COMMAND),
+            "\nПригласить: ", code_span(_INVITE),
+        ), suggested_actions=(
+            ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),
+            ReplyAction("Пригласить", f"{_INVITE} open {family.id}"),
+        ))
+
+    def _members(
+        self, context: HandlerContext, address: ReplyAddress, families: ManageFamily,
+        family: Family | None, arguments: str,
+    ) -> IncomingResponse:
+        if family is None:
+            return self._family_access_ended()
+        parts = arguments.split()
+        page = 1
+        reference = None
+        if len(parts) == 2 and parts[0] == "open":
+            if parts[1] != str(family.id):
+                return self._family_access_ended()
+        elif 2 <= len(parts) <= 3 and parts[0] == "page":
+            if len(parts) == 3 and parts[2] != str(family.id):
+                return self._family_access_ended()
+            number = parts[1]
+            if len(number) > 10 or not number.isascii() or not number.isdecimal() or int(number) < 1:
+                return IncomingResponse(compose_content(
+                    "Укажи номер страницы или отправь ", code_span(MEMBERS_COMMAND), ".",
+                ))
+            page = int(number)
+        elif len(parts) == 1:
+            reference = parts[0]
+        elif parts:
+            return IncomingResponse(compose_content("Посмотреть участников: ", code_span(MEMBERS_COMMAND), "."))
+        try:
+            members = families.list_members(context.app_user.id, family.id)
+        except FamilyAccessEnded:
+            return self._family_access_ended()
+        if reference is None:
+            return self._members_view.show(context, address, family, members, page)
+        return self._members_view.details(context, address, family, members, reference)
+
+    @staticmethod
+    def _family_access_ended() -> IncomingResponse:
+        return IncomingResponse(compose_content(
+            "Доступ к семье завершён. Открой ", code_span("/family"), " для актуальных действий.",
+        ))
 
     @staticmethod
     def _invite(
@@ -198,9 +249,7 @@ class FamilyCapability(
             return IncomingResponse(compose_content("Чтобы пригласить участника, открой ", code_span(_INVITE), "."))
         # Кнопка привязана к семье, показанной в ответе. Ручная команда открывает текущую.
         if family is None or (len(parts) == 2 and parts[1] != str(family.id)):
-            return IncomingResponse(compose_content(
-                "Доступ к семье завершён. Открой ", code_span("/family"), " для актуальных действий.",
-            ))
+            return FamilyCapability._family_access_ended()
         if action == "open":
             return IncomingResponse(compose_content(
                 f"Приглашение в семью «{family.name}». Чтобы получить одноразовый код, отправь ",
@@ -209,9 +258,7 @@ class FamilyCapability(
         try:
             issued = invitations.issue(app_user_id, family.id)
         except FamilyAccessEnded:
-            return IncomingResponse(compose_content(
-                "Доступ к семье завершён. Открой ", code_span("/family"), " для актуальных действий.",
-            ))
+            return FamilyCapability._family_access_ended()
         except InvitationUnavailable:
             return IncomingResponse(compose_content(
                 "Не удалось создать код. Попробуй ещё раз через ", code_span(_INVITE), ".",
