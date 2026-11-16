@@ -1,11 +1,13 @@
 """Проверяет семейный вход через общую маршрутизацию и временную SQLite."""
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
+from threading import Barrier
 import unittest
 from unittest.mock import patch
 
@@ -97,6 +99,19 @@ class FamilyChannelsTest(unittest.TestCase):
             shopping.add(owner.id, family.id, text, actor_joined_at=joined_at)
             if buy:
                 shopping.buy(owner.id, family.id, buy, actor_joined_at=joined_at)
+
+    def _rejoin_guest(self) -> None:
+        with connect_database(self.database_path) as connection:
+            profiles = create_user_identity_service(connection)
+            guest = profiles.resolve_without_touch(self.guest)
+            owner = profiles.resolve_without_touch(self.owner_tg)
+            repository = SQLiteFamilyRepository(connection)
+            family = repository.find_for_member(guest.id)
+            actor = next(member for member in repository.list_members(guest.id, family.id)
+                         if member.app_user_id == guest.id)
+            repository.leave(guest.id, family.id, actor_joined_at=actor.joined_at)
+            invitations = ManageInvitations(repository, clock=lambda: actor.joined_at + timedelta(minutes=1))
+            invitations.join(guest.id, invitations.issue(owner.id, family.id).code)
 
     def test_shopping_section_is_scoped_to_tab_chat_and_revision(self) -> None:
         """Покупки открываются участнику и меняют каталог только одного чата."""
@@ -214,23 +229,75 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             self._send(processor, self.guest, "/family_shopping")
             self._send(processor, self.guest, "/add")
-            with connect_database(self.database_path) as connection:
-                profiles = create_user_identity_service(connection)
-                guest = profiles.resolve_without_touch(self.guest)
-                owner = profiles.resolve_without_touch(self.owner_tg)
-                repository = SQLiteFamilyRepository(connection)
-                family = repository.find_for_member(guest.id)
-                actor = next(member for member in repository.list_members(guest.id, family.id)
-                             if member.app_user_id == guest.id)
-                repository.leave(guest.id, family.id, actor_joined_at=actor.joined_at)
-                invitations = ManageInvitations(repository, clock=lambda: actor.joined_at + timedelta(minutes=1))
-                invitations.join(guest.id, invitations.issue(owner.id, family.id).code)
+            self._rejoin_guest()
             stale = self._send(processor, self.guest, "Старое ожидание")
             self.assertIn("Доступ к семье завершён", response_text(stale))
             stale = self._send(processor, self.guest, "/add Устаревшая команда")
             self.assertIn("Доступ к семье завершён", response_text(stale))
             self.assertIn("Список пуст", response_text(self._send(processor, self.guest, "/family_shopping")))
             self.assertIn("1. Свежая покупка", response_text(self._send(processor, self.guest, "/add Свежая покупка")))
+
+    def test_previous_membership_buttons_and_target_cannot_be_used_after_failed_reopen(self) -> None:
+        """После повторного вступления прежний список недоступен даже при сбое новой отправки."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._seed_shopping("Хлеб")
+            opened = self._send(processor, self.guest, "/family_shopping")
+            self.assertTrue(opened.view_delivery.start())
+            opened.view_delivery.finish("40")
+            selecting = self._send(processor, self.guest, "/buy")
+            self.assertEqual(selecting.view_delivery.target_message_id, "40")
+            self.assertTrue(selecting.view_delivery.start())
+            selecting.view_delivery.finish("40")
+            old_choice = next(action for action in selecting.bound_actions if action.label == "1. Хлеб")
+
+            self._rejoin_guest()
+            before_reopen = self._send(processor, self.guest, "/buy")
+            self.assertIn("Доступ к семье завершён", response_text(before_reopen))
+            reopened = self._send(processor, self.guest, "/family_shopping")
+            self.assertTrue(reopened.view_delivery.start())
+            reopened.view_delivery.finish(None)
+            event = replace(self._event(self.guest, "callback"), callback_message_id="40")
+            stale = processor.select_action(event, old_choice.token)
+            self.assertIn("Открой список", response_text(stale))
+            self.assertIsNone(stale.view_delivery)
+
+            recovery = self._send(processor, self.guest, "/buy")
+            self.assertIn("Не удалось обновить список", response_text(recovery))
+            self.assertIsNone(recovery.view_delivery)
+            latest = self._send(processor, self.guest, "/family_shopping")
+            self.assertIn("Нужно купить\n1. Хлеб", response_text(latest))
+            self.assertNotIn("Купленные товары", response_text(latest))
+
+    def test_concurrent_channel_choices_of_same_item_apply_once(self) -> None:
+        """Участники Telegram и VK получают один результат покупки и независимые edit-цели."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._seed_shopping("Хлеб")
+            choices = []
+            for identity, message_id in ((self.owner_tg, "41"), (self.guest, "42")):
+                opened = self._send(processor, identity, "/family_shopping")
+                self.assertTrue(opened.view_delivery.start())
+                opened.view_delivery.finish(message_id)
+                selecting = self._send(processor, identity, "/buy")
+                self.assertTrue(selecting.view_delivery.start())
+                selecting.view_delivery.finish(message_id)
+                choice = next(action for action in selecting.bound_actions if action.label == "1. Хлеб")
+                event = replace(self._event(identity, "callback"), callback_message_id=message_id)
+                choices.append((event, choice.token))
+
+            ready = Barrier(2)
+
+            def choose(choice: tuple[IncomingEvent, str]) -> IncomingResponse:
+                ready.wait(timeout=5)
+                return processor.select_action(*choice)
+
+            with ThreadPoolExecutor(max_workers=2) as workers:
+                results = tuple(workers.map(choose, choices))
+            self.assertEqual([result.view_delivery.target_message_id for result in results], ["41", "42"])
+            for result in results:
+                self.assertIn("Купленные товары\n1. Хлеб", response_text(result))
+            self.assertEqual(sum("№1 уже куплен" in response_text(result) for result in results), 1)
 
     def test_long_batch_report_keeps_editable_list_and_all_notices(self) -> None:
         """Длинный результат читается по страницам, а список остаётся целым сообщением."""
