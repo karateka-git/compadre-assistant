@@ -52,6 +52,7 @@ class CommandSuggestion:
 
     command: str
     description: str
+    label: str | None = None  # Отображаемая подпись для канала с текстовыми кнопками.
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +86,7 @@ class ReplyAction:
 
     label: str
     command: str
+    row: int | None = None  # Номер ряда, если ответу нужна явная раскладка.
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +129,7 @@ class BoundReplyAction:
     label: str
     token: str
     response_id: str
+    row: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +199,9 @@ class IncomingResponse:
     preserve_source_actions: bool = False
     view: ResponseView | None = None  # Намерение владельца ответа до привязки.
     view_delivery: ResponseViewDelivery | None = field(default=None, repr=False, compare=False)
+    # Для канала с одной клавиатурой «prefer» доставляет меню вместе с ответом,
+    # а «preserve» оставляет нижнее меню и размещает действия под ответом.
+    command_menu_delivery: Literal["prefer", "preserve"] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +255,27 @@ class ContextualCommandQueryPort(Protocol):
         Returns:
             Имена команд из статического каталога возможности. Пустое
             множество оставляет только общие команды и другие доступные входы.
+        """
+        ...
+
+
+@runtime_checkable
+class ContextualCommandMenuPort(Protocol):
+    """Проецирует пункты нижнего меню из контекста активной возможности."""
+
+    def contextual_command_menu(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
+    ) -> tuple[CommandSuggestion, ...] | None:
+        """Возвращает точные команды меню для проверенного профиля и чата.
+
+        Args:
+            app_user: Профиль с доступом к активному режиму.
+            address: Личный чат с активным режимом.
+            mode_revision: Ревизия режима в этом чате.
+            pending: Действующее и применимое ожидание, если есть.
+
+        Returns:
+            Пункты меню или None для стандартного меню канала.
         """
         ...
 

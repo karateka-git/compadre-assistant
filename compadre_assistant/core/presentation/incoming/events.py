@@ -71,6 +71,8 @@ class IncomingEvent:
         images: Ленивые ссылки на самостоятельные фото в порядке сообщения.
         callback_message_id: ID ответа бота, к которому прикреплена нажатая кнопка.
             Отдельный от ID события нажатия в message_id.
+        menu_choice: Канал пометил текст как подпись кнопки нижнего меню.
+            Ядро проверяет подпись по актуальному меню перед исполнением.
 
     Raises:
         ValueError: Если обязательное поле пусто.
@@ -85,6 +87,7 @@ class IncomingEvent:
     display_name: str | None = None
     images: tuple[ImageAttachment, ...] = ()
     callback_message_id: str | None = None
+    menu_choice: bool = False
 
     @property
     def reply_address(self) -> ReplyAddress:

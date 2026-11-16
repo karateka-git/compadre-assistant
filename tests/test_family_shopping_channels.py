@@ -229,6 +229,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.messages = count(42)
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.last_cmid = 0
+        self.sent_messages: dict[int, dict[str, str | int]] = {}
         self.enterContext(patch("compadre_assistant.presentation.vk.bot.urlopen", side_effect=self._fake_api))
 
     def _fake_api(self, request, *, timeout):
@@ -236,11 +237,15 @@ class VkFamilyShoppingTest(unittest.TestCase):
         params = {key: value[0] for key, value in parse_qs(request.data.decode()).items()}
         self.calls.append((method, params))
         if method == "messages.send":
+            self.last_cmid = next(self.messages)
+            message_id = 9000 + self.last_cmid
+            self.sent_messages[self.last_cmid] = {"id": message_id, "text": params["message"]}
             if "peer_ids" in params:
-                self.last_cmid = next(self.messages)
-                response = [{"peer_id": 201, "message_id": 9000 + self.last_cmid, "conversation_message_id": self.last_cmid}]
+                response = [{"peer_id": 201, "message_id": message_id, "conversation_message_id": self.last_cmid}]
             else:
-                response = 9001
+                response = message_id
+        elif method == "messages.getByConversationMessageId":
+            response = {"items": [self.sent_messages[int(params["conversation_message_ids"])]]}
         elif method in ("messages.edit", "messages.sendMessageEventAnswer"):
             response = 1
         else:
@@ -253,9 +258,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
             logger=self.logger, menu_update_handler=self.menu,
         )
 
-    def _send(self, text: str) -> None:
+    def _send(self, text: str, *, payload: str | dict | None = None, peer_id: int = 201) -> None:
         self._handle({"type": "message_new", "object": {"message": {
-            "peer_id": 201, "from_id": 201, "id": next(self.updates), "text": text,
+            "peer_id": peer_id, "from_id": 201, "id": next(self.updates), "text": text, "payload": payload,
         }}})
 
     def _press(self, token: str, cmid: int) -> None:
@@ -267,13 +272,28 @@ class VkFamilyShoppingTest(unittest.TestCase):
     def _latest_edit(self) -> dict[str, str]:
         return next(params for method, params in reversed(self.calls) if method == "messages.edit")
 
-    def _visible_menu(self) -> set[str]:
+    def _visible_menu(self) -> dict[str, str | None]:
         for method, params in reversed(self.calls):
             if method == "messages.send" and (serialized := params.get("keyboard")):
                 keyboard = json.loads(serialized)
                 if not keyboard["inline"]:
-                    return {button["action"]["label"] for row in keyboard["buttons"] for button in row}
+                    return {button["action"]["label"]: button["action"].get("payload")
+                            for row in keyboard["buttons"] for button in row}
         self.fail("Нижнее меню VK не было опубликовано")
+
+    def _menu_press(self, label: str) -> None:
+        self._send(label, payload=self._visible_menu()[label])
+
+    def _single_reply(self, action, text: str, *, labels: list[str] | None = None) -> dict[str, str]:
+        previous = len(self.calls)
+        action()
+        sent = [params for method, params in self.calls[previous:] if method == "messages.send"]
+        self.assertEqual(len(sent), 1, self.calls[previous:])
+        self.assertIn(text, sent[0]["message"])
+        if labels is not None:
+            self.assertFalse(json.loads(sent[0]["keyboard"])["inline"])
+            self.assertEqual(list(self._visible_menu()), labels)
+        return sent[0]
 
     def _actions(self, params: dict[str, str]) -> dict[str, str]:
         keyboard = json.loads(params["keyboard"])
@@ -288,47 +308,89 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._send("/family")
         self._send("/family_create")
         self._send("Дом")
-        self.assertFalse({"/add", "/buy", "/delete"} & self._visible_menu())
-        self._send("/family_shopping")
-        self.assertTrue({"/add", "/buy", "/delete"} <= self._visible_menu())
-        self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 9))]))
-        cmid = self.last_cmid
-        published = next(params for method, params in reversed(self.calls)
-                         if method == "messages.send" and "peer_ids" in params)
-        self.assertEqual(list(self._actions(published)), ["Следующая страница", "Назад"])
+        self._menu_press("Покупки")
+        self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 11))]))
+        self._single_reply(lambda: self._menu_press("Следующая страница"), "2/2",
+                           labels=["Добавить", "Купить", "Удалить", "Предыдущая страница", "Назад"])
 
-        self._send("/buy")
-        first = self._latest_edit()
+        menu_before_selection = self._visible_menu()
+        first = self._single_reply(lambda: self._menu_press("Купить"), "1/3")
+        cmid = self.last_cmid
         buttons = self._actions(first)
-        self.assertIn("1/2", first["message"])
-        self.assertIn("Следующая страница", buttons)
+        self.assertEqual(self._visible_menu(), menu_before_selection)
+        self.assertIn("→", buttons)
         self.assertTrue(next(label for label in buttons if label.startswith("1. ")).endswith("…"))
         self.assertIn("/family_shopping item 1", first["message"])
-        self._press(buttons["Следующая страница"], cmid)
+        self._press(buttons["→"], cmid)
         second = self._latest_edit()
-        self.assertIn("2/2", second["message"])
+        self.assertIn("2/3", second["message"])
+        rows = [[button["action"]["label"] for button in row] for row in json.loads(second["keyboard"])["buttons"]]
+        self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [["←", "→"], ["Назад"]])
         self._send("8")
         bought = self._latest_edit()
         self.assertNotIn("8. Товар 8", self._actions(bought))
         self.assertNotIn("Купленные товары", bought["message"])
-        self._press(self._actions(bought)["Назад"], cmid)
-        self.assertIn("Купленные товары\n1. Товар 8", self._latest_edit()["message"])
-        self._press(self._actions(self._latest_edit())["Очистить купленное"], cmid)
-        cleared = self._latest_edit()
+        self.assertEqual(self._visible_menu(), menu_before_selection)
+        self._single_reply(lambda: self._press(self._actions(bought)["Назад"], cmid), "Купленные товары\n1. Товар 8",
+                           labels=["Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Назад"])
+        cleared = self._single_reply(lambda: self._menu_press("Очистить купленное"), "Список покупок")
         self.assertNotIn("Купленные товары", cleared["message"])
-        self.assertNotIn("Очистить купленное", self._actions(cleared))
-
-        self._send("/delete")
-        self._press(self._actions(self._latest_edit())["2. Товар 2"], cmid)
-        self.assertNotIn("Товар 2", self._latest_edit()["message"])
+        self.assertNotIn("Очистить купленное", self._visible_menu())
         self.assertTrue(all(params["cmid"] == str(cmid) for method, params in self.calls if method == "messages.edit"))
-        self._send("/delete 4")
-        self.assertEqual(self.last_cmid, cmid)
+
+        delete = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
+        delete_cmid = self.last_cmid
+        self.assertNotEqual(delete_cmid, cmid)
+        before = len(self.calls)
+        self._press(self._actions(delete)["2. Товар 2"], delete_cmid)
+        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.edit"])
+        self.assertEqual(self._latest_edit()["cmid"], str(delete_cmid))
+        self.assertNotIn("Товар 2", self._latest_edit()["message"])
+        self._single_reply(lambda: self._send("/delete 4"), "/delete без аргументов")
         self._send("/delete")
         self._send("3")
-        self._send("/family_shopping")
-        self.assertNotEqual(self.last_cmid, cmid)
-        published = next(params for method, params in reversed(self.calls)
-                         if method == "messages.send" and "peer_ids" in params)
+        self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
+        published = self._single_reply(lambda: self._send("/family_shopping"), "Список покупок")
         self.assertIn("3. Товар 5", published["message"])
         self.assertNotIn("Товар 4", published["message"])
+
+    def test_family_menu_and_pending_add_use_one_reply(self) -> None:
+        """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
+        no_family = ["Создать семью", "Вступить по коду"]
+        home = ["Покупки", "Участники", "Пригласить", "Выйти из режима"]
+        shopping = ["Добавить", "Купить", "Удалить", "Назад"]
+        self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
+        self._single_reply(lambda: self._menu_press("Создать семью"), "Пришли название семьи", labels=["Отмена"])
+        self._single_reply(lambda: self._send("Дом"), "Семья «Дом»", labels=home)
+        roster = self._single_reply(lambda: self._menu_press("Участники"), "Участники семьи «Дом»")
+        self.assertEqual(self._visible_menu().keys(), set(home))
+        self.assertIn("Закрыть семью", self._actions(roster))
+        self._single_reply(lambda: self._menu_press("Пригласить"), "одноразовый код")
+        self._single_reply(lambda: self._menu_press("Покупки"), "Список пуст", labels=shopping)
+        empty = self._single_reply(lambda: self._menu_press("Купить"), "Добавь покупку через /add")
+        self.assertEqual(list(self._actions(empty)), ["Назад"])
+        self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
+        self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
+        self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=shopping)
+        self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»", labels=home)
+        confirmation = self._single_reply(lambda: self._send("/family_close"), "Подтверждение действует")
+        self.assertEqual(list(self._actions(confirmation)), ["Закрыть семью", "Отменить"])
+        self._single_reply(lambda: self._press(self._actions(confirmation)["Отменить"], self.last_cmid), "Действие отменено")
+        self._single_reply(lambda: self._menu_press("Выйти из режима"), "Режим этого чата завершён")
+        self._single_reply(lambda: self._send("/family"), "Семья «Дом»", labels=home)
+
+    def test_marked_labels_are_exact_private_and_never_become_pending_input(self) -> None:
+        """Меню принимает только точный актуальный ярлык и игнорирует команды из payload."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        marker = self._visible_menu()["Покупки"]
+        self._single_reply(lambda: self._send("Покупки", payload=marker, peer_id=2_000_000_001), "кнопка меню устарела")
+        self._send("Покупки", payload=json.loads(marker))
+        self._menu_press("Добавить")
+        for label in ("Покупки", "Отмена ", "/exit"):
+            self._single_reply(lambda: self._send(label, payload=marker), "кнопка меню устарела")
+        self._send("Отмена", payload={"command": "/exit"})
+        saved = self._single_reply(lambda: self._send("/family_shopping"), "1. Отмена")
+        self.assertNotIn("Покупки\n", saved["message"])
+        self.assertNotIn("2.", saved["message"])

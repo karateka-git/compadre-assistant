@@ -147,13 +147,16 @@ class FamilyChannelsTest(unittest.TestCase):
             for identity in (self.owner_tg, self.owner_vk):
                 with self.subTest(channel=identity.channel):
                     home = self._send(processor, identity, "/family")
-                    roster = self._choose(processor, identity, home, "Участники")
+                    roster = (self._choose(processor, identity, home, "Участники") if identity.channel == "telegram"
+                              else self._send(processor, identity, "/family_members"))
                     member = self._choose(processor, identity, roster, "Илья")
                     roster = self._choose(processor, identity, member, "Назад")
                     self.assertIn("Участники семьи «Дом»", response_text(roster))
                     home = self._choose(processor, identity, roster, "Назад")
                     self.assertIn("Семья «Дом»", response_text(home))
-                    invitation = self._choose(processor, identity, home, "Пригласить")
+                    invitation = (self._choose(processor, identity, home, "Пригласить")
+                                  if identity.channel == "telegram"
+                                  else self._send(processor, identity, "/family_invite"))
                     issued = self._choose(processor, identity, invitation, "Создать код")
                     invitation = self._choose(processor, identity, issued, "Назад")
                     self.assertIn("Чтобы получить одноразовый код", response_text(invitation))
@@ -165,18 +168,19 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             long_title = "<пакет>&" * 20
             self._seed_shopping("\n".join([long_title, "Хлеб", "Персик", "Яблоко", "Молоко", "Лук"]), buy=(2,))
-            opened = self._send(processor, self.guest, "/family_shopping")
+            opened = self._send(processor, self.owner_tg, "/family_shopping")
             first_page = response_text(opened)
             self.assertIn("1/2", first_page)
             self.assertIn("Нужно купить", first_page)
             self.assertIn("Купленные товары", first_page)
             self.assertIn("/family_shopping item 1", first_page)
             self.assertNotIn(long_title, first_page)
-            self.assertEqual(response_text(self._send(processor, self.guest, "/family_shopping item 1")), f"1. {long_title}")
+            self.assertEqual(response_text(self._send(processor, self.owner_tg, "/family_shopping item 1")),
+                             f"1. {long_title}")
             self.assertTrue(opened.view_delivery.start())
             opened.view_delivery.finish("4")
             action = next(action for action in opened.bound_actions if action.label == "Следующая страница")
-            event = replace(self._event(self.guest, "callback"), callback_message_id="4")
+            event = replace(self._event(self.owner_tg, "callback"), callback_message_id="4")
             updated = processor.select_action(event, action.token)
             self.assertIn("2/2", response_text(updated))
             self.assertIn("1. Хлеб", response_text(updated))
@@ -224,7 +228,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("3. Чай\n4. Молоко, 2 л", response_text(added))
             self.assertIsNone(added.view_delivery.target_message_id)
             self._deliver(added, "101")
-            self._deliver(self._send(processor, self.guest, "/family_shopping"), "102")
+            self._send(processor, self.guest, "/family_shopping")
             for command in ("/buy 2", "/delete 2"):
                 self.assertIn("без аргументов", response_text(self._send(processor, self.guest, command)))
             buying = self._send(processor, self.guest, "/buy")
@@ -269,11 +273,9 @@ class FamilyChannelsTest(unittest.TestCase):
         with self._runtime("family") as processor:
             self._joined_family(processor)
             self._seed_shopping("Хлеб")
-            opened = self._send(processor, self.guest, "/family_shopping")
-            self.assertTrue(opened.view_delivery.start())
-            opened.view_delivery.finish("40")
+            self.assertIsNone(self._send(processor, self.guest, "/family_shopping").view_delivery)
             selecting = self._send(processor, self.guest, "/buy")
-            self.assertEqual(selecting.view_delivery.target_message_id, "40")
+            self.assertIsNone(selecting.view_delivery.target_message_id)
             self.assertTrue(selecting.view_delivery.start())
             selecting.view_delivery.finish("40")
             old_choice = next(action for action in selecting.bound_actions if action.label == "1. Хлеб")
@@ -281,7 +283,9 @@ class FamilyChannelsTest(unittest.TestCase):
             self._rejoin_guest()
             before_reopen = self._send(processor, self.guest, "/buy")
             self.assertIn("Доступ к семье завершён", response_text(before_reopen))
-            reopened = self._send(processor, self.guest, "/family_shopping")
+            self._send(processor, self.guest, "/family_shopping")
+            reopened = self._send(processor, self.guest, "/buy")
+            self.assertIsNone(reopened.view_delivery.target_message_id)
             self.assertTrue(reopened.view_delivery.start())
             reopened.view_delivery.finish(None)
             event = replace(self._event(self.guest, "callback"), callback_message_id="40")
@@ -304,11 +308,12 @@ class FamilyChannelsTest(unittest.TestCase):
             choices = []
             for identity, message_id in ((self.owner_tg, "41"), (self.guest, "42")):
                 opened = self._send(processor, identity, "/family_shopping")
-                self.assertTrue(opened.view_delivery.start())
-                opened.view_delivery.finish(message_id)
+                if identity.channel == "telegram":
+                    self._deliver(opened, message_id)
                 selecting = self._send(processor, identity, "/buy")
-                self.assertTrue(selecting.view_delivery.start())
-                selecting.view_delivery.finish(message_id)
+                self.assertEqual(selecting.view_delivery.target_message_id,
+                                 message_id if identity.channel == "telegram" else None)
+                self._deliver(selecting, message_id)
                 choice = next(action for action in selecting.bound_actions if action.label == "1. Хлеб")
                 event = replace(self._event(identity, "callback"), callback_message_id=message_id)
                 choices.append((event, choice.token))
@@ -331,12 +336,12 @@ class FamilyChannelsTest(unittest.TestCase):
         with self._runtime("family") as processor:
             self._joined_family(processor)
             self._seed_shopping("Хлеб\nМолоко")
-            self._deliver(self._send(processor, self.guest, "/family_shopping"), "100")
+            self._send(processor, self.guest, "/family_shopping")
             buy = self._send(processor, self.guest, "/buy")
             self.assertTrue(buy.view_delivery.start())
             self.assertIn("Список для выбора недоступен", response_text(self._send(processor, self.guest, "1")))
 
-            # Первое редактирование ещё идёт, поэтому новое представление не допускается.
+            # Первая публикация ещё идёт, поэтому новое представление не допускается.
             skipped = self._send(processor, self.guest, "/delete")
             self.assertIsNone(skipped.view_delivery)
             buy.view_delivery.finish("100")
@@ -356,7 +361,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             self._seed_shopping("Хлеб\nМолоко\nСыр")
             self._deliver(self._send(processor, self.owner_tg, "/family_shopping"), "100")
-            self._deliver(self._send(processor, self.guest, "/family_shopping"), "101")
+            self._send(processor, self.guest, "/family_shopping")
             self._deliver(self._send(processor, self.owner_tg, "/buy"), "100")
             self._deliver(self._send(processor, self.guest, "/delete"), "101")
             self._deliver(self._send(processor, self.guest, "1"), "101")

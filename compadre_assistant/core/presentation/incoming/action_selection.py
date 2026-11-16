@@ -190,6 +190,7 @@ class ResponseActionStore:
     def register(self, event: IncomingEvent, context: ActionContext,
                  actions: tuple[tuple[str, str, PendingConfirmation | None, ConfirmationAction | None], ...],
                  *, view: PreparedResponseView | None = None,
+                 rows: dict[str, int] | None = None,
                  ) -> tuple[BoundReplyAction, ...]:
         """Связывает действия одного ответа с непрозрачными случайными токенами.
 
@@ -198,6 +199,7 @@ class ResponseActionStore:
             context: Снимок допуска именно этого ответа.
             actions: Подпись, точная команда и необязательное адресное ожидание.
             view: Поколение управляемого ответа, требующее подтверждения доставки.
+            rows: Явные ряды кнопок по их точным командам.
 
         Returns:
             Контракт сериализации адаптером; команда в callback не передаётся.
@@ -216,7 +218,7 @@ class ResponseActionStore:
                     response_id, event.reply_address, event.external_user_id, context,
                     command, self._clock() + self._ttl, confirmation, action, view,
                 )
-                result.append(BoundReplyAction(label, token, response_id))
+                result.append(BoundReplyAction(label, token, response_id, rows.get(command) if rows else None))
             return tuple(result)
 
     def claim(

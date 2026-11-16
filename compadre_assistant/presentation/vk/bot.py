@@ -543,6 +543,7 @@ def _handle_update(
         text=text,
         external_user_id=str(from_id),
         images=images,
+        menu_choice=not images and _is_vk_menu_choice(message.get("payload")),
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(
@@ -568,6 +569,16 @@ def _handle_update(
         logger=logger,
         deliver_menu=_menu_delivery_for_event(deliver_menu, incoming_message),
     )
+
+
+def _is_vk_menu_choice(payload: object) -> bool:
+    """Распознаёт маркер текстовой кнопки, который не содержит команд."""
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload)
+        except ValueError:
+            return False
+    return isinstance(payload, dict) and set(payload) == {"menu"} and payload["menu"] is True
 
 
 def _handle_message_event(
@@ -665,10 +676,13 @@ def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
     for start in range(0, len(items), columns):
         row: list[dict[str, object]] = []
         for item in items[start:start + columns]:
-            label = item.command
+            label = item.label if item.label is not None else item.command
             if not label or len(label) > 40:
-                raise ValueError("VK text button command must contain 1-40 characters")
-            row.append({"action": {"type": "text", "label": label}, "color": "secondary"})
+                raise ValueError("VK text button label must contain 1-40 characters")
+            action = {"type": "text", "label": label}
+            if item.label is not None:
+                action["payload"] = '{"menu":true}'
+            row.append({"action": action, "color": "secondary"})
         rows.append(row)
     return json.dumps(
         {"one_time": False, "inline": False, "buttons": rows},
@@ -781,7 +795,8 @@ def _safe_send_vk_message(
         )
 
     try:
-        delivered = deliver_menu(send) if deliver_menu is not None else send(None)[0]
+        delivered = (deliver_menu(send) if deliver_menu is not None and response.command_menu_delivery != "preserve"
+                     else send(None)[0])
     finally:
         if response.after_delivery is not None:
             response.after_delivery(delivered)
@@ -860,7 +875,9 @@ def _send_vk_message(
 ) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
-    keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+    keyboard = None if menu_keyboard is not None and response.command_menu_delivery == "prefer" else (
+        _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+    )
     # VK принимает одну клавиатуру на сообщение. У короткого ответа
     # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.
     reply_chunk_count = len(chunks)
@@ -949,28 +966,32 @@ def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
     if len({action.response_id for action in actions}) != 1:
         raise ValueError("VK inline buttons must belong to one response")
     seen_tokens: set[str] = set()
-    rows: list[list[dict[str, object]]] = []
-    for start in range(0, len(actions), 5):
-        row: list[dict[str, object]] = []
-        for action in actions[start:start + 5]:
-            token = action.token
-            if not token:
-                raise ValueError("VK callback token must not be empty")
-            if token in seen_tokens:
-                raise ValueError("VK callback tokens must be unique")
-            seen_tokens.add(token)
-            if not action.label or len(action.label) > 40:
-                raise ValueError("VK callback label must contain 1-40 characters")
-            payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
-            if len(payload.encode("utf-8")) > 255:
-                raise ValueError("VK callback payload must contain at most 255 bytes")
-            row.append({
-                "action": {"type": "callback", "label": action.label, "payload": payload},
-                "color": "secondary",
-            })
-        rows.append(row)
+    rows: dict[int, list[dict[str, object]]] = {}
+    explicit_rows = any(action.row is not None for action in actions)
+    for index, action in enumerate(actions):
+        row_number = action.row if explicit_rows else index // 5
+        if row_number is None or not 0 <= row_number < 6:
+            raise ValueError("VK inline keyboard row must be between 0 and 5")
+        row = rows.setdefault(row_number, [])
+        if len(row) >= 5:
+            raise ValueError("VK inline keyboard supports at most 5 buttons per row")
+        token = action.token
+        if not token:
+            raise ValueError("VK callback token must not be empty")
+        if token in seen_tokens:
+            raise ValueError("VK callback tokens must be unique")
+        seen_tokens.add(token)
+        if not action.label or len(action.label) > 40:
+            raise ValueError("VK callback label must contain 1-40 characters")
+        payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
+        if len(payload.encode("utf-8")) > 255:
+            raise ValueError("VK callback payload must contain at most 255 bytes")
+        row.append({
+            "action": {"type": "callback", "label": action.label, "payload": payload},
+            "color": "secondary",
+        })
     return json.dumps(
-        {"one_time": False, "inline": True, "buttons": rows},
+        {"one_time": False, "inline": True, "buttons": [rows[index] for index in sorted(rows)]},
         ensure_ascii=False,
         separators=(",", ":"),
     )
