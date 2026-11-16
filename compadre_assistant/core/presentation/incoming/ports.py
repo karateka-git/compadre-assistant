@@ -139,11 +139,14 @@ class ResponseView:
             представления, с кнопки только сообщение, на котором её нажали.
         unavailable: Ответ для случая, когда обновление не состоялось.
             Владелец указывает, как заново открыть представление.
+        on_delivered: Уведомление владельца после подтверждённой доставки
+            сообщения. Порядок предметных состояний контролирует владелец.
     """
 
     key: str
     update: bool = False
     unavailable: MessageContent | None = None
+    on_delivered: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         """Требует устойчивое имя и подсказку для недоступного обновления."""

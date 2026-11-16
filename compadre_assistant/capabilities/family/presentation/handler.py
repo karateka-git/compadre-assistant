@@ -14,7 +14,7 @@ from compadre_assistant.capabilities.family.domain.membership import (
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
 from compadre_assistant.capabilities.family.domain.shopping import (
-    InvalidItemNumbers, InvalidShoppingNames, ItemNumbersExhausted, ManageShopping,
+    InvalidShoppingNames, ItemNumbersExhausted, ManageShopping, ShoppingItem,
 )
 from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
 from compadre_assistant.capabilities.family.presentation.members import (
@@ -22,8 +22,8 @@ from compadre_assistant.capabilities.family.presentation.members import (
 )
 from compadre_assistant.capabilities.family.presentation.shopping import (
     ADD_COMMAND, BUY_COMMAND, CLEAR_BOUGHT_COMMAND, DELETE_COMMAND, SHOPPING_COMMAND,
-    ShoppingSection, ShoppingSections, ShoppingSelection, needs_notice_pages, parse_item_number, shopping_list,
-    shopping_notices, shopping_report,
+    ShoppingChoice, ShoppingSection, ShoppingSections, ShoppingSelection, parse_item_number, shopping_list,
+    shopping_notice, shopping_page,
 )
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -64,8 +64,8 @@ class FamilyCapability(
             CapabilityCommand(SHOPPING_COMMAND, (CommandParameter("view", "<view>", False),), "открыть покупки"),
         )), HelpSection("Покупки", (
             CapabilityCommand(ADD_COMMAND, (CommandParameter("items", "<items>", False),), "добавить покупки"),
-            CapabilityCommand(BUY_COMMAND, (CommandParameter("numbers", "<numbers>", False),), "отметить купленными"),
-            CapabilityCommand(DELETE_COMMAND, (CommandParameter("numbers", "<numbers>", False),), "удалить из списка"),
+            CapabilityCommand(BUY_COMMAND, (), "отметить купленными"),
+            CapabilityCommand(DELETE_COMMAND, (), "удалить из списка"),
             CapabilityCommand(CLEAR_BOUGHT_COMMAND, (), "очистить купленное"),
         )))),
         enabled_by_default=True,
@@ -312,7 +312,7 @@ class FamilyCapability(
     def continue_input(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
     ) -> PendingInputResult:
-        """Принимает название, код или покупки в чате, где начато ожидание.
+        """Принимает название, код, список покупок или номер из показанного списка.
 
         Args:
             context: Повторно допущенный профиль.
@@ -326,6 +326,8 @@ class FamilyCapability(
         command = pending.input_kind
         if command == ADD_COMMAND:
             return self._continue_shopping_add(context, pending, event)
+        if command in (BUY_COMMAND, DELETE_COMMAND):
+            return self._continue_shopping_choice(context, pending, event)
         if command not in (_CREATE, _JOIN):
             return PendingInputResult(IncomingResponse(compose_content(
                 "Открой ", code_span("/family"), " и начни действие заново.",
@@ -443,7 +445,7 @@ class FamilyCapability(
             if parts == ["back"]:
                 items = shopping.list_items(app_user_id, family.id, actor_joined_at=current.joined_at)
                 return shopping_list(items, current, update=True)
-            if len(parts) != 2 or parts[0] not in ("page", "item", "result", *ShoppingSelection):
+            if len(parts) != 2 or parts[0] not in ("page", "item", *ShoppingSelection):
                 return self._open_shopping_hint()
             number = parse_item_number(parts[1])
             if number is None:
@@ -451,14 +453,10 @@ class FamilyCapability(
             items = shopping.list_items(app_user_id, family.id, actor_joined_at=current.joined_at)
         except FamilyAccessEnded:
             return self._family_access_ended()
-        if parts[0] == "result":
-            if not current.report:
-                return IncomingResponse(text_content("В этом разделе нет подробного результата операции."))
-            return shopping_report(current.report, number)
         if parts[0] == "page":
             return shopping_list(items, current, number)
         if parts[0] in tuple(ShoppingSelection):
-            return shopping_list(items, current, number, update=True, selection=ShoppingSelection(parts[0]))
+            return self._begin_shopping_choice(context, address, current, items, ShoppingSelection(parts[0]), number)
         item = next((item for item in items if item.number == number), None)
         if item is None:
             return IncomingResponse(text_content(f"№{number} нет в списке."))
@@ -481,18 +479,23 @@ class FamilyCapability(
             case ["clear", _]:
                 items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=joined_at)
                 return shopping_list(items, section, page, update=True)
-            case ["pick", _, "buy" | "delete" as view, value] if (number := parse_item_number(value)) is not None:
+            case ["pick", _, "buy" | "delete" as view, position_text, value]:
+                number = parse_item_number(value)
+                position = parse_item_number(position_text)
+                if number is None or position is None:
+                    return self._open_shopping_hint()
                 selection = ShoppingSelection(view)
                 change = shopping.buy if selection == ShoppingSelection.BUY else shopping.delete
                 result = change(app_user_id, family_id, (number,), actor_joined_at=joined_at)
-                return shopping_list(
-                    result.items, section, page, update=True, selection=selection,
-                    notices=shopping_notices(result.changes),
+                return self._begin_shopping_choice(
+                    context, address, section, result.items, selection, page,
+                    notice=shopping_notice(result.changes[0], position),
                 )
             case ["show", _, "page" | "buy" | "delete" as view]:
-                selection = None if view == "page" else ShoppingSelection(view)
                 items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
-                return shopping_list(items, section, page, update=True, selection=selection)
+                if view == "page":
+                    return shopping_list(items, section, page, update=True)
+                return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), page)
             case _:
                 return self._open_shopping_hint()
 
@@ -517,24 +520,83 @@ class FamilyCapability(
             items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=section.joined_at)
             return shopping_list(items, section)
 
-        if not arguments:
-            selection = ShoppingSelection.BUY if command == BUY_COMMAND else ShoppingSelection.DELETE
-            items = shopping.list_items(app_user_id, family_id, actor_joined_at=section.joined_at)
-            return shopping_list(items, section, update=True, selection=selection)
-
-        try:
-            numbers = tuple(parse_item_number(value) or 0 for value in arguments.split())
-            change = shopping.buy if command == BUY_COMMAND else shopping.delete
-            result = change(app_user_id, family_id, numbers, actor_joined_at=section.joined_at)
-        except InvalidItemNumbers:
+        if arguments:
             return IncomingResponse(compose_content(
-                "Укажи один или несколько положительных номеров через пробел. Например, ",
-                code_span(f"{command} 1 2"), ".",
+                "Отправь ", code_span(command), " без аргументов. Затем выбери товар или пришли его номер.",
             ))
-        notices = shopping_notices(result.changes)
-        if needs_notice_pages(notices):
-            self._shopping_sections.replace(app_user_id, address, section, replace(section, report=notices))
-        return shopping_list(result.items, section, notices=notices)
+        selection = ShoppingSelection.BUY if command == BUY_COMMAND else ShoppingSelection.DELETE
+        items = shopping.list_items(app_user_id, family_id, actor_joined_at=section.joined_at)
+        return self._begin_shopping_choice(context, address, section, items, selection, 1)
+
+    def _begin_shopping_choice(
+        self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection, items: tuple[ShoppingItem, ...],
+        selection: ShoppingSelection, page: int, *, notice: str | None = None,
+    ) -> IncomingResponse:
+        page, _, visible = shopping_page(items, page, selecting=True)
+        if not visible:
+            return shopping_list(items, section, page, update=True, selection=selection, notice=notice)
+        pending_inputs = context.pending_inputs
+        if pending_inputs is None:
+            return self._open_shopping_hint()
+        app_user_id = context.app_user.id
+        command = BUY_COMMAND if selection is ShoppingSelection.BUY else DELETE_COMMAND
+        with pending_inputs.lock(address):
+            current = self._shopping_sections.current(app_user_id, address, section.revision)
+            if current is not section:
+                return self._open_shopping_hint()
+            pending = pending_inputs.begin(
+                address, self.descriptor.capability_id, command, app_user_id=app_user_id,
+                required_mode=self.descriptor.capability_id, value_label="номер покупки", retry_command=command,
+            )
+            choice = ShoppingChoice(pending.request_id, selection, page,
+                                    tuple((position, item.number) for position, item in visible))
+            if not self._shopping_sections.replace(app_user_id, address, section, replace(section, choice=choice)):
+                pending_inputs.clear(address, pending.request_id)
+                return self._open_shopping_hint()
+        return shopping_list(items, section, page, update=True, selection=selection, choice=choice, notice=notice)
+
+    def _continue_shopping_choice(
+        self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
+    ) -> PendingInputResult:
+        revision = context.mode_revision
+        app_user_id = context.app_user.id
+        address = event.reply_address
+        section = None if revision is None else self._shopping_sections.current(app_user_id, address, revision)
+        choice = section.choice if section is not None else None
+        if section is None or choice is None or choice.request_id != pending.request_id:
+            return PendingInputResult(self._open_shopping_hint(), PendingInputOutcome.COMPLETE)
+        if not choice.delivered.is_set():
+            return PendingInputResult(IncomingResponse(compose_content(
+                "Список для выбора недоступен. Открой ", code_span(SHOPPING_COMMAND), " и повтори ",
+                code_span(pending.input_kind), ".",
+            )), PendingInputOutcome.RETRY)
+        if event.message_id in section.number_message_ids:
+            return PendingInputResult(IncomingResponse(text_content(
+                "Это сообщение уже обработано. Для следующего выбора отправь новый номер.",
+            )), PendingInputOutcome.RETRY)
+        position = parse_item_number(event.text.strip())
+        number = dict(choice.numbers).get(position) if position is not None else None
+        if position is None or number is None:
+            return PendingInputResult(IncomingResponse(compose_content(
+                "Пришли один номер с текущей страницы или введи ", code_span("/cancel"), ".",
+            )), PendingInputOutcome.RETRY)
+        claimed = section.record_number_message(event.message_id)
+        if not self._shopping_sections.replace(app_user_id, address, section, claimed):
+            return PendingInputResult(self._open_shopping_hint(), PendingInputOutcome.COMPLETE)
+        with self._open_scenarios() as (_, _, shopping):
+            change = shopping.buy if choice.selection is ShoppingSelection.BUY else shopping.delete
+            try:
+                result = change(
+                    app_user_id, section.family_id, (number,), actor_joined_at=section.joined_at,
+                    expected_position=position,
+                )
+            except FamilyAccessEnded:
+                return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
+        response = self._begin_shopping_choice(
+            context, address, claimed, result.items, choice.selection, choice.page,
+            notice=shopping_notice(result.changes[0], position),
+        )
+        return PendingInputResult(response, PendingInputOutcome.COMPLETE)
 
     def _begin_shopping_add(
         self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection,

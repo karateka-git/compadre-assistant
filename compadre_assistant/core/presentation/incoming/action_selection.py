@@ -139,7 +139,7 @@ class ResponseActionStore:
         delivery = ResponseViewDelivery(
             target, view.unavailable,
             lambda: self._start_view(scope, generation),
-            lambda message_id: self._finish_view(scope, generation, target, message_id),
+            lambda message_id: self._finish_view(scope, generation, target, message_id, view.on_delivered),
         )
         return PreparedResponseView(scope, generation, delivery)
 
@@ -153,7 +153,10 @@ class ResponseActionStore:
             slot.sending = True
             return True
 
-    def _finish_view(self, scope: _ViewScope, generation: int, target: str | None, message_id: str | None) -> None:
+    def _finish_view(
+        self, scope: _ViewScope, generation: int, target: str | None, message_id: str | None,
+        on_delivered: Callable[[], None] | None,
+    ) -> None:
         with self._lock:
             slot = self._views.get(scope)
             if slot is None or slot.generation != generation or not slot.sending:
@@ -167,6 +170,9 @@ class ResponseActionStore:
                 # Неопределённый результат edit требует открыть представление снова.
                 slot.delivered_generation = None
                 slot.delivered_message_id = None
+                return
+        if message_id and on_delivered is not None:
+            on_delivered()
 
     def protects_keyboard(self, event: IncomingEvent, token: str) -> bool:
         """Проверяет, могло ли нажатие прийти с управляемой клавиатуры."""
