@@ -13,7 +13,9 @@ from compadre_assistant.core.domain.users.ports import (
 from compadre_assistant.core.domain.users.entities import (
     AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, is_private_chat_address,
 )
-from compadre_assistant.core.domain.users.identity import IdentityAlreadyBoundError, InvalidLinkCodeError
+from compadre_assistant.core.domain.users.identity import (
+    IdentityAlreadyBoundError, InvalidLinkCodeError, SourceProfileInUseError,
+)
 from compadre_assistant.core.data.sqlite.user_identity_dtos import (
     AppUserDto, ExternalIdentityDto, IncomingIdentityDto, IdentityLinkTokenDto, IdentityRebindConfirmationDto,
 )
@@ -577,6 +579,9 @@ class SQLiteIdentityRebindConfirmationRepository(IdentityRebindConfirmationRepos
 
         Returns:
             ID итогового профиля либо `None` при недоступном или устаревшем решении.
+
+        Raises:
+            SourceProfileInUseError: Перенос требует удаления используемого профиля.
         """
         with self._connection:
             cursor = self._connection.execute(
@@ -637,10 +642,17 @@ class SQLiteIdentityRebindConfirmationRepository(IdentityRebindConfirmationRepos
                     confirmation.source_app_user_id,
                 ),
             )
-            self._connection.execute(
-                "DELETE FROM app_users WHERE id = ? AND NOT EXISTS (SELECT 1 FROM external_identities WHERE app_user_id = ?)",
-                (confirmation.source_app_user_id, confirmation.source_app_user_id),
-            )
+            try:
+                self._connection.execute(
+                    "DELETE FROM app_users WHERE id = ? AND NOT EXISTS "
+                    "(SELECT 1 FROM external_identities WHERE app_user_id = ?)",
+                    (confirmation.source_app_user_id, confirmation.source_app_user_id),
+                )
+            except sqlite3.IntegrityError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_CONSTRAINT_FOREIGNKEY:
+                    raise
+                # Ошибка выходит за границу транзакции и откатывает перенос вместе с кодом.
+                raise SourceProfileInUseError("Cannot remove a source profile that is still in use") from error
             return confirmation.target_app_user_id
 
 

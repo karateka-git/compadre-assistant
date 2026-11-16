@@ -30,6 +30,7 @@ from compadre_assistant.core.domain.users.identity import (
     IdentityAlreadyBoundError,
     InvalidDisplayNameError,
     InvalidLinkCodeError,
+    SourceProfileInUseError,
     UserIdentityService,
 )
 from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
@@ -636,6 +637,11 @@ class IncomingMessageDispatcher:
                         identity, confirmation_id=int(parts[2]), version=int(parts[3])
                     )
                     return ProcessIncomingMessageResult(IncomingMessageResultType.LINK_REBIND_CANCELLED)
+                except SourceProfileInUseError:
+                    return IncomingResponse(compose_content(
+                        "Канал остался в исходном профиле, потому что этот профиль ещё используется. "
+                        "Привяжи к нему другой канал и открой ", code_span("/confirm"), ", чтобы повторить перенос.",
+                    ))
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
                         compose_content(
