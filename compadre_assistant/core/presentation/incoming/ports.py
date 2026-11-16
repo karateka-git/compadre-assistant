@@ -144,12 +144,15 @@ class ResponseView:
             Владелец указывает, как заново открыть представление.
         on_delivered: Уведомление владельца после подтверждённой доставки
             сообщения. Порядок предметных состояний контролирует владелец.
+        cleanup_previous: После доставки снять клавиатуры прежних отслеживаемых
+            представлений этой возможности в исходном чате.
     """
 
     key: str
     update: bool = False
     unavailable: MessageContent | None = None
     on_delivered: Callable[[], None] | None = field(default=None, repr=False, compare=False)
+    cleanup_previous: bool = False
 
     def __post_init__(self) -> None:
         """Требует устойчивое имя и подсказку для недоступного обновления."""
@@ -171,12 +174,13 @@ class ResponseViewDelivery:
             True допускает один сетевой вызов или его транспортные повторы.
         finish: После допуска фиксирует ID сообщения только при успехе.
             При редактировании передаётся тот же ID, при сбое или отмене None.
+            Возвращает ID снятых с учёта сообщений для очистки их клавиатур.
     """
 
     target_message_id: str | None
     unavailable: MessageContent | None
     start: Callable[[], bool] = field(repr=False, compare=False)
-    finish: Callable[[str | None], None] = field(repr=False, compare=False)
+    finish: Callable[[str | None], tuple[str, ...]] = field(repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +206,8 @@ class IncomingResponse:
     # Для канала с одной клавиатурой «prefer» доставляет меню вместе с ответом,
     # а «preserve» оставляет нижнее меню и размещает действия под ответом.
     command_menu_delivery: Literal["prefer", "preserve"] | None = None
+    close_managed_views: bool = False  # Ответ заменяет отслеживаемый экран без редактирования.
+    retire_views_after_delivery: Callable[[], tuple[str, ...]] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +282,26 @@ class ContextualCommandMenuPort(Protocol):
 
         Returns:
             Пункты меню или None для стандартного меню канала.
+        """
+        ...
+
+
+@runtime_checkable
+class ReplyActionRecoveryPort(Protocol):
+    """Указывает ручной путь после недоступного действия в личном чате."""
+
+    def reply_action_recovery_command(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
+    ) -> str:
+        """Возвращает точную команду по проверенному профилю и текущему разделу.
+
+        Args:
+            app_user: Профиль с действующим доступом к возможности.
+            address: Личный чат, из которого пришёл callback.
+            mode_revision: Ревизия активного режима или None после выхода.
+
+        Returns:
+            Команда, которая открывает доступный экран.
         """
         ...
 

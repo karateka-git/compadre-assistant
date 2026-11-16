@@ -17,7 +17,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
-    CapabilityHelp, CommandSuggestion, ContextualCommandMenuPort, ContextualCommandQueryPort, ResponseView,
+    CapabilityHelp, CommandSuggestion, ContextualCommandMenuPort, ContextualCommandQueryPort,
+    ReplyActionRecoveryPort, ResponseView,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -289,43 +290,67 @@ class IncomingMessageDispatcher:
             Ответ обычного маршрута либо одинаковый безопасный отказ для всех
             отсутствующих, чужих, устаревших и уже использованных действий.
         """
-        rejected = IncomingResponse(text_content(
-            "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
-        ), preserve_source_actions=store.protects_keyboard(event, token))
+        def rejected() -> IncomingResponse:
+            return self._rejected_action(event, store.managed_action_owner(event, token))
+
+        managed_source = store.protects_keyboard(event, token)
         context = None
-        if rejected.preserve_source_actions:
+        if managed_source:
             try:
                 context = self.action_context(event)
             except Exception:
                 LOGGER.exception("Could not validate selected managed response action")
-                return rejected
+                return rejected()
         with self._pending_inputs.lock(event.reply_address):
             if busy := self._busy_response(event, allow_cancel=False):
                 return replace(busy, preserve_source_actions=True)
             entry = store.claim(event, token, context=context)
         if entry is None:
-            return rejected
+            return rejected()
         try:
             if self.action_context(event) != entry.context:
-                return rejected
+                return rejected()
             if entry.confirmation is not None:
                 snapshot = self._action_confirmations(event)
                 if snapshot.status != "complete" or not any(
                         item == entry.confirmation and entry.action in item.actions
                         for item in snapshot.confirmations):
-                    return rejected
+                    return rejected()
             elif not self._suggestion_allowed(entry.command, entry.context):
-                return rejected
+                return rejected()
             if entry.command.strip() == "/confirm":
                 snapshot = self._action_confirmations(event)
                 if snapshot.status != "complete" or not snapshot.confirmations:
-                    return rejected
+                    return rejected()
         except Exception:
             LOGGER.exception("Could not validate selected response action")
-            return rejected
+            return rejected()
         # Команда берётся только из серверной записи, никогда из callback/подписи.
         response = self.execute(replace(event, text=entry.command, images=()), completion_handler, menu_update_handler)
-        return replace(response, preserve_source_actions=True) if entry.view is not None else response
+        return replace(response, preserve_source_actions=True) if managed_source or entry.view is not None else response
+
+    def _rejected_action(self, event: IncomingEvent, previous_mode: str | None) -> IncomingResponse:
+        """Сохраняет исходные кнопки и предлагает актуальный ручной переход."""
+        content = text_content(
+            "Эта кнопка больше недоступна. Отправь /help или вызови нужную команду из текста ответа."
+        )
+        if is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            try:
+                known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+                if known is not None and known[1].external_user_id == event.external_user_id:
+                    user = known[0]
+                    mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
+                    mode_id = previous_mode or mode.capability_id
+                    capability = self._personal_registry(user, event).by_id(mode_id) if mode_id is not None else None
+                    if isinstance(capability, ReplyActionRecoveryPort):
+                        revision = mode.revision if mode_id == mode.capability_id else None
+                        command = capability.reply_action_recovery_command(user, event.reply_address, revision)
+                        content = compose_content("Эта кнопка больше недоступна. Открой ", code_span(command), ".")
+            except Exception:
+                LOGGER.exception("Could not resolve response action recovery")
+        # Один ID мог уже получить свежую клавиатуру. Без подтверждённого перехода
+        # неизвестное нажатие не даёт права её снимать.
+        return IncomingResponse(content, preserve_source_actions=True)
 
     def _suggestion_allowed(self, text: str, context: ActionContext) -> bool:
         """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
@@ -637,6 +662,10 @@ class IncomingMessageDispatcher:
                     "Используй ", code_span("/cancel"), " без аргументов."
                 ))
             cleared = self._pending_inputs.clear(event.reply_address)
+            if cleared and pending is not None and pending.cancel_return_command is not None:
+                return IncomingResponse(compose_content(
+                    "Ввод отменён. Чтобы вернуться, открой ", code_span(pending.cancel_return_command), ".",
+                ), close_managed_views=True)
             return IncomingResponse(text_content(
                 "Ввод отменён. Активный режим этого чата не изменён." if cleared else
                 "В этом чате нечего отменять. Продолжай текущий режим или вызови нужную команду."

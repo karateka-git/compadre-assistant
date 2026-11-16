@@ -298,7 +298,7 @@ def shopping_list(
     if notice:
         parts.extend(("\n\n", notice))
     if section.vk_menu and selection is None:
-        return IncomingResponse(compose_content(*parts))
+        return IncomingResponse(compose_content(*parts), close_managed_views=True)
     unavailable = compose_content("Не удалось обновить список. Открой его снова через ", code_span(SHOPPING_COMMAND), ".")
     return IncomingResponse(
         compose_content(*parts), suggested_actions=tuple(actions),
@@ -306,6 +306,7 @@ def shopping_list(
         view=ResponseView(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
             on_delivered=choice.delivered.set if choice is not None else None,
+            cleanup_previous=True,
         ),
     )
 

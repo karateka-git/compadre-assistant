@@ -18,6 +18,7 @@ from compadre_assistant.capabilities.family.data.sqlite_family_repository import
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.core.presentation.incoming.ports import CommandMenuUpdate
 from compadre_assistant.presentation.telegram.bot import _register_handlers
 from compadre_assistant.presentation.vk.bot import VkApiClient, _create_vk_menu_update_handler, _handle_update
@@ -131,6 +132,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._open()
         older_list = self.last_sent
         await self._send("/add")
+        prompt_id = self.last_sent
         await self._send("Хлеб\nМолоко, 2 л\nЯблоки")
         active_list = self.last_sent
         self.assertNotEqual(older_list, active_list)
@@ -170,7 +172,64 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Очистить купленное", self._actions(cleared))
         self.assertTrue(all(call.kwargs["message_id"] == active_list
                             for call in self.bot.edit_message_text.await_args_list))
+        self.assertEqual([call.kwargs["message_id"] for call in self.bot.edit_message_reply_markup.await_args_list],
+                         [older_list, prompt_id])
+
+    async def test_add_cancel_and_mode_switch_remove_only_previous_keyboard(self) -> None:
+        """Отмена даёт путь к списку, а смена режима снимает отслеживаемые кнопки."""
+        await self._open()
+        await self._send("/add Хлеб\nМолоко")
+        active_list = self.last_sent
+        await self._send("/buy")
+        old_buy = self._actions(self.bot.edit_message_text.await_args)["1. Хлеб"]
+        self.bot.edit_message_reply_markup.reset_mock()
+        await self._send("/add")
+        prompt_id = self.last_sent
+        cancel = self._actions(self.bot.send_message.await_args)["Отмена"]
+        self.bot.edit_message_reply_markup.assert_awaited_once_with(chat_id=101, message_id=active_list, reply_markup=None)
+        await self._press(old_buy, active_list)
+        self.assertIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(self.bot.edit_message_reply_markup.await_count, 1)
+        await self._press(cancel, prompt_id)
+        self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
+        self.assertIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], prompt_id)
+
+        await self._send("/family_shopping")
+        reopened = self.last_sent
+        refreshed_buy = self._actions(self.bot.send_message.await_args)["Купить"]
+        text = self.bot.send_message.await_args.kwargs["text"]
+        self.assertIn("1. Хлеб", text)
+        self.assertNotIn("Купленные товары", text)
+        await self._send("/settings")
+        self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], reopened)
+        await self._press(refreshed_buy, reopened)
+        self.assertIn("Открой <code>/family</code>", self.bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(self.bot.edit_message_reply_markup.await_count, 3)
+
+    async def test_failed_replacement_defers_removal_and_failed_cleanup_preserves_new_list(self) -> None:
+        """Сбой отправки сохраняет старую клавиатуру, а сбой cleanup не отменяет новый список."""
+        await self._open()
+        old_id = self.last_sent
+        old_button = self._actions(self.bot.send_message.await_args)["Добавить"]
+        self.bot.send_message.side_effect = RuntimeError("fake send rejection")
+        with self.assertLogs(self.logger, level="ERROR"):
+            await self._send("/add Хлеб")
         self.bot.edit_message_reply_markup.assert_not_awaited()
+
+        self.bot.send_message.side_effect = self._send_message
+        self.bot.edit_message_reply_markup.side_effect = RuntimeError("fake cleanup rejection")
+        with self.assertLogs(self.logger, level="ERROR"):
+            await self._send("/family_shopping")
+        current_id = self.last_sent
+        self.assertIn("1. Хлеб", self.bot.send_message.await_args.kwargs["text"])
+        buy = self._actions(self.bot.send_message.await_args)["Купить"]
+        self.bot.edit_message_reply_markup.assert_awaited_once_with(chat_id=101, message_id=old_id, reply_markup=None)
+        await self._press(old_button, old_id)
+        self.assertIn("больше недоступна", self.bot.send_message.await_args.kwargs["text"])
+        await self._press(buy, current_id)
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], current_id)
+        self.assertEqual(self.bot.edit_message_reply_markup.await_count, 1)
 
     async def test_failed_edit_requires_reopen_and_preserves_manual_path(self) -> None:
         """Неудавшийся edit не повторяет покупку, после переоткрытия работают номера."""
@@ -230,6 +289,8 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.last_cmid = 0
         self.sent_messages: dict[int, dict[str, str | int]] = {}
+        self.reject_edits: set[int] = set()
+        self.confirm_sends = True
         self.enterContext(patch("compadre_assistant.presentation.vk.bot.urlopen", side_effect=self._fake_api))
 
     def _fake_api(self, request, *, timeout):
@@ -237,6 +298,8 @@ class VkFamilyShoppingTest(unittest.TestCase):
         params = {key: value[0] for key, value in parse_qs(request.data.decode()).items()}
         self.calls.append((method, params))
         if method == "messages.send":
+            if not self.confirm_sends:
+                return BytesIO(b'{"response":null}')
             self.last_cmid = next(self.messages)
             message_id = 9000 + self.last_cmid
             self.sent_messages[self.last_cmid] = {"id": message_id, "text": params["message"]}
@@ -246,7 +309,13 @@ class VkFamilyShoppingTest(unittest.TestCase):
                 response = message_id
         elif method == "messages.getByConversationMessageId":
             response = {"items": [self.sent_messages[int(params["conversation_message_ids"])]]}
-        elif method in ("messages.edit", "messages.sendMessageEventAnswer"):
+        elif method == "messages.edit":
+            cmid = int(params["cmid"])
+            if cmid in self.reject_edits:
+                return BytesIO(json.dumps({"error": {"error_code": 909, "error_msg": "Cannot edit"}}).encode())
+            self.sent_messages[cmid]["text"] = params["message"]
+            response = 1
+        elif method == "messages.sendMessageEventAnswer":
             response = 1
         else:
             self.fail(f"Неожиданный метод VK API {method}")
@@ -326,6 +395,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertIn("2/3", second["message"])
         rows = [[button["action"]["label"] for button in row] for row in json.loads(second["keyboard"])["buttons"]]
         self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [["←", "→"], ["Назад"]])
+        before = len(self.calls)
+        self._single_reply(lambda: self._press(buttons["2. Товар 2"], cmid), "Открой /family_shopping")
+        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
         self._send("8")
         bought = self._latest_edit()
         self.assertNotIn("8. Товар 8", self._actions(bought))
@@ -394,3 +466,61 @@ class VkFamilyShoppingTest(unittest.TestCase):
         saved = self._single_reply(lambda: self._send("/family_shopping"), "1. Отмена")
         self.assertNotIn("Покупки\n", saved["message"])
         self.assertNotIn("2.", saved["message"])
+
+    def test_add_and_back_retire_vk_choice_after_response_and_expired_press_preserves_current(self) -> None:
+        """Старый выбор чистится после send, истёкшая кнопка не чистит текущий cmid."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Покупки")
+        self._send("/add Хлеб\nМолоко")
+        now = [0.0]
+        self.processor._response_actions = ResponseActionStore(ttl_seconds=10, clock=lambda: now[0])
+        first = self._single_reply(lambda: self._menu_press("Купить"), "Выбери, что купил")
+        first_cmid = self.last_cmid
+        old_buy = self._actions(first)["1. Хлеб"]
+        before = len(self.calls)
+        self._menu_press("Добавить")
+        self.assertEqual([method for method, _ in self.calls[before:]],
+                         ["messages.send", "messages.getByConversationMessageId", "messages.edit"])
+        clear = self._latest_edit()
+        self.assertEqual(clear["cmid"], str(first_cmid))
+        self.assertEqual(json.loads(clear["keyboard"])["buttons"], [])
+        self._single_reply(lambda: self._press(old_buy, first_cmid), "Открой /family_shopping")
+        self._single_reply(lambda: self._menu_press("Отмена"), "открой /family_shopping")
+        self._send("/family_shopping")
+
+        second = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
+        second_cmid = self.last_cmid
+        delete = self._actions(second)["1. Хлеб"]
+        self.confirm_sends = False
+        before = len(self.calls)
+        with self.assertLogs(self.logger, level="ERROR"):
+            self._menu_press("Добавить")
+        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.send"])
+        self.confirm_sends = True
+        # Чат уже ждёт добавления. Ручное открытие списка отменяет ввод и снова
+        # подтверждает доставку замены, после которой можно снять старую клавиатуру.
+        self.reject_edits.add(second_cmid)
+        with self.assertLogs(self.logger, level="WARNING"):
+            self._single_reply(lambda: self._send("/family_shopping"), "1. Хлеб")
+        self._single_reply(lambda: self._press(delete, second_cmid), "Открой /family_shopping")
+
+        third = self._single_reply(lambda: self._menu_press("Купить"), "Выбери, что купил")
+        third_cmid = self.last_cmid
+        now[0] = 10
+        before = len(self.calls)
+        self._single_reply(lambda: self._press(self._actions(third)["1. Хлеб"], third_cmid), "Открой /family_shopping")
+        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
+        self._send("/family_shopping")
+        self.assertIn("1. Хлеб\n2. Молоко", self.calls[-1][1]["message"])
+
+        fourth = self._single_reply(lambda: self._menu_press("Купить"), "Выбери, что купил")
+        fourth_cmid = self.last_cmid
+        self.processor = self.enterContext(create_channel_message_processor(
+            database_path=self.processor._database_path, enabled_capabilities=("family",),
+        ))
+        stale = self._actions(fourth)["1. Хлеб"]
+        before = len(self.calls)
+        self._single_reply(lambda: self._press(stale, fourth_cmid), "Открой /family.")
+        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])

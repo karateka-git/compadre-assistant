@@ -319,7 +319,7 @@ class VkApiClient:
         random_id: int | None = None,
         format_data: str | None = None,
         keyboard: str | None = None,
-    ) -> None:
+    ) -> int | None:
         """Отправляет одну готовую часть VK без повторного разбиения.
 
         Args:
@@ -328,14 +328,18 @@ class VkApiClient:
             random_id: Стабильный ID одной retry-серии или `None` для нового ID.
             format_data: JSON диапазонов именно этой части или `None` для plain.
             keyboard: JSON VK-клавиатуры; `None` оставляет обычное сообщение без клавиатуры.
+
+        Returns:
+            Подтверждённый ID сообщения, если VK его вернул.
         """
         # Разбиение после рендеринга нарушило бы offsets и границы retry-серии.
         params = {"peer_id": str(peer_id)}
         if format_data is not None:
             params["format_data"] = format_data
         result = self._send_message(params, text=text, random_id=random_id, keyboard=keyboard)
-        if (keyboard is not None and format_data is None and isinstance(result, int)
-                and not isinstance(result, bool) and result > 0):
+        if type(result) is not int or result <= 0:
+            return None
+        if keyboard is not None and format_data is None:
             try:
                 is_inline = json.loads(keyboard).get("inline") is True
             except (ValueError, AttributeError):
@@ -345,6 +349,7 @@ class VkApiClient:
                     self._inline_messages[peer_id, result] = text
                     if len(self._inline_messages) > 512:
                         self._inline_messages.popitem(last=False)
+        return result
 
     def send_editable_message(
         self, *, peer_id: int, text: str, random_id: int, keyboard: str | None,
@@ -421,11 +426,18 @@ class VkApiClient:
             "event_id": event_id, "user_id": str(user_id), "peer_id": str(peer_id),
         })
 
-    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
-        """Убирает кнопки исходного plain-сообщения при сохранённом тексте.
+    def clear_inline_keyboard(
+        self, *, peer_id: int, conversation_message_id: int, managed: bool = False,
+    ) -> None:
+        """Убирает кнопки plain-сообщения, сохраняя его текст.
 
-        Если исходный ответ не найден в памяти или имел format_data, редактирование
-        пропускается: VK messages.edit не принимает format_data.
+        Args:
+            peer_id: Исходный диалог.
+            conversation_message_id: ID сообщения в этом диалоге.
+            managed: Ядро подтвердило вывод plain-сообщения из обращения.
+
+        Raises:
+            VkBotError: API отклонил получение текста или снятие клавиатуры.
         """
         result = self._api_call("messages.getByConversationMessageId", {
             "peer_id": str(peer_id),
@@ -438,15 +450,17 @@ class VkApiClient:
         message_id = message.get("id")
         if not isinstance(message_id, int) or isinstance(message_id, bool):
             return
-        with self._inline_lock:
-            original_text = self._inline_messages.get((peer_id, message_id))
-        if original_text is None or message.get("text") != original_text:
+        # Для callback без подтверждённого перехода нужны локальные следы plain
+        # отправки. У управляемого представления plain гарантирован транспортом.
+        original_text = message.get("text")
+        if not isinstance(original_text, str):
             return
-        self._api_call("messages.edit", {
-            "peer_id": str(peer_id), "cmid": str(conversation_message_id),
-            "message": original_text,
-            "keyboard": VK_EMPTY_INLINE_KEYBOARD,
-        })
+        if not managed:
+            with self._inline_lock:
+                if self._inline_messages.get((peer_id, message_id)) != original_text:
+                    return
+        self.edit_message(peer_id=peer_id, conversation_message_id=conversation_message_id,
+                          text=original_text, keyboard=None)
         with self._inline_lock:
             self._inline_messages.pop((peer_id, message_id), None)
 
@@ -797,9 +811,20 @@ def _safe_send_vk_message(
     try:
         delivered = (deliver_menu(send) if deliver_menu is not None and response.command_menu_delivery != "preserve"
                      else send(None)[0])
+        if delivered and response.retire_views_after_delivery is not None:
+            _clear_vk_managed_keyboards(client, peer_id, response.retire_views_after_delivery(), logger)
     finally:
         if response.after_delivery is not None:
             response.after_delivery(delivered)
+
+
+def _clear_vk_managed_keyboards(client: Any, peer_id: int, message_ids: tuple[str, ...], logger: logging.Logger) -> None:
+    """Снимает клавиатуры по ID завершённых представлений своего диалога."""
+    for message_id in message_ids:
+        try:
+            client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=int(message_id), managed=True)
+        except VkBotError as error:
+            logger.warning("VK inline keyboard removal failed: %s", error)
 
 
 def _send_vk_view(
@@ -847,7 +872,7 @@ def _send_vk_view(
                     plain=True,
                 )
         finally:
-            delivery.finish(confirmed_id)
+            _clear_vk_managed_keyboards(client, peer_id, delivery.finish(confirmed_id), logger)
 
     if confirmed_id is not None:
         if menu_keyboard is None:
@@ -899,14 +924,19 @@ def _send_vk_message(
         random_id = randint(1, 2_147_483_647)
         chunk_keyboard = (menu_keyboard if has_menu and index == menu_index
                           else keyboard if index == len(chunks) - 1 else None)
-        sent = safe_send(
-            lambda chunk=chunk, random_id=random_id, keyboard=chunk_keyboard: client.send_message(
+        def deliver_chunk() -> None:
+            message_id = client.send_message(
                 peer_id=peer_id,
                 text=chunk.text,
                 format_data=None if plain else chunk.format_data,
                 keyboard=chunk_keyboard,
                 random_id=random_id,
-            ),
+            )
+            if response.retire_views_after_delivery is not None and message_id is None:
+                raise VkBotError("VK send returned no confirmed message ID")
+
+        sent = safe_send(
+            deliver_chunk,
             logger=logger,
             channel="VK",
             target_id=str(peer_id),
