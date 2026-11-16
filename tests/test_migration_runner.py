@@ -19,15 +19,17 @@ class AiCapabilityIdMigrationTest(unittest.TestCase):
     """Проверяет перенос режимов и личного доступа с выпущенной схемы 0005."""
 
     def setUp(self) -> None:
-        """Создаёт временную БД с включённым и выключенным ИИ и другими режимами."""
+        """Готовит БД на 0005 со старыми настройками ИИ и каталог для перехода на 0006."""
         self.root = Path(self.enterContext(TemporaryDirectory(prefix="ai-capability-id-")))
         self.database_path = self.root / "fixture.db"
-        self.previous_sql = self.root / "previous-sql"
-        self.previous_sql.mkdir()
+        self.migrations_dir = self.root / "migrations-through-0006"
+        self.migrations_dir.mkdir()
         for path in MIGRATIONS_DIR.glob("000[1-5]_*.sql"):
-            (self.previous_sql / path.name).write_bytes(path.read_bytes())
+            (self.migrations_dir / path.name).write_bytes(path.read_bytes())
         self.connection = self.enterContext(connect_database(self.database_path))
-        apply_migrations(self.connection, self.previous_sql)
+        apply_migrations(self.connection, self.migrations_dir)
+        migration = MIGRATIONS_DIR / "0006_ai_capability_id.sql"
+        (self.migrations_dir / migration.name).write_bytes(migration.read_bytes())
         with self.connection as connection:
             connection.execute("INSERT INTO app_users (id) VALUES (1), (2)")
             connection.executemany("INSERT INTO active_chat_modes VALUES (?, ?, ?, ?, ?, 'fixture')", (
@@ -46,14 +48,14 @@ class AiCapabilityIdMigrationTest(unittest.TestCase):
         from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 
         connection = self.connection
-        completed = apply_migrations(connection)
-        self.assertEqual(completed[0].name, "0006_ai_capability_id.sql")
+        completed = apply_migrations(connection, self.migrations_dir)
+        self.assertEqual([migration.name for migration in completed], ["0006_ai_capability_id.sql"])
         self.assertEqual(self._modes(), [
             (1, "telegram", "11", "ai", 4, "fixture"), (1, "vk", "22", None, 2, "fixture"),
             (2, "telegram", "33", "obsidian", 1, "fixture"), (2, "vk", "44", "ai", 9, "fixture"),
         ])
         self.assertEqual(self._preferences(), [(1, "ai", 0), (1, "obsidian", 1), (2, "ai", 1)])
-        self.assertEqual(apply_migrations(connection), [])
+        self.assertEqual(apply_migrations(connection, self.migrations_dir), [])
         self.assertEqual(connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
         with connect_database(self.database_path) as reopened:
@@ -73,7 +75,7 @@ class AiCapabilityIdMigrationTest(unittest.TestCase):
             connection.execute("INSERT INTO user_capability_preferences VALUES (1, 'ai', 1)")
         before_modes, before_preferences = self._modes(), self._preferences()
         with self.assertRaisesRegex(MigrationError, "UNIQUE constraint failed"):
-            apply_migrations(self.connection)
+            apply_migrations(self.connection, self.migrations_dir)
         self.assertEqual(self._modes(), before_modes)
         self.assertEqual(self._preferences(), before_preferences)
         self.assertEqual(self.connection.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0], 5)
