@@ -5,8 +5,14 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
+from compadre_assistant.capabilities.family.data.invitation_dtos import (
+    InvitationPeriodDto, invitation_period_from_dto,
+)
 from compadre_assistant.capabilities.family.data.membership_dtos import (
     FamilyDto, FamilyMemberDto, family_from_dto, family_member_from_dto,
+)
+from compadre_assistant.capabilities.family.domain.invitations import (
+    InvalidInvitation, InvitationPeriod, InvitationRepository,
 )
 from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, OtherMemberRequired,
@@ -14,7 +20,7 @@ from compadre_assistant.capabilities.family.domain.membership import (
 from compadre_assistant.capabilities.family.domain.ports import FamilyRepository
 
 
-class SQLiteFamilyRepository(FamilyRepository):
+class SQLiteFamilyRepository(FamilyRepository, InvitationRepository):
     """Хранит семью и проверяет актуальный состав перед каждым изменением."""
 
     def __init__(self, connection: sqlite3.Connection) -> None:
@@ -114,6 +120,71 @@ class SQLiteFamilyRepository(FamilyRepository):
             if self._has_other_members(family_id, app_user_id):
                 raise FamilyHasOtherMembers("Закрыть семью может единственный участник")
             self._connection.execute("DELETE FROM families WHERE id = ?", (family_id,))
+
+    def issue_invitation(
+        self, app_user_id: int, family_id: int, code_digest: str, period: InvitationPeriod,
+    ) -> Family | None:
+        """Сохраняет проверочное значение от текущего участника семьи.
+
+        Args:
+            app_user_id: Профиль приглашавшего.
+            family_id: Семья, для которой запрашивали код.
+            code_digest: Проверочное значение случайного кода.
+            period: Срок действия приглашения в UTC.
+
+        Returns:
+            Семья после записи или None при коллизии кода.
+
+        Raises:
+            FamilyAccessEnded: Профиль больше не состоит в указанной семье.
+        """
+        with self._write():
+            family = self._require_membership(app_user_id, family_id)
+            row = self._connection.execute(
+                """INSERT INTO family_invites (family_id, created_by_app_user_id, code_digest, created_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT (code_digest) DO NOTHING RETURNING id""",
+                (family_id, app_user_id, code_digest, period.created_at.isoformat(), period.expires_at.isoformat()),
+            ).fetchone()
+            return family if row is not None else None
+
+    def join_by_invitation(self, app_user_id: int, code_digest: str, now: datetime) -> Family:
+        """Добавляет участника и погашает приглашение атомарно.
+
+        Args:
+            app_user_id: Профиль нового участника.
+            code_digest: Проверочное значение введённого кода.
+            now: Время проверки и вступления в UTC.
+
+        Returns:
+            Семья, в которую принят профиль.
+
+        Raises:
+            InvalidInvitation: Код не связан с действующей семьёй.
+            InvitationUsed: Код уже погашен.
+            InvitationExpired: Истёк срок действия кода.
+            AlreadyInFamily: Профиль уже состоит в семье.
+        """
+        with self._write():
+            row = self._connection.execute(
+                """SELECT invite.id AS invite_id, invite.created_at AS issued_at, invite.expires_at, invite.used_at,
+                          family.id, family.name, family.owner_app_user_id, family.created_at
+                   FROM family_invites AS invite JOIN families AS family ON family.id = invite.family_id
+                   WHERE invite.code_digest = ?""",
+                (code_digest,),
+            ).fetchone()
+            if row is None:
+                raise InvalidInvitation("Семейное приглашение недействительно")
+            period = invitation_period_from_dto(InvitationPeriodDto(row["issued_at"], row["expires_at"], row["used_at"]))
+            period.require_usable(now)
+            if self.find_for_member(app_user_id) is not None:
+                raise AlreadyInFamily("Профиль уже состоит в семье")
+            self._connection.execute("UPDATE family_invites SET used_at = ? WHERE id = ?", (now.isoformat(), row["invite_id"]))
+            self._connection.execute(
+                "INSERT INTO family_members (family_id, app_user_id, joined_at) VALUES (?, ?, ?)",
+                (row["id"], app_user_id, now.isoformat()),
+            )
+            return family_from_dto(FamilyDto(row["id"], row["name"], row["owner_app_user_id"], row["created_at"]))
 
     @contextmanager
     def _write(self) -> Iterator[None]:
