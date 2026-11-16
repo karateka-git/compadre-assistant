@@ -18,6 +18,7 @@ from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse, ReplyAction
 from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.telegram.bot import _register_handlers, safe_send_telegram_reply
+from tests.test_incoming_boundary import FakeCapability
 from tests.test_response_views import RECOVERY, EditableCapability
 from tests.test_telegram_bot import FakeAiogram
 
@@ -27,14 +28,11 @@ class TelegramResponseViewsTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         """Готовит отдельную БД, известный чат и зарегистрированные handlers."""
-        path = Path(self.enterContext(TemporaryDirectory(prefix="telegram-response-views-"))) / "app.db"
-        with connect_database(path) as connection:
+        self.db_path = Path(self.enterContext(TemporaryDirectory(prefix="telegram-response-views-"))) / "app.db"
+        with connect_database(self.db_path) as connection:
             apply_migrations(connection)
             identity = create_user_identity_service(connection)
             identity.register_with_name(IncomingIdentity("telegram", "1001", "1001"), display_name="Тест")
-        self.capability = EditableCapability()
-        self.processor = ChannelMessageProcessor(database_path=path, capabilities=(self.capability,))
-        self.processor(IncomingEvent("telegram", "1001", "99", "/selected", "1001"))
         self.chat = SimpleNamespace(id=1001)
         self.author = SimpleNamespace(id=1001)
         self.message_ids = count(100)
@@ -45,6 +43,15 @@ class TelegramResponseViewsTest(unittest.IsolatedAsyncioTestCase):
             edit_message_reply_markup=AsyncMock(),
         )
         self.logger = logging.getLogger("test.telegram.response_views")
+        self.start_runtime()
+        self.processor(IncomingEvent("telegram", "1001", "99", "/selected", "1001"))
+
+    def start_runtime(self) -> None:
+        """Запускает свежие handlers и процессный реестр на имеющейся БД."""
+        self.capability = EditableCapability()
+        self.processor = ChannelMessageProcessor(
+            database_path=self.db_path, capabilities=(self.capability, FakeCapability("other", "/other")),
+        )
         aiogram = FakeAiogram()
         _register_handlers(aiogram.dispatcher, aiogram, incoming_message_processor=self.processor, logger=self.logger)
         self.router = aiogram.dispatcher.included_router
@@ -216,3 +223,33 @@ class TelegramResponseViewsTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all("reply_markup" not in call.kwargs for call in recovery))
         await self.send("/adjust_view")
         self.assertEqual(self.bot.send_message.await_args.kwargs["text"], RECOVERY)
+
+    async def test_mode_switch_closes_old_view_across_reentry(self) -> None:
+        """Смена на другой режим и возврат требуют открыть ответ заново."""
+        first, *_ = await self.open_view()
+        await self.send("/other")
+        await self.press(first)
+        self.assertIn("больше недоступна", self.bot.send_message.await_args.kwargs["text"])
+        await self.send("/selected")
+        await self.send("/adjust_view")
+        self.assertEqual(self.bot.send_message.await_args.kwargs["text"], RECOVERY)
+        self.assertEqual(self.capability.choices, [])
+        self.bot.edit_message_text.assert_not_awaited()
+
+    async def test_restart_preserves_mode_and_requires_new_view(self) -> None:
+        """Новый runtime отклоняет старую кнопку и редактирует лишь новую публикацию."""
+        old, *_ = await self.open_view()
+        self.start_runtime()
+        await self.send("/adjust_view")
+        self.assertEqual(self.bot.send_message.await_args.kwargs["text"], RECOVERY)
+
+        current, *_ = await self.open_view()
+        await self.press(old)
+        self.assertIn("больше недоступна", self.bot.send_message.await_args.kwargs["text"])
+        self.assertEqual(self.capability.choices, [])
+        self.bot.edit_message_text.assert_not_awaited()
+        await self.press(current, 44)
+        self.assertEqual(self.capability.choices, ["A"])
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], 44)
+        self.assertTrue(all(call.kwargs["message_id"] == 42
+                            for call in self.bot.edit_message_reply_markup.await_args_list))

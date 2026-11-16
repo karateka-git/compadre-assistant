@@ -137,6 +137,28 @@ class ResponseViewsTest(unittest.TestCase):
         self.assertTrue(stale.preserve_source_actions)
         self.assertIn("больше недоступна", response_text(stale))
 
+    def test_two_delivered_views_keep_separate_targets_and_buttons(self):
+        """Оба чата сохраняют свою цель, а чужая кнопка её не меняет."""
+        first = self.send("/show_view")
+        self.deliver(first, "42")
+        second = self.send("/show_view", "1002")
+        self.deliver(second, "99")
+        rejected = self.select(first.bound_actions[0], source="99", chat="1002")
+        self.assertTrue(rejected.preserve_source_actions)
+        self.assertIn("больше недоступна", response_text(rejected))
+        self.assertEqual(self.capability.choices, [])
+
+        adjusted = self.send("/adjust_view", "1002")
+        self.assertEqual(adjusted.view_delivery.target_message_id, "99")
+        self.deliver(adjusted, "99")
+        left = self.select(first.bound_actions[0])
+        self.assertEqual(left.view_delivery.target_message_id, "42")
+        self.deliver(left, "42")
+        right = self.select(adjusted.bound_actions[1], source="99", chat="1002")
+        self.assertEqual(right.view_delivery.target_message_id, "99")
+        self.deliver(right, "99")
+        self.assertEqual(self.capability.choices, ["A", "B"])
+
     def test_superseded_attempt_and_failed_edit_do_not_activate_tokens(self):
         """Поздняя доставка не перезаписывает новую, а сбой закрывает цель."""
         opening = self.send("/show_view")
