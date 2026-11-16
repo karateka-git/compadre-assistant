@@ -17,6 +17,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
+    CapabilityHelp, ContextualCommandQueryPort,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
@@ -873,10 +874,10 @@ class IncomingMessageDispatcher:
             ))
         if event.images and not owner.descriptor.accepts_images:
             return IncomingResponse(text_content(_TEXT_INPUT_HINT))
-        mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id))
+        mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
         if ((pending.app_user_id is not None and pending.app_user_id != user.id)
                 or (pending.required_mode is not None
-                    and (mode is None or mode.capability_id != pending.required_mode))):
+                    and mode.capability_id != pending.required_mode)):
             self._pending_inputs.clear(event.reply_address, pending.request_id)
             return IncomingResponse(text_content(
                 "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
@@ -884,6 +885,7 @@ class IncomingMessageDispatcher:
         context = HandlerContext(
             user, CallbackReplyDelivery(completion_handler) if completion_handler else None,
             self._pending_inputs,
+            mode_revision=mode.revision if mode.capability_id == pending.owner_id else None,
         )
         try:
             result = owner.continue_input(context, pending, event)
@@ -1195,6 +1197,7 @@ class IncomingMessageDispatcher:
                 ),
             )
         try:
+            context = replace(context, mode_revision=state.revision)
             if capability.descriptor.profile_commands:
                 context = replace(context, profile_operation=lambda command, arguments: self._profile_operation(
                     command, arguments, user, event, capability.descriptor.capability_id, personal,
@@ -1232,9 +1235,10 @@ class IncomingMessageDispatcher:
         """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
         from compadre_assistant.core.presentation.incoming.help import format_contextual_help
 
-        personal, mode_id, pending, snapshot = self._command_context(event)
+        personal, mode_id, pending, snapshot, active_help = self._command_context(event)
         return format_contextual_help(
             personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
+            active_help=active_help,
         )
 
     def command_menu(self, event: IncomingEvent) -> CommandMenu:
@@ -1300,18 +1304,21 @@ class IncomingMessageDispatcher:
         # Работа может быть принята во время чтения источников подтверждений.
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
-        pending, snapshot = context[2:]
+        personal, mode_id, pending, snapshot, active_help = context
         complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
-        return build_command_menu(*context), complete
+        return build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help), complete
 
     def _command_context(
         self, event: IncomingEvent, *, cleanup_pending: bool = True,
         known_user: AppUser | None = None, preserve_expired: bool = False,
-    ) -> tuple[PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult]:
+    ) -> tuple[
+        PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult,
+        CapabilityHelp | None,
+    ]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = known_user or self._user_identity_service.resolve(_incoming_identity_from_event(event))
         personal = self._personal_registry(user, event) if user is not None else None
-        mode = self._chat_mode_repository.get(
+        mode = self._chat_mode_repository.get_state(
             ChatModeKey(user.id, event.channel, event.chat_id)
         ) if user is not None else None
         with self._pending_inputs.lock(event.reply_address):
@@ -1325,10 +1332,35 @@ class IncomingMessageDispatcher:
                     if not (preserve_expired and expired and applicable and pending.retry_command):
                         self._pending_inputs.clear(event.reply_address, pending.request_id)
                     pending = None
-        active = personal.by_id(mode.capability_id) if personal is not None and mode is not None else None
+        active = (
+            personal.by_id(mode.capability_id)
+            if personal is not None and mode is not None and mode.capability_id is not None else None
+        )
         snapshot = self._confirmation_snapshot(event, user, active)
         mode_id = personal.visible_mode(mode.capability_id) if personal is not None and mode else None
-        return personal, mode_id, pending, snapshot
+        active_help = (
+            self._project_command_help(active, user, event.reply_address, mode.revision)
+            if active is not None and user is not None and mode is not None else None
+        )
+        return personal, mode_id, pending, snapshot, active_help
+
+    def _project_command_help(
+        self, capability: IncomingCapabilityPort, user: AppUser, address: ReplyAddress, mode_revision: int,
+    ) -> CapabilityHelp | None:
+        if not capability.descriptor.persistent_mode or not isinstance(capability, ContextualCommandQueryPort):
+            return None
+        try:
+            names = capability.visible_mode_commands(user, address, mode_revision)
+            catalog = capability.descriptor.help
+            sections = tuple(
+                replace(section, commands=commands)
+                for section in catalog.sections
+                if (commands := tuple(command for command in section.commands if command.name in names))
+            )
+            return replace(catalog, sections=sections)
+        except Exception:
+            LOGGER.exception("Could not read contextual commands: capability_id=%s", capability.descriptor.capability_id)
+            return CapabilityHelp()
 
     def _pending_is_applicable(
         self, event: IncomingEvent, pending: PendingInput, user: AppUser | None,

@@ -179,6 +179,29 @@ class HandlerContext:
     pending_inputs: PendingInputStore | None = None
     # Привязано к текущему событию и выдаётся зарегистрированному владельцу команд.
     profile_operation: Callable[[ChatCommand, str], IncomingResponse] | None = None
+    # Ревизия режима владельца, уже выбранного в этом чате. При входе её ещё нет.
+    mode_revision: int | None = None
+
+
+@runtime_checkable
+class ContextualCommandQueryPort(Protocol):
+    """Отбирает объявленные команды активной возможности для справки и меню."""
+
+    def visible_mode_commands(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
+    ) -> frozenset[str]:
+        """Читает видимые команды раздела без исполнения действий.
+
+        Args:
+            app_user: Проверенный профиль с действующим доступом к режиму.
+            address: Адрес чата, где выбран этот режим.
+            mode_revision: Ревизия активного режима в указанном чате.
+
+        Returns:
+            Имена команд из статического каталога возможности. Пустое
+            множество оставляет только общие команды и другие доступные входы.
+        """
+        ...
 
 
 @runtime_checkable

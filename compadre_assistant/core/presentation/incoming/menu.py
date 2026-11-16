@@ -3,7 +3,7 @@
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CommandMenu, CommandSuggestion, ConfirmationQueryResult,
+    CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion, ConfirmationQueryResult,
 )
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
 
@@ -17,6 +17,8 @@ def build_command_menu(
     mode_id: str | None,
     pending: PendingInput | None,
     snapshot: ConfirmationQueryResult,
+    *,
+    active_help: CapabilityHelp | None = None,
 ) -> CommandMenu:
     """Собирает выбираемые команды по проверенному состоянию текущего чата.
 
@@ -25,6 +27,7 @@ def build_command_menu(
         mode_id: Сохранённый режим данного чата.
         pending: Уже проверенное по сроку, профилю и доступу ожидание ввода.
         snapshot: Снимок всех применимых источников подтверждений.
+        active_help: Отобранная справка активной возможности либо None для её каталога.
 
     Returns:
         Меню с точными командами, запускающими действие или пошаговый ввод.
@@ -52,7 +55,8 @@ def build_command_menu(
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:
-            for section in active.descriptor.help.sections:
+            catalog = active.descriptor.help if active_help is None else active_help
+            for section in catalog.sections:
                 for command in section.commands:
                     capability(command)
             common(ChatCommand.EXIT)

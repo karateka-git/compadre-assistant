@@ -3,7 +3,7 @@
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, ConfirmationQueryResult, IncomingResponse,
+    CapabilityCommand, CapabilityHelp, ConfirmationQueryResult, IncomingResponse,
 )
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
@@ -15,6 +15,8 @@ def format_contextual_help(
     pending: PendingInput | None,
     snapshot: ConfirmationQueryResult,
     confirmation: IncomingResponse,
+    *,
+    active_help: CapabilityHelp | None = None,
 ) -> IncomingResponse:
     """Формирует справку только по допущенным командам и актуальным ожиданиям.
 
@@ -24,6 +26,7 @@ def format_contextual_help(
         pending: Проверенное ожидание ввода, срок которого не продлевается.
         snapshot: Результат опроса применимых источников подтверждений.
         confirmation: Готовое представление адресных действий этого снимка.
+        active_help: Отобранная справка активной возможности либо None для её каталога.
 
     Returns:
         Справку с отдельным блоком точных адресных действий.
@@ -52,12 +55,13 @@ def format_contextual_help(
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:
+            catalog = active.descriptor.help if active_help is None else active_help
             line(f"Команды режима {mode_id}:")
-            for section in active.descriptor.help.sections:
+            for section in catalog.sections:
                 line(section.title + ":")
                 for item in section.commands:
                     entry(item)
-            for instruction in active.descriptor.help.instructions:
+            for instruction in catalog.instructions:
                 line(instruction)
             command("/exit", "выйти из режима этого чата")
             parts.append(compose_content(
