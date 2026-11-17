@@ -276,9 +276,8 @@ def shopping_list(
     view_name = str(selection) if selection is not None else "page"
     for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
         if 1 <= destination <= last_page:
-            arrow = "←" if destination < page else "→"
             actions.append(_shopping_button(
-                section, arrow if section.vk_menu else label, f"show {destination} {view_name}",
+                section, label, f"show {destination} {view_name}",
                 row=len(visible) if section.vk_menu else None,
             ))
     if selection is None:

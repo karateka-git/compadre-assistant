@@ -647,17 +647,19 @@ class VkFamilyShoppingTest(unittest.TestCase):
         cmid = self.last_cmid
         buttons = self._actions(first)
         self.assertEqual(self._visible_menu(), menu_before_selection)
-        self.assertIn("→", buttons)
+        self.assertIn("Следующая страница", buttons)
+        self.assertNotIn("Предыдущая страница", buttons)
         self.assertTrue(next(label for label in buttons if label.startswith("1. ")).endswith("…"))
         self.assertIn("/family_shopping item 1", first["message"])
-        self._press(buttons["→"], cmid)
+        self._press(buttons["Следующая страница"], cmid)
         second = self._latest_edit()
         self.assertIn("2/3", second["message"])
         self.assertIn("пришли номер товара", second["message"])
         for duplicate in _SELECTION_TEXT_DUPLICATES:
             self.assertNotIn(duplicate, second["message"])
         rows = [[button["action"]["label"] for button in row] for row in json.loads(second["keyboard"])["buttons"]]
-        self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [["←", "→"], ["Назад"]])
+        navigation = ["Предыдущая страница", "Следующая страница"]
+        self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [navigation, ["Назад"]])
         before = len(self.calls)
         self._single_reply(lambda: self._press(buttons["2. Товар 2"], cmid), "Открой /family_shopping")
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
@@ -676,6 +678,12 @@ class VkFamilyShoppingTest(unittest.TestCase):
         delete = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
         delete_cmid = self.last_cmid
         self.assertNotEqual(delete_cmid, cmid)
+        self._press(self._actions(delete)["Следующая страница"], delete_cmid)
+        delete_page = self._latest_edit()
+        delete_rows = json.loads(delete_page["keyboard"])["buttons"]
+        self.assertEqual([button["action"]["label"] for button in delete_rows[-2]], navigation)
+        self._press(self._actions(delete_page)["Предыдущая страница"], delete_cmid)
+        delete = self._latest_edit()
         before = len(self.calls)
         self._press(self._actions(delete)["2. Товар 2"], delete_cmid)
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.edit"])
