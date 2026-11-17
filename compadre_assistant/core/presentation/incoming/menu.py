@@ -57,8 +57,11 @@ def build_command_menu(
         if active is not None and active.descriptor.persistent_mode:
             catalog = active.descriptor.help if active_help is None else active_help
             for section in catalog.sections:
-                for command in section.commands:
-                    capability(command)
+                if not section.menu_help_only:
+                    for command in section.commands:
+                        capability(command)
+            if any(section.menu_help_only for section in catalog.sections):
+                common(ChatCommand.HELP)
             common(ChatCommand.EXIT)
             for access in personal.access:
                 if access.effective and not access.descriptor.persistent_mode:

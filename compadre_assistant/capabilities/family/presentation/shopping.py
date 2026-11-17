@@ -265,36 +265,30 @@ def shopping_list(
             ))
     else:
         if section.inline_commands:
-            parts.extend(("\n\nДобавить · ", code_span(ADD_COMMAND)))
             actions.append(_shopping_button(section, "Добавить", f"add {page}"))
             if totals[ShoppingItemStatus.NEEDED]:
                 # Выбор начинается с первой покупки видимой обычной страницы.
                 choice_page = (page - 1) * _ORDINARY_PAGE_SIZE // _TELEGRAM_SELECTION_PAGE_SIZE + 1
-                for label, command, view in (
-                    ("Купить", BUY_COMMAND, ShoppingSelection.BUY),
-                    ("Удалить", DELETE_COMMAND, ShoppingSelection.DELETE),
+                for label, view in (
+                    ("Купить", ShoppingSelection.BUY),
+                    ("Удалить", ShoppingSelection.DELETE),
                 ):
-                    parts.extend((f"\n{label} · ", code_span(command)))
                     actions.append(_shopping_button(section, label, f"show {choice_page} {view}"))
         if totals[ShoppingItemStatus.BOUGHT] and not section.vk_menu:
-            parts.extend(("\n\nОчистить купленное · ", code_span(CLEAR_BOUGHT_COMMAND)))
             actions.append(_shopping_button(section, "Очистить купленное", f"clear {page}"))
-        if section.vk_menu:
-            parts.extend(("\n\nКоманды списка: ", code_span(ADD_COMMAND), ", ", code_span(BUY_COMMAND), ", ",
-                          code_span(DELETE_COMMAND), ", ", code_span(CLEAR_BOUGHT_COMMAND), "."))
 
     view_name = str(selection) if selection is not None else "page"
     for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
         if 1 <= destination <= last_page:
-            command = f"{SHOPPING_COMMAND} {view_name} {destination}"
-            parts.extend(("\n", label, " · ", code_span(command)))
+            if selection is not None:
+                command = f"{SHOPPING_COMMAND} {view_name} {destination}"
+                parts.extend(("\n", label, " · ", code_span(command)))
             arrow = "←" if destination < page else "→"
             actions.append(_shopping_button(
                 section, arrow if section.vk_menu else label, f"show {destination} {view_name}",
                 row=len(visible) if section.vk_menu else None,
             ))
     if selection is None:
-        parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} home")))
         actions.append(_shopping_button(section, "Назад", "home"))
     else:
         parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} back")))

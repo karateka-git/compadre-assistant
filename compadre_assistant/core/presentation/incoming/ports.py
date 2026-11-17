@@ -36,6 +36,8 @@ class HelpSection:
 
     title: str
     commands: tuple[CapabilityCommand, ...]
+    instructions: tuple[MessageContent, ...] = ()
+    menu_help_only: bool = False  # В общем меню раздел представлен командой /help.
 
 
 @dataclass(frozen=True, slots=True)
