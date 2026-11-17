@@ -582,8 +582,6 @@ class FamilyCapability(
             case ["show", _, "page" | "buy" | "delete" as view]:
                 items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
                 if view == "page":
-                    if section.vk_menu:
-                        page = section.ordinary_page
                     return self._show_shopping_list(context, address, section, items, page, update=True)
                 return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), page)
             case _:

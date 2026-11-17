@@ -124,7 +124,7 @@ class FamilyChannelsTest(unittest.TestCase):
             home = self._send(processor, self.owner_tg, "/family")
             self.assertIn("/family_members", response_text(self._send(processor, self.owner_tg, "/help")))
             opened = self._choose(processor, self.owner_tg, home, "Покупки")
-            self.assertIn("Список пуст", response_text(opened))
+            self.assertIn("Список покупок пуст", response_text(opened))
             self.assertIsNotNone(opened.view_delivery)
             self.assertTrue(opened.view_delivery.start())
             opened.view_delivery.finish("1")
@@ -167,12 +167,14 @@ class FamilyChannelsTest(unittest.TestCase):
         with self._runtime("family") as processor:
             self._joined_family(processor)
             long_title = "<пакет>&" * 20
-            self._seed_shopping("\n".join([long_title, "Хлеб", "Персик", "Яблоко", "Молоко", "Лук"]), buy=(2,))
+            self._seed_shopping("\n".join([long_title, "Хлеб", *(f"Товар {number}" for number in range(2, 12))]),
+                                buy=(2,))
             opened = self._send(processor, self.owner_tg, "/family_shopping")
             first_page = response_text(opened)
             self.assertIn("1/2", first_page)
             self.assertIn("Нужно купить", first_page)
-            self.assertIn("Купленные товары", first_page)
+            self.assertNotIn("Куплено", first_page)
+            self.assertNotIn("Смотри другие страницы", first_page)
             self.assertIn("/family_shopping item 1", first_page)
             self.assertNotIn(long_title, first_page)
             self.assertEqual(response_text(self._send(processor, self.owner_tg, "/family_shopping item 1")),
@@ -183,7 +185,7 @@ class FamilyChannelsTest(unittest.TestCase):
             event = replace(self._event(self.owner_tg, "callback"), callback_message_id="4")
             updated = processor.select_action(event, action.token)
             self.assertIn("2/2", response_text(updated))
-            self.assertIn("1. Хлеб", response_text(updated))
+            self.assertIn("11. Товар 11\n\nКуплено\n1. Хлеб", response_text(updated))
             self.assertEqual(updated.view_delivery.target_message_id, "4")
 
     def test_shopping_page_from_previous_family_cannot_read_new_family(self) -> None:
@@ -240,7 +242,7 @@ class FamilyChannelsTest(unittest.TestCase):
                     self.assertIn("Пришли один номер", response_text(invalid))
             read = self._send(processor, self.owner_tg, "/family_shopping")
             self.assertIn("2. Чай", response_text(read))
-            self.assertNotIn("Купленные товары", response_text(read))
+            self.assertNotIn("Куплено", response_text(read))
             self._deliver(read, "103")
             removed = self._send(processor, self.guest, "2")
             self.assertIn("Нужно купить\n1. Хлеб\n2. Чай\n3. Молоко, 2 л", response_text(removed))
@@ -248,10 +250,10 @@ class FamilyChannelsTest(unittest.TestCase):
             self._deliver(self._send(processor, self.owner_tg, "/delete"), "103")
             self._deliver(self._send(processor, self.owner_tg, "1"), "103")
             read = self._send(processor, self.owner_tg, "/family_shopping")
-            self.assertIn("Нужно купить\n1. Чай\n2. Молоко, 2 л\n\nКупленные товары\n1. Чай", response_text(read))
+            self.assertIn("Нужно купить\n1. Чай\n2. Молоко, 2 л\n\nКуплено\n1. Чай", response_text(read))
             cleared = self._send(processor, self.owner_tg, "/family_clear_bought")
             self.assertIn("1. Чай", response_text(cleared))
-            self.assertNotIn("Купленные товары", response_text(cleared))
+            self.assertNotIn("Куплено", response_text(cleared))
             self.assertNotIn("Очистить купленное", response_text(cleared))
 
     def test_old_shopping_add_input_cannot_continue_after_rejoining_same_family(self) -> None:
@@ -265,7 +267,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("Доступ к семье завершён", response_text(stale))
             stale = self._send(processor, self.guest, "/add Устаревшая команда")
             self.assertIn("Доступ к семье завершён", response_text(stale))
-            self.assertIn("Список пуст", response_text(self._send(processor, self.guest, "/family_shopping")))
+            self.assertIn("Список покупок пуст", response_text(self._send(processor, self.guest, "/family_shopping")))
             self.assertIn("1. Свежая покупка", response_text(self._send(processor, self.guest, "/add Свежая покупка")))
 
     def test_previous_membership_buttons_and_target_cannot_be_used_after_failed_reopen(self) -> None:
@@ -298,7 +300,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIsNone(recovery.view_delivery)
             latest = self._send(processor, self.guest, "/family_shopping")
             self.assertIn("Нужно купить\n1. Хлеб", response_text(latest))
-            self.assertNotIn("Купленные товары", response_text(latest))
+            self.assertNotIn("Куплено", response_text(latest))
 
     def test_concurrent_channel_choices_of_same_item_apply_once(self) -> None:
         """Участники Telegram и VK получают один результат покупки и независимые edit-цели."""
@@ -353,7 +355,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("Список для выбора недоступен", response_text(self._send(processor, self.guest, "1")))
             read = self._send(processor, self.guest, "/family_shopping")
             self.assertIn("Нужно купить\n1. Хлеб\n2. Молоко", response_text(read))
-            self.assertNotIn("Купленные товары", response_text(read))
+            self.assertNotIn("Куплено", response_text(read))
 
     def test_position_shift_and_cancel_do_not_apply_a_different_item(self) -> None:
         """Второй чат сдвигает номер, первый должен получить новый список и подтвердить выбор."""
@@ -373,7 +375,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.owner_tg, "2")
             read = self._send(processor, self.owner_tg, "/family_shopping")
             self.assertIn("1. Молоко\n2. Сыр", response_text(read))
-            self.assertNotIn("Купленные товары", response_text(read))
+            self.assertNotIn("Куплено", response_text(read))
             self._deliver(read, "102")
             selecting = self._send(processor, self.owner_tg, "/buy")
             self._deliver(selecting, "102")
@@ -383,7 +385,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.owner_tg, "1")
             ordinary = self._send(processor, self.owner_tg, "/family_shopping")
             self.assertIn("Нужно купить\n1. Молоко\n2. Сыр", response_text(ordinary))
-            self.assertNotIn("Купленные товары", response_text(ordinary))
+            self.assertNotIn("Куплено", response_text(ordinary))
 
     def test_repeated_number_message_is_not_applied_to_next_item(self) -> None:
         """Повтор старого сообщения после обновления не выбирает товар с новым номером."""
@@ -399,7 +401,40 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIsNone(repeat.view_delivery)
             self._deliver(self._send(processor, self.owner_tg, "1"), "100")
             ordinary = self._send(processor, self.owner_tg, "/family_shopping")
-            self.assertIn("Нужно купить\n1. Сыр\n\nКупленные товары\n1. Хлеб\n2. Молоко", response_text(ordinary))
+            self.assertIn("Нужно купить\n1. Сыр\n\nКуплено\n1. Хлеб\n2. Молоко", response_text(ordinary))
+
+    def test_choice_beyond_ten_keeps_the_product_after_another_chat_shifts_numbers(self) -> None:
+        """Номер требует пересмотра страницы, а кнопка выбирает показанный товар."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._seed_shopping("\n".join(f"Товар {number:02d}" for number in range(1, 14)))
+            self._deliver(self._send(processor, self.owner_tg, "/family_shopping"), "100")
+            origin = self._send(processor, self.owner_tg, "/family_shopping page 2")
+            self._deliver(origin, "101")
+            first_action = next(action for action in origin.bound_actions if action.label == "Купить")
+            event = replace(self._event(self.owner_tg, "callback"), callback_message_id="101")
+            choosing = processor.select_action(event, first_action.token)
+            self.assertIn("3/3", response_text(choosing))
+            self.assertIn("11. Товар 11", response_text(choosing))
+            self._deliver(choosing, "101")
+
+            self._send(processor, self.guest, "/family_shopping")
+            self._deliver(self._send(processor, self.guest, "/delete"), "102")
+            self._deliver(self._send(processor, self.guest, "1"), "102")
+            shifted = self._send(processor, self.owner_tg, "11")
+            self.assertIn("Нумерация изменилась", response_text(shifted))
+            self.assertIn("11. Товар 12", response_text(shifted))
+            self._deliver(shifted, "101")
+            chosen = next(action for action in shifted.bound_actions if action.label == "11. Товар 12")
+            # Второй чат снова меняет позицию. Кнопка хранит номер показанного товара.
+            self._deliver(self._send(processor, self.guest, "1"), "102")
+            after = processor.select_action(event, chosen.token)
+            self._deliver(after, "101")
+            back = next(action for action in after.bound_actions if action.label == "Назад")
+            ordinary = response_text(processor.select_action(event, back.token))
+            self.assertIn("Куплено\n1. Товар 12", ordinary)
+            self.assertIn("9. Товар 11\n10. Товар 13", ordinary)
+            self.assertNotIn("2/2", ordinary)
 
     def test_family_is_server_opt_in_and_private_only(self) -> None:
         """Семейный вход недоступен без включения, регистрации и личного чата."""

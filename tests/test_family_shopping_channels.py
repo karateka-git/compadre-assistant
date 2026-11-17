@@ -1,5 +1,6 @@
 """Проверяет общий список через обработчики Telegram и VK с локальными fake API."""
 
+from datetime import UTC, datetime
 from functools import partial
 from html import unescape
 from io import BytesIO
@@ -17,6 +18,8 @@ from compadre_assistant.bootstrap import (
     ChannelMessageProcessor, create_channel_message_processor, create_user_identity_service,
 )
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
+from compadre_assistant.capabilities.family.domain.shopping import ManageShopping, ShoppingItem, ShoppingItemStatus
+from compadre_assistant.capabilities.family.presentation.shopping import ShoppingSection, shopping_list
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
@@ -26,17 +29,87 @@ from compadre_assistant.presentation.telegram.bot import _register_handlers, saf
 from compadre_assistant.presentation.vk.bot import (
     VkApiClient, _create_vk_menu_update_handler, _handle_update, _safe_send_vk_message,
 )
+from tests.response_assertions import response_text
 from tests.test_telegram_bot import FakeAiogram
 
 
-def _runtime(test: unittest.TestCase, channel: str, user_id: int) -> ChannelMessageProcessor:
+def _runtime(test: unittest.TestCase, channel: str, user_id: int) -> tuple[ChannelMessageProcessor, Path]:
     database = Path(test.enterContext(TemporaryDirectory(prefix="family-shopping-channel-"))) / "app.db"
     with connect_database(database) as connection:
         apply_migrations(connection)
         create_user_identity_service(connection).register_with_name(
             IncomingIdentity(channel, str(user_id), str(user_id)), display_name="Лена",
         )
-    return test.enterContext(create_channel_message_processor(database_path=database, enabled_capabilities=("family",)))
+    processor = test.enterContext(create_channel_message_processor(database_path=database, enabled_capabilities=("family",)))
+    return processor, database
+
+
+def _seed_long_bought(database: Path, channel: str, user_id: str) -> tuple[str, ...]:
+    """Добавляет покупки на две страницы и длинный купленный блок."""
+    names = tuple(f"Купленный товар {index:02d} " + "Ж<&" * 22 for index in range(1, 45))
+    pending = tuple(f"Нужный товар {index:02d}" for index in range(1, 12))
+    with connect_database(database) as connection:
+        user = create_user_identity_service(connection).resolve_without_touch(IncomingIdentity(channel, user_id, user_id))
+        repository = SQLiteFamilyRepository(connection)
+        family = repository.find_for_member(user.id)
+        actor = next(member for member in repository.list_members(user.id, family.id) if member.app_user_id == user.id)
+        shopping = ManageShopping(repository)
+        shopping.add(user.id, family.id, "\n".join((*pending, *names)), actor_joined_at=actor.joined_at)
+        shopping.buy(user.id, family.id, tuple(range(12, 12 + len(names))), actor_joined_at=actor.joined_at)
+    return names
+
+
+class ShoppingPageTest(unittest.TestCase):
+    """Проверяет логические страницы, общие для Telegram и VK."""
+
+    def test_item_counts_and_groups_on_each_page(self) -> None:
+        """Только «Нужно купить» задаёт размер и число страниц."""
+        variants = ((5, 8, (5,)), (10, 3, (10,)), (13, 8, (10, 3)), (20, 4, (10, 10)),
+                    (23, 0, (10, 10, 3)), (0, 6, (0,)), (0, 0, (0,)))
+        now = datetime.now(UTC)
+        for channel in ("telegram", "vk"):
+            section = ShoppingSection(1, 1, now, inline_commands=channel == "telegram", vk_menu=channel == "vk")
+            for needed, bought, counts in variants:
+                with self.subTest(channel=channel, needed=needed, bought=bought):
+                    items = tuple(
+                        ShoppingItem(number, f"{prefix}{number:02d}", status, 1, now, None, None)
+                        for first, end, prefix, status in (
+                            (1, needed + 1, "Нужный-", ShoppingItemStatus.NEEDED),
+                            (needed + 1, needed + bought + 1, "Купленный-", ShoppingItemStatus.BOUGHT),
+                        )
+                        for number in range(first, end)
+                    )
+                    for page, count_items in enumerate(counts, 1):
+                        content = response_text(shopping_list(items, section, page))
+                        self.assertEqual(content.count(". Нужный-"), count_items)
+                        if count_items:
+                            first = (page - 1) * 10 + 1
+                            self.assertIn(f"{first}. Нужный-{first:02d}", content)
+                        if len(counts) == 1:
+                            self.assertNotIn(" · 1/", content)
+                        else:
+                            self.assertIn(f" · {page}/{len(counts)}", content)
+                        if bought and page == len(counts):
+                            self.assertIn(f"Куплено\n1. Купленный-{needed + 1:02d}", content)
+                            self.assertEqual(content.count(". Купленный-"), bought)
+                        else:
+                            self.assertNotIn("Куплено", content)
+                        self.assertNotIn("Смотри другие страницы", content)
+                        if not needed:
+                            self.assertIn("Нужно купить\nСписок пуст." if bought else "Список покупок пуст.", content)
+
+    def test_unknown_items_keep_separate_numbering_on_last_page(self) -> None:
+        """Неизвестный статус сохраняет собственную группу и не занимает место покупок."""
+        now = datetime.now(UTC)
+        section = ShoppingSection(1, 1, now, inline_commands=True)
+        items = tuple(
+            ShoppingItem(number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
+            for number in range(1, 12)
+        ) + (ShoppingItem(12, "Другой товар", ShoppingItemStatus.UNKNOWN, 1, now, None, None),)
+        self.assertNotIn("с неизвестным состоянием", response_text(shopping_list(items, section, 1)))
+        final = response_text(shopping_list(items, section, 2))
+        self.assertIn("11. Товар 11\n\nПокупки с неизвестным состоянием\n1. Другой товар", final)
+        self.assertNotIn("Куплено", final)
 
 
 class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
@@ -44,7 +117,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self) -> None:
         """Подключает настоящие обработчики к fake Bot API."""
-        self.processor = _runtime(self, "telegram", 101)
+        self.processor, self.database = _runtime(self, "telegram", 101)
         self.chat = SimpleNamespace(id=101)
         self.author = SimpleNamespace(id=101)
         self.updates = count(200)
@@ -154,7 +227,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
 
         await self._press(buying["1. Хлеб"], active_list)
         bought = self.bot.edit_message_text.await_args
-        self.assertNotIn("Купленные товары", bought.kwargs["text"])
+        self.assertNotIn("Куплено", bought.kwargs["text"])
         self.assertEqual(list(self._actions(bought)), ["1. Молоко, 2 л", "2. Яблоки", "Назад"])
         await self._press(buying["2. Молоко, 2 л"], active_list)
         self.assertEqual(self.bot.edit_message_text.await_count, 2)
@@ -172,7 +245,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._press(ordinary["Очистить купленное"], active_list)
         cleared = self.bot.edit_message_text.await_args
         self.assertIn("1. Молоко, 2 л", cleared.kwargs["text"])
-        self.assertNotIn("Купленные товары", cleared.kwargs["text"])
+        self.assertNotIn("Куплено", cleared.kwargs["text"])
         self.assertNotIn("Очистить купленное", self._actions(cleared))
         self.assertTrue(all(call.kwargs["message_id"] == active_list
                             for call in self.bot.edit_message_text.await_args_list))
@@ -204,7 +277,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         refreshed_buy = self._actions(self.bot.send_message.await_args)["Купить"]
         text = self.bot.send_message.await_args.kwargs["text"]
         self.assertIn("1. Хлеб", text)
-        self.assertNotIn("Купленные товары", text)
+        self.assertNotIn("Куплено", text)
         await self._send("/settings")
         self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], reopened)
         await self._press(refreshed_buy, reopened)
@@ -256,13 +329,13 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.bot.edit_message_text.await_count, 2)
             write.assert_called_once()
         await self._send("/family_shopping")
-        self.assertIn("Купленные товары\n1. Хлеб", self.bot.send_message.await_args.kwargs["text"])
+        self.assertIn("Куплено\n1. Хлеб", self.bot.send_message.await_args.kwargs["text"])
         self.bot.edit_message_text.side_effect = lambda **kwargs: SimpleNamespace(message_id=kwargs["message_id"])
         await self._send("/buy")
         await self._send("1")
         await self._send("/family_shopping")
         result = self.bot.send_message.await_args.kwargs["text"]
-        self.assertIn("Купленные товары\n1. Хлеб\n2. Молоко", result)
+        self.assertIn("Куплено\n1. Хлеб\n2. Молоко", result)
 
     async def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
         """Список и ручные операции доступны при отключённых inline-кнопках."""
@@ -276,13 +349,13 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
             await self._send("1")
             self.assertNotIn("Молоко", self.bot.edit_message_text.await_args.kwargs["text"])
             await self._send("/family_clear_bought")
-            self.assertIn("Список пуст", self.bot.send_message.await_args.kwargs["text"])
+            self.assertIn("Список покупок пуст", self.bot.send_message.await_args.kwargs["text"])
 
     async def test_long_page_has_navigation_on_last_message_and_short_replacement_is_sent(self) -> None:
         """Переход на длинную страницу переносит кнопки после доставки всего HTML."""
         await self._open()
         title = "<&" * 40 + " финиш"
-        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 6)), title]))
+        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 11)), title]))
         short_id = self.last_sent
         next_page = self._actions(self.bot.send_message.await_args)["Следующая страница"]
         self.bot.send_message.reset_mock()
@@ -296,7 +369,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(len(chunks), 1)
         self.assertTrue(all(len(chunk["text"].encode("utf-16-le")) // 2 <= 250 for chunk in chunks))
         joined = "".join(unescape(chunk["text"]) for chunk in chunks)
-        self.assertIn(f"6. {title}", joined)
+        self.assertIn(f"11. {title}", joined)
         self.assertTrue(all("reply_markup" not in chunk for chunk in chunks[:-1]))
         previous = self._actions(self.bot.send_message.await_args)["Предыдущая страница"]
         long_id = self.last_sent
@@ -317,7 +390,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
     async def test_partial_long_replacement_preserves_previous_keyboard(self) -> None:
         """При отказе части новый ID не подтверждается и прежние кнопки не снимаются."""
         await self._open()
-        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 6)), "<" * 79]))
+        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 11)), "<" * 79]))
         previous_id = self.last_sent
         next_page = self._actions(self.bot.send_message.await_args)["Следующая страница"]
         self.bot.edit_message_reply_markup.reset_mock()
@@ -340,13 +413,31 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._send("/buy")
         self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], previous_id)
 
+    async def test_entire_bought_group_stays_on_last_logical_telegram_page(self) -> None:
+        """Большой купленный блок доставляется частями последней страницы."""
+        await self._open()
+        bought = _seed_long_bought(self.database, "telegram", "101")
+        await self._send("/family_shopping")
+        self.assertNotIn("Куплено", self.bot.send_message.await_args.kwargs["text"])
+        current_id = self.last_sent
+        next_page = self._actions(self.bot.send_message.await_args)["Следующая страница"]
+        self.bot.send_message.reset_mock()
+        await self._press(next_page, current_id)
+        chunks = [call.kwargs for call in self.bot.send_message.await_args_list]
+        self.assertGreater(len(chunks), 1)
+        joined = "".join(unescape(chunk["text"]) for chunk in chunks)
+        self.assertIn("Список покупок · 2/2\n\nНужно купить\n11. Нужный товар 11\n\nКуплено", joined)
+        for position, name in enumerate(bought, 1):
+            self.assertIn(f"{position}. {name}", joined)
+        self.assertIn("Предыдущая страница", self._actions(self.bot.send_message.await_args))
+
 
 class VkFamilyShoppingTest(unittest.TestCase):
     """Проверяет нижнее меню, inline-клавиатуру и один cmid через VK Long Poll."""
 
     def setUp(self) -> None:
         """Настраивает VK-клиент с ответами локального обработчика HTTP."""
-        self.processor = _runtime(self, "vk", 201)
+        self.processor, self.database = _runtime(self, "vk", 201)
         self.client = VkApiClient(token="fake-vk-token")
         self.logger = logging.getLogger("test.family.vk")
         self.menu = _create_vk_menu_update_handler(self.client, logger=self.logger)
@@ -463,13 +554,35 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertEqual(list(self._visible_menu()), ["Добавить", "Купить", "Удалить", "Назад"])
         self.assertIn("keyboard", sent[-1])
 
+    def test_entire_bought_group_stays_on_last_logical_vk_page(self) -> None:
+        """Большой купленный блок не добавляет страниц и сохраняет меню VK."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        bought = _seed_long_bought(self.database, "vk", "201")
+        first = self._single_reply(lambda: self._menu_press("Покупки"), "1/2")
+        self.assertNotIn("Куплено", first["message"])
+        boundary = len(self.calls)
+        self._menu_press("Следующая страница")
+        sent = [params for method, params in self.calls[boundary:] if method == "messages.send"]
+        self.assertGreater(len(sent), 1)
+        joined = "".join(part["message"] for part in sent)
+        self.assertIn("Список покупок · 2/2\n\nНужно купить\n11. Нужный товар 11\n\nКуплено", joined)
+        for position, name in enumerate(bought, 1):
+            self.assertIn(f"{position}. {name}", joined)
+        self.assertTrue(all("keyboard" not in part for part in sent[:-1]))
+        self.assertIn("keyboard", sent[-1])
+        menu = self._visible_menu()
+        self.assertIn("Предыдущая страница", menu)
+        self.assertNotIn("Следующая страница", menu)
+
     def test_paginated_selection_clear_and_text_command_use_vk_cmid(self) -> None:
         """Страницы и выбор длинных названий помещаются в клавиатуру одного сообщения."""
         self._send("/family")
         self._send("/family_create")
         self._send("Дом")
         self._menu_press("Покупки")
-        self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 11))]))
+        self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 13))]))
         self._single_reply(lambda: self._menu_press("Следующая страница"), "2/2",
                            labels=["Добавить", "Купить", "Удалить", "Предыдущая страница", "Назад"])
 
@@ -492,12 +605,12 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._send("8")
         bought = self._latest_edit()
         self.assertNotIn("8. Товар 8", self._actions(bought))
-        self.assertNotIn("Купленные товары", bought["message"])
+        self.assertNotIn("Куплено", bought["message"])
         self.assertEqual(self._visible_menu(), menu_before_selection)
-        self._single_reply(lambda: self._press(self._actions(bought)["Назад"], cmid), "Купленные товары\n1. Товар 8",
+        self._single_reply(lambda: self._press(self._actions(bought)["Назад"], cmid), "Куплено\n1. Товар 8",
                            labels=["Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Назад"])
         cleared = self._single_reply(lambda: self._menu_press("Очистить купленное"), "Список покупок")
-        self.assertNotIn("Купленные товары", cleared["message"])
+        self.assertNotIn("Куплено", cleared["message"])
         self.assertNotIn("Очистить купленное", self._visible_menu())
         self.assertTrue(all(params["cmid"] == str(cmid) for method, params in self.calls if method == "messages.edit"))
 
@@ -529,7 +642,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertEqual(self._visible_menu().keys(), set(home))
         self.assertIn("Закрыть семью", self._actions(roster))
         self._single_reply(lambda: self._menu_press("Пригласить"), "одноразовый код")
-        self._single_reply(lambda: self._menu_press("Покупки"), "Список пуст", labels=shopping)
+        self._single_reply(lambda: self._menu_press("Покупки"), "Список покупок пуст", labels=shopping)
         empty = self._single_reply(lambda: self._menu_press("Купить"), "Добавь покупку через /add")
         self.assertEqual(list(self._actions(empty)), ["Назад"])
         self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
