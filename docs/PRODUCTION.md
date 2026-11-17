@@ -31,7 +31,23 @@ Python и другие режимы контроллера этому входу
 первым запуском сверяйте права и установленный controller snapshot с
 [инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
 
-## Последний проверенный снимок 17.11.2026, после 07:46 UTC
+## Последний проверенный снимок 17.11.2026, после 08:49 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | Установлена `v4.2.3`, SHA `f9f7f6b6ee57f0ebf543c43eb82ddcf081a0292a`. Immutable Release `448355494`. Deployment `7848444081` получил статус `22391374823` (`success`). Полный CI `44048167785`, попытка 1, подтвердил совместимость с `v4.2.2`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.3) · [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/44048167785/attempts/1) |
+| Контроллер | Snapshot `6de377cf402483c32faa63b805f6420df434fe70`. |
+| SQLite и backup | Активное поколение `d11aca973717472aa8e8cbf1ccdfd4fb`, последняя миграция `0007_family.sql`. Проверены финальная резервная копия, выбор активной базы для планового backup и отсутствие файлов прежнего поколения после штатной очистки. |
+| Каналы | Контейнеры Telegram и VK `healthy`, перезапусков 0. Основной сервис и таймер backup активны, `family` включена в обоих контейнерах. |
+| Длительность | Workflow начал установку в 08:46:00.629 UTC и подтвердил Deployment в 08:49:06.257 UTC. Отчёт контроллера зафиксировал 158,463 с установки и 75,454 с простоя. Расход токенов Codex за этот интервал `unknown`. |
+
+Release опубликовали из рабочей копии точного SHA `release/4.2`. Workflow
+установил эту версию и записал техническую приёмку.
+
+[Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/44049484978) ·
+[Статус Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7848444081/statuses)
+
+## Исторический снимок 17.11.2026, после 07:46 UTC
 
 | Область | Результат проверки |
 | --- | --- |
