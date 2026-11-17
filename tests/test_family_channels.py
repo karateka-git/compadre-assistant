@@ -83,11 +83,10 @@ class FamilyChannelsTest(unittest.TestCase):
     def _member_command(
         self, processor: ChannelMessageProcessor, identity: IncomingIdentity, name: str, operation: str,
     ) -> str:
-        roster = self._send(processor, identity, "/family_members")
-        member = self._choose(processor, identity, roster, name)
-        command = re.search(rf"(/family_{operation} [\w-]+)", response_text(member))
-        self.assertIsNotNone(command)
-        return command[1]
+        roster = self._send(processor, identity, "/family_members commands")
+        reference = re.search(rf"{re.escape(name)} \([^)]+\) — /family_members ([\w-]+)", response_text(roster))
+        self.assertIsNotNone(reference)
+        return f"/family_{operation} {reference[1]}"
 
     def _seed_shopping(self, text: str, *, buy: tuple[int, ...] = ()) -> None:
         with connect_database(self.database_path) as connection:
@@ -147,9 +146,14 @@ class FamilyChannelsTest(unittest.TestCase):
             for identity in (self.owner_tg, self.owner_vk):
                 with self.subTest(channel=identity.channel):
                     home = self._send(processor, identity, "/family")
+                    self.assertEqual(response_text(home), "Семья «Дом»")
+                    self.assertIn("/family_members commands [<page>]", response_text(
+                        self._send(processor, identity, "/help"),
+                    ))
                     roster = (self._choose(processor, identity, home, "Участники") if identity.channel == "telegram"
                               else self._send(processor, identity, "/family_members"))
                     member = self._choose(processor, identity, roster, "Илья")
+                    self.assertEqual(response_text(member), "Илья\nУчастник семьи «Дом».")
                     roster = self._choose(processor, identity, member, "Назад")
                     self.assertIn("Участники семьи «Дом»", response_text(roster))
                     home = self._choose(processor, identity, roster, "Назад")
@@ -157,9 +161,12 @@ class FamilyChannelsTest(unittest.TestCase):
                     invitation = (self._choose(processor, identity, home, "Пригласить")
                                   if identity.channel == "telegram"
                                   else self._send(processor, identity, "/family_invite"))
+                    self.assertEqual(response_text(invitation), "Приглашение в семью «Дом»")
                     issued = self._choose(processor, identity, invitation, "Создать код")
+                    self.assertIn("По коду можно вступить один раз", response_text(issued))
+                    self.assertNotIn("/family_invite", response_text(issued))
                     invitation = self._choose(processor, identity, issued, "Назад")
-                    self.assertIn("Чтобы получить одноразовый код", response_text(invitation))
+                    self.assertEqual(response_text(invitation), "Приглашение в семью «Дом»")
                     self.assertIn("Семья «Дом»", response_text(self._choose(processor, identity, invitation, "Назад")))
 
     def test_shopping_pages_preserve_groups_numbers_and_full_titles(self) -> None:
@@ -225,7 +232,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIsNone(direct.view_delivery.target_message_id)
             self.assertTrue(direct.view_delivery.start())
             direct.view_delivery.finish("100")
-            self.assertIn("Ожидание действует 10 минут", response_text(self._send(processor, self.owner_tg, "/add")))
+            self.assertIn("На ввод 10 минут", response_text(self._send(processor, self.owner_tg, "/add")))
             added = self._send(processor, self.owner_tg, "Чай\n\nМолоко, 2 л")
             self.assertIn("3. Чай\n4. Молоко, 2 л", response_text(added))
             self.assertIsNone(added.view_delivery.target_message_id)
@@ -234,7 +241,7 @@ class FamilyChannelsTest(unittest.TestCase):
             for command in ("/buy 2", "/delete 2"):
                 self.assertIn("без аргументов", response_text(self._send(processor, self.guest, command)))
             buying = self._send(processor, self.guest, "/buy")
-            self.assertIn("отправь номер следующим сообщением. Например, 2", response_text(buying))
+            self.assertIn("пришли номер товара. На выбор 10 минут.", response_text(buying))
             self._deliver(buying, "102")
             for bad in ("0", "-4", "1,2", "5", "9223372036854775807"):
                 with self.subTest(bad=bad):
@@ -454,7 +461,8 @@ class FamilyChannelsTest(unittest.TestCase):
         """Проверяет кнопки и ручные команды на одном хранилище обоих каналов."""
         with self._runtime("family") as processor:
             initial = self._send(processor, self.owner_tg, "/family")
-            self.assertIn("/family_create", response_text(initial))
+            self.assertEqual(response_text(initial), "Семья")
+            self.assertIn("/family_create", response_text(self._send(processor, self.owner_tg, "/help")))
             waiting = self._choose(processor, self.owner_tg, initial, "Создать семью")
             self.assertIn("10 минут", response_text(waiting))
             self.assertIn("Напиши непустое", response_text(self._send(processor, self.owner_tg, " \t ")))
@@ -495,7 +503,7 @@ class FamilyChannelsTest(unittest.TestCase):
                     self._send(processor, self.owner_tg, interrupt)
                     result = self._send(processor, self.owner_tg, "Лишнее название")
                     self.assertNotIn("Семья «Лишнее название»", response_text(result))
-                    self.assertIn("/family_join", response_text(result))
+                    self.assertIn("Вступить по коду", {action.label for action in result.bound_actions})
 
     def test_incorrect_code_does_not_extend_pending_input(self) -> None:
         """После десяти минут код требует заново открыть ожидание."""
@@ -520,7 +528,10 @@ class FamilyChannelsTest(unittest.TestCase):
             text = response_text(roster)
             self.assertIn("Оля (владелец, ты)", text)
             self.assertIn("Илья (участник)", text)
-            reference = re.search(r"Илья \(участник\) — (/family_members [\w-]+)", text)
+            self.assertNotIn("/family", text)
+            manual = self._send(processor, self.owner_tg, "/family_members commands")
+            self.assertFalse(manual.bound_actions)
+            reference = re.search(r"Илья \(участник\) — (/family_members [\w-]+)", response_text(manual))
             self.assertIsNotNone(reference)
             command = reference[1]
 
@@ -544,7 +555,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             self._send(processor, self.guest, "/settings")
             self._send(processor, self.guest, "/name Оля")
-            roster = response_text(self._send(processor, self.owner_tg, "/family_members"))
+            roster = response_text(self._send(processor, self.owner_tg, "/family_members commands"))
             references = re.findall(r"Оля \([^)]+\) — (/family_members [\w-]+)", roster)
             self.assertEqual(len(set(references)), 2)
             self.assertIn("Владелец семьи", response_text(self._send(processor, self.owner_tg, references[0])))
@@ -566,13 +577,18 @@ class FamilyChannelsTest(unittest.TestCase):
                     invitations.join(member.id, invitations.issue(owner.id, family.id).code)
             first = self._send(processor, self.owner_tg, "/family_members")
             self.assertIn("1/2", response_text(first))
-            self.assertIn("/family_members page 2", response_text(first))
+            self.assertNotIn("/family_members", response_text(first))
             self.assertNotIn("Участник 309", response_text(first))
             second = self._choose(processor, self.owner_tg, first, "Следующая страница")
             self.assertIn("Участник 309", response_text(second))
-            self.assertIn("/family_members page 1", response_text(second))
+            self.assertNotIn("/family_members", response_text(second))
             manual = self._send(processor, self.owner_tg, "/family_members page 2")
             self.assertEqual(response_text(manual), response_text(second))
+            first_commands = self._send(processor, self.owner_tg, "/family_members commands")
+            self.assertIn("/family_members commands 2", response_text(first_commands))
+            second_commands = self._send(processor, self.owner_tg, "/family_members commands 2")
+            self.assertIn("Участник 309", response_text(second_commands))
+            self.assertIn("/family_members commands 1", response_text(second_commands))
 
     def test_member_confirmation_is_addressed_and_one_use(self) -> None:
         """Решение привязано к профилю, чату, операции, версии и текущему запросу."""
@@ -582,6 +598,7 @@ class FamilyChannelsTest(unittest.TestCase):
             command = self._member_command(processor, self.owner_tg, "Илья", "remove")
             pending = self._send(processor, self.owner_tg, command)
             self.assertIn("Исключить участника «Илья»", response_text(pending))
+            self.assertNotIn("/confirm", response_text(pending))
             approve = self._decision(pending)
             for identity in (self.guest, self.owner_vk):
                 with self.subTest(identity=identity):
@@ -720,7 +737,7 @@ class FamilyChannelsTest(unittest.TestCase):
             close = self._choose(processor, self.owner_tg, roster, "Закрыть семью")
             result = self._choose(processor, self.owner_tg, close, "Закрыть семью")
             self.assertIn("Семья закрыта", response_text(result))
-            self.assertIn("/family_create", response_text(result))
+            self.assertIn("Создать семью", {action.label for action in result.bound_actions})
             self.assertIn("Код недействителен", response_text(self._send(processor, self.other, code[1])))
 
     def test_server_disabling_preserves_family_and_invalidates_old_confirmation(self) -> None:

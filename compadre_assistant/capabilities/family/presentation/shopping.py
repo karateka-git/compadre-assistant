@@ -202,7 +202,7 @@ def shopping_list(
     update: bool = False, selection: ShoppingSelection | None = None,
     choice: ShoppingChoice | None = None, notice: str | None = None,
 ) -> IncomingResponse:
-    """Показывает страницу по группам статусов и команды доступных переходов.
+    """Показывает страницу по группам статусов и кнопки переходов.
 
     Args:
         items: Текущий снимок списка с постоянными номерами.
@@ -225,18 +225,19 @@ def shopping_list(
         items, page, selecting=selection is not None, vk_menu=section.vk_menu,
     )
     empty_list = not items and selection is None
-    selecting_with_items = selection is not None and bool(items)
     parts: list[str | TextSpan] = ["Список покупок пуст." if empty_list else "Список покупок"]
     if last_page > 1:
         parts.append(f" · {page}/{last_page}")
-    if not empty_list:
+    if selection is not None and not visible:
+        parts.append("\n\nВ «Нужно купить» пока ничего нет.")
+    elif not empty_list:
         for status, label in groups:
             group = tuple((position, item) for position, item in visible if item.status is status)
             if not group and status is not ShoppingItemStatus.NEEDED:
                 continue
             parts.extend(("\n\n", label))
             if not group:
-                parts.append("\nВ этой группе пока ничего нет." if selecting_with_items else "\nСписок пуст.")
+                parts.append("\nСписок пуст.")
             for position, item in group:
                 title = item.name
                 if len(title) > _TITLE_PREVIEW:
@@ -249,12 +250,7 @@ def shopping_list(
     if selection is not None:
         instruction = "Выбери, что купил" if selection is ShoppingSelection.BUY else "Выбери, что удалить"
         if visible:
-            example = visible[1][0] if len(visible) > 1 else visible[0][0]
-            parts.extend((f"\n\n{instruction}, или отправь номер следующим сообщением. Например, ",
-                          code_span(str(example)), ". Выбор действует 10 минут. Для отмены введи ",
-                          code_span("/cancel"), "."))
-        else:
-            parts.extend(("\n\nВ «Нужно купить» пока ничего нет. Добавь покупку через ", code_span(ADD_COMMAND), "."))
+            parts.append(f"\n\n{instruction}, или пришли номер товара. На выбор 10 минут.")
         for row, (position, item) in enumerate(visible):
             label = f"{position}. {item.name}"
             if len(label) > _BUTTON_LABEL_LIMIT:
@@ -280,9 +276,6 @@ def shopping_list(
     view_name = str(selection) if selection is not None else "page"
     for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
         if 1 <= destination <= last_page:
-            if selection is not None:
-                command = f"{SHOPPING_COMMAND} {view_name} {destination}"
-                parts.extend(("\n", label, " · ", code_span(command)))
             arrow = "←" if destination < page else "→"
             actions.append(_shopping_button(
                 section, arrow if section.vk_menu else label, f"show {destination} {view_name}",
@@ -291,7 +284,6 @@ def shopping_list(
     if selection is None:
         actions.append(_shopping_button(section, "Назад", "home"))
     else:
-        parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} back")))
         actions.append(_shopping_button(
             section, "Назад", f"show {section.ordinary_page} page",
             row=_VK_SELECTION_PAGE_SIZE + 1 if section.vk_menu else None,
