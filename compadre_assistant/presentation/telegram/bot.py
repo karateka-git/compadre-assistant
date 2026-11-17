@@ -20,7 +20,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CommandMenuUpdateHandler, IncomingResponse,
 )
 from compadre_assistant.core.presentation.message_content import text_content
-from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+from compadre_assistant.presentation.telegram.rendering import TelegramChunk, render_telegram_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send_async,
@@ -709,7 +709,7 @@ async def safe_send_telegram_reply(
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
     include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
 ) -> None:
-    """Доставляет Telegram-ответ и обновляет управляемое сообщение целиком.
+    """Доставляет Telegram-ответ и подтверждает управляемое представление.
 
     Args:
         message: Aiogram message или совместимый fake.
@@ -756,15 +756,28 @@ async def _send_telegram_view(
     message: Any, response: IncomingResponse, *, logger: logging.Logger, limit: int,
     sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
 ) -> bool:
-    """Подтверждает ID одного сообщения и даёт ручной путь при сбое обновления."""
+    """Подтверждает ID сообщения с кнопками и даёт ручной путь при сбое."""
     delivery = response.view_delivery
     assert delivery is not None
     target = delivery.target_message_id
     confirmed_id = None
+    finish = delivery.finish
     if delivery.start():
         try:
             chunks = render_telegram_content(response.content, response.actions, limit=limit)
-            if len(chunks) == 1:
+            multipart = len(chunks) > 1
+            finish_replacement = delivery.finish_replacement
+            if finish_replacement is not None and (
+                delivery.allow_multiple_messages if multipart else delivery.target_has_multiple_messages
+            ):
+                finish = lambda message_id: finish_replacement(message_id, multipart)
+                confirmed_id = await _send_telegram_view_replacement(
+                    message, chunks, response, logger=logger, sleeper=sleeper,
+                    include_bound_actions=include_bound_actions,
+                )
+                if confirmed_id is not None or target is None:
+                    return confirmed_id is not None
+            elif len(chunks) == 1:
                 chunk = chunks[0]
                 keyboard = _optional_telegram_inline_keyboard(response, logger) if include_bound_actions else None
                 target_id = str(message.chat.id)
@@ -802,7 +815,7 @@ async def _send_telegram_view(
                     sleeper=sleeper, include_bound_actions=False,
                 )
         finally:
-            for message_id in delivery.finish(confirmed_id):
+            for message_id in finish(confirmed_id):
                 await _clear_telegram_inline_keyboard(message, message_id, logger)
 
     if delivery.unavailable is not None and target is not None:
@@ -811,6 +824,31 @@ async def _send_telegram_view(
             sleeper=sleeper, include_bound_actions=False,
         )
     return False
+
+
+async def _send_telegram_view_replacement(
+    message: Any, chunks: tuple[TelegramChunk, ...], response: IncomingResponse, *,
+    logger: logging.Logger, sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
+) -> str | None:
+    """Отправляет части новой публикации и подтверждает ID сообщения с кнопками."""
+    keyboard = _optional_telegram_inline_keyboard(response, logger) if include_bound_actions else None
+    confirmed_id = None
+    for index, chunk in enumerate(chunks):
+        kwargs: dict[str, Any] = {"parse_mode": chunk.parse_mode}
+        if keyboard is not None and index == len(chunks) - 1:
+            kwargs["reply_markup"] = keyboard
+
+        async def deliver() -> None:
+            nonlocal confirmed_id
+            confirmed_id = _telegram_message_id(await message.answer(chunk.text, **kwargs))
+
+        sent = await safe_send_async(
+            deliver, logger=logger, channel="Telegram", target_id=str(message.chat.id),
+            retry_delay_resolver=_telegram_retry_delay, sleeper=sleeper,
+        )
+        if not sent or confirmed_id is None:
+            return None
+    return confirmed_id
 
 
 async def _send_telegram_reply(

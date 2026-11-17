@@ -307,6 +307,7 @@ def shopping_list(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
             on_delivered=choice.delivered.set if choice is not None else None,
             cleanup_previous=True,
+            allow_multiple_messages=selection is None,
         ),
     )
 

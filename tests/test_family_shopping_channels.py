@@ -1,5 +1,7 @@
 """Проверяет общий список через обработчики Telegram и VK с локальными fake API."""
 
+from functools import partial
+from html import unescape
 from io import BytesIO
 from itertools import count
 import json
@@ -20,8 +22,10 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.core.presentation.incoming.ports import CommandMenuUpdate
-from compadre_assistant.presentation.telegram.bot import _register_handlers
-from compadre_assistant.presentation.vk.bot import VkApiClient, _create_vk_menu_update_handler, _handle_update
+from compadre_assistant.presentation.telegram.bot import _register_handlers, safe_send_telegram_reply
+from compadre_assistant.presentation.vk.bot import (
+    VkApiClient, _create_vk_menu_update_handler, _handle_update, _safe_send_vk_message,
+)
 from tests.test_telegram_bot import FakeAiogram
 
 
@@ -274,6 +278,68 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
             await self._send("/family_clear_bought")
             self.assertIn("Список пуст", self.bot.send_message.await_args.kwargs["text"])
 
+    async def test_long_page_has_navigation_on_last_message_and_short_replacement_is_sent(self) -> None:
+        """Переход на длинную страницу переносит кнопки после доставки всего HTML."""
+        await self._open()
+        title = "<&" * 40 + " финиш"
+        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 6)), title]))
+        short_id = self.last_sent
+        next_page = self._actions(self.bot.send_message.await_args)["Следующая страница"]
+        self.bot.send_message.reset_mock()
+        self.bot.edit_message_reply_markup.reset_mock()
+        with patch(
+            "compadre_assistant.presentation.telegram.bot.safe_send_telegram_reply",
+            partial(safe_send_telegram_reply, limit=250),
+        ):
+            await self._press(next_page, short_id)
+        chunks = [call.kwargs for call in self.bot.send_message.await_args_list]
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk["text"].encode("utf-16-le")) // 2 <= 250 for chunk in chunks))
+        joined = "".join(unescape(chunk["text"]) for chunk in chunks)
+        self.assertIn(f"6. {title}", joined)
+        self.assertTrue(all("reply_markup" not in chunk for chunk in chunks[:-1]))
+        previous = self._actions(self.bot.send_message.await_args)["Предыдущая страница"]
+        long_id = self.last_sent
+        self.bot.edit_message_reply_markup.assert_awaited_once_with(
+            chat_id=101, message_id=short_id, reply_markup=None,
+        )
+        self.bot.edit_message_text.assert_not_awaited()
+
+        await self._press(previous, long_id)
+        new_id = self.last_sent
+        self.assertNotEqual(long_id, new_id)
+        self.assertIn("1/2", self.bot.send_message.await_args.kwargs["text"])
+        self.bot.edit_message_text.assert_not_awaited()
+        self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], long_id)
+        await self._press(self._actions(self.bot.send_message.await_args)["Купить"], new_id)
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], new_id)
+
+    async def test_partial_long_replacement_preserves_previous_keyboard(self) -> None:
+        """При отказе части новый ID не подтверждается и прежние кнопки не снимаются."""
+        await self._open()
+        await self._send("/add " + "\n".join([*(f"Товар {index}" for index in range(1, 6)), "<" * 79]))
+        previous_id = self.last_sent
+        next_page = self._actions(self.bot.send_message.await_args)["Следующая страница"]
+        self.bot.edit_message_reply_markup.reset_mock()
+        self.bot.send_message.reset_mock()
+        self.bot.send_message.side_effect = [
+            SimpleNamespace(message_id=9001), RuntimeError("fake second part rejection"),
+            SimpleNamespace(message_id=9002),
+        ]
+        with (
+            patch("compadre_assistant.presentation.telegram.bot.safe_send_telegram_reply",
+                  partial(safe_send_telegram_reply, limit=250)),
+            self.assertLogs(self.logger, level="ERROR"),
+        ):
+            await self._press(next_page, previous_id)
+        self.bot.edit_message_reply_markup.assert_not_awaited()
+        self.bot.edit_message_text.assert_not_awaited()
+        self.assertIn("Не удалось обновить список", self.bot.send_message.await_args.kwargs["text"])
+        self.assertTrue(all("reply_markup" not in call.kwargs for call in self.bot.send_message.await_args_list))
+        self.bot.send_message.side_effect = self._send_message
+        await self._send("/buy")
+        self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], previous_id)
+
 
 class VkFamilyShoppingTest(unittest.TestCase):
     """Проверяет нижнее меню, inline-клавиатуру и один cmid через VK Long Poll."""
@@ -371,6 +437,31 @@ class VkFamilyShoppingTest(unittest.TestCase):
         buttons = [button["action"] for row in keyboard["buttons"] for button in row]
         self.assertTrue(all(len(button["label"]) <= 40 for button in buttons))
         return {button["label"]: json.loads(button["payload"])["token"] for button in buttons}
+
+    def test_long_ordinary_page_reaches_vk_with_menu_on_last_message(self) -> None:
+        """Все части списка доходят, а нижнее меню прикрепляется к последней."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Покупки")
+        items = ["<" * 80, "Яблоки 🍎", "Молоко", "Рис"]
+        self._send("/add " + "\n".join(items))
+        self._send("/family_shopping home")
+        boundary = len(self.calls)
+        with patch(
+            "compadre_assistant.presentation.vk.bot._safe_send_vk_message",
+            partial(_safe_send_vk_message, limit=150),
+        ):
+            self._menu_press("Покупки")
+        sent = [params for method, params in self.calls[boundary:] if method == "messages.send"]
+        self.assertGreater(len(sent), 1)
+        self.assertTrue(all(len(part["message"].encode("utf-16-le")) // 2 <= 150 for part in sent))
+        joined = "".join(part["message"] for part in sent)
+        for position, item in enumerate(items, 1):
+            self.assertIn(f"{position}. {item}", joined)
+        self.assertTrue(all("keyboard" not in part for part in sent[:-1]))
+        self.assertEqual(list(self._visible_menu()), ["Добавить", "Купить", "Удалить", "Назад"])
+        self.assertIn("keyboard", sent[-1])
 
     def test_paginated_selection_clear_and_text_command_use_vk_cmid(self) -> None:
         """Страницы и выбор длинных названий помещаются в клавиатуру одного сообщения."""
