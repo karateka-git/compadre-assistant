@@ -76,12 +76,16 @@ class FamilyCapability(
             CapabilityCommand(_CREATE, (), "создать семью"),
             CapabilityCommand(_JOIN, (), "вступить по коду"),
             CapabilityCommand(_INVITE, (CommandParameter("action", "create", False),), "пригласить в семью"),
+            CapabilityCommand(SHOPPING_COMMAND, (), "открыть покупки"),
+        )), HelpSection("Участники", (
             CapabilityCommand(MEMBERS_COMMAND, (CommandParameter("member", "<member>", False),), "посмотреть участников"),
             CapabilityCommand(LEAVE_COMMAND, (), "выйти из семьи"),
             CapabilityCommand(REMOVE_COMMAND, (CommandParameter("member", "<member>", False),), "исключить участника"),
             CapabilityCommand(TRANSFER_COMMAND, (CommandParameter("member", "<member>", False),), "передать роль владельца"),
             CapabilityCommand(CLOSE_COMMAND, (), "закрыть семью"),
-            CapabilityCommand(SHOPPING_COMMAND, (), "открыть покупки"),
+        ), instructions=(
+            compose_content(code_span(f"{MEMBERS_COMMAND} commands [<page>]"),
+                            " — показать коды участников для ручных команд"),
         )), HelpSection(
             "Команды после открытия списка «Покупки»",
             (
@@ -95,6 +99,8 @@ class FamilyCapability(
             ),
             instructions=(
                 compose_content(code_span(f"{SHOPPING_COMMAND} page <number>"), " — открыть страницу списка"),
+                compose_content(code_span(f"{SHOPPING_COMMAND} buy <page>"), " — открыть страницу выбора, что куплено"),
+                compose_content(code_span(f"{SHOPPING_COMMAND} delete <page>"), " — открыть страницу выбора для удаления"),
                 compose_content(code_span(f"{SHOPPING_COMMAND} back"), " — вернуться из выбора товара к списку"),
                 compose_content(code_span(f"{SHOPPING_COMMAND} home"), " — вернуться из списка в меню семьи"),
             ),
@@ -323,10 +329,8 @@ class FamilyCapability(
         pending = self._confirmations.begin(
             context, address, command.removeprefix("/family_"), family.id, actor, target, label,
         )
-        approve, cancel = pending.actions
-        return IncomingResponse(compose_content(
-            question, "\n\nПодтверждение действует 10 минут.\nПодтвердить: ", code_span(approve.command),
-            "\nОтменить: ", code_span(cancel.command),
+        return IncomingResponse(text_content(
+            f"{question}\n\nПодтверждение действует 10 минут.",
         ), actions=pending.actions)
 
     def _confirm_member_action(
@@ -470,36 +474,32 @@ class FamilyCapability(
             required_mode=FamilyCapability.descriptor.capability_id, value_label=label, retry_command=command,
             cancel_only_menu=True,
         )
-        return IncomingResponse(compose_content(
-            f"Пришли {label} следующим сообщением. Ожидание действует 10 минут. Для отмены введи ",
-            code_span("/cancel"), ".",
-        ))
+        prompt = f"Пришли {label}. На ввод 10 минут."
+        if event.channel == "vk":
+            return IncomingResponse(text_content(prompt))
+        return IncomingResponse(compose_content(prompt, " Для отмены введи ", code_span("/cancel"), "."))
 
     @staticmethod
     def _retry_input(answer: str) -> PendingInputResult:
-        return PendingInputResult(IncomingResponse(compose_content(
-            answer, " Пришли значение снова или введи ", code_span("/cancel"), ".",
-        )), PendingInputOutcome.RETRY)
+        return PendingInputResult(IncomingResponse(text_content(answer)), PendingInputOutcome.RETRY)
 
     @staticmethod
     def _home(family: Family | None, *, channel: str, prefix: str = "") -> IncomingResponse:
         introduction = prefix + "\n\n" if prefix else ""
         if family is None:
-            return IncomingResponse(compose_content(
-                introduction, "Семья\n\nСоздать семью: ", code_span(_CREATE),
-                "\nВступить по коду: ", code_span(_JOIN),
-            ), close_managed_views=True, suggested_actions=() if channel == "vk" else (
-                ReplyAction("Создать семью", _CREATE), ReplyAction("Вступить по коду", _JOIN),
-            ))
-        return IncomingResponse(compose_content(
-            introduction, f"Семья «{family.name}»\n\nПокупки: ", code_span(SHOPPING_COMMAND),
-            "\nУчастники: ", code_span(MEMBERS_COMMAND),
-            "\nПригласить: ", code_span(_INVITE),
-        ), close_managed_views=True, suggested_actions=() if channel == "vk" else (
-            ReplyAction("Покупки", f"{SHOPPING_COMMAND} open {family.id}"),
-            ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),
-            ReplyAction("Пригласить", f"{_INVITE} open {family.id}"),
-        ))
+            title = "Семья"
+            actions = (ReplyAction("Создать семью", _CREATE), ReplyAction("Вступить по коду", _JOIN))
+        else:
+            title = f"Семья «{family.name}»"
+            actions = (
+                ReplyAction("Покупки", f"{SHOPPING_COMMAND} open {family.id}"),
+                ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),
+                ReplyAction("Пригласить", f"{_INVITE} open {family.id}"),
+            )
+        return IncomingResponse(
+            text_content(introduction + title), close_managed_views=True,
+            suggested_actions=() if channel == "vk" else actions,
+        )
 
     def _shopping(
         self, context: HandlerContext, event: IncomingEvent, families: ManageFamily,
@@ -733,9 +733,8 @@ class FamilyCapability(
             self._shopping_sections.replace(
                 app_user_id, address, current, replace(current, add_request_id=pending.request_id),
             )
-        return IncomingResponse(compose_content(
-            "Напиши, что купить. Можно отправить несколько покупок одним сообщением, по одной на строку. "
-            "Ожидание действует 10 минут. Для отмены введи ", code_span("/cancel"), ".",
+        return IncomingResponse(text_content(
+            "Напиши, что купить, по одному товару на строку. На ввод 10 минут.",
         ), suggested_actions=(ReplyAction("Отмена", "/cancel"),) if section.inline_commands else (),
             view=ResponseView(f"shopping-add:{section.action_key}", cleanup_previous=True)
             if section.inline_commands else None,
@@ -779,10 +778,11 @@ class FamilyCapability(
         parts = arguments.split()
         page = 1
         reference = None
+        show_commands = bool(parts and parts[0] == "commands")
         if len(parts) == 2 and parts[0] == "open":
             if parts[1] != str(family.id):
                 return self._family_access_ended()
-        elif 2 <= len(parts) <= 3 and parts[0] == "page":
+        elif (2 <= len(parts) <= 3 and parts[0] == "page") or (show_commands and len(parts) == 2):
             if len(parts) == 3 and parts[2] != str(family.id):
                 return self._family_access_ended()
             number = parts[1]
@@ -791,16 +791,16 @@ class FamilyCapability(
                     "Укажи номер страницы или отправь ", code_span(MEMBERS_COMMAND), ".",
                 ))
             page = int(number)
-        elif len(parts) == 1:
+        elif len(parts) == 1 and not show_commands:
             reference = parts[0]
-        elif parts:
+        elif len(parts) > 1:
             return IncomingResponse(compose_content("Посмотреть участников: ", code_span(MEMBERS_COMMAND), "."))
         try:
             members = families.list_members(context.app_user.id, family.id)
         except FamilyAccessEnded:
             return self._family_access_ended()
         if reference is None:
-            return self._members_view.show(context, address, family, members, page)
+            return self._members_view.show(context, address, family, members, page, show_commands=show_commands)
         return self._members_view.details(context, address, family, members, reference)
 
     @staticmethod
@@ -821,11 +821,9 @@ class FamilyCapability(
         if family is None or (len(parts) == 2 and parts[1] != str(family.id)):
             return FamilyCapability._family_access_ended()
         if action == "open":
-            return IncomingResponse(compose_content(
-                f"Приглашение в семью «{family.name}». Чтобы получить одноразовый код, отправь ",
-                code_span(f"{_INVITE} create"), ".\n\nНазад · ", code_span("/family"),
-            ), suggested_actions=(ReplyAction("Создать код", f"{_INVITE} create {family.id}"),
-                                  ReplyAction("Назад", "/family")))
+            return IncomingResponse(text_content(f"Приглашение в семью «{family.name}»"), suggested_actions=(
+                ReplyAction("Создать код", f"{_INVITE} create {family.id}"), ReplyAction("Назад", "/family"),
+            ))
         try:
             issued = invitations.issue(app_user_id, family.id)
         except FamilyAccessEnded:
@@ -837,5 +835,5 @@ class FamilyCapability(
         deadline = issued.expires_at.astimezone(UTC).strftime("%d.%m.%Y, %H:%M UTC")
         return IncomingResponse(compose_content(
             f"Приглашение в семью «{issued.family.name}»\n\nКод: ", code_span(issued.code),
-            f"\nДействует до {deadline}. По коду можно вступить один раз.\n\nНазад · ", code_span(_INVITE),
+            f"\nДействует до {deadline}. По коду можно вступить один раз.",
         ), suggested_actions=(ReplyAction("Назад", f"{_INVITE} open {issued.family.id}"),))

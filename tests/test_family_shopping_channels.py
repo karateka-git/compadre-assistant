@@ -37,10 +37,14 @@ from tests.test_telegram_bot import FakeAiogram
 
 _SHOPPING_HELP_COMMANDS = (
     "/add [<items>]", "/buy", "/delete", "/family_clear_bought",
-    "/family_shopping page <number>", "/family_shopping back", "/family_shopping home",
+    "/family_shopping page <number>", "/family_shopping buy <page>", "/family_shopping delete <page>",
+    "/family_shopping back", "/family_shopping home",
 )
 _SHOPPING_TEXT_DUPLICATES = (
     "/add", "/buy", "/delete", "/family_clear_bought", "/family_shopping page", "/family_shopping home",
+)
+_SELECTION_TEXT_DUPLICATES = (
+    "Например", "/cancel", "/family_shopping buy", "/family_shopping delete", "/family_shopping back",
 )
 
 
@@ -203,6 +207,15 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         controls = self._actions(ordinary)
         self.assertEqual(list(controls), ["Добавить", "Купить", "Удалить", "Следующая страница", "Назад"])
 
+        await self._press(controls["Купить"], ordinary_id)
+        selection = self.bot.edit_message_text.await_args
+        self.assertIn("пришли номер товара", selection.kwargs["text"])
+        for duplicate in _SELECTION_TEXT_DUPLICATES:
+            self.assertNotIn(duplicate, selection.kwargs["text"])
+        self.assertIn("Следующая страница", self._actions(selection))
+        await self._press(self._actions(selection)["Назад"], ordinary_id)
+        controls = self._actions(self.bot.edit_message_text.await_args)
+
         await self._send("/help")
         help_text = unescape(self.bot.send_message.await_args.kwargs["text"])
         for command in _SHOPPING_HELP_COMMANDS:
@@ -224,7 +237,8 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         empty_controls = self._actions(self.bot.send_message.await_args)
         self.assertEqual(list(empty_controls), ["Добавить", "Назад"])
         await self._press(empty_controls["Добавить"], empty_list)
-        self.assertIn("/cancel", self.bot.send_message.await_args.kwargs["text"])
+        self.assertIn("На ввод 10 минут", self.bot.send_message.await_args.kwargs["text"])
+        self.assertNotIn("/cancel", self.bot.send_message.await_args.kwargs["text"])
         prompt_controls = self._actions(self.bot.send_message.await_args)
         await self._press(prompt_controls["Отмена"], self.last_sent)
         self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
@@ -261,7 +275,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         first_edit = self.bot.edit_message_text.await_args
         self.assertEqual(first_edit.kwargs["message_id"], active_list)
         self.assertEqual(self.bot.send_message.await_count, sent)
-        self.assertIn("Например, <code>2</code>", first_edit.kwargs["text"])
+        self.assertIn("пришли номер товара", first_edit.kwargs["text"])
         buying = self._actions(first_edit)
         self.assertEqual(list(buying), ["1. Хлеб", "2. Молоко, 2 л", "3. Яблоки", "Назад"])
         await self._press(buying["1. Хлеб"], older_list)
@@ -639,6 +653,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._press(buttons["→"], cmid)
         second = self._latest_edit()
         self.assertIn("2/3", second["message"])
+        self.assertIn("пришли номер товара", second["message"])
+        for duplicate in _SELECTION_TEXT_DUPLICATES:
+            self.assertNotIn(duplicate, second["message"])
         rows = [[button["action"]["label"] for button in row] for row in json.loads(second["keyboard"])["buttons"]]
         self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [["←", "→"], ["Назад"]])
         before = len(self.calls)
@@ -683,9 +700,11 @@ class VkFamilyShoppingTest(unittest.TestCase):
         roster = self._single_reply(lambda: self._menu_press("Участники"), "Участники семьи «Дом»")
         self.assertEqual(self._visible_menu().keys(), set(home))
         self.assertIn("Закрыть семью", self._actions(roster))
-        self._single_reply(lambda: self._menu_press("Пригласить"), "одноразовый код")
+        invitation = self._single_reply(lambda: self._menu_press("Пригласить"), "Приглашение в семью «Дом»")
+        self.assertEqual(list(self._actions(invitation)), ["Создать код", "Назад"])
         self._single_reply(lambda: self._menu_press("Покупки"), "Список покупок пуст", labels=shopping)
-        empty = self._single_reply(lambda: self._menu_press("Купить"), "Добавь покупку через /add")
+        empty = self._single_reply(lambda: self._menu_press("Купить"), "В «Нужно купить» пока ничего нет.")
+        self.assertNotIn("/add", empty["message"])
         self.assertEqual(list(self._actions(empty)), ["Назад"])
         self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
         self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
@@ -729,7 +748,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
             self.assertIn(command, help_from_list["message"])
         self.assertEqual(self._visible_menu(), shopping_menu)
 
-        self._single_reply(lambda: self._menu_press("Купить"), "отправь номер следующим сообщением")
+        self._single_reply(lambda: self._menu_press("Купить"), "пришли номер товара")
         selection_cmid = self.last_cmid
         self._single_reply(lambda: self._send("/help"), "Ожидается")
         self.assertEqual(self._visible_menu(), shopping_menu)

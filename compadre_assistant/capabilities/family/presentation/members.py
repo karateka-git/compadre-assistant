@@ -10,7 +10,7 @@ from typing import Protocol
 from compadre_assistant.capabilities.family.domain.membership import Family, FamilyMember
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import HandlerContext, IncomingResponse, ReplyAction
-from compadre_assistant.core.presentation.message_content import code_span, compose_content
+from compadre_assistant.core.presentation.message_content import code_span, compose_content, text_content
 
 
 MEMBERS_COMMAND = "/family_members"
@@ -39,9 +39,9 @@ class MembersView:
 
     def show(
         self, context: HandlerContext, address: ReplyAddress, family: Family,
-        members: tuple[FamilyMember, ...], page: int,
+        members: tuple[FamilyMember, ...], page: int, *, show_commands: bool = False,
     ) -> IncomingResponse:
-        """Показывает имена и команды выбора на запрошенной странице.
+        """Показывает состав семьи на запрошенной странице.
 
         Args:
             context: Допущенный профиль и ревизия семейного режима.
@@ -49,9 +49,10 @@ class MembersView:
             family: Семья, членство в которой проверено.
             members: Актуальный состав из семейного сценария.
             page: Номер страницы, начиная с единицы.
+            show_commands: Показать ручные команды вместо кнопок.
 
         Returns:
-            Список участников с кнопками и полным ручным путём.
+            Список участников с кнопками или точными командами выбора.
         """
         total_pages = max(1, (len(members) + _PAGE_SIZE - 1) // _PAGE_SIZE)
         page = min(page, total_pages)
@@ -69,22 +70,25 @@ class MembersView:
             own_label = ", ты" if member.app_user_id == context.app_user.id else ""
             reference = self._reference(context, address, family.id, actor, member)
             command = f"{MEMBERS_COMMAND} {reference}"
-            parts.extend(("\n", name, f" ({role}{own_label}) — ", code_span(command)))
+            parts.extend(("\n", name, f" ({role}{own_label})"))
+            if show_commands:
+                parts.extend((" — ", code_span(command)))
+                continue
             label = name if len(name) <= 24 else name[:23] + "…"
             suffix = " (ты)" if own_label else " (владелец)" if member.is_owner else ""
             actions.append(ReplyAction(label + suffix, command))
         for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
             if 1 <= destination <= total_pages:
-                command = f"{MEMBERS_COMMAND} page {destination}"
-                parts.extend(("\n", label, " — ", code_span(command)))
-                actions.append(ReplyAction(label, f"{command} {family.id}"))
+                if show_commands:
+                    parts.extend(("\n", label, " — ", code_span(f"{MEMBERS_COMMAND} commands {destination}")))
+                else:
+                    actions.append(ReplyAction(label, f"{MEMBERS_COMMAND} page {destination} {family.id}"))
+        if show_commands:
+            return IncomingResponse(compose_content(*parts))
         if not actor.is_owner:
-            parts.extend(("\nВыйти из семьи: ", code_span(LEAVE_COMMAND)))
             actions.append(ReplyAction("Выйти из семьи", f"{LEAVE_COMMAND} {family.id}"))
         elif len(members) == 1:
-            parts.extend(("\nЗакрыть семью: ", code_span(CLOSE_COMMAND)))
             actions.append(ReplyAction("Закрыть семью", f"{CLOSE_COMMAND} {family.id}"))
-        parts.extend(("\n\nНазад · ", code_span("/family")))
         actions.append(ReplyAction("Назад", "/family"))
         return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
 
@@ -95,21 +99,18 @@ class MembersView:
         """Показывает детали участника, если ссылка относится к текущему составу."""
         member = self.resolve(context, address, family.id, members, reference)
         if member is None:
-            return IncomingResponse(compose_content(
-                "Выбор участника устарел. Открой ", code_span(MEMBERS_COMMAND), ", чтобы увидеть актуальный состав.",
-            ), suggested_actions=(ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),))
+            return IncomingResponse(
+                text_content("Выбор участника устарел."),
+                suggested_actions=(ReplyAction("Участники", f"{MEMBERS_COMMAND} open {family.id}"),),
+            )
         name = self.display_name(member)
         role = "Владелец семьи" if member.is_owner else "Участник семьи"
-        parts = [name, "\n", f"{role} «{family.name}»."]
         actions = []
         if not member.is_owner and any(item.is_owner and item.app_user_id == context.app_user.id for item in members):
             for label, command in (("Исключить из семьи", REMOVE_COMMAND), ("Передать роль владельца", TRANSFER_COMMAND)):
-                command = f"{command} {reference}"
-                parts.extend(("\n", label, ": ", code_span(command)))
-                actions.append(ReplyAction(label, command))
-        parts.extend(("\n\nНазад · ", code_span(MEMBERS_COMMAND)))
+                actions.append(ReplyAction(label, f"{command} {reference}"))
         actions.append(ReplyAction("Назад", f"{MEMBERS_COMMAND} open {family.id}"))
-        return IncomingResponse(compose_content(*parts), suggested_actions=tuple(actions))
+        return IncomingResponse(text_content(f"{name}\n{role} «{family.name}»."), suggested_actions=tuple(actions))
 
     def display_name(self, member: FamilyMember) -> str:
         """Возвращает имя уже проверенного участника или нейтральную подпись."""
