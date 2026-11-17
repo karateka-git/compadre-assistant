@@ -51,6 +51,7 @@ _VK_FAMILY_MENU = (
     CommandSuggestion(SHOPPING_COMMAND, "открыть покупки", "Покупки"),
     CommandSuggestion(MEMBERS_COMMAND, "посмотреть участников", "Участники"),
     CommandSuggestion(_INVITE, "пригласить в семью", "Пригласить"),
+    CommandSuggestion("/help", "показать справку о покупках", "Помощь"),
     CommandSuggestion("/exit", "выйти из режима семьи", "Выйти из режима"),
 )
 _VK_SHOPPING_MENU = (
@@ -80,13 +81,25 @@ class FamilyCapability(
             CapabilityCommand(REMOVE_COMMAND, (CommandParameter("member", "<member>", False),), "исключить участника"),
             CapabilityCommand(TRANSFER_COMMAND, (CommandParameter("member", "<member>", False),), "передать роль владельца"),
             CapabilityCommand(CLOSE_COMMAND, (), "закрыть семью"),
-            CapabilityCommand(SHOPPING_COMMAND, (CommandParameter("view", "<view>", False),), "открыть покупки"),
-        )), HelpSection("Покупки", (
-            CapabilityCommand(ADD_COMMAND, (CommandParameter("items", "<items>", False),), "добавить покупки"),
-            CapabilityCommand(BUY_COMMAND, (), "отметить купленными"),
-            CapabilityCommand(DELETE_COMMAND, (), "удалить из списка"),
-            CapabilityCommand(CLEAR_BOUGHT_COMMAND, (), "очистить купленное"),
-        )))),
+            CapabilityCommand(SHOPPING_COMMAND, (), "открыть покупки"),
+        )), HelpSection(
+            "Команды после открытия списка «Покупки»",
+            (
+                CapabilityCommand(
+                    ADD_COMMAND, (CommandParameter("items", "[<items>]", False),),
+                    "добавить покупки. Без аргументов бот попросит прислать названия, по одному на строку",
+                ),
+                CapabilityCommand(BUY_COMMAND, (), "выбрать покупку кнопкой или номером и отметить её купленной"),
+                CapabilityCommand(DELETE_COMMAND, (), "выбрать покупку кнопкой или номером и удалить её из «Нужно купить»"),
+                CapabilityCommand(CLEAR_BOUGHT_COMMAND, (), "удалить все купленные позиции"),
+            ),
+            instructions=(
+                compose_content(code_span(f"{SHOPPING_COMMAND} page <number>"), " — открыть страницу списка"),
+                compose_content(code_span(f"{SHOPPING_COMMAND} back"), " — вернуться из выбора товара к списку"),
+                compose_content(code_span(f"{SHOPPING_COMMAND} home"), " — вернуться из списка в меню семьи"),
+            ),
+            menu_help_only=True,
+        ))),
         enabled_by_default=True,
         display_name="«Семья»",
         private_chat_hint="Открой /family в личном чате с ботом.",
@@ -168,7 +181,7 @@ class FamilyCapability(
     def visible_mode_commands(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
     ) -> frozenset[str]:
-        """Показывает команды активного режима по текущему членству профиля."""
+        """Отбирает разделы справки по членству профиля и открытому экрану."""
         with self._open_scenarios() as (families, _, _):
             family = families.find_for_member(app_user.id)
             if family is None:
@@ -178,11 +191,14 @@ class FamilyCapability(
             except FamilyAccessEnded:
                 return frozenset((_CREATE, _JOIN))
             actor = next(member for member in members if member.app_user_id == app_user.id)
-            sections = self._member_commands(actor, len(members))
             current = self._shopping_sections.current(app_user.id, address, mode_revision)
             if current is not None and current.matches(family.id, actor.joined_at):
-                return frozenset((SHOPPING_COMMAND, ADD_COMMAND, BUY_COMMAND, DELETE_COMMAND))
-            return sections | {SHOPPING_COMMAND}
+                return frozenset((SHOPPING_COMMAND, *_SHOPPING_ACTIONS))
+            sections = self._member_commands(actor, len(members)) | {SHOPPING_COMMAND}
+            if address.channel == "vk":
+                # Кнопка «Помощь» в меню VK объясняет, что сначала нужно открыть покупки.
+                return sections | set(_SHOPPING_ACTIONS)
+            return sections
 
     def contextual_command_menu(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
@@ -582,8 +598,6 @@ class FamilyCapability(
             case ["show", _, "page" | "buy" | "delete" as view]:
                 items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
                 if view == "page":
-                    if section.vk_menu:
-                        page = section.ordinary_page
                     return self._show_shopping_list(context, address, section, items, page, update=True)
                 return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), page)
             case _:

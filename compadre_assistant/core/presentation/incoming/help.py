@@ -61,6 +61,8 @@ def format_contextual_help(
                 line(section.title + ":")
                 for item in section.commands:
                     entry(item)
+                for instruction in section.instructions:
+                    parts.append(compose_content("\n", instruction))
             for instruction in catalog.instructions:
                 line(instruction)
             command("/exit", "выйти из режима этого чата")

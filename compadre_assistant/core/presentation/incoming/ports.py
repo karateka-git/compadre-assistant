@@ -36,6 +36,8 @@ class HelpSection:
 
     title: str
     commands: tuple[CapabilityCommand, ...]
+    instructions: tuple[MessageContent, ...] = ()
+    menu_help_only: bool = False  # В общем меню раздел представлен командой /help.
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +148,8 @@ class ResponseView:
             сообщения. Порядок предметных состояний контролирует владелец.
         cleanup_previous: После доставки снять клавиатуры прежних отслеживаемых
             представлений этой возможности в исходном чате.
+        allow_multiple_messages: Разрешает адаптеру опубликовать представление
+            несколькими сообщениями с кнопками на последнем.
     """
 
     key: str
@@ -153,6 +157,7 @@ class ResponseView:
     unavailable: MessageContent | None = None
     on_delivered: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     cleanup_previous: bool = False
+    allow_multiple_messages: bool = False
 
     def __post_init__(self) -> None:
         """Требует устойчивое имя и подсказку для недоступного обновления."""
@@ -171,16 +176,27 @@ class ResponseViewDelivery:
             None означает публикацию нового сообщения.
         unavailable: Текст подсказки при невозможности обновить сообщение.
         start: Проверяет, что попытка ещё актуальна, и резервирует доставку.
-            True допускает один сетевой вызов или его транспортные повторы.
+            True допускает одну доставку, включая разрешённые части и повторы.
         finish: После допуска фиксирует ID сообщения только при успехе.
             При редактировании передаётся тот же ID, при сбое или отмене None.
             Возвращает ID снятых с учёта сообщений для очистки их клавиатур.
+        allow_multiple_messages: Разрешает последовательную доставку частей.
+        target_has_multiple_messages: Прежняя доставка состоит из частей,
+            поэтому обновление требует нового сообщения вместо редактирования.
+        finish_replacement: Подтверждает ID последнего нового сообщения после
+            успешной доставки всех частей и принимает признак нескольких частей.
+            При сбое принимает None, сохраняя прежнюю подтверждённую доставку.
     """
 
     target_message_id: str | None
     unavailable: MessageContent | None
     start: Callable[[], bool] = field(repr=False, compare=False)
     finish: Callable[[str | None], tuple[str, ...]] = field(repr=False, compare=False)
+    allow_multiple_messages: bool = False
+    target_has_multiple_messages: bool = False
+    finish_replacement: Callable[[str | None, bool], tuple[str, ...]] | None = field(
+        default=None, repr=False, compare=False,
+    )
 
 
 @dataclass(frozen=True, slots=True)
