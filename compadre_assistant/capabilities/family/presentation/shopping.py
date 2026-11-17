@@ -22,7 +22,8 @@ ADD_COMMAND = "/add"  # Добавление текста из команды и
 BUY_COMMAND = "/buy"  # Открывает выбор покупки для отметки.
 DELETE_COMMAND = "/delete"  # Открывает выбор покупки для удаления.
 CLEAR_BOUGHT_COMMAND = "/family_clear_bought"  # Очистка купленных позиций.
-_PAGE_SIZE = 5  # Оставляет место для групп, навигации и команд на одном сообщении.
+_ORDINARY_PAGE_SIZE = 10  # Лимит группы «Нужно купить» при просмотре.
+_TELEGRAM_SELECTION_PAGE_SIZE = 5  # Лимит кнопок товаров в Telegram.
 _VK_SELECTION_PAGE_SIZE = 4  # Два из шести рядов оставлены для перелистывания и возврата.
 _TITLE_PREVIEW = 90  # Оставляет место для текста команд при HTML-экранировании.
 _BUTTON_LABEL_LIMIT = 40  # Ограничение длины подписи VK применяется для обоих каналов.
@@ -31,7 +32,7 @@ _RECENT_NUMBER_MESSAGES = 128  # Повторное событие канала 
 
 _SHOPPING_GROUPS = (
     (ShoppingItemStatus.NEEDED, "Нужно купить"),
-    (ShoppingItemStatus.BOUGHT, "Купленные товары"),
+    (ShoppingItemStatus.BOUGHT, "Куплено"),
     (ShoppingItemStatus.UNKNOWN, "Покупки с неизвестным состоянием"),
 )
 
@@ -63,7 +64,7 @@ class ShoppingSection:
     joined_at: datetime
     inline_commands: bool = False  # Команды обычного списка видны под сообщением.
     vk_menu: bool = False  # Вместо кнопок обычного списка используется нижнее меню.
-    bought_visible: bool = field(default=False, compare=False)  # Купленное на последнем обычном экране VK.
+    bought_visible: bool = field(default=False, compare=False)  # Доступность очистки купленного в меню.
     ordinary_page: int = field(default=1, compare=False)
     ordinary_last_page: int = field(default=1, compare=False)
     selection_open: bool = field(default=False, compare=False)
@@ -82,18 +83,16 @@ class ShoppingSection:
         return replace(self, number_message_ids=(*self.number_message_ids, message_id)[-_RECENT_NUMBER_MESSAGES:])
 
     def ordinary_view(self, items: tuple[ShoppingItem, ...], page: int) -> ShoppingSection:
-        """Завершает выбор и закрывает доступ со старого сообщения выбора в VK.
+        """Завершает выбор и сохраняет фактическую страницу обычного списка.
 
         Args:
             items: Снимок, отображённый на обычном экране.
             page: Запрошенная страница, начиная с 1.
 
         Returns:
-            Состояние обычного экрана и его нижнего меню, если оно нужно.
+            Состояние обычного экрана. В VK смена ключа закрывает прежний выбор.
         """
-        if not self.vk_menu:
-            return replace(self, selection_open=False, choice=None, add_request_id=None)
-        key = token_urlsafe(12) if self.selection_open else self.action_key
+        key = token_urlsafe(12) if self.vk_menu and self.selection_open else self.action_key
         page, last_page, _ = shopping_page(items, page, selecting=False)
         return replace(self, selection_open=False, choice=None, add_request_id=None,
                        bought_visible=any(item.status is ShoppingItemStatus.BOUGHT for item in items),
@@ -169,7 +168,7 @@ def shopping_notice(change: ItemChange, position: int) -> str | None:
 def shopping_page(
     items: tuple[ShoppingItem, ...], page: int, *, selecting: bool, vk_menu: bool = False,
 ) -> tuple[int, int, tuple[tuple[int, ShoppingItem], ...]]:
-    """Нумерует группы и возвращает запрошенный срез.
+    """Разбивает «Нужно купить» на страницы с нумерацией по всему списку.
 
     Args:
         items: Текущий список в порядке постоянных номеров.
@@ -179,18 +178,23 @@ def shopping_page(
 
     Returns:
         Фактическая страница, число страниц и пары видимого номера с товаром.
+        В обычном списке остальные группы целиком идут на последнюю страницу.
     """
-    groups = _SHOPPING_GROUPS[:1] if selecting else _SHOPPING_GROUPS
-    numbered = tuple(
-        (position, item)
-        for status, _ in groups
-        for position, item in enumerate((item for item in items if item.status is status), 1)
-    )
-    page_size = _VK_SELECTION_PAGE_SIZE if selecting and vk_menu else _PAGE_SIZE
-    last_page = max(1, (len(numbered) + page_size - 1) // page_size)
+    needed = tuple(enumerate((item for item in items if item.status is ShoppingItemStatus.NEEDED), 1))
+    page_size = _ORDINARY_PAGE_SIZE
+    if selecting:
+        page_size = _VK_SELECTION_PAGE_SIZE if vk_menu else _TELEGRAM_SELECTION_PAGE_SIZE
+    last_page = max(1, (len(needed) + page_size - 1) // page_size)
     page = min(page, last_page)
     start = (page - 1) * page_size
-    return page, last_page, numbered[start:start + page_size]
+    visible = needed[start:start + page_size]
+    if not selecting and page == last_page:
+        visible += tuple(
+            pair
+            for status, _ in _SHOPPING_GROUPS[1:]
+            for pair in enumerate((item for item in items if item.status is status), 1)
+        )
+    return page, last_page, visible
 
 
 def shopping_list(
@@ -210,8 +214,8 @@ def shopping_list(
         notice: Пояснение при отказе изменить выбранный товар.
 
     Returns:
-        Ответ с ограниченным числом строк. Длинный текст товара доступен
-        отдельной обычной командой.
+        Ответ со списком и действиями. Длинный текст товара доступен
+        отдельной обычной командой, а последняя страница может занять несколько сообщений.
     """
     groups = _SHOPPING_GROUPS[:1] if selection is not None else _SHOPPING_GROUPS
     totals = {status: 0 for status, _ in _SHOPPING_GROUPS}
@@ -220,26 +224,26 @@ def shopping_list(
     page, last_page, visible = shopping_page(
         items, page, selecting=selection is not None, vk_menu=section.vk_menu,
     )
-    parts: list[str | TextSpan] = ["Список покупок"]
+    empty_list = not items and selection is None
+    selecting_with_items = selection is not None and bool(items)
+    parts: list[str | TextSpan] = ["Список покупок пуст." if empty_list else "Список покупок"]
     if last_page > 1:
         parts.append(f" · {page}/{last_page}")
-    for status, label in groups:
-        if status != ShoppingItemStatus.NEEDED and not totals[status]:
-            continue
-        parts.extend(("\n\n", label))
-        if not totals[status]:
-            parts.append("\nСписок пуст." if not items else "\nВ этой группе пока ничего нет.")
-        elif not any(item.status == status for _, item in visible):
-            parts.append("\nСмотри другие страницы.")
-        for position, item in visible:
-            if item.status != status:
+    if not empty_list:
+        for status, label in groups:
+            group = tuple((position, item) for position, item in visible if item.status is status)
+            if not group and status is not ShoppingItemStatus.NEEDED:
                 continue
-            title = item.name
-            if len(title) > _TITLE_PREVIEW:
-                title = title[:_TITLE_PREVIEW] + "…"
-                parts.extend((f"\n{position}. {title} · ", code_span(f"{SHOPPING_COMMAND} item {item.number}")))
-            else:
-                parts.append(f"\n{position}. {title}")
+            parts.extend(("\n\n", label))
+            if not group:
+                parts.append("\nВ этой группе пока ничего нет." if selecting_with_items else "\nСписок пуст.")
+            for position, item in group:
+                title = item.name
+                if len(title) > _TITLE_PREVIEW:
+                    title = title[:_TITLE_PREVIEW] + "…"
+                    parts.extend((f"\n{position}. {title} · ", code_span(f"{SHOPPING_COMMAND} item {item.number}")))
+                else:
+                    parts.append(f"\n{position}. {title}")
 
     actions: list[ReplyAction] = []
     if selection is not None:
@@ -261,39 +265,36 @@ def shopping_list(
             ))
     else:
         if section.inline_commands:
-            parts.extend(("\n\nДобавить · ", code_span(ADD_COMMAND)))
             actions.append(_shopping_button(section, "Добавить", f"add {page}"))
             if totals[ShoppingItemStatus.NEEDED]:
-                for label, command, view in (
-                    ("Купить", BUY_COMMAND, ShoppingSelection.BUY),
-                    ("Удалить", DELETE_COMMAND, ShoppingSelection.DELETE),
+                # Выбор начинается с первой покупки видимой обычной страницы.
+                choice_page = (page - 1) * _ORDINARY_PAGE_SIZE // _TELEGRAM_SELECTION_PAGE_SIZE + 1
+                for label, view in (
+                    ("Купить", ShoppingSelection.BUY),
+                    ("Удалить", ShoppingSelection.DELETE),
                 ):
-                    parts.extend((f"\n{label} · ", code_span(command)))
-                    actions.append(_shopping_button(section, label, f"show {page} {view}"))
+                    actions.append(_shopping_button(section, label, f"show {choice_page} {view}"))
         if totals[ShoppingItemStatus.BOUGHT] and not section.vk_menu:
-            parts.extend(("\n\nОчистить купленное · ", code_span(CLEAR_BOUGHT_COMMAND)))
             actions.append(_shopping_button(section, "Очистить купленное", f"clear {page}"))
-        if section.vk_menu:
-            parts.extend(("\n\nКоманды списка: ", code_span(ADD_COMMAND), ", ", code_span(BUY_COMMAND), ", ",
-                          code_span(DELETE_COMMAND), ", ", code_span(CLEAR_BOUGHT_COMMAND), "."))
 
     view_name = str(selection) if selection is not None else "page"
     for label, destination in (("Предыдущая страница", page - 1), ("Следующая страница", page + 1)):
         if 1 <= destination <= last_page:
-            command = f"{SHOPPING_COMMAND} {view_name} {destination}"
-            parts.extend(("\n", label, " · ", code_span(command)))
+            if selection is not None:
+                command = f"{SHOPPING_COMMAND} {view_name} {destination}"
+                parts.extend(("\n", label, " · ", code_span(command)))
             arrow = "←" if destination < page else "→"
             actions.append(_shopping_button(
                 section, arrow if section.vk_menu else label, f"show {destination} {view_name}",
                 row=len(visible) if section.vk_menu else None,
             ))
     if selection is None:
-        parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} home")))
         actions.append(_shopping_button(section, "Назад", "home"))
     else:
         parts.extend(("\n\nНазад · ", code_span(f"{SHOPPING_COMMAND} back")))
         actions.append(_shopping_button(
-            section, "Назад", f"show {page} page", row=_VK_SELECTION_PAGE_SIZE + 1 if section.vk_menu else None,
+            section, "Назад", f"show {section.ordinary_page} page",
+            row=_VK_SELECTION_PAGE_SIZE + 1 if section.vk_menu else None,
         ))
     if notice:
         parts.extend(("\n\n", notice))
@@ -307,6 +308,7 @@ def shopping_list(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
             on_delivered=choice.delivered.set if choice is not None else None,
             cleanup_previous=True,
+            allow_multiple_messages=selection is None,
         ),
     )
 

@@ -76,6 +76,7 @@ class _ViewSlot:
     expires_at: float
     delivered_generation: int | None = None
     delivered_message_id: str | None = None
+    delivered_in_parts: bool = False
     started: bool = False
     sending: bool = False
     cleanup_previous: bool = False
@@ -147,10 +148,19 @@ class ResponseActionStore:
             slot.expires_at = self._clock() + self._ttl
             slot.started = False
             slot.cleanup_previous = view.cleanup_previous
+            target_has_parts = target is not None and slot.delivered_in_parts
+        finish_replacement = (
+            lambda message_id, multipart: self._finish_view(
+                scope, generation, target, message_id, view.on_delivered, replacement=True, multipart=multipart,
+            )
+        ) if view.allow_multiple_messages or target_has_parts else None
         delivery = ResponseViewDelivery(
             target, view.unavailable,
             lambda: self._start_view(scope, generation),
             lambda message_id: self._finish_view(scope, generation, target, message_id, view.on_delivered),
+            allow_multiple_messages=view.allow_multiple_messages,
+            target_has_multiple_messages=target_has_parts,
+            finish_replacement=finish_replacement,
         )
         return PreparedResponseView(scope, generation, delivery)
 
@@ -166,7 +176,7 @@ class ResponseActionStore:
 
     def _finish_view(
         self, scope: _ViewScope, generation: int, target: str | None, message_id: str | None,
-        on_delivered: Callable[[], None] | None,
+        on_delivered: Callable[[], None] | None, *, replacement: bool = False, multipart: bool = False,
     ) -> tuple[str, ...]:
         with self._lock:
             slot = self._views.get(scope)
@@ -175,7 +185,9 @@ class ResponseActionStore:
             slot.sending = False
             slot.expires_at = self._clock() + self._ttl
             previous_id = slot.delivered_message_id
-            confirmed = bool(message_id and (target is None or target == message_id))
+            confirmed = bool(message_id and (
+                target is None or (message_id != target if replacement else message_id == target)
+            ))
             if slot.retired:
                 del self._views[scope]
                 return tuple(dict.fromkeys(value for value in (previous_id, message_id if confirmed else None) if value))
@@ -183,11 +195,12 @@ class ResponseActionStore:
             if confirmed:
                 slot.delivered_generation = generation
                 slot.delivered_message_id = message_id
+                slot.delivered_in_parts = multipart
                 if slot.cleanup_previous:
                     retired = self._retire_views(scope.owner, generation)
                     if previous_id is not None and previous_id != message_id:
                         retired = (*retired, previous_id)
-            elif target is not None:
+            elif target is not None and not replacement:
                 # Неопределённый результат edit требует открыть представление снова.
                 slot.delivered_generation = None
         if confirmed and on_delivered is not None:
