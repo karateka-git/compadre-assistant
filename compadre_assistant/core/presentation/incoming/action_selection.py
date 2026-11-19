@@ -10,7 +10,7 @@ from time import monotonic
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BoundReplyAction, ConfirmationAction, PendingConfirmation, ResponseView, ResponseViewDelivery,
+    BoundReplyAction, ConfirmationAction, PendingConfirmation, ReplyAction, ResponseView, ResponseViewDelivery,
 )
 
 
@@ -272,18 +272,16 @@ class ResponseActionStore:
             )
 
     def register(self, event: IncomingEvent, context: ActionContext,
-                 actions: tuple[tuple[str, str, PendingConfirmation | None, ConfirmationAction | None], ...],
+                 actions: tuple[tuple[ReplyAction, PendingConfirmation | None, ConfirmationAction | None], ...],
                  *, view: PreparedResponseView | None = None,
-                 rows: dict[str, int] | None = None,
                  ) -> tuple[BoundReplyAction, ...]:
         """Связывает действия одного ответа с непрозрачными случайными токенами.
 
         Args:
             event: Проверенный исходный адрес с явным отправителем.
             context: Снимок допуска именно этого ответа.
-            actions: Подпись, точная команда и необязательное адресное ожидание.
+            actions: Проверенные описания действий и необязательные адресные ожидания.
             view: Поколение управляемого ответа, требующее подтверждения доставки.
-            rows: Явные ряды кнопок по их точным командам.
 
         Returns:
             Контракт сериализации адаптером; команда в callback не передаётся.
@@ -296,13 +294,17 @@ class ResponseActionStore:
                 del self._entries[next(iter(self._entries))]
             response_id = token_urlsafe(16)
             result = []
-            for label, command, confirmation, action in actions:
-                token = token_urlsafe(24)
-                self._entries[token] = RegisteredAction(
-                    response_id, event.reply_address, event.external_user_id, context,
-                    command, self._clock() + self._ttl, confirmation, action, view,
-                )
-                result.append(BoundReplyAction(label, token, response_id, rows.get(command) if rows else None))
+            for description, confirmation, action in actions:
+                token = "" if description.url is not None else token_urlsafe(24)
+                if token:
+                    self._entries[token] = RegisteredAction(
+                        response_id, event.reply_address, event.external_user_id, context,
+                        description.command, self._clock() + self._ttl, confirmation, action, view,
+                    )
+                result.append(BoundReplyAction(
+                    description.label, token, response_id, description.row,
+                    description.scope, description.purpose, description.destination, description.url,
+                ))
             return tuple(result)
 
     def claim(

@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits
+
 
 class ImageLoadError(RuntimeError):
     """Сообщает о недоступном изображении без деталей транспорта."""
@@ -73,6 +75,7 @@ class IncomingEvent:
             Отдельный от ID события нажатия в message_id.
         menu_choice: Канал пометил текст как подпись кнопки нижнего меню.
             Ядро проверяет подпись по актуальному меню перед исполнением.
+        action_layout: Ограничения адаптера для формирования страницы владельцем.
 
     Raises:
         ValueError: Если обязательное поле пусто.
@@ -88,6 +91,7 @@ class IncomingEvent:
     images: tuple[ImageAttachment, ...] = ()
     callback_message_id: str | None = None
     menu_choice: bool = False
+    action_layout: ActionLayoutLimits = ActionLayoutLimits()
 
     @property
     def reply_address(self) -> ReplyAddress:

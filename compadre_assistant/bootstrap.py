@@ -32,6 +32,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     IncomingResponse,
     BackgroundReply,
     PendingInputExpiryHandler,
+    ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
@@ -467,6 +468,20 @@ class ChannelMessageProcessor:
                 self._reconcile_menu_event(event, handler, allow_unknown=True, send=send_with_menu)
         return send(None)[0] if delivered is None else delivered
 
+    def section_actions(self, event: IncomingEvent) -> tuple[ReplyAction, ...] | None:
+        """Читает действия раздела через проверенный снимок без исполнения команд.
+
+        Args:
+            event: Адрес и явный автор запроса; текст игнорируется.
+
+        Returns:
+            Действия раздела, включая пустой набор, либо None при отсутствии
+            владельца нового контракта. Ошибка источника передаётся вызывающему.
+        """
+        with self._menu_lock:
+            snapshot = self._read_menu_snapshot(event, allow_unknown=True)
+        return snapshot[0].menu.section_actions if snapshot is not None else None
+
     def __call__(self, incoming_message: IncomingEvent,
                  completion_handler: ChannelCompletionHandler | None = None,
                  menu_update_handler: CommandMenuUpdateHandler | None = None, *,
@@ -515,7 +530,7 @@ class ChannelMessageProcessor:
         menu_updates: list[CommandMenuUpdate] = []
         origin = IncomingEvent(
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
-            "ответ", incoming_message.external_user_id,
+            "ответ", incoming_message.external_user_id, action_layout=incoming_message.action_layout,
         )
 
         def refresh_deferred_menu(address: ReplyAddress) -> None:
@@ -558,10 +573,13 @@ class ChannelMessageProcessor:
                             )
                             if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
-                                    origin, response, action_store,
+                                    origin, response, action_store, view_origin=original_context,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
+                response = replace(response, suggested_actions=tuple(
+                    action for action in response.suggested_actions if action.url is None
+                ))
                 completion_handler(BackgroundReply(reply.address, response))
 
             completion = deliver if completion_handler is not None else None

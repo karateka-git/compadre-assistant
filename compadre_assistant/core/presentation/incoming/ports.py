@@ -67,6 +67,8 @@ class CommandMenu:
 
     items: tuple[CommandSuggestion, ...] = ()
     pending_input_label: str | None = None  # Тип ожидаемого значения поверх базового режима.
+    # None — владелец ещё использует каталог команд; () — раздел без действий.
+    section_actions: tuple[ReplyAction, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +157,7 @@ class BoundReplyAction:
     """Передаёт адаптеру подпись, opaque token и ID конкретного ответа.
 
     Только token отправляется назад через select_action; подпись не исполняется.
+    При url токен пуст и действие только открывает проверенную ссылку.
     response_id позволяет сопоставить кнопки с отправленным сообщением канала.
     """
 
@@ -162,6 +165,10 @@ class BoundReplyAction:
     token: str
     response_id: str
     row: int | None = None
+    scope: ActionScope = ActionScope.SCREEN
+    purpose: ActionPurpose = ActionPurpose.ACTION
+    destination: ScreenDestination | None = None
+    url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
