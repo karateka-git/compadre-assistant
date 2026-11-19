@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import os
 from pathlib import Path
 import sys
 from urllib.parse import quote
 
 from scripts.ci_repository_compatibility import DeploymentReleaseTagEvidence, ReleaseTagEvidence, resolve_release_tag
-from scripts.check_hotfix_pairs import HotfixError, check_release
+from scripts.check_hotfix_pairs import HotfixError, check_release, check_release_history
 from scripts.create_release_branch import (
     EXPECTED_REPOSITORY, ReleaseBranchError, checked_main_head, repository_from_origin,
 )
@@ -28,6 +28,14 @@ class PublishError(RuntimeError):
     """Означает, что опубликованная версия не может быть создана безопасно."""
 
 
+@dataclass
+class _ImmutableReleaseReads:
+    """Хранит проверенные данные точных Git SHA в рамках одной публикации."""
+
+    parents: dict[str, tuple[str, str]] = field(default_factory=dict)
+    migrations: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class PreparedRelease:
     """Хранит проверенные реквизиты будущего выпуска."""
@@ -42,6 +50,9 @@ class PreparedRelease:
     notes: str
     make_latest: str
     compatibility: DeploymentReleaseTagEvidence
+    previous_patch_sha: str | None
+    github_history: bool
+    _reads: _ImmutableReleaseReads = field(repr=False, compare=False)
 
 
 def _sha(value: object, label: str) -> str:
@@ -159,15 +170,18 @@ def _check_number(parts: tuple[int, int, int], change: str,
         raise PublishError("Новая линия требует следующего MINOR или MAJOR с PATCH=0")
 
 
-def _candidate(api: GitHub, branch: str, sha: str) -> None:
-    """Сверяет локальный чистый checkout и текущий удалённый tip."""
+def _candidate(api: GitHub, branch: str, sha: str, *, github_history: bool = False) -> None:
+    """Сверяет удалённую вершину и checkout для публикации с локальной проверкой."""
     from scripts.create_release_branch import git
-    if repository_from_origin() != EXPECTED_REPOSITORY or api.repository != EXPECTED_REPOSITORY:
+    if api.repository != EXPECTED_REPOSITORY:
         raise PublishError("Репозиторий origin или API не совпадает с проектом")
-    if git("status", "--porcelain", "--untracked-files=all").stdout.strip():
-        raise PublishError("Для публикации нужен чистый checkout")
-    if git("rev-parse", "HEAD").stdout.strip() != sha:
-        raise PublishError("HEAD не соответствует candidate SHA")
+    if not github_history:
+        if repository_from_origin() != EXPECTED_REPOSITORY:
+            raise PublishError("Репозиторий origin или API не совпадает с проектом")
+        if git("status", "--porcelain", "--untracked-files=all").stdout.strip():
+            raise PublishError("Для публикации нужен чистый checkout")
+        if git("rev-parse", "HEAD").stdout.strip() != sha:
+            raise PublishError("HEAD не соответствует candidate SHA")
     ref = api.get(f"/git/ref/heads/{branch}")
     if not isinstance(ref, dict) or not isinstance(ref.get("object"), dict):
         raise PublishError("Некорректный ref релизной ветки")
@@ -196,7 +210,26 @@ def _compatibility(api: GitHub, admission: Admission) -> DeploymentReleaseTagEvi
                                             admission.run_attempt, result["schema_fingerprint"], baseline)
 
 
-def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> PreparedRelease:
+def _previous_patch_sha(api: GitHub, parts: tuple[int, int, int],
+                        history: dict[tuple[int, int, int], dict]) -> str:
+    """Читает текущий тег непосредственно предшествующего выпуска линии."""
+    major, minor, patch = parts
+    previous = history.get((major, minor, patch - 1))
+    if previous is None:
+        raise PublishError("Не подтверждён предыдущий выпуск PATCH")
+    return tag_commit(api, previous["tag_name"])
+
+
+def _patch_pairs(api: GitHub, branch: str, sha: str, baseline: str, *,
+                 github_history: bool, reads: _ImmutableReleaseReads) -> tuple[tuple[int, int | None, str], ...]:
+    """Проверяет текущие пары PR для фазы публикации."""
+    if github_history:
+        return tuple(check_release_history(api, branch, sha, baseline, commit_parents=reads.parents))
+    return tuple(check_release(api, branch, sha, baseline, require_full_ci=False))
+
+
+def prepare(api: GitHub, version: str, sha: str, change: str, notes: str, *,
+            github_history: bool = False) -> PreparedRelease:
     """Проверяет номер, защиту, историю, парные PR и полный CI точного SHA.
 
     Args:
@@ -205,6 +238,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         sha: Полный SHA кандидата.
         change: Тип версии initial, major, minor или patch.
         notes: Подготовленное человеком описание изменений.
+        github_history: Проверять историю PATCH через GitHub для production runner.
 
     Returns:
         Все реквизиты для публикации без скрытых проверок.
@@ -212,6 +246,13 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     Raises:
         PublishError: Допуск или защита не доказаны.
     """
+    return _prepare(api, version, sha, change, notes, github_history=github_history and change == "patch",
+                    reads=_ImmutableReleaseReads())
+
+
+def _prepare(api: GitHub, version: str, sha: str, change: str, notes: str, *,
+             github_history: bool, reads: _ImmutableReleaseReads) -> PreparedRelease:
+    """Строит допуск на свежих данных и переиспользует проверенные Git-объекты."""
     major, minor, patch = parts = _version(version)
     if not SHA_PATTERN.fullmatch(sha):
         raise PublishError("Требуется полный 40-символьный SHA")
@@ -221,16 +262,15 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
     if any(line.startswith(reserved) for line in notes.splitlines()):
         raise PublishError("Release notes содержат служебное поле манифеста")
     branch = f"release/{major}.{minor}"
-    _candidate(api, branch, sha)
+    _candidate(api, branch, sha, github_history=github_history)
     history = _published_versions(api)
     _check_number(parts, change, history)
     _unused_name(api, version)
     _protection(api, version)
-    line = [(number, item) for number, item in history.items() if number[:2] == parts[:2]]
-    if line:
-        _, baseline_release = max(line)
-        baseline = tag_commit(api, baseline_release["tag_name"])
-        pairs = tuple(check_release(api, branch, sha, baseline))
+    previous_patch_sha = None
+    if change == "patch":
+        previous_patch_sha = _previous_patch_sha(api, parts, history)
+        pairs = _patch_pairs(api, branch, sha, previous_patch_sha, github_history=github_history, reads=reads)
         admission = select_successful_run(api, api.repository, RELEASE_WORKFLOW, sha, branch)
     else:
         checked_main_head(api, sha)
@@ -240,10 +280,12 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         raise PublishError("Нет успешного полного CI для точного SHA")
     compatibility = _compatibility(api, admission)
     try:
-        expected_migration = expected_migration_at(api, sha)
+        if sha not in reads.migrations:
+            reads.migrations[sha] = expected_migration_at(api, sha)
+        expected_migration = reads.migrations[sha]
     except ValueError as error:
         raise PublishError(f"Не подтверждена ожидаемая миграция SQLite: {error}") from error
-    _candidate(api, branch, sha)
+    _candidate(api, branch, sha, github_history=github_history)
     _unused_name(api, version)
     run_url = f"https://github.com/{api.repository}/actions/runs/{admission.run_id}/attempts/{admission.run_attempt}"
     pair_lines = "\n".join(
@@ -262,7 +304,7 @@ def prepare(api: GitHub, version: str, sha: str, change: str, notes: str) -> Pre
         body += f"\nПарные PR исправлений:\n{pair_lines}\n"
     make_latest = "true" if not history or parts > max(history) else "false"
     return PreparedRelease(version, branch, sha, admission, pairs, body,
-                           change, notes, make_latest, compatibility)
+                           change, notes, make_latest, compatibility, previous_patch_sha, github_history, reads)
 
 
 def _require_published_tag(api: GitHub, prepared: PreparedRelease, object_sha: str) -> None:
@@ -293,7 +335,8 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
             не объединяет tag ref и Release в одну транзакцию: тег после
             частичного сбоя остаётся занятым и требует ручного разбора.
     """
-    if prepare(api, prepared.version, prepared.sha, prepared.change, prepared.notes) != prepared:
+    if _prepare(api, prepared.version, prepared.sha, prepared.change, prepared.notes,
+                github_history=prepared.github_history, reads=prepared._reads) != prepared:
         raise PublishError("Допуск изменился после подготовки выпуска")
     tag = api.post("/git/tags", {"tag": prepared.version, "message": prepared.compatibility.message(),
                                 "object": prepared.sha, "type": "commit"})
@@ -308,14 +351,16 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
             or tag.get("object", {}).get("type") != "tag" or tag["object"].get("sha") != object_sha):
         raise PublishError("Создание тега не подтверждено; версию разбирать вручную")
     _require_published_tag(api, prepared, object_sha)
-    _candidate(api, prepared.branch, prepared.sha)
-    if prepared.pairs:
+    _candidate(api, prepared.branch, prepared.sha, github_history=prepared.github_history)
+    if prepared.previous_patch_sha is not None:
         history = _published_versions(api)
-        line = [(number, item) for number, item in history.items()
-                if number[:2] == _version(prepared.version)[:2]]
-        if not line or tuple(check_release(
-            api, prepared.branch, prepared.sha, tag_commit(api, max(line)[1]["tag_name"]),
-        )) != prepared.pairs:
+        parts = _version(prepared.version)
+        _check_number(parts, prepared.change, history)
+        previous = _previous_patch_sha(api, parts, history)
+        if previous != prepared.previous_patch_sha:
+            raise PublishError("Предыдущий тег PATCH изменился после создания тега")
+        if _patch_pairs(api, prepared.branch, prepared.sha, previous, github_history=prepared.github_history,
+                        reads=prepared._reads) != prepared.pairs:
             raise PublishError("Условия парных PR изменились после создания тега")
     else:
         checked_main_head(api, prepared.sha)
@@ -325,6 +370,7 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
     if _policy_pin(api) != prepared.compatibility.policy_sha:
         raise PublishError("Внешний CI policy pin изменился после создания тега")
     verify_deployment_base(api, asdict(prepared.compatibility.baseline), prepared.compatibility.previous_sha)
+    _protection(api, prepared.version)
     release = api.post("/releases", {
         "tag_name": prepared.version, "target_commitish": prepared.sha,
         "name": prepared.version, "body": prepared.body,

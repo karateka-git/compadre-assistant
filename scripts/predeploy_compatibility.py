@@ -300,7 +300,8 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
 
     Args:
         api: Независимый GitHub API с Actions, Contents и Deployments read.
-        selected: Закреплённый Release или допуск точной попытки обычного CI.
+        selected: Закреплённый Release или допуск точной попытки обычного CI,
+            проверенной селектором в текущей фазе публикации.
         policy_sha: Внешний reviewed pin контроллера, не поле artifact.
         previous_sha: SHA last_good на VPS. Публикация передаёт None и требует
             действующую базу из Deployments.
@@ -344,8 +345,9 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
                 or any(step.get("status") != "completed" or step.get("conclusion") != "success"
                        for step in steps)):
             raise PredeployError("SAFE_CI_JOB_FAILED")
-    elif select_successful_run(api, selected.repository, selected.workflow, selected.sha,
-                               branch, selected.run_id, selected.run_attempt) is None:
+    elif (not isinstance(selected, Admission)
+          and select_successful_run(api, selected.repository, selected.workflow, selected.sha,
+                                    branch, selected.run_id, selected.run_attempt) is None):
         raise PredeployError("SAFE_CI_ATTEMPT")
     policy, policy_sources = _trusted_policy(api, policy_sha)
     if policy["repository"] != selected.repository or api.repository != selected.repository:

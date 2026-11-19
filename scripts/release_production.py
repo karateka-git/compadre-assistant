@@ -49,12 +49,12 @@ def _select_or_publish(api: PublishingGitHub, version: str, sha: str, *,
             # prepare повторно проверит отсутствие версии и тега перед любой записью.
             assert notes is not None
             with http_phase(HttpPhase.RELEASE_PREPARE):
-                prepared = releases.prepare(api, version, sha, change, notes)
+                prepared = releases.prepare(api, version, sha, change, notes, github_history=change == "patch")
             print("Публикация GitHub Release", flush=True)
             try:
                 with http_phase(HttpPhase.RELEASE_PUBLISH):
                     releases.publish(api, prepared)
-            except (releases.PublishError, PublishingError, ControllerError) as error:
+            except (releases.PublishError, PublishingError, ControllerError, HotfixError) as error:
                 raise ProductionReleaseError(
                     f"Публикация Release не подтверждена. Проверьте тег и Release перед повтором. Причина: {error}"
                 ) from error

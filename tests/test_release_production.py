@@ -101,7 +101,7 @@ class ProductionReleaseTests(unittest.TestCase):
 
         with patch.object(self.api, "get", side_effect=get):
             self._release()
-        self.prepare.assert_called_once_with(self.api, VERSION, SHA, "patch", "Исправление")
+        self.prepare.assert_called_once_with(self.api, VERSION, SHA, "patch", "Исправление", github_history=True)
         self.publish.assert_called_once_with(self.api, self.prepare.return_value)
         self.client.assert_called_once_with(self.api.repository, "production-test-token")
         self.assertEqual([path for path, _ in self.api.posts], ["/deployments", "/deployments/7/statuses"])

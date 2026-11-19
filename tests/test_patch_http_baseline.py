@@ -1,4 +1,4 @@
-"""Воспроизводит исходные HTTP-маршруты PATCH на локальных фикстурах."""
+"""Воспроизводит HTTP-маршруты PATCH на локальных фикстурах."""
 
 from __future__ import annotations
 
@@ -229,6 +229,10 @@ class _RestFixture:
                 self.graph.main if branch == "main" else self.graph.candidate)}}
         if path.startswith("/git/ref/tags/"):
             return self.refs[path.removeprefix("/git/ref/tags/")]
+        if path.startswith("/git/commits/"):
+            sha = path.removeprefix("/git/commits/")
+            current, *parents = _git(self.graph.checkout, "rev-list", "--parents", "-n", "1", sha).split()
+            return {"sha": current, "parents": [{"sha": parent} for parent in parents]}
         if path.startswith("/git/tags/"):
             return self.tags[path.removeprefix("/git/tags/")]
         if path.startswith("/pulls/"):
@@ -392,7 +396,8 @@ def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = Fals
     notes = root / "notes.md"
     notes.write_text("Фикстура PATCH\n", encoding="utf-8")
     flags = ["--resume"] if installed else ["--release", "--change", "patch", "--notes-file", str(notes)]
-    argv = ["release_production", VERSION, api.graph.candidate, "--ssh-host", "vps.example.invalid",
+    sha = api.graph.main if mode == "wrong_sha" else api.graph.candidate
+    argv = ["release_production", VERSION, sha, "--ssh-host", "vps.example.invalid",
             "--known-hosts", str(notes), *flags]
     with (patch.object(system, "OLD_SHA", api.graph.base), patch.object(system, "NEW_SHA", api.graph.candidate),
           chdir(api.graph.checkout)):
@@ -410,8 +415,8 @@ def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = Fals
             elapsed = perf_counter_ns() - started
     reports = [json.loads(line.removeprefix("deploy-http-metrics ")) for line in stderr.getvalue().splitlines()
                if line.startswith("deploy-http-metrics ")]
-    if mode == "wrong_checkout":
-        if exit_code != 1 or "HEAD не соответствует candidate SHA" not in stderr.getvalue():
+    if mode == "wrong_sha":
+        if exit_code != 1 or "Candidate не является текущим tip" not in stderr.getvalue():
             raise AssertionError(stderr.getvalue())
     elif exit_code != 0 or json.loads(stdout.getvalue().splitlines()[-1])["state"] != "success":
         raise AssertionError(f"{mode}: {stderr.getvalue()}\n{stdout.getvalue()}\n{controller.errors}")
@@ -428,7 +433,7 @@ def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = Fals
 
 
 def measure_baseline() -> list[dict]:
-    """Измеряет четыре сценария с одинаковым PATCH и исходной историей."""
+    """Измеряет четыре сценария с одинаковым PATCH и историей выпусков."""
     with TemporaryDirectory(prefix="patch-http-baseline-") as directory:
         root = Path(directory)
         graph = _make_graph(root / "checkout", ArtifactAPI().workflow_bytes)
@@ -447,7 +452,7 @@ def measure_baseline() -> list[dict]:
         resumed.seed_release(first, installed=True)
         continued = _measure(root, "resume", resumed, installed=True)
         _git(graph.checkout, "checkout", "--quiet", "--detach", graph.main)
-        refused = _measure(root, "wrong_checkout", _RestFixture(graph, fingerprint))
+        refused = _measure(root, "wrong_sha", _RestFixture(graph, fingerprint))
         return [published, installed, continued, refused]
 
 

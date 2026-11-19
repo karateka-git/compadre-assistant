@@ -8,7 +8,8 @@ Deployment v2. Он воспроизводится локально для PATCH
 
 ## Воспроизвести замер
 
-В корне проекта запустите через Python проектного `.venv`:
+Исторический замер воспроизводится из корня checkout коммита `8c1c105`
+через Python проектного `.venv`.
 
 ```text
 python -m tests.test_patch_http_baseline
@@ -17,8 +18,9 @@ python -m tests.test_patch_http_baseline
 В выходном JSON `summary` содержит суммы, а `scenarios` сохраняет
 агрегаты по этапам и отчёты отдельных SSH-вызовов. Фикстура независимо
 сверяет суммы HTTP-попыток с полученными запросами. Для автоматической
-проверки исходных маршрутов запустите `python -m unittest tests.test_patch_http_baseline`.
-[Код фикстуры](../../tests/test_patch_http_baseline.py)
+проверки исходных маршрутов откройте тот же checkout и запустите
+`python -m unittest tests.test_patch_http_baseline`. Команда на рабочей
+ветке измеряет текущую реализацию. [Код фикстуры](../../tests/test_patch_http_baseline.py)
 
 | Сценарий | Место | GET API | POST API | GET базы¹ | Страницы | Ошибки | GET хранилища ZIP | HTTP, мс² |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
