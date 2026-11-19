@@ -31,6 +31,8 @@ _HTTP_PHASES = tuple(HttpPhase)
 class HttpOperation(StrEnum):
     """Задаёт имена команд runner и отдельных процессов контроллера."""
 
+    # Отдельное SSH-действие владельца D18.
+    ATTEMPT = "attempt"
     RELEASE = "release"
     RESUME = "resume"
     INSTALL = "install"

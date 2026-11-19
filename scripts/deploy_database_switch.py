@@ -257,6 +257,9 @@ def transition(host, state: dict, record, publish) -> None:
     record("candidate_copy_verified", new=new)
     record("switch_intent", switch_intent={"from": state["old"]["generation_id"], "to": generation})
     host.require_snapshot_quiescence()
+    from scripts.deploy_attempt import require_current
+
+    require_current(host)
     publish(host.state_dir / "active-db.json", json.dumps(selector(state, "new")) + "\n")
     if read_selected(host, state) != "new":
         raise ValueError("Публикация selector не подтверждена")

@@ -105,6 +105,13 @@ def _atomic_text(path: Path, value: str) -> None:
         Path(temporary).unlink(missing_ok=True)
 
 
+def deployment_mutation_lock(host):
+    """Выбирает общий lock и проверяет право входа на изменение установки."""
+    from scripts.deploy_attempt import mutation_lock
+
+    return mutation_lock(host)
+
+
 def _version(value: str) -> tuple[int, int, int]:
     """Преобразует каноническую версию в ключ для обычного SemVer порядка."""
     if not prep.VERSION_PATTERN.fullmatch(value):
@@ -538,7 +545,8 @@ class Host:
             prep.require_clean_checkout(self.checkout, candidate["sha"])
             evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
             if "baseline" in evidence:
-                compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"])
+                compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"],
+                                                     frozen=getattr(self, "locked_attempt", None) is not None)
         else:
             token = compatibility.private_text(self.state_dir / "github-read-token")
             evidence = compatibility.verify_evidence(
@@ -1079,7 +1087,8 @@ class Host:
         with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
             if annotated:
                 evidence = compatibility.verify_tag_evidence(
-                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha)
+                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha,
+                    frozen=getattr(self, "locked_attempt", None) is not None)
             else:
                 api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
                 evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
@@ -1215,6 +1224,13 @@ def _prepare_candidate(
         metrics.update(sha=selected.sha, run_id=selected.run_id, run_attempt=selected.run_attempt)
         if selected.kind != ("emergency" if emergency else "ordinary"):
             raise DeployError("Тип выбранного Release не соответствует команде")
+        ownership = getattr(host, "locked_attempt", None)
+        if ownership is not None:
+            attempt, _ = ownership
+            if ((selected.sha, selected.version, selected.release_id, selected.run_id, selected.run_attempt,
+                 getattr(selected.compatibility, "baseline", None)) !=
+                    (attempt.sha, attempt.version, attempt.release_id, attempt.run_id, attempt.run_attempt, attempt.baseline)):
+                raise DeployError("Выбранный Release расходится с D18")
         if selected.sha == old_sha:
             raise DeployError("Текущий код уже имеет SHA выбранной версии")
         annotated = sqlite_v2 and not emergency and selected.compatibility is not None
@@ -1519,7 +1535,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         raise DeployError("Причина допустима только с --emergency")
     else:
         initiator = None
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    with deployment_mutation_lock(host):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         _recover(host, state)
@@ -1633,6 +1649,9 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                     host.require_baseline(last_good, old_sha, old_id)
             if switch_state is not None or initial_switch:
                 with metrics.stage("v2.admission_recheck"), http_phase(HttpPhase.VPS_RECHECK):
+                    from scripts.deploy_attempt import require_current
+
+                    require_current(host)
                     host.require_switch_candidate(state)
                 _state(host, state, "ready")
             critical = True
@@ -1733,7 +1752,7 @@ def verify_pinned(host: Host) -> None:
     Raises:
         DeployError: Pin, проверка обоих каналов или возврат не подтвердились.
     """
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    with deployment_mutation_lock(host):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         _recover(host, state)
@@ -1829,17 +1848,25 @@ def main() -> None:
                       help="техническая приёмка указанной версии и SHA без изменений")
     mode.add_argument("--cleanup-old", nargs=2, metavar=("SHA", "RUNTIME_ID"),
                       help="удалить прежнюю SQLite для технически принятого выпуска")
+    mode.add_argument("--attempt", nargs=6, metavar=("ACTION", "SHA", "KEY", "OWNER", "SNAPSHOT", "D18"),
+                      help="выполнить команду протокола владения Deployment v2")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        separate_mode = args.verify_pinned or args.verify_installed is not None or args.cleanup_old is not None
+        separate_mode = args.verify_pinned or args.verify_installed is not None or args.cleanup_old is not None or args.attempt is not None
         if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
-        if args.verify_pinned:
+        if args.attempt is not None:
+            from scripts import deploy_attempt
+
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT):
+                result = deploy_attempt.execute(host, args.version, *args.attempt)
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+        elif args.verify_pinned:
             verify_pinned(host)
         elif args.verify_installed is not None:
             with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.VERIFY_INSTALLED):

@@ -291,7 +291,9 @@ def cleanup_old(host: Host, version: str, sha: str, expected_runtime: str) -> di
         raise CleanupError("Очистка требует точную версию и полный SHA")
     if not isinstance(expected_runtime, str) or not _RUNTIME_ID.fullmatch(expected_runtime):
         raise CleanupError("Очистка требует runtime_id из технической приёмки")
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    from scripts.deploy_prod import deployment_mutation_lock
+
+    with deployment_mutation_lock(host):
         state = prep.read_state(host.state_dir, host.checkout)
         if not isinstance(state, dict) or state.get("stage") != "success":
             raise CleanupError("Очистка требует завершённый успешный выпуск")
