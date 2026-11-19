@@ -151,10 +151,39 @@ class ControllerTests(unittest.TestCase):
 
     def test_runner_resumes_lost_cleanup_response_with_new_workflow_id(self):
         """Оба протокола проходят два сеанса с одной установкой и одной очисткой."""
+        self._runner_crash("complete")
+
+    def test_resume_after_creation_without_status(self):
+        """Потеря runner после POST создания не порождает второй D18."""
+        self._runner_crash("create")
+
+    def test_resume_after_in_progress_before_install(self):
+        """При отсутствии серверного старта новый owner начинает установку один раз."""
+        self._runner_crash("in_progress")
+
+    def test_resume_after_install(self):
+        """Уже установленный runtime проверяется и очищается без нового install."""
+        self._runner_crash("install")
+
+    def test_resume_after_success_before_close(self):
+        """Потеря ответа success оставляет тот же числовой статус."""
+        self._runner_crash("success")
+
+    def test_resume_after_terminal_journal_write(self):
+        """Повтор закрытого журнала требует свежей приёмки того же runtime."""
+        self._runner_crash("close")
+
+    def _runner_crash(self, interruption):
         from dataclasses import replace
         import json
         from scripts import release_production as runner
-        from scripts.publish_installation_tag import InstallationTagError
+
+        lost = True
+        def interrupt(point):
+            nonlocal lost
+            if point == interruption and lost:
+                lost = False
+                raise InterruptedError("Остановка runner")
 
         selected = self.host.select(VERSION)
         receipt = replace(RECEIPT, version=VERSION, sha=SHA, release_id=42, run_id=108, run_attempt=1,
@@ -168,6 +197,9 @@ class ControllerTests(unittest.TestCase):
             result = old_post(path, body)
             if path == "/deployments":
                 self.api.deployments[-1].update(sha=SHA, ref=SHA)
+                interrupt("create")
+            else:
+                interrupt(body["state"])
             return result
         self.api.post = post
         original_get = self.api.get
@@ -188,20 +220,17 @@ class ControllerTests(unittest.TestCase):
             controller.prep.write_state(host.state_dir, host.checkout, state)
         installs = self.enterContext(patch.object(controller.prod, "deploy", side_effect=install))
         cleans = self.enterContext(patch.object(controller.cleanup, "cleanup_old", side_effect=clean))
-        lost = True
         def ssh(argv, **kwargs):
-            nonlocal lost
             _, _, _, version, _, action, *arguments = argv
             result = controller.execute(self.host, version, action, *arguments)
-            if action == "complete" and lost:
-                lost = False
-                raise InstallationTagError("Потерян ответ SSH после очистки")
+            if action in ("complete", "install", "close"):
+                interrupt(action)
             return SimpleNamespace(stdout=json.dumps(result), stderr="")
         self.enterContext(patch.object(runner, "run_vps_command", side_effect=ssh))
         settings = {"COMPADRE_CONTROLLER_SHA": SNAPSHOT, "COMPADRE_DEPLOYMENT_WRITER": "v2",
                     "GITHUB_RUN_ID": KEY.split(":")[0], "GITHUB_RUN_ATTEMPT": "1", "RELEASE_SOURCE_ATTEMPT": ""}
         with patch.dict(os.environ, settings):
-            with self.assertRaisesRegex(InstallationTagError, "очистки"):
+            with self.assertRaisesRegex(InterruptedError, "runner"):
                 runner._run_release(self.api, VERSION, SHA, change="patch", notes="patch",
                                     ssh_host="vps", known_hosts=Path("hosts"), identity=None)
         self.states[KEY] = "completed"
@@ -254,3 +283,69 @@ class ControllerTests(unittest.TestCase):
                     runner._run_release(self.api, VERSION, SHA, change=change, notes=None,
                                         ssh_host="vps", known_hosts=Path("hosts"), identity=None)
                 publish.assert_not_called()
+
+    def test_old_image_on_new_generation_cannot_prove_restoration(self):
+        """Даже штатный boot прежнего образа не доказывает возврат после допуска на новую БД."""
+        from dataclasses import replace
+
+        state = {"stage": "rolled_back", "last_good": {"image_id": "old-image", "sha": BASE.sha,
+                 "version": BASE.version, "ci_run_id": RECEIPT.run_id, "ci_run_attempt": RECEIPT.run_attempt},
+                 "admission_may_have_started": False, "old": {"manifest": [RECEIPT.migration]},
+                 "timer_before": {"enabled": True, "active": True}}
+        controller.prep.write_state(self.host.state_dir, self.host.checkout, state)
+        state = controller.prep.read_state(self.host.state_dir, self.host.checkout)
+        self.host.select = lambda version: SimpleNamespace(**asdict(RECEIPT), tag_object_sha="3" * 40)
+        self.host.timer_snapshot = lambda: state["timer_before"]
+        self.host.unit_active = lambda unit: True
+        self.enterContext(patch.object(controller.prep, "require_clean_checkout"))
+        self.enterContext(patch.object(controller.prep, "require_exact_tag"))
+        self.enterContext(patch.object(controller.acceptance, "_container_identity", return_value={"tg": ["id", "ts"]}))
+        boot = {"outcome": "rolled_back", "sha": BASE.sha, "image_id": "old-image",
+                "generation_id": RECEIPT.generation_id}
+        self.enterContext(patch.object(controller.runtime, "verify", return_value=boot))
+        actual = controller._rolled_back(self.host, state, RECEIPT)
+        self.assertEqual(replace(actual, runtime_id=RECEIPT.runtime_id), RECEIPT)
+        for change in ({"generation_id": "a" * 32}, {"outcome": "success"}):
+            with patch.dict(boot, change), self.assertRaises(DeployError):
+                controller._rolled_back(self.host, state, RECEIPT)
+        with patch.dict(state, admission_may_have_started=True), self.assertRaises(DeployError):
+            controller._rolled_back(self.host, state, RECEIPT)
+
+
+@unittest.skipUnless(os.name == "posix" and getattr(os, "geteuid", lambda: -1)() == 0,
+                     "проверка требует изолированного Linux с root-owned состоянием")
+class LinuxOwnershipTests(unittest.TestCase):
+    """Проверяет реальный flock и root-only журнал в двух Python-процессах."""
+
+    def test_process_exit_preserves_reservation(self):
+        """После выхода владельца flock свободен, но другой deploy запрещён журналом."""
+        import subprocess
+        import sys
+        from tests.test_deployment_writer import ATTEMPT
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            host = SimpleNamespace(checkout=root / "checkout", state_dir=root / "state")
+            code = (
+                "from pathlib import Path\n"
+                "from types import SimpleNamespace\n"
+                "from scripts.deploy_attempt import mutation_lock\n"
+                "from scripts.deploy_prepare import PreparationError\n"
+                "from scripts.deploy_prod import DeployError\n"
+                "import sys\n"
+                "root = Path(sys.argv[1])\n"
+                "host = SimpleNamespace(checkout=root/'checkout', state_dir=root/'state')\n"
+                "try:\n"
+                "    with mutation_lock(host): print('доступ')\n"
+                "except (PreparationError, DeployError) as error: print(str(error))\n"
+            )
+            def probe():
+                return subprocess.run((sys.executable, "-B", "-c", code, directory),
+                                      capture_output=True, encoding="utf-8", check=True).stdout
+            with controller.prep.deploy_lock(host.state_dir, host.checkout):
+                self.assertIn("Уже выполняется", probe())
+                controller._save(host, {"protocol": 2, "attempt": asdict(ATTEMPT), "owner": KEY,
+                    "snapshot": SNAPSHOT, "base_receipt": asdict(RECEIPT), "claims": [], "deployment_id": None,
+                    "started": False, "closed": False})
+            self.assertEqual((host.state_dir / controller.JOURNAL).stat().st_mode & 0o777, 0o600)
+            self.assertIn("владеет открытая попытка", probe())

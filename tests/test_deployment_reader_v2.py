@@ -125,3 +125,42 @@ class AttemptReaderTests(unittest.TestCase):
         for state in ("in_progress", "pending", "queued", "inactive", "future", "error"):
             with self.subTest(state=state), patch.dict(self.api.status, state=state), self.assertRaises(DeploymentAcceptanceError):
                 resolve_accepted_baseline(self.api)
+
+    def test_main_release_and_pinned_harness_follow_same_transition(self):
+        """Оба caller и независимый harness закрывают допуск, пока D18 открыт."""
+        import json
+        from scripts import full_ci_controller as ci
+        from scripts import ci_repository_compatibility as harness
+        from scripts.full_ci_controller import ControllerError
+
+        api = self.api
+        real_get = api.get
+        def get(path, **parameters):
+            if path.startswith("/git/ref/heads/"):
+                return {"object": {"sha": SHA}}
+            return real_get(path, **parameters)
+        pin = "9" * 40
+        self.enterContext(patch.object(api, "get", side_effect=get))
+        self.enterContext(patch.object(ci, "git", return_value=SHA))
+        self.enterContext(patch.object(ci, "GitHub", return_value=api))
+        self.enterContext(patch.dict(os.environ, GITHUB_EVENT_NAME="workflow_dispatch", COMPATIBILITY_POLICY_SHA=pin,
+                                     GITHUB_TOKEN="fixture"))
+        for mode, branch in (("main", "main"), ("release", "release/3.4")):
+            def outputs(expected_pin=pin):
+                return ci.decide(api, mode, SHA, branch, False, expected_sha=SHA, expected_policy_sha=expected_pin)
+            with self.subTest(mode=mode):
+                with self.assertRaises(ControllerError):
+                    outputs("8" * 40)
+                with patch.dict(api.status, state="in_progress"):
+                    with self.assertRaises(ControllerError):
+                        outputs()
+                current = outputs()
+                self.assertEqual(current["policy-sha"], pin)
+                self.assertEqual(harness._confirmed_baseline(api.repository, SHA, current["accepted-baseline"]),
+                                 json.loads(current["accepted-baseline"]))
+                with patch.dict(api.status, state="failure", description="v1 restored=7/8"):
+                    with self.assertRaises(ValueError):
+                        harness._confirmed_baseline(api.repository, SHA, current["accepted-baseline"])
+                    restored = outputs()
+                    self.assertEqual(harness._confirmed_baseline(api.repository, SHA, restored["accepted-baseline"]),
+                                     asdict(BASE))
