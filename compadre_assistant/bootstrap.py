@@ -363,7 +363,7 @@ class ChannelMessageProcessor:
             if not complete:
                 # Скрываем /confirm, пока источник подтверждений недоступен.
                 self._menu_failures.setdefault(address, INCOMPLETE_MENU_SNAPSHOT)
-            if (self._published_menus.get(address) == update
+            if (self._same_menu_projection(self._published_menus.get(address), update)
                     and self._menu_failures.get(address) in (None, INCOMPLETE_MENU_SNAPSHOT)):
                 if complete:
                     self._acknowledge_menu(update)
@@ -373,18 +373,39 @@ class ChannelMessageProcessor:
                 self._menu_failures[address] = "Не удалось доставить меню с ответом"
                 return
             if sent is None:
-                if send is not None and self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+                if send is not None and not self._same_menu_snapshot(
+                    self._read_menu_snapshot(event, allow_unknown=allow_unknown), snapshot,
+                ):
                     self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                     return
                 if handler(update) is False:
                     return
-            if self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+            if not self._same_menu_snapshot(self._read_menu_snapshot(event, allow_unknown=allow_unknown), snapshot):
                 self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                 return
             self._record_menu_delivery(update, complete)
         except Exception as error:
             self._menu_failures[address] = str(error)
             LOGGER.exception("Could not deliver reconciled command menu")
+
+    @staticmethod
+    def _same_menu_projection(published: CommandMenuUpdate | None, current: CommandMenuUpdate) -> bool:
+        if published is None or published.address != current.address:
+            return False
+        old_actions, actions = published.menu.section_actions, current.menu.section_actions
+        if current.address.channel == "vk" and old_actions is not None and actions is not None:
+            # Подпись передаётся без команды; актуальная цель проверяется при нажатии.
+            return tuple((action.label, action.url) for action in old_actions) == tuple(
+                (action.label, action.url) for action in actions
+            )
+        return published == current
+
+    @classmethod
+    def _same_menu_snapshot(
+        cls, previous: tuple[CommandMenuUpdate, bool, int | None] | None,
+        current: tuple[CommandMenuUpdate, bool, int | None],
+    ) -> bool:
+        return previous is not None and previous[1:] == current[1:] and cls._same_menu_projection(previous[0], current[0])
 
     def _record_menu_delivery(self, update: CommandMenuUpdate, complete: bool) -> None:
         if complete:

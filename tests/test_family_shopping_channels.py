@@ -743,10 +743,42 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._single_reply(lambda: self._send("/delete 4"), "/delete без аргументов")
         self._send("/delete")
         self._send("3")
+        self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
         self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»")
         published = self._single_reply(lambda: self._send("/family_shopping"), "Список покупок")
         self.assertIn("3. Товар 5", published["message"])
         self.assertNotIn("Товар 4", published["message"])
+
+    def test_all_back_paths_return_to_origin_before_leaving_shopping(self) -> None:
+        """Нижнее и экранное «Назад» и ручной back возвращают на исходную страницу."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Покупки")
+        self._send("/add " + "\n".join(f"Товар {number}" for number in range(1, 13)))
+        self._menu_press("Следующая страница")
+        original_menu = self._visible_menu()
+
+        for path in ("lower", "inline", "text"):
+            with self.subTest(path=path):
+                selection = self._single_reply(lambda: self._menu_press("Купить"), "3/3")
+                cmid = self.last_cmid
+                self.assertEqual(self._visible_menu(), original_menu)
+                help_reply = self._single_reply(lambda: self._send("/help"), "/family_shopping back")
+                self.assertNotIn("keyboard", help_reply)
+                if path == "lower":
+                    action = lambda: self._menu_press("Назад")
+                elif path == "inline":
+                    action = lambda: self._press(self._actions(selection)["Назад"], cmid)
+                else:
+                    action = lambda: self._send("/family_shopping back")
+                ordinary = self._single_reply(action, "Список покупок · 2/2")
+                self.assertIn("11. Товар 11", ordinary["message"])
+                self.assertNotIn("keyboard", ordinary)
+                self.assertEqual(self._visible_menu(), original_menu)
+
+        self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»",
+                           labels=["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"])
 
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""

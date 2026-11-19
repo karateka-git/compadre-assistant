@@ -78,6 +78,7 @@ class ShoppingSection:
     bought_visible: bool = field(default=False, compare=False)  # Доступность очистки купленного в меню.
     ordinary_page: int = field(default=1, compare=False)
     ordinary_last_page: int = field(default=1, compare=False)
+    selection_shown: Event = field(default_factory=Event, compare=False, repr=False)
     add_request_id: str | None = field(default=None, compare=False)
     choice: ShoppingChoice | None = field(default=None, compare=False)
     number_message_ids: tuple[str, ...] = field(default=(), compare=False)
@@ -236,11 +237,12 @@ def shopping_page(
     return ShoppingPage(page, last_page, visible)
 
 
-def shopping_section_actions(section: ShoppingSection) -> tuple[ReplyAction, ...]:
+def shopping_section_actions(section: ShoppingSection, *, from_selection: bool = False) -> tuple[ReplyAction, ...]:
     """Возвращает доступные действия и переходы обычного списка покупок.
 
     Args:
         section: Состояние обычной страницы с доступными статусами списка.
+        from_selection: Действия раздела доступны рядом с уже показанным выбором.
 
     Returns:
         Действия в порядке показа. Выбор получает исходную страницу списка,
@@ -262,10 +264,12 @@ def shopping_section_actions(section: ShoppingSection) -> tuple[ReplyAction, ...
             label, f"{command} page {destination}", scope=ActionScope.SECTION,
             purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("shopping-list", destination),
         ))
-    actions.append(ReplyAction(
-        "Назад", f"{command} home", scope=ActionScope.SECTION,
-        purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("family-home"),
-    ))
+    back_command, back_destination = (
+        ("back", ScreenDestination("shopping-list", page)) if from_selection else
+        ("home", ScreenDestination("family-home"))
+    )
+    actions.append(ReplyAction("Назад", f"{command} {back_command}", scope=ActionScope.SECTION,
+                               purpose=ActionPurpose.NAVIGATION, destination=back_destination))
     return tuple(actions)
 
 
@@ -333,13 +337,22 @@ def shopping_list(
         actions = _selection_actions(section, snapshot, selection, layout)
     if notice:
         parts.extend(("\n\n", notice))
+
+    def on_delivered() -> None:
+        if selection is None:
+            section.selection_shown.clear()
+        else:
+            section.selection_shown.set()
+            if choice is not None:
+                choice.delivered.set()
+
     unavailable = compose_content("Не удалось обновить список. Открой его снова через ", code_span(SHOPPING_COMMAND), ".")
     return IncomingResponse(
         compose_content(*parts), suggested_actions=actions,
         command_menu_delivery=SectionMenuDelivery.PRESERVE if selection is not None else SectionMenuDelivery.RECONCILE,
         view=ResponseView(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
-            on_delivered=choice.delivered.set if choice is not None else None,
+            on_delivered=on_delivered,
             cleanup_previous=True,
             allow_multiple_messages=selection is None,
             action_scope=ActionScope.SCREEN if selection is not None else ActionScope.SECTION,

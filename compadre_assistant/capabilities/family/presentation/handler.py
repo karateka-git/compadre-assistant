@@ -231,7 +231,7 @@ class FamilyCapability(
                 return _NO_FAMILY_SECTION_ACTIONS
             if not section.matches(family.id, actor.joined_at):
                 return _FAMILY_SECTION_ACTIONS
-        return shopping_section_actions(section)
+        return shopping_section_actions(section, from_selection=section.selection_shown.is_set())
 
     def reply_action_recovery_command(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
@@ -578,6 +578,9 @@ class FamilyCapability(
             case ["page", value] if (page := parse_item_number(value)) is not None:
                 items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
                 return self._show_shopping_list(context, address, section, items, page, update=update)
+            case ["back"]:
+                items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
+                return self._show_shopping_list(context, address, section, items, section.ordinary_page, update=update)
             case _:
                 return self._open_shopping_hint()
 
@@ -753,7 +756,8 @@ class FamilyCapability(
         )
         return IncomingResponse(
             content, suggested_actions=(CANCEL_SECTION_ACTION,),
-            view=ResponseView(f"shopping-add:{section.action_key}", cleanup_previous=True),
+            view=ResponseView(f"shopping-add:{section.action_key}", on_delivered=section.selection_shown.clear,
+                              cleanup_previous=True),
             command_menu_delivery=SectionMenuDelivery.RECONCILE,
         )
 
