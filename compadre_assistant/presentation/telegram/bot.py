@@ -712,7 +712,7 @@ async def safe_send_telegram_reply(
     logger: logging.Logger,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
+    include_bound_actions: bool | None = None,
 ) -> bool:
     """Доставляет Telegram-ответ и подтверждает управляемое представление.
 
@@ -723,6 +723,7 @@ async def safe_send_telegram_reply(
         limit: Безопасный предел длины одного сообщения.
         sleeper: Асинхронное ожидание между тестируемыми retry-попытками.
         include_bound_actions: Показывать ли inline-кнопки общего ответа.
+            None использует тот же флаг канала, что и расчёт вместимости входа.
 
     Returns:
         Успех доставки всех частей. Управляемое обновление требует
@@ -732,6 +733,8 @@ async def safe_send_telegram_reply(
     Raises:
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
+    if include_bound_actions is None:
+        include_bound_actions = TELEGRAM_INLINE_ACTIONS_ENABLED
     delivered = False
     try:
         send = _send_telegram_view if response.view_delivery is not None else _send_telegram_reply

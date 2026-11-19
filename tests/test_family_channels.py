@@ -18,6 +18,7 @@ from compadre_assistant.capabilities.family.domain.shopping import ManageShoppin
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse
 from tests.response_assertions import response_text
@@ -262,6 +263,39 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("1. Чай", response_text(cleared))
             self.assertNotIn("Куплено", response_text(cleared))
             self.assertNotIn("Очистить купленное", response_text(cleared))
+
+    def test_shopping_menu_query_reads_the_same_actions_without_executing_input(self) -> None:
+        """Запрос раздела сохраняет режим, покупки и даже просроченную запись ожидания."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._seed_shopping("Хлеб")
+            for identity in (self.owner_tg, self.owner_vk):
+                with self.subTest(channel=identity.channel):
+                    self._send(processor, identity, "/family")
+                    ordinary = self._send(processor, identity, "/family_shopping")
+                    probe = self._event(identity, "/exit")
+                    offered = processor.section_actions(probe)
+                    self.assertEqual(offered, ordinary.suggested_actions)
+                    self.assertEqual([action.label for action in offered], ["Добавить", "Купить", "Удалить", "Назад"])
+                    self.assertTrue(all(action.scope is ActionScope.SECTION for action in offered))
+
+                    prompt = self._send(processor, identity, "/add")
+                    probe = self._event(identity, "Непринятая покупка")
+                    pending = processor._pending_inputs.get(probe.reply_address)
+                    self.assertIsNotNone(pending)
+                    cancel = processor.section_actions(probe)
+                    self.assertEqual(cancel, prompt.suggested_actions)
+                    self.assertEqual([action.purpose for action in cancel], [ActionPurpose.CANCEL])
+                    self.assertIs(processor._pending_inputs.get(probe.reply_address), pending)
+
+                    with patch.object(processor._pending_inputs, "_clock", return_value=pending.expires_at):
+                        self.assertEqual(processor.section_actions(probe), offered)
+                        self.assertIs(processor._pending_inputs.get(probe.reply_address), pending)
+
+                    self._send(processor, identity, "/cancel")
+                    final = self._send(processor, identity, "/family_shopping")
+                    self.assertIn("1. Хлеб", response_text(final))
+                    self.assertNotIn("Непринятая покупка", response_text(final))
 
     def test_old_shopping_add_input_cannot_continue_after_rejoining_same_family(self) -> None:
         """Ожидание не добавляет текст после выхода и повторного вступления в ту же семью."""

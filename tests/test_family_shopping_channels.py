@@ -445,8 +445,13 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
         """Список и ручные операции доступны при отключённых inline-кнопках."""
-        with patch("compadre_assistant.presentation.telegram.bot._optional_telegram_inline_keyboard", return_value=None):
+        with patch("compadre_assistant.presentation.telegram.bot.TELEGRAM_INLINE_ACTIONS_ENABLED", False):
             await self._open()
+            await self._send("/add")
+            self.assertIn("/cancel", self.bot.send_message.await_args.kwargs["text"])
+            self.assertNotIn("reply_markup", self.bot.send_message.await_args.kwargs)
+            await self._send("/cancel")
+            self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
             await self._send("/add Хлеб\nМолоко")
             self.assertNotIn("reply_markup", self.bot.send_message.await_args.kwargs)
             await self._send("/buy")
@@ -779,6 +784,26 @@ class VkFamilyShoppingTest(unittest.TestCase):
 
         self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»",
                            labels=["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"])
+
+    def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
+        """VK сохраняет отдельное меню и подтверждает текстовый выбор по номеру."""
+        with patch("compadre_assistant.presentation.vk.bot.VK_INLINE_ACTIONS_ENABLED", False):
+            self._send("/family")
+            self._send("/family_create")
+            self._send("Дом")
+            self._menu_press("Покупки")
+            self._single_reply(lambda: self._send("/add"), "/cancel", labels=["Отмена"])
+            self._single_reply(lambda: self._send("/cancel"), "Ввод отменён", labels=["Добавить", "Назад"])
+            self._single_reply(lambda: self._send("/add Хлеб\nМолоко"), "1. Хлеб\n2. Молоко")
+            previous_menu = self._visible_menu()
+            choosing = self._single_reply(lambda: self._send("/buy"), "пришли номер товара")
+            self.assertNotIn("keyboard", choosing)
+            self._send("1")
+            self.assertIn("1. Молоко", self._latest_edit()["message"])
+            self.assertEqual(self._visible_menu(), previous_menu)
+            ordinary = self._single_reply(lambda: self._send("/family_shopping back"), "Куплено\n1. Хлеб")
+            self.assertFalse(json.loads(ordinary["keyboard"])["inline"])
+            self.assertIn("Очистить купленное", self._visible_menu())
 
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
