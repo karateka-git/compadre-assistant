@@ -38,17 +38,34 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ github.sha }}
+          path: candidate
           fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout trusted compatibility controller
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ vars.COMPATIBILITY_POLICY_SHA }}
+          path: policy
           persist-credentials: false
       - name: Decide full run
         id: decide
+        shell: bash
+        working-directory: candidate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
           BRANCH_CREATED: ${{ github.event.created }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           EXPECTED_POLICY_SHA: ${{ inputs.expected_policy_sha }}
-        run: python -m scripts.full_ci_controller release
+        run: |
+          set -eu
+          policy_dir="$GITHUB_WORKSPACE/policy"
+          [[ "$COMPATIBILITY_POLICY_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+            [[ -z "$EXPECTED_POLICY_SHA" || "$EXPECTED_POLICY_SHA" == "$COMPATIBILITY_POLICY_SHA" ]] &&
+            [[ "$(git -C "$policy_dir" rev-parse HEAD)" == "$COMPATIBILITY_POLICY_SHA" ]] ||
+            { echo "Checkout does not match the expected compatibility policy SHA" >&2; exit 1; }
+          python -I -B -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("scripts.full_ci_controller", run_name="__main__", alter_sys=True)' \
+            "$policy_dir" release
 
   full-suite:
     name: release-check-full
