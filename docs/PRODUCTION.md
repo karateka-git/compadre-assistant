@@ -38,12 +38,54 @@ SHA snapshot. [Допустимая SSH-команда](OPERATIONS.md#прове
 
 | Область | Результат проверки |
 | --- | --- |
-| Выпуск и допуск | Установлена `v4.2.5`, SHA `7aa730cd24ad71997a4097e43c47e68261522d15`. Immutable Release `451572990`. Полный CI `44558320565/1` подтвердил совместимость с `v4.2.4`. Первый Deployment v2 `7918397506` получил статус `22643154420` (`success`) в 16:02:38 UTC. Журнал VPS для попытки `44560296240:1` закрыт. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.5) · [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/44558320565/attempts/1) · [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7918397506/statuses) |
-| Контроллер | Snapshot и локальный policy pin `7b4629b4254df085fb54cbff1a088c9f4ee405e1`. GitHub использует тот же SHA в `COMPATIBILITY_POLICY_SHA` и `PRODUCTION_CONTROLLER_SHA`. Writer установлен в `v2`. |
+| Выпуск и допуск | Установлена `v4.2.5`, SHA `7aa730cd24ad71997a4097e43c47e68261522d15`. Immutable Release `451572990`. Полный CI `44558320565/1` подтвердил совместимость с `v4.2.4`, Deployment `7851484607`, статусом `22412109090`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.5) · [Полный CI кандидата](https://github.com/karateka-git/compadre-assistant/actions/runs/44558320565/attempts/1) |
+| Deployment | Попытка `44560296240:1` создала первый Deployment v2 `7918397506`, статус `22642834674` (`in_progress`) и статус `22643154420` (`success`) в 16:02:38 UTC. В 16:07 UTC проверка под lock подтвердила закрытый журнал с `create`, `in_progress` и `finish`. Локальная квитанция, выбор принятой базы и прямое чтение записи совпали по Release, SHA, точному CI, поколению и миграции. [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7918397506/statuses) |
+| Контроллер | Snapshot и локальный policy pin `7b4629b4254df085fb54cbff1a088c9f4ee405e1`. GitHub использует тот же SHA в `COMPATIBILITY_POLICY_SHA` и `PRODUCTION_CONTROLLER_SHA`. Writer установлен в `v2`. [PR main](https://github.com/karateka-git/compadre-assistant/pull/138) · [Полный CI snapshot](https://github.com/karateka-git/compadre-assistant/actions/runs/44557528623/attempts/1) · [Синхронизация полного CI в release/4.2](https://github.com/karateka-git/compadre-assistant/pull/139) |
 | SQLite и backup | Активное поколение `fd7495e834234c52ba9e650ece1675fa`, последняя миграция `0007_family.sql`. Подтверждены SHA-256, целостность и внешние ключи финальной копии, режим `0400` и выбор активной базы для планового backup. Файл прежнего поколения и его SQLite sidecars отсутствуют после штатной очистки. Сервис backup завершился успешно, таймер активен, следующий запуск 20.11 в 03:15 UTC. |
 | Каналы | Telegram и VK `healthy`, перезапусков 0. Основной сервис активен, `family` включена в обоих контейнерах. Квитанция работающего экземпляра совпала с сохранённым результатом выпуска. |
-| Длительность | Workflow занял 7 мин 18 с. Контроллер начал установку в 15:59:06.109 UTC и завершил в 16:01:55.544 UTC. В отчёте установки 169,435 с работы и 80,744 с простоя. [Журнал выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) |
+| Длительность | Workflow занял 7 мин 18 с, job `release` — 7 мин 12 с, шаг выпуска — 7 мин 06 с. В отчёте контроллера 169,435 с установки и 80,744 с простоя. [Границы интервалов и расход HTTP](DEPLOY_METRICS.md#измерить-первый-production-выпуск-с-deployment-v2) · [Workflow](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) |
 | Проверка владельцем | 19.11.2026 владелец подтвердил, что после выпуска `v4.2.5` оба бота ответили как обычно в Telegram и VK. |
+
+В том же окне под существующим `deploy.lock` проверили manifest из 75 файлов
+и установили snapshot и локальный pin. SHA-256 архива —
+`1927da3cbd84c4d30b79f18c06108be26a58005386062f163227bfac3f36e708`.
+SHA-256 установленного root dispatcher —
+`6be555b97a4f82c3d5edd3eb5af2eb9fa4e926d3535a2fccb1776b154c5f2f32`.
+Два канала продолжали работу при обновлении контроллера.
+[Контракт ограниченного входа](OPERATIONS.md#проверить-ограниченный-ssh-вход-runner)
+
+### Сверка читателей перед первым Deployment v2
+
+19.11.2026 проверка `44536661701/1` прочитала базу v1, базу через читатель
+v2, точный текущий статус и запись того же SHA. Она выполнилась на SHA
+`fc5e4773647b49077c8800eea28a371a45cd18a5` с реальным `GITHUB_TOKEN`,
+правами `contents: read` и `deployments: read`. Та же проверка на VPS
+с `github-read-token` подтвердила `v4.2.4`, SHA
+`5edb92b7b0dbbaec0270889a8a34849eee77580c`, Release `448512857`,
+Deployment `7851484607` и статус `22412109090`. В согласованное окно до
+открытия `v4.2.5` сверили под `deploy.lock` выбор обоих читателей и прямое
+чтение тех же ID с фактической установкой.
+[Workflow проверки](https://github.com/karateka-git/compadre-assistant/actions/runs/44536661701/attempts/1) ·
+[Release v4.2.4](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.4) ·
+[Команда пробы](OPERATIONS.md#обновить-доверенную-политику-полного-ci)
+
+На момент сверки прочитали все 16 Deployment от `v3.3.0` до `v4.2.4`
+по точному ID, проверили текущий доверенный `success`, Release, тег, SHA и
+ожидаемую миграцию. Сводка `v3.2.0` подтвердила исторический тег установки.
+Аннотации и evidence четырёх линий сверили с исходными policy pin, байтами
+workflow, digest архива и сохранённой базой по ID.
+
+| Выпуск | Проверенная попытка полного CI | Artifact ID |
+| --- | --- | --- |
+| `v3.4.0` | [43194817952/1](https://github.com/karateka-git/compadre-assistant/actions/runs/43194817952/attempts/1) | `13933085460` |
+| `v4.0.6` | [43714090269/1](https://github.com/karateka-git/compadre-assistant/actions/runs/43714090269/attempts/1) | `14161529455` |
+| `v4.1.1` | [43873138601/1](https://github.com/karateka-git/compadre-assistant/actions/runs/43873138601/attempts/1) | `14229480018` |
+| `v4.2.4` | [44069516542/1](https://github.com/karateka-git/compadre-assistant/actions/runs/44069516542/attempts/1) | `14320819796` |
+
+Для `release/3.4` отдельно проверили отчёт SHA
+`efe22a4f019e68a0436ee3d5e1825ab9248934e0` с принятой базой `v3.4.0`
+и доказательством в артефакте `14015696076`.
+[Полный CI 43378457266/1](https://github.com/karateka-git/compadre-assistant/actions/runs/43378457266/attempts/1)
 
 ## Исторический снимок 17.11.2026, после 11:09 UTC
 
