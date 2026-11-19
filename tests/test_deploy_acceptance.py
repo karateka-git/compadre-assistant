@@ -176,20 +176,27 @@ class AcceptanceTests(unittest.TestCase):
               patch.object(prod, "deploy", return_value=SHA) as deploy,
               patch.object(acceptance, "verify_installed", return_value=receipt) as verify):
             automatic = StringIO()
-            with patch.object(prod.sys, "argv", ["deploy-prod", VERSION]), redirect_stdout(automatic):
+            with (patch.object(prod.sys, "argv", ["deploy-prod", VERSION]), redirect_stdout(automatic),
+                  redirect_stderr(StringIO()) as install_metrics):
                 prod.main()
             deploy.assert_called_once_with(host, VERSION, emergency=False, reason=None)
             verify.assert_called_once_with(host, VERSION, SHA)
             self.assertEqual(automatic.getvalue(), f'deploy-prod technical_acceptance={{"sha":"{SHA}"}}\n')
+            self.assertEqual(json.loads(install_metrics.getvalue().removeprefix("deploy-http-metrics ")),
+                             {"schema_version": 1, "location": "vps", "operation": "install",
+                              "result": "success", "http": []})
             deploy.reset_mock()
             verify.reset_mock()
             machine = StringIO()
             with (patch.object(prod.sys, "argv", ["deploy-prod", VERSION, "--verify-installed", SHA]),
-                  redirect_stdout(machine)):
+                  redirect_stdout(machine), redirect_stderr(StringIO()) as verify_metrics):
                 prod.main()
             deploy.assert_not_called()
             verify.assert_called_once_with(host, VERSION, SHA)
             self.assertEqual(json.loads(machine.getvalue()), receipt)
+            self.assertEqual(len(machine.getvalue().splitlines()), 1)
+            self.assertEqual(json.loads(verify_metrics.getvalue().removeprefix("deploy-http-metrics "))["operation"],
+                             "verify_installed")
 
     def test_cli_reports_acceptance_failure_separately_from_installation(self):
         """Ошибку из отдельного модуля выводит без traceback или повторной установки."""
@@ -208,4 +215,6 @@ class AcceptanceTests(unittest.TestCase):
             self.assertEqual(exit_status.exception.code, 1)
             deploy.assert_called_once()
             self.assertIn("Техническая приёмка не пройдена (таймер)", errors.getvalue())
+            failure_metrics = errors.getvalue().splitlines()[0].removeprefix("deploy-http-metrics ")
+            self.assertEqual(json.loads(failure_metrics)["result"], "failure")
             self.assertEqual(output.getvalue(), "")

@@ -5,18 +5,39 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from enum import StrEnum
 from functools import wraps
 import json
 from pathlib import Path
+import sys
 from threading import Event, Thread
 import time
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
+from scripts.full_ci_controller import HttpLocation, HttpPhase, collect_http_metrics
+
 
 # Это интервал предупреждения, а не deadline системной операции.
 WARNING_SECONDS = 60
 _current: ContextVar[Report | None] = ContextVar("deploy_report", default=None)
+_HTTP_PREFIX = "deploy-http-metrics "
+_HTTP_REPORT_KEYS = frozenset({"schema_version", "location", "operation", "result", "http"})
+_HTTP_COUNTS = frozenset({"attempts", "pages", "errors", "elapsed_ns"})
+_HTTP_ROW_KEYS = _HTTP_COUNTS | {"location", "phase", "target", "method"}
+_HTTP_PHASES = tuple(HttpPhase)
+
+
+class HttpOperation(StrEnum):
+    """Задаёт имена команд runner и отдельных процессов контроллера."""
+
+    # Отдельное SSH-действие владельца D18.
+    ATTEMPT = "attempt"
+    RELEASE = "release"
+    RESUME = "resume"
+    INSTALL = "install"
+    VERIFY_INSTALLED = "verify_installed"
+    CLEANUP_OLD = "cleanup_old"
 
 
 def _utc() -> str:
@@ -29,6 +50,71 @@ def _emit(message: str) -> None:
     except Exception:
         # Закрытый stdout не должен превращать наблюдение в причину rollback.
         pass
+
+
+def _emit_http(report: dict) -> None:
+    try:
+        print(_HTTP_PREFIX + json.dumps(report, separators=(",", ":")), file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        # Ошибка потока телеметрии не меняет результат установки.
+        pass
+
+
+@contextmanager
+def github_http_report(location: HttpLocation, operation: HttpOperation) -> Iterator[None]:
+    """Пишет агрегаты процесса в stderr при штатном выходе и исключении.
+
+    Args:
+        location: Место выполнения команды (runner или VPS).
+        operation: Каноническое имя команды без пользовательских значений.
+
+    Yields:
+        Управление команде с активным замером HTTP.
+    """
+    with collect_http_metrics(location) as metrics:
+        result = "failure"
+        try:
+            yield
+            result = "success"
+        finally:
+            _emit_http({"schema_version": 1, "location": location.value, "operation": operation.value,
+                        "result": result, "http": metrics.rows()})
+
+
+def _valid_http_row(row: object) -> bool:
+    return (isinstance(row, dict) and row.keys() == _HTTP_ROW_KEYS
+            and row["location"] == HttpLocation.VPS and row["phase"] in _HTTP_PHASES
+            and row["target"] in ("github_api", "github_graphql_query", "artifact_storage")
+            and row["method"] in ("GET", "POST", "OTHER")
+            and (row["target"] != "github_graphql_query" or row["method"] == "POST")
+            and all(type(row[key]) is int and row[key] >= 0 for key in _HTTP_COUNTS)
+            and row["attempts"] >= max(1, row["pages"], row["errors"]))
+
+
+def relay_vps_http_report(stderr: str | bytes | None, operation: HttpOperation) -> None:
+    """Выводит подтверждённый агрегат из stderr одной завершившейся SSH-команды.
+
+    Args:
+        stderr: Захваченный stderr, в том числе частичный при таймауте.
+        operation: Ожидаемая команда, запущенная runner.
+    """
+    if isinstance(stderr, bytes):
+        stderr = stderr.decode("utf-8", errors="replace")
+    for line in reversed((stderr or "").splitlines()):
+        if len(line) > 16_384 or not line.startswith(_HTTP_PREFIX):
+            continue
+        try:
+            report = json.loads(line[len(_HTTP_PREFIX):])
+        except (ValueError, RecursionError):
+            continue
+        # Не перепечатываем произвольный stderr, в том числе текст ошибок SSH.
+        if (isinstance(report, dict) and report.keys() == _HTTP_REPORT_KEYS
+                and type(report["schema_version"]) is int and report["schema_version"] == 1
+                and report["location"] == HttpLocation.VPS and report["operation"] == operation
+                and report["result"] in ("success", "failure") and isinstance(report["http"], list)
+                and all(_valid_http_row(row) for row in report["http"])):
+            _emit_http(report)
+            return
 
 
 class Report:

@@ -24,7 +24,8 @@ from scripts import deploy_database_switch as database_switch
 from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
-from scripts.full_ci_controller import GitHub
+from scripts.deployment_acceptance import AcceptedBaseline
+from scripts.full_ci_controller import GitHub, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
@@ -103,6 +104,13 @@ def _atomic_text(path: Path, value: str) -> None:
                 os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def deployment_mutation_lock(host):
+    """Выбирает общий lock и проверяет право входа на изменение установки."""
+    from scripts.deploy_attempt import mutation_lock
+
+    return mutation_lock(host)
 
 
 def _version(value: str) -> tuple[int, int, int]:
@@ -507,11 +515,12 @@ class Host:
         except Exception as error:
             raise DeployError("SQLite protocol v2: rollout закрыт; инфраструктура не подтверждена") from error
 
-    def require_switch_candidate(self, state: dict) -> None:
+    def require_switch_candidate(self, state: dict, *, observed_base: AcceptedBaseline | None = None) -> None:
         """Сверяет допуск непосредственно перед marker и остановкой writers.
 
         Args:
             state: Подготовленный переход с результатом миграции online-копии.
+            observed_base: D17, проверенный вместе с D18 в этой секции под lock.
 
         Raises:
             DeployError: Release, evidence, controller либо image изменились.
@@ -538,7 +547,9 @@ class Host:
             prep.require_clean_checkout(self.checkout, candidate["sha"])
             evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
             if "baseline" in evidence:
-                compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"])
+                compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"],
+                                                     frozen=getattr(self, "locked_attempt", None) is not None,
+                                                     observed=observed_base)
         else:
             token = compatibility.private_text(self.state_dir / "github-read-token")
             evidence = compatibility.verify_evidence(
@@ -1079,7 +1090,8 @@ class Host:
         with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
             if annotated:
                 evidence = compatibility.verify_tag_evidence(
-                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha)
+                    GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha,
+                    frozen=getattr(self, "locked_attempt", None) is not None)
             else:
                 api = compatibility.EvidenceAPI(EXPECTED_REPOSITORY, token)
                 evidence = compatibility.verify_evidence(api, selected, policy_sha, old_sha)
@@ -1092,7 +1104,8 @@ class Host:
                                           lambda work: self.migrate_copy(candidate_id, work))
         if not annotated:
             # Исторический допуск зависит от доступности artifact после миграции.
-            with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
+            with (metrics.stage("predeploy.evidence_recheck"), http_phase(HttpPhase.VPS_RECHECK),
+                  compatibility.check("SAFE_EVIDENCE_RECHECK")):
                 if (compatibility.private_text(pin_path) != policy_sha
                         or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
                     raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
@@ -1149,6 +1162,9 @@ class Host:
 def _state(host: Host, value: dict[str, Any], stage: str, **changes: Any) -> None:
     """Записывает стадию атомарно и печатает только безопасное событие журнала."""
     value.update(changes)
+    ownership = getattr(host, "locked_attempt", None)
+    if ownership is not None:
+        value["deployment_attempt"] = [ownership[0].attempt_key, ownership[1]]
     value["stage"] = stage
     prep.write_state(host.state_dir, host.checkout, value)
     metrics.update(stage=stage)
@@ -1214,6 +1230,13 @@ def _prepare_candidate(
         metrics.update(sha=selected.sha, run_id=selected.run_id, run_attempt=selected.run_attempt)
         if selected.kind != ("emergency" if emergency else "ordinary"):
             raise DeployError("Тип выбранного Release не соответствует команде")
+        ownership = getattr(host, "locked_attempt", None)
+        if ownership is not None:
+            attempt, _ = ownership
+            if ((selected.sha, selected.version, selected.release_id, selected.run_id, selected.run_attempt,
+                 getattr(selected.compatibility, "baseline", None)) !=
+                    (attempt.sha, attempt.version, attempt.release_id, attempt.run_id, attempt.run_attempt, attempt.baseline)):
+                raise DeployError("Выбранный Release расходится с D18")
         if selected.sha == old_sha:
             raise DeployError("Текущий код уже имеет SHA выбранной версии")
         annotated = sqlite_v2 and not emergency and selected.compatibility is not None
@@ -1518,7 +1541,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
         raise DeployError("Причина допустима только с --emergency")
     else:
         initiator = None
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    with deployment_mutation_lock(host):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         _recover(host, state)
@@ -1631,8 +1654,11 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with compatibility.check("SAFE_INSTALLED_RUNTIME"):
                     host.require_baseline(last_good, old_sha, old_id)
             if switch_state is not None or initial_switch:
-                with metrics.stage("v2.admission_recheck"):
-                    host.require_switch_candidate(state)
+                with metrics.stage("v2.admission_recheck"), http_phase(HttpPhase.VPS_RECHECK):
+                    from scripts.deploy_attempt import require_current
+
+                    observed_base = require_current(host)
+                    host.require_switch_candidate(state, observed_base=observed_base)
                 _state(host, state, "ready")
             critical = True
             host.marker(True)
@@ -1732,7 +1758,7 @@ def verify_pinned(host: Host) -> None:
     Raises:
         DeployError: Pin, проверка обоих каналов или возврат не подтвердились.
     """
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    with deployment_mutation_lock(host):
         state = _read_recovery_state(host)
         previous_stage = state.get("stage")
         _recover(host, state)
@@ -1804,7 +1830,8 @@ def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> 
     from scripts import deploy_acceptance
 
     try:
-        receipt = deploy_acceptance.verify_installed(host, version, sha)
+        with http_phase(HttpPhase.VPS_ACCEPT):
+            receipt = deploy_acceptance.verify_installed(host, version, sha)
     except (DeployError, deploy_acceptance.DeployError) as error:
         # При python -m текущий DeployError принадлежит __main__.
         raise DeployError(f"Техническая приёмка не пройдена ({error})") from error
@@ -1827,35 +1854,61 @@ def main() -> None:
                       help="техническая приёмка указанной версии и SHA без изменений")
     mode.add_argument("--cleanup-old", nargs=2, metavar=("SHA", "RUNTIME_ID"),
                       help="удалить прежнюю SQLite для технически принятого выпуска")
+    mode.add_argument("--attempt", nargs=6, metavar=("ACTION", "SHA", "KEY", "OWNER", "SNAPSHOT", "D18"),
+                      help="выполнить команду протокола владения Deployment v2")
+    mode.add_argument("--reconcile-rejected-post", nargs=4, metavar=("SHA", "KEY", "SNAPSHOT", "ACTION"),
+                      help="сверить подтверждённо неисполненный POST после завершения runner")
+    mode.add_argument("--recover-attempt-forward", nargs=3, metavar=("SHA", "KEY", "SNAPSHOT"),
+                      help="продолжить штатный forward recovery открытой попытки владельцем VPS")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        separate_mode = args.verify_pinned or args.verify_installed is not None or args.cleanup_old is not None
+        separate_mode = (args.verify_pinned or args.verify_installed or args.cleanup_old
+                         or args.attempt or args.reconcile_rejected_post or args.recover_attempt_forward)
         if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
-        if args.verify_pinned:
+        if args.recover_attempt_forward is not None:
+            from scripts import deploy_attempt
+
+            deploy_attempt.recover_forward(host, args.version, *args.recover_attempt_forward)
+        elif args.reconcile_rejected_post is not None:
+            from scripts import deploy_attempt
+
+            deploy_attempt.reconcile_post(host, args.version, *args.reconcile_rejected_post)
+        elif args.attempt is not None:
+            from scripts import deploy_attempt
+
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT), immutable_git_reads():
+                result = deploy_attempt.execute(host, args.version, *args.attempt)
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+        elif args.verify_pinned:
             verify_pinned(host)
         elif args.verify_installed is not None:
-            _report_acceptance(host, args.version, args.verify_installed, machine=True)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.VERIFY_INSTALLED):
+                _report_acceptance(host, args.version, args.verify_installed, machine=True)
         elif args.cleanup_old is not None:
             from scripts import deploy_cleanup_old
 
-            sha, runtime_id = args.cleanup_old
-            try:
-                result = deploy_cleanup_old.cleanup_old(host, args.version, sha, runtime_id)
-            except (DeployError, deploy_cleanup_old.DeployError, prep.PreparationError, ValueError) as error:
-                raise DeployError(f"Прежняя SQLite не очищена ({error})") from error
-            except OSError as error:
-                raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
-            print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.CLEANUP_OLD):
+                sha, runtime_id = args.cleanup_old
+                try:
+                    with http_phase(HttpPhase.VPS_CLEANUP):
+                        result = deploy_cleanup_old.cleanup_old(host, args.version, sha, runtime_id)
+                except (DeployError, deploy_cleanup_old.DeployError, prep.PreparationError, ValueError) as error:
+                    raise DeployError(f"Прежняя SQLite не очищена ({error})") from error
+                except OSError as error:
+                    raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
         else:
-            installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
-            if installed_sha is not None:
-                _report_acceptance(host, args.version, installed_sha, machine=False)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.INSTALL):
+                with http_phase(HttpPhase.VPS_PREPARE):
+                    installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
+                if installed_sha is not None:
+                    _report_acceptance(host, args.version, installed_sha, machine=False)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error

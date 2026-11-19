@@ -111,7 +111,7 @@ def recover(host: prod.Host) -> None:
     Raises:
         DeployError: Недоказанный контракт или отказ возобновления каналов.
     """
-    with prep.deploy_lock(host.state_dir, host.checkout):
+    with prod.deployment_mutation_lock(host):
         state = prep.read_state(host.state_dir, host.checkout)
         if not state:
             raise prod.DeployError("Отсутствует durable state для forward recovery")

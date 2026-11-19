@@ -168,4 +168,7 @@ def verify_installed(host: Host, version: str, sha: str) -> dict:
     if not prep.VERSION_PATTERN.fullmatch(version) or not prep.SHA_PATTERN.fullmatch(sha):
         raise DeployError("Техническая приёмка требует версию и полный SHA")
     with _read_lock(host):
+        from scripts.deploy_attempt import require_unreserved
+
+        require_unreserved(host)
         return _verify_locked(host, version, sha)

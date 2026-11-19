@@ -196,6 +196,35 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.verify(api)
 
+    def test_reuses_admission_but_verifies_selected_release_attempt(self) -> None:
+        """Проверка evidence переиспользует свежий допуск только формы Admission."""
+        api = ArtifactAPI()
+        selected = api.selected
+        admission = gate.select_successful_run(api, selected.repository, selected.workflow, selected.sha, "main")
+        self.assertIsInstance(admission, gate.Admission)
+        previous = api.policy["previous_sha"]
+        with patch.object(gate, "select_successful_run", wraps=gate.select_successful_run) as select:
+            self.assertEqual(gate.verify_evidence(api, admission, POLICY_SHA, previous)["artifact_id"], 22)
+            select.assert_not_called()
+            self.assertEqual(self.verify(api)["artifact_id"], 22)
+            select.assert_called_once_with(api, selected.repository, selected.workflow, selected.sha,
+                                           "main", selected.run_id, selected.run_attempt)
+
+    def test_reuses_verified_zip_but_rechecks_artifact_metadata(self) -> None:
+        """Переиспользует ZIP только пока совпадают свежие ID и digest."""
+        api = ArtifactAPI()
+        archives = {}
+        previous = api.policy["previous_sha"]
+        with patch.object(api, "download", wraps=api.download) as download:
+            for _ in range(2):
+                self.assertEqual(gate.verify_evidence(api, api.selected, POLICY_SHA, previous,
+                                                     verified_archives=archives)["artifact_id"], 22)
+            download.assert_called_once_with(22)
+            api.artifact["expired"] = True
+            with self.assertRaisesRegex(gate.PredeployError, "SAFE_ARTIFACT_METADATA"):
+                gate.verify_evidence(api, api.selected, POLICY_SHA, previous, verified_archives=archives)
+            download.assert_called_once_with(22)
+
     def test_dynamic_evidence_requires_current_deployment_and_real_installed_sha(self) -> None:
         """Публикация и VPS доверяют одной проверенной базе точного CI."""
         api = ArtifactAPI()

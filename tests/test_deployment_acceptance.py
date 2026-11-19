@@ -1,7 +1,9 @@
 """Проверяет чтение приёмки Deployments на локальной модели GitHub API."""
 
 from dataclasses import asdict, replace
+import os
 import unittest
+from unittest.mock import patch
 
 from scripts.ci_repository_compatibility import DeploymentReleaseTagEvidence, ReleaseTagEvidence
 from scripts.create_release_branch import EXPECTED_REPOSITORY
@@ -91,6 +93,10 @@ class FakeGitHub:
 
 class DeploymentAcceptanceTests(unittest.TestCase):
     """Проверяет допуск, конфликт, авторство и границы списка."""
+
+    def setUp(self) -> None:
+        """Задаёт явный режим для REST-сценариев исторической приёмки."""
+        self.enterContext(patch.dict(os.environ, COMPADRE_DEPLOYMENT_READER="v1"))
 
     def test_accepts_exact_current_success_and_counts_requests(self) -> None:
         """Шесть чтений достаточно для одной записи с аннотированным Release."""
@@ -293,6 +299,10 @@ class DeploymentAcceptanceTests(unittest.TestCase):
 
 class AcceptedBaselineTests(unittest.TestCase):
     """Проверяет актуальную и сохранённую базу CI из Deployments."""
+
+    def setUp(self) -> None:
+        """Задаёт явный режим для проверки исторического алгоритма v1."""
+        self.enterContext(patch.dict(os.environ, COMPADRE_DEPLOYMENT_READER="v1"))
 
     @staticmethod
     def second_deployment(api: FakeGitHub, *, time: str = "2026-01-01T01:00:00Z",

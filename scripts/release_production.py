@@ -7,19 +7,23 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import subprocess
 import sys
 from urllib.error import HTTPError
 from urllib.parse import quote
 
+from scripts import deploy_metrics as metrics
 from scripts import publish_deployment_acceptance as deployments
 from scripts import publish_release as releases
+from scripts import deployment_writer as writer
+from scripts import deployment_acceptance as records
 from scripts.check_hotfix_pairs import HotfixError
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.deploy_database_switch import OLD_CLEANUP_VERSION
 from scripts.deploy_prepare import PreparationError, parse_state_object
 from scripts.deployment_acceptance import DeploymentAcceptanceError, DeploymentRecord
 from scripts.full_ci_admission import AdmissionError, SHA_PATTERN
-from scripts.full_ci_controller import ControllerError
+from scripts.full_ci_controller import ControllerError, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.publish_installation_tag import InstallationReceipt, InstallationTagError, _receipt, run_vps_command
 from scripts.select_deploy_release import DeploySelectionError, SelectedRelease, select_release
@@ -39,21 +43,25 @@ def _select_or_publish(api: PublishingGitHub, version: str, sha: str, *,
     """Публикует только отсутствующий Release и перечитывает его допуск."""
     if change is not None:
         try:
-            api.get(f"/releases/tags/{quote(version, safe='')}")
+            with http_phase(HttpPhase.RELEASE_LOOKUP):
+                api.get(f"/releases/tags/{quote(version, safe='')}")
         except ControllerError as error:
             if not isinstance(error.__cause__, HTTPError) or error.__cause__.code != 404:
                 raise
             # prepare повторно проверит отсутствие версии и тега перед любой записью.
             assert notes is not None
-            prepared = releases.prepare(api, version, sha, change, notes)
+            with http_phase(HttpPhase.RELEASE_PREPARE):
+                prepared = releases.prepare(api, version, sha, change, notes, github_history=change == "patch")
             print("Публикация GitHub Release", flush=True)
             try:
-                releases.publish(api, prepared)
-            except (releases.PublishError, PublishingError, ControllerError) as error:
+                with http_phase(HttpPhase.RELEASE_PUBLISH):
+                    releases.publish(api, prepared)
+            except (releases.PublishError, PublishingError, ControllerError, HotfixError) as error:
                 raise ProductionReleaseError(
                     f"Публикация Release не подтверждена. Проверьте тег и Release перед повтором. Причина: {error}"
                 ) from error
-    selected = select_release(api, version)
+    with http_phase(HttpPhase.RELEASE_SELECT):
+        selected = select_release(api, version)
     if selected.sha != sha:
         raise ProductionReleaseError("Опубликованный Release относится к другому SHA")
     return selected
@@ -83,6 +91,87 @@ def _require_cleanup(output: str, receipt: InstallationReceipt) -> None:
         raise ProductionReleaseError("Очистка VPS не подтверждена для принятого поколения SQLite")
 
 
+def _v2_route(resume):
+    """Проверяет включение писателя и исходную попытку до любой публикации."""
+    mode = os.environ.get("COMPADRE_DEPLOYMENT_WRITER", "v1")
+    source = os.environ.get("RELEASE_SOURCE_ATTEMPT", "")
+    if mode == "v1" and not source:
+        return None
+    if mode not in ("v2", "resume-only") or mode == "resume-only" and not resume or not records._reader_v2():
+        raise ProductionReleaseError("Настройки писателя не разрешают эту команду")
+    owner = f"{os.environ.get('GITHUB_RUN_ID', '')}:{os.environ.get('GITHUB_RUN_ATTEMPT', '')}"
+    key = source if resume else owner
+    snapshot = os.environ.get("COMPADRE_CONTROLLER_SHA", "")
+    if (not all(re.fullmatch(r"[1-9][0-9]{0,19}:[1-9][0-9]{0,9}", item) for item in (owner, key))
+            or bool(source) != resume or not SHA_PATTERN.fullmatch(snapshot)):
+        raise ProductionReleaseError("Требуются ключ исходной попытки и проверенный snapshot")
+    return key, owner, snapshot
+
+
+def _run_attempt(api, selected, route, resume, remote):
+    """Завершает одну установку по исходному ключу и перечитывает её итог."""
+    key, owner, snapshot = route
+    deployment_id = 0
+
+    def call(action):
+        raw = remote(metrics.HttpOperation.ATTEMPT, "--attempt", action, selected.sha, key, owner, snapshot,
+                     str(deployment_id), timeout=3600 if action in ("install", "complete") else 300)
+        # Контроллер заканчивает вывод одной JSON-строкой, установка до неё пишет этапы.
+        lines = raw.stdout.splitlines()
+        if not lines or len(lines[-1]) > 8192:
+            raise ProductionReleaseError("Отсутствует квитанция команды Deployment")
+        return parse_state_object(lines[-1])
+
+    reserved = call("resume" if resume else "reserve")
+    attempt = records._attempt({"id": 0, "sha": selected.sha, "payload": reserved["attempt"]})
+    if ((attempt.attempt_key, attempt.version, attempt.kind, attempt.release_id, attempt.run_id,
+         attempt.run_attempt, attempt.baseline) != (key, selected.version, selected.kind, selected.release_id,
+         selected.run_id, selected.run_attempt, getattr(selected.compatibility, "baseline", None))
+            or type(reserved.get("started")) is not bool):
+        raise ProductionReleaseError("Резервация VPS расходится с проверенным Release")
+
+    def claim_creation(action):
+        return call(action).get("granted") is True
+
+    def claim_status(action):
+        grant = call(action)
+        return InstallationReceipt(**grant["receipt"]) if grant.get("granted") is True else None
+
+    bound = reserved["deployment_id"]
+    with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
+        if bound is None:
+            record = writer.create_attempt(api, attempt, claim_creation)
+            deployment_id = record.deployment_id
+        else:
+            deployment_id = records._positive(bound, "D18")
+            record, _ = writer.current_attempt(api, attempt, deployment_id)
+        if record.state is records.DeploymentState.MISSING:
+            record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS, claim_status)
+    if record.state is records.DeploymentState.IN_PROGRESS:
+        if record.description != f"v1 attempt={key}":
+            raise ProductionReleaseError("D18 не подтвердил исходный ключ")
+        if not reserved["started"]:
+            try:
+                call("install")
+            except InstallationTagError:
+                # Ответ SSH мог потеряться в любой момент; разрешена только сверка.
+                print("Установка не подтверждена по SSH. Сверка сохранённого этапа", flush=True)
+    elif record.state not in (records.DeploymentState.SUCCESS, records.DeploymentState.FAILURE):
+        raise ProductionReleaseError("Текущий статус D18 не допускает продолжения")
+    result = call("complete")
+    if result["outcome"] not in ("success", "restored"):
+        raise ProductionReleaseError("Не подтверждены установка или возврат")
+    target = records.DeploymentState.SUCCESS if result["outcome"] == "success" else records.DeploymentState.FAILURE
+    receipt = InstallationReceipt(**result["receipt"])
+    with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
+        record = writer.write_status(api, attempt, deployment_id, target, claim_status, receipt)
+    if call("close") != result:
+        raise ProductionReleaseError("Закрытие попытки не подтверждено для проверенного runtime")
+    if record.state is records.DeploymentState.FAILURE:
+        raise ProductionReleaseError(f"Deployment {deployment_id} завершён возвратом на {attempt.baseline.version}")
+    return record
+
+
 def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str | None, notes: str | None,
                  ssh_host: str, known_hosts: Path, identity: Path | None) -> DeploymentRecord:
     """Проводит выпуск через GitHub и контроллер с повторными сверками VPS."""
@@ -90,19 +179,35 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     deployments._require_deployment_version(version)
     if not SHA_PATTERN.fullmatch(sha):
         raise ProductionReleaseError("Требуется полный 40-символьный SHA")
-    deployments._require_trusted_author(api)
+    route = _v2_route(change is None)
+    with http_phase(HttpPhase.AUTHOR):
+        deployments._require_trusted_author(api)
     print("Проверка GitHub Release", flush=True)
     selected = _select_or_publish(api, version, sha, change=change, notes=notes)
     print(f"Release {selected.release_id}, CI {selected.run_id}/{selected.run_attempt}, SHA {selected.sha}", flush=True)
     accepted: InstallationReceipt | None = None
 
+    def remote(operation: metrics.HttpOperation, *arguments: str, timeout: int) -> subprocess.CompletedProcess[str]:
+        """Сохраняет агрегат SSH-процесса, включая завершение с ошибкой."""
+        try:
+            result = run_vps_command((*_CONTROLLER, version, *arguments), ssh_host=ssh_host,
+                                     known_hosts=known_hosts, identity=identity, capture_output=True,
+                                     timeout=timeout)
+        except InstallationTagError as error:
+            cause = error.__cause__
+            if isinstance(cause, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+                metrics.relay_vps_http_report(cause.stderr, operation)
+            raise
+        metrics.relay_vps_http_report(result.stderr, operation)
+        return result
+
+    if route is not None:
+        return _run_attempt(api, selected, route, change is None, remote)
+
     def read_fresh() -> InstallationReceipt:
         """Удостоверяет точную приёмку и сохраняет runtime на весь сеанс."""
         nonlocal accepted
-        result = run_vps_command(
-            (*_CONTROLLER, version, "--verify-installed", sha),
-            ssh_host=ssh_host, known_hosts=known_hosts, identity=identity, capture_output=True, timeout=240,
-        )
+        result = remote(metrics.HttpOperation.VERIFY_INSTALLED, "--verify-installed", sha, timeout=240)
         receipt = _receipt(result.stdout, version, sha)
         if ((receipt.kind, receipt.release_id, receipt.run_id, receipt.run_attempt) !=
                 (selected.kind, selected.release_id, selected.run_id, selected.run_attempt)):
@@ -117,10 +222,7 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     else:
         print("Установка Release на VPS", flush=True)
         try:
-            run_vps_command(
-                (*_CONTROLLER, version),
-                ssh_host=ssh_host, known_hosts=known_hosts, identity=identity, capture_output=True, timeout=3600,
-            )
+            remote(metrics.HttpOperation.INSTALL, timeout=3600)
         except InstallationTagError as error:
             raise ProductionReleaseError(
                 "Установка не подтверждена. Проверьте состояние VPS. "
@@ -130,10 +232,7 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     try:
         receipt = read_fresh()
         print("Очистка прежнего поколения SQLite", flush=True)
-        result = run_vps_command(
-            (*_CONTROLLER, version, "--cleanup-old", sha, receipt.runtime_id),
-            ssh_host=ssh_host, known_hosts=known_hosts, identity=identity, capture_output=True, timeout=240,
-        )
+        result = remote(metrics.HttpOperation.CLEANUP_OLD, "--cleanup-old", sha, receipt.runtime_id, timeout=240)
         _require_cleanup(result.stdout, receipt)
     except (InstallationTagError, ProductionReleaseError) as error:
         raise ProductionReleaseError(
@@ -142,7 +241,8 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
         ) from error
     print("Очистка прежнего поколения SQLite подтверждена", flush=True)
     try:
-        record = deployments.publish(api, read_fresh)
+        with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
+            record = deployments.publish(api, read_fresh)
     except (deployments.DeploymentPublishError, InstallationTagError, DeploymentAcceptanceError,
             ControllerError, DeploySelectionError, PublishingError) as error:
         raise ProductionReleaseError(
@@ -171,15 +271,18 @@ def main() -> None:
     if args.resume and (args.change is not None or args.notes_file is not None):
         parser.error("--change и --notes-file доступны только для --release")
 
+    operation = metrics.HttpOperation.RELEASE if args.release else metrics.HttpOperation.RESUME
     try:
-        if repository_from_origin() != EXPECTED_REPOSITORY:
-            raise ProductionReleaseError("Origin не совпадает с репозиторием проекта")
-        api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
-        notes = args.notes_file.read_text(encoding="utf-8") if args.notes_file is not None else None
-        record = _run_release(api, args.version, args.sha, change=args.change, notes=notes,
-                              ssh_host=args.ssh_host, known_hosts=args.known_hosts, identity=args.identity)
-        print(json.dumps({"deployment_id": record.deployment_id, "status_id": record.status_id,
-                          "state": record.state.value, "cleanup": "completed"}, ensure_ascii=False))
+        v2 = os.environ.get("COMPADRE_DEPLOYMENT_WRITER") in ("v2", "resume-only")
+        with metrics.github_http_report(HttpLocation.RUNNER, operation), immutable_git_reads(enabled=v2):
+            if repository_from_origin() != EXPECTED_REPOSITORY:
+                raise ProductionReleaseError("Origin не совпадает с репозиторием проекта")
+            api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
+            notes = args.notes_file.read_text(encoding="utf-8") if args.notes_file is not None else None
+            record = _run_release(api, args.version, args.sha, change=args.change, notes=notes,
+                                  ssh_host=args.ssh_host, known_hosts=args.known_hosts, identity=args.identity)
+            print(json.dumps({"deployment_id": record.deployment_id, "status_id": record.status_id,
+                              "state": record.state.value, "cleanup": "completed"}, ensure_ascii=False))
     except (ProductionReleaseError, deployments.DeploymentPublishError, DeploymentAcceptanceError,
             InstallationTagError, DeploySelectionError, releases.PublishError, ReleaseBranchError,
             AdmissionError, ControllerError, PublishingError, HotfixError, OSError, KeyError,

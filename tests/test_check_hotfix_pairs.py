@@ -41,6 +41,10 @@ class FakeApi:
                  "merged_at": None, "merge_commit_sha": None},
         }
         self.heads = {"main": MAIN_SHA, "release/1.0": RELEASE_SHA}
+        self.commits = {
+            BASE: {"sha": BASE, "parents": []},
+            RELEASE_SHA: {"sha": RELEASE_SHA, "parents": [{"sha": BASE}, {"sha": "f" * 40}]},
+        }
         self.releases = []
         self.compare_status = "ahead"
         self.error_path = None
@@ -60,7 +64,7 @@ class FakeApi:
         self.pulls[number]["merge_commit_sha"] = sha
 
     def get(self, path, **parameters):
-        """Читает PR, ref или сравнение; может имитировать отказ API."""
+        """Читает PR, ref, Git-объект или сравнение; может имитировать отказ API."""
         if path == self.error_path:
             raise hotfix.HotfixError("API недоступен")
         if path.startswith("/pulls/"):
@@ -68,6 +72,8 @@ class FakeApi:
         if path.startswith("/git/ref/heads/"):
             branch = path.removeprefix("/git/ref/heads/")
             return {"ref": f"refs/heads/{branch}", "object": {"sha": self.heads[branch]}}
+        if path.startswith("/git/commits/"):
+            return deepcopy(self.commits[path.removeprefix("/git/commits/")])
         if path.startswith("/compare/"):
             base, head = path.removeprefix("/compare/").split("...")
             # Реальный GitHub compare не содержит head_commit при status=ahead.
@@ -98,7 +104,7 @@ class HotfixTests(unittest.TestCase):
         self.origin.start()
         self.addCleanup(self.origin.stop)
         self.git = patch.object(hotfix, "git", side_effect=self.fake_git)
-        self.git.start()
+        self.local_git = self.git.start()
         self.addCleanup(self.git.stop)
         admission = patch.object(hotfix, "select_successful_run", return_value=object())
         self.admission = admission.start()
@@ -296,10 +302,76 @@ class HotfixTests(unittest.TestCase):
                           " M file.py" if a[:1] == ("status",) else self.fake_git(*a)):
             with self.assertRaisesRegex(hotfix.HotfixError, "чистый checkout"):
                 hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE)
+        with patch.object(hotfix, "git", side_effect=lambda *a:
+                          MAIN_SHA if a[:1] == ("rev-parse",) else self.fake_git(*a)):
+            with self.assertRaisesRegex(hotfix.HotfixError, "Checkout не соответствует"):
+                hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE)
         self.api.releases = [{"tag_name": "v1.0.1", "draft": False, "prerelease": False}]
         with patch.object(hotfix, "tag_commit", return_value=OTHER_HEAD):
             with self.assertRaisesRegex(hotfix.HotfixError, "последним опубликованным"):
                 hotfix.check_release(self.api, "release/1.0", RELEASE_SHA, BASE)
+
+    def test_api_history_uses_exact_parents_and_refreshes_links(self) -> None:
+        """Два merge проверяются в порядке линии, а кеш не скрывает новые связи PR."""
+        self.api.merge(11, MAIN_SHA)
+        self.api.merge(10, RELEASE_SHA)
+        self.api.pulls[12] = {"number": 12, "body": main_commit(), "base": {"ref": "release/1.0"}}
+        self.api.merge(12, NEXT_SHA)
+        self.api.commits[NEXT_SHA] = {"sha": NEXT_SHA, "parents": [{"sha": RELEASE_SHA}, {"sha": OTHER_HEAD}]}
+        self.api.heads["release/1.0"] = NEXT_SHA
+        parents = {}
+        with patch.object(self.api, "get", wraps=self.api.get) as get:
+            self.assertEqual(hotfix.check_release_history(
+                self.api, "release/1.0", NEXT_SHA, BASE, commit_parents=parents,
+            ), [(10, 11, MAIN_SHA), (12, None, MAIN_SHA)])
+            self.api.pulls[12]["body"] = ""
+            with self.assertRaisesRegex(hotfix.HotfixError, "Hotfix-Links"):
+                hotfix.check_release_history(
+                    self.api, "release/1.0", NEXT_SHA, BASE, commit_parents=parents,
+                )
+        self.assertEqual([call.args[0] for call in get.call_args_list if call.args[0].startswith("/git/commits/")],
+                         [f"/git/commits/{NEXT_SHA}", f"/git/commits/{RELEASE_SHA}"])
+        self.local_git.assert_not_called()
+        self.admission.assert_not_called()
+
+    def test_api_history_rejects_incomplete_or_invalid_parents(self) -> None:
+        """Неполный ответ, чужой объект, прямой commit и цикл закрывают проверку."""
+        for data, error in (
+            ({"sha": RELEASE_SHA}, "Не подтверждены родители"),
+            ({"sha": NEXT_SHA, "parents": [{"sha": BASE}, {"sha": OTHER_HEAD}]}, "Не подтверждены родители"),
+            ({"sha": RELEASE_SHA, "parents": [{"sha": BASE}, {}]}, "Не подтверждены родители"),
+            ({"sha": RELEASE_SHA, "parents": [{"sha": BASE}]}, "без PR merge"),
+            ({"sha": RELEASE_SHA, "parents": [{"sha": BASE}, {"sha": BASE}]}, "без PR merge"),
+            ({"sha": RELEASE_SHA, "parents": [{"sha": RELEASE_SHA}, {"sha": OTHER_HEAD}]}, "циклична"),
+        ):
+            with self.subTest(data=data):
+                self.api.commits[RELEASE_SHA] = data
+                with self.assertRaisesRegex(hotfix.HotfixError, error):
+                    hotfix.check_release_history(self.api, "release/1.0", RELEASE_SHA, BASE)
+
+    def test_api_history_requires_baseline_and_nonempty_range(self) -> None:
+        """Baseline на втором родителе или совпадающий с вершиной не даёт допуска."""
+        with self.assertRaisesRegex(hotfix.HotfixError, "не принадлежит первой"):
+            hotfix.check_release_history(self.api, "release/1.0", RELEASE_SHA, "f" * 40)
+        with self.assertRaisesRegex(hotfix.HotfixError, "нет исправлений"):
+            hotfix.check_release_history(self.api, "release/1.0", RELEASE_SHA, RELEASE_SHA)
+
+    def test_api_history_requires_tip_before_and_after_link_check(self) -> None:
+        """Нет допуска после сдвига вершины во время проверки связей PR."""
+        self.api.merge(10, RELEASE_SHA)
+        self.api.merge(11, MAIN_SHA)
+        get = self.api.get
+
+        def move_during_pair_check(path, **parameters):
+            if path.startswith("/pulls/"):
+                self.api.heads["release/1.0"] = NEXT_SHA
+            return get(path, **parameters)
+
+        with patch.object(self.api, "get", side_effect=move_during_pair_check):
+            with self.assertRaisesRegex(hotfix.HotfixError, "ветка сдвинулась"):
+                hotfix.check_release_history(self.api, "release/1.0", RELEASE_SHA, BASE)
+            with self.assertRaisesRegex(hotfix.HotfixError, "не является текущим SHA"):
+                hotfix.check_release_history(self.api, "release/1.0", RELEASE_SHA, BASE)
 
 
 if __name__ == "__main__":

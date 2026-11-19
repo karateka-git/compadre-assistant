@@ -118,7 +118,18 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
     Raises:
         HotfixError: Ссылки или целевые ветки неполны.
     """
-    current = pull(api, number)
+    return _linked_group(api, pull(api, number))
+
+
+def _linked_group(api: GitHub, current: dict) -> tuple[dict | None, str | None, tuple[dict, ...]]:
+    number = current["number"]
+    pulls = {number: current}
+
+    def read(number: int) -> dict:
+        if number not in pulls:
+            pulls[number] = pull(api, number)
+        return pulls[number]
+
     commit = body_main_commit(current)
     if current["base"].get("ref") == "main":
         if commit is not None:
@@ -127,7 +138,7 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
     elif commit is not None:
         main = None
     else:
-        linked = [pull(api, item) for item in body_links(current)]
+        linked = [read(item) for item in body_links(current)]
         candidates = [pr for pr in linked if pr["base"].get("ref") == "main"]
         if len(candidates) != 1:
             raise HotfixError("В описании release PR нужна одна ссылка на main PR")
@@ -136,11 +147,11 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
         if main["base"].get("ref") != "main" or body_main_commit(main) is not None:
             raise HotfixError("Ссылка не указывает на PR в main")
         selected = body_links(main)
-        releases = tuple(pull(api, item) for item in selected)
+        releases = tuple(read(item) for item in selected)
         members = {main["number"], *selected}
     else:
         selected = body_links(current, optional=True)
-        releases = (current, *(pull(api, item) for item in selected))
+        releases = (current, *(read(item) for item in selected))
         members = {pr["number"] for pr in releases}
     branches = []
     for release in releases:
@@ -210,17 +221,21 @@ def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int | None
 
 def merge_pull(api: GitHub, sha: str, branch: str) -> dict:
     """Находит единственный слитый PR для merge commit заданной ветки."""
+    return pull(api, _merge_pull_number(api, sha, branch))
+
+
+def _merge_pull_number(api: GitHub, sha: str, branch: str) -> int:
     matches = [pr for pr in api.pages(f"/commits/{sha}/pulls")
                if isinstance(pr, dict) and pr.get("merged_at")
                and pr.get("merge_commit_sha") == sha
                and isinstance(pr.get("base"), dict) and pr["base"].get("ref") == branch]
-    if len(matches) != 1:
+    if len(matches) != 1 or type(matches[0].get("number")) is not int or matches[0]["number"] <= 0:
         raise HotfixError(f"Для {sha} нет единственного слитого PR в {branch}")
-    return pull(api, matches[0]["number"])
+    return matches[0]["number"]
 
 
-def reachable(api: GitHub, sha: str, branch: str) -> bool:
-    """Подтверждает принадлежность SHA текущей истории ветки через GitHub."""
+def _branch_tip(api: GitHub, branch: str) -> str:
+    """Читает текущий SHA подтверждённого ref ветки."""
     ref = api.get(f"/git/ref/heads/{branch}")
     if (not isinstance(ref, dict) or ref.get("ref") != f"refs/heads/{branch}" or
             not isinstance(ref.get("object"), dict)):
@@ -228,6 +243,12 @@ def reachable(api: GitHub, sha: str, branch: str) -> bool:
     head = ref["object"].get("sha")
     if not isinstance(head, str) or not SHA_PATTERN.fullmatch(head):
         raise HotfixError(f"Некорректный head {branch}")
+    return head
+
+
+def reachable(api: GitHub, sha: str, branch: str) -> bool:
+    """Подтверждает принадлежность SHA текущей истории ветки через GitHub."""
+    head = _branch_tip(api, branch)
     if sha == head:
         return True
     comparison = api.get(f"/compare/{sha}...{head}")
@@ -244,7 +265,7 @@ def _merged_reachable(api: GitHub, pr: dict, branch: str) -> str:
     if (pr.get("merged_at") is None or not isinstance(sha, str) or
             not SHA_PATTERN.fullmatch(sha) or pr["base"].get("ref") != branch):
         raise HotfixError(f"PR #{pr['number']} ещё не слит в {branch}")
-    if merge_pull(api, sha, branch)["number"] != pr["number"] or not reachable(api, sha, branch):
+    if _merge_pull_number(api, sha, branch) != pr["number"] or not reachable(api, sha, branch):
         raise HotfixError(f"Merge PR #{pr['number']} не подтверждён в {branch}")
     return sha
 
@@ -272,9 +293,101 @@ def check_baseline(api: GitHub, branch: str, baseline: str) -> None:
         raise HotfixError("Начальный baseline не имеет успешного pre-release-check-full")
 
 
+def _require_release_range(branch: str, candidate: str, baseline: str) -> None:
+    """Проверяет идентификаторы релизной ветки и границ диапазона."""
+    if not RELEASE_BRANCH_PATTERN.fullmatch(branch) or not all(
+        SHA_PATTERN.fullmatch(value) for value in (candidate, baseline)
+    ):
+        raise HotfixError("Требуются release/X.Y и два полных SHA")
+
+
+def _check_release_pairs(api: GitHub, branch: str,
+                         merges: list[str]) -> list[tuple[int, int | None, str]]:
+    """Сверяет связанные PR для каждого слияния в порядке релизной линии."""
+    if not merges:
+        raise HotfixError("После baseline нет исправлений")
+    result = []
+    for sha in merges:
+        release = merge_pull(api, sha, branch)
+        if (release["base"].get("ref") != branch or release.get("merge_commit_sha") != sha
+                or not release.get("merged_at")):
+            raise HotfixError(f"Данные слияния PR #{release['number']} изменились")
+        main, commit, selected = _linked_group(api, release)
+        if release["number"] not in [item["number"] for item in selected]:
+            raise HotfixError("PR release не совпал с парой")
+        if main is not None:
+            main_sha = _merged_reachable(api, main, "main")
+        elif commit is not None and reachable(api, commit, "main"):
+            main_sha = commit
+        else:
+            raise HotfixError("Указанный main commit недостижим")
+        result.append((release["number"], main["number"] if main is not None else None,
+                       main_sha))
+    return result
+
+
+def _read_merge_parents(api: GitHub, sha: str) -> tuple[str, str]:
+    """Возвращает двух точных родителей подтверждённого Git-объекта."""
+    commit = api.get(f"/git/commits/{sha}")
+    parents = commit.get("parents") if isinstance(commit, dict) else None
+    if (not isinstance(parents, list) or commit.get("sha") != sha
+            or any(not isinstance(parent, dict) or not isinstance(parent.get("sha"), str)
+                   or not SHA_PATTERN.fullmatch(parent["sha"]) for parent in parents)):
+        raise HotfixError(f"Не подтверждены родители commit {sha}")
+    if not parents:
+        raise HotfixError("Baseline не принадлежит первой родительской линии release")
+    if len(parents) != 2 or parents[0]["sha"] == parents[1]["sha"]:
+        raise HotfixError(f"Изменение release без PR merge: {sha}")
+    return parents[0]["sha"], parents[1]["sha"]
+
+
+def check_release_history(
+    api: GitHub, branch: str, candidate: str, baseline: str, *,
+    commit_parents: dict[str, tuple[str, str]] | None = None,
+) -> list[tuple[int, int | None, str]]:
+    """Проверяет PATCH по истории GitHub и текущим связям PR.
+
+    Args:
+        api: Клиент GitHub API репозитория выпуска.
+        branch: Действующая релизная ветка release/X.Y.
+        candidate: SHA текущей вершины ветки.
+        baseline: SHA последнего опубликованного выпуска линии, выбранного вызывающим кодом.
+        commit_parents: Кеш проверенных родителей по SHA в пределах одного выпуска.
+
+    Returns:
+        Список release PR, main PR (или None) и подтверждённого SHA main.
+
+    Raises:
+        HotfixError: Ветка, история или связи PR не подтверждены.
+        ControllerError: GitHub не вернул запрошенные данные.
+    """
+    _require_release_range(branch, candidate, baseline)
+    if api.repository != EXPECTED_REPOSITORY:
+        raise HotfixError("Репозиторий API не совпадает с проектом")
+    if _branch_tip(api, branch) != candidate:
+        raise HotfixError("Candidate не является текущим SHA релизной ветки")
+    parents_by_sha = {} if commit_parents is None else commit_parents
+    merges = []
+    walked: set[str] = set()
+    current = candidate
+    while current != baseline:
+        if current in walked:
+            raise HotfixError("Первая родительская линия release циклична")
+        walked.add(current)
+        merges.append(current)
+        if current not in parents_by_sha:
+            parents_by_sha[current] = _read_merge_parents(api, current)
+        current = parents_by_sha[current][0]
+    merges.reverse()
+    result = _check_release_pairs(api, branch, merges)
+    if _branch_tip(api, branch) != candidate:
+        raise HotfixError("Релизная ветка сдвинулась во время проверки")
+    return result
+
+
 def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
                   *, require_full_ci: bool = True) -> list[tuple[int, int | None, str]]:
-    """Проверяет каждый merge релизной линии после прошлого выпуска.
+    """Проверяет чистый checkout и каждый merge после baseline релизной линии.
 
     Args:
         api: Читающий клиент GitHub API.
@@ -289,43 +402,24 @@ def check_release(api: GitHub, branch: str, candidate: str, baseline: str,
     Raises:
         HotfixError: История, ссылки или слияние выбранных PR не подтверждены.
     """
-    if not RELEASE_BRANCH_PATTERN.fullmatch(branch) or not all(
-        SHA_PATTERN.fullmatch(value) for value in (candidate, baseline)
-    ):
-        raise HotfixError("Требуются release/X.Y и два полных SHA")
+    _require_release_range(branch, candidate, baseline)
     require_repository(api)
     check_baseline(api, branch, baseline)
     if git("status", "--porcelain", "--untracked-files=all"):
         raise HotfixError("Для публикации нужен чистый checkout")
     if git("rev-parse", "HEAD") != candidate:
         raise HotfixError("Checkout не соответствует candidate SHA")
-    if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
+    if _branch_tip(api, branch) != candidate:
         raise HotfixError("Candidate не является текущим SHA релизной ветки")
     first_parent = git("rev-list", "--first-parent", candidate).splitlines()
     if baseline not in first_parent:
         raise HotfixError("Baseline не принадлежит первой родительской линии release")
     merges = list(reversed(first_parent[:first_parent.index(baseline)]))
-    if not merges:
-        raise HotfixError("После baseline нет исправлений")
-    result = []
     for sha in merges:
         if len(git("rev-list", "--parents", "-n", "1", sha).split()) != 3:
             raise HotfixError(f"Изменение release без PR merge: {sha}")
-        release = merge_pull(api, sha, branch)
-        if release.get("merge_commit_sha") != sha or not release.get("merged_at"):
-            raise HotfixError(f"Данные слияния PR #{release['number']} изменились")
-        main, commit, selected = linked_group(api, release["number"])
-        if release["number"] not in [item["number"] for item in selected]:
-            raise HotfixError("PR release не совпал с парой")
-        if main is not None:
-            main_sha = _merged_reachable(api, main, "main")
-        elif commit is not None and reachable(api, commit, "main"):
-            main_sha = commit
-        else:
-            raise HotfixError("Указанный main commit недостижим")
-        result.append((release["number"], main["number"] if main is not None else None,
-                       main_sha))
-    if api.get(f"/git/ref/heads/{branch}")["object"]["sha"] != candidate:
+    result = _check_release_pairs(api, branch, merges)
+    if _branch_tip(api, branch) != candidate:
         raise HotfixError("Релизная ветка сдвинулась во время проверки")
     if require_full_ci and select_successful_run(api, api.repository, RELEASE_WORKFLOW, candidate, branch) is None:
         raise HotfixError("Нет успешного release-check-full для точного SHA")

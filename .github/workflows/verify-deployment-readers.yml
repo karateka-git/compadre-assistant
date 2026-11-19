@@ -1,0 +1,28 @@
+name: Verify deployment readers
+on:
+  push:
+    branches: [codex/patch-deployment]
+    paths:
+      - '.github/workflows/verify-deployment-readers.yml'
+      - 'scripts/deployment_acceptance.py'
+      - 'scripts/full_ci_controller.py'
+      - 'scripts/probe_deployment_reader.py'
+permissions:
+  contents: read
+  deployments: read
+jobs:
+  readers:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact tested commit
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Check baseline with workflow token
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 -B -m scripts.probe_deployment_reader

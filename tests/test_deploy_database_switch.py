@@ -415,7 +415,8 @@ class DatabaseSwitchTests(unittest.TestCase):
         selector = host.state_dir / "active-db.json"
         original_selector = selector.read_bytes()
 
-        def require_candidate(candidate: dict) -> None:
+        def require_candidate(candidate: dict, *, observed_base=None) -> None:
+            self.assertIsNone(observed_base)
             self.assertEqual(host.selected_database(), database)
             self.assertEqual(host.runtime_tag(), boot["tag"])
             self.assertEqual(candidate["old"]["host_path"], str(database))

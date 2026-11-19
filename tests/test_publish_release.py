@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 from contextlib import redirect_stdout
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from io import StringIO
 
 from scripts import publish_release as publisher
@@ -61,12 +61,12 @@ class FakeApi:
             return self.migrations
         if path == f"/git/tags/{OBJECT_SHA}":
             return self.tag_object
-        if path == "/git/ref/tags/v1.0.0":
+        if path.startswith("/git/ref/tags/"):
             return self.tags[-1]
         if path == "/git/ref/heads/release/1.0":
             return {"object": {"sha": OLD if self.move_after_tag and self.posts else SHA}}
-        if path == "/releases/tags/v1.0.0":
-            return {"id": 42, "tag_name": "v1.0.0", "target_commitish": SHA,
+        if path.startswith("/releases/tags/"):
+            return {"id": 42, "tag_name": self.posts[-1][1]["tag_name"], "target_commitish": SHA,
                     "body": self.posts[-1][1]["body"], "draft": False,
                     "prerelease": False, "immutable": self.release_immutable,
                     "published_at": "2026-10-14T00:00:00Z"}
@@ -109,19 +109,19 @@ class PublishTests(unittest.TestCase):
         """Подменяет локальный checkout и selector CI."""
         self.api = FakeApi()
         self.candidate = patch.object(publisher, "_candidate")
-        self.candidate.start()
+        self.candidate_check = self.candidate.start()
         self.addCleanup(self.candidate.stop)
         self.main = patch.object(publisher, "checked_main_head", return_value=SHA)
         self.main.start()
         self.addCleanup(self.main.stop)
         self.hotfix = patch.object(publisher, "check_release", return_value=[(10, 11, "same patch")])
-        self.hotfix.start()
+        self.local_hotfix = self.hotfix.start()
         self.addCleanup(self.hotfix.stop)
         self.tag = patch.object(publisher, "tag_commit", return_value=SHA)
         self.tag.start()
         self.addCleanup(self.tag.stop)
         self.admission = patch.object(publisher, "select_successful_run", side_effect=self.admit)
-        self.admission.start()
+        self.select = self.admission.start()
         self.addCleanup(self.admission.stop)
         self.evidence = self.enterContext(patch.object(
             publisher, "verify_evidence",
@@ -135,8 +135,9 @@ class PublishTests(unittest.TestCase):
 
     def test_initial_release_reuses_exact_main_full(self) -> None:
         """Первый выпуск получает main-full, notes и ссылку на CI."""
-        result = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        result = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения", github_history=True)
         self.assertEqual(result.admission.workflow, MAIN_WORKFLOW)
+        self.assertFalse(result.github_history)
         self.assertEqual(result.make_latest, "true")
         self.assertIn("Тип выпуска: обычный", result.body)
         self.assertIn("/actions/runs/123/attempts/1", result.body)
@@ -153,7 +154,8 @@ class PublishTests(unittest.TestCase):
         with patch.object(publisher, "tag_commit", return_value=OLD), \
              patch.object(publisher, "check_release", return_value=[(10, 11, "same")]) as check:
             result = publisher.prepare(self.api, "v1.0.1", SHA, "patch", "Исправление")
-        check.assert_called_once_with(self.api, "release/1.0", SHA, OLD)
+        check.assert_called_once_with(self.api, "release/1.0", SHA, OLD, require_full_ci=False)
+        self.select.assert_called_once_with(self.api, self.api.repository, RELEASE_WORKFLOW, SHA, "release/1.0")
         self.assertEqual(result.admission.workflow, RELEASE_WORKFLOW)
         self.assertEqual(result.make_latest, "true")
         self.assertIn("https://github.com/karateka-git/compadre-assistant/pull/10", result.body)
@@ -273,6 +275,73 @@ class PublishTests(unittest.TestCase):
         self.base.side_effect = ValueError("SAFE_BASELINE_DEPLOYMENT")
         with self.assertRaisesRegex(ValueError, "SAFE_BASELINE_DEPLOYMENT"):
             publisher.publish(self.api, prepared)
+        self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
+
+    def test_runner_patch_reuses_immutable_reads_and_selects_ci_in_each_phase(self) -> None:
+        """Проверки каждой фазы читают CI заново и разделяют кеш Git-объектов."""
+        self.api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-14T00:00:00Z"}]
+        with (patch.object(publisher, "tag_commit", return_value=OLD) as tag,
+              patch.object(publisher, "check_release_history", return_value=[(10, 11, OLD)]) as check,
+              patch.object(self.api, "get", wraps=self.api.get) as get):
+            prepared = publisher.prepare(self.api, "v1.0.1", SHA, "patch", "Исправление", github_history=True)
+            self.assertEqual(publisher.publish(self.api, prepared), "https://github.com/release")
+
+        self.local_hotfix.assert_not_called()
+        self.assertTrue(all(call.kwargs == {"github_history": True} for call in self.candidate_check.call_args_list))
+        self.assertEqual([call.args for call in check.call_args_list], [(self.api, "release/1.0", SHA, OLD)] * 3)
+        cache = check.call_args_list[0].kwargs["commit_parents"]
+        self.assertTrue(all(call.kwargs["commit_parents"] is cache for call in check.call_args_list))
+        self.assertEqual([call.args for call in tag.call_args_list], [(self.api, "v1.0.0")] * 3)
+        self.assertEqual([call.args for call in self.select.call_args_list],
+                         [(self.api, self.api.repository, RELEASE_WORKFLOW, SHA, "release/1.0")] * 3)
+        self.assertEqual([call.kwargs for call in get.call_args_list
+                          if call.args[0] == f"/contents/{MIGRATIONS_PREFIX.rstrip('/')}"], [{"ref": SHA}])
+        self.assertEqual([call.args[1] for call in self.evidence.call_args_list], [prepared.admission] * 2)
+
+    def test_patch_refuses_moved_previous_tag_before_and_after_tag_creation(self) -> None:
+        """Изменение предыдущего тега закрывает допуск даже при совпадении пары."""
+        self.api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-14T00:00:00Z"}]
+        for previous, error, posts in (
+            ([OLD, PIN], "Допуск изменился", []),
+            ([OLD, OLD, PIN], "Предыдущий тег PATCH изменился", ["/git/tags", "/git/refs"]),
+        ):
+            with (self.subTest(previous=previous), patch.object(publisher, "tag_commit", side_effect=previous),
+                  patch.object(publisher, "check_release_history", return_value=[(10, 11, OLD)])):
+                prepared = publisher.prepare(self.api, "v1.0.1", SHA, "patch", "Исправление", github_history=True)
+                with self.assertRaisesRegex(publisher.PublishError, error):
+                    publisher.publish(self.api, prepared)
+                self.assertEqual([path for path, _ in self.api.posts], posts)
+
+    def test_changed_ci_attempt_stops_each_publication_phase(self) -> None:
+        """Смена успешной попытки запрещает следующую запись."""
+        self.api.releases = [{"tag_name": "v1.0.0", "published_at": "2026-10-14T00:00:00Z"}]
+        admitted = self.admit(self.api, self.api.repository, RELEASE_WORKFLOW, SHA, "release/1.0")
+        rerun = replace(admitted, run_attempt=2)
+        for attempts, error, posts in (
+            ([admitted, rerun], "Допуск изменился", []),
+            ([admitted, admitted, rerun], "Допуск CI изменился", ["/git/tags", "/git/refs"]),
+        ):
+            with (self.subTest(attempts=attempts),
+                  patch.object(publisher, "select_successful_run", side_effect=attempts),
+                  patch.object(publisher, "check_release_history", return_value=[(10, 11, OLD)])):
+                prepared = publisher.prepare(self.api, "v1.0.1", SHA, "patch", "Исправление", github_history=True)
+                with self.assertRaisesRegex(publisher.PublishError, error):
+                    publisher.publish(self.api, prepared)
+                self.assertEqual([path for path, _ in self.api.posts], posts)
+
+    def test_changed_protection_after_tag_ref_blocks_release(self) -> None:
+        """Публикация повторно сверяет immutable-настройку перед созданием Release."""
+        prepared = publisher.prepare(self.api, "v1.0.0", SHA, "initial", "Изменения")
+        original_post = self.api.post
+
+        def post(path, payload):
+            if path == "/git/refs":
+                self.api.immutable = False
+            return original_post(path, payload)
+
+        with patch.object(self.api, "post", side_effect=post):
+            with self.assertRaisesRegex(publisher.PublishError, "Immutable Releases"):
+                publisher.publish(self.api, prepared)
         self.assertEqual([path for path, _ in self.api.posts], ["/git/tags", "/git/refs"])
 
     def test_check_and_dry_run_never_post(self) -> None:
