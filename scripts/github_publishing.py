@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from urllib.request import Request, urlopen
 
-from scripts.full_ci_controller import GitHub
+from scripts.full_ci_controller import GitHub, open_http
 
 
 class PublishingError(RuntimeError):
@@ -31,7 +31,7 @@ class PublishingGitHub(GitHub):
             "User-Agent": "compadre-release-publisher",
         })
         try:
-            with urlopen(request, timeout=20) as response:
+            with open_http(request, timeout=20, fallback=urlopen) as response:
                 if response.status != 200:
                     raise PublishingError(f"GitHub /user: HTTP {response.status}")
                 result = json.load(response)
@@ -63,7 +63,7 @@ class PublishingGitHub(GitHub):
                               "User-Agent": "compadre-release-publisher",
                           })
         try:
-            with urlopen(request, timeout=20) as response:
+            with open_http(request, timeout=20, fallback=urlopen) as response:
                 if response.status != 201:
                     raise PublishingError(f"GitHub API не подтвердил создание {path}: HTTP {response.status}")
                 result = json.load(response)

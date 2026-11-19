@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass
+from enum import StrEnum
 import json
 import os
 import re
 import subprocess
 import sys
+from time import perf_counter_ns
 from urllib.parse import quote, urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPHandler, HTTPRedirectHandler, HTTPSHandler, Request, build_opener, urlopen
 
 from scripts.full_ci_admission import (
     AdmissionError, COMPATIBILITY_CHECK, FULL_CALLERS, FULL_SUITE_CHECK,
@@ -32,6 +37,197 @@ def git(*arguments: str) -> str:
     if result.returncode:
         raise ControllerError(f"git {' '.join(arguments)}: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+class HttpLocation(StrEnum):
+    """Обозначает процесс, отправивший запрос."""
+
+    RUNNER = "runner"
+    VPS = "vps"
+
+
+class HttpPhase(StrEnum):
+    """Ограничивает набор меток этапов выпуска."""
+
+    OTHER = "other"  # Запрос вне явно обозначенного этапа.
+    AUTHOR = "author"  # Установление доверенного автора записи.
+    RELEASE_LOOKUP = "release_lookup"  # Проверка наличия опубликованного Release.
+    RELEASE_PREPARE = "release_prepare"  # Подготовка кандидата к публикации.
+    RELEASE_PUBLISH = "release_publish"  # Повторный допуск и запись тега и Release.
+    RELEASE_SELECT = "release_select"  # Сверка опубликованного Release с тегом и CI.
+    DEPLOYMENT_BASE = "deployment_base"  # Запросы для выбора или подтверждения принятой базы.
+    DEPLOYMENT_PUBLISH = "deployment_publish"  # Запись и подтверждение результата выкладки.
+    VPS_PREPARE = "vps_prepare"  # Подготовка установки на VPS.
+    VPS_RECHECK = "vps_recheck"  # Повторная сверка допуска перед переключением.
+    VPS_ACCEPT = "vps_accept"  # Техническая сверка установленного выпуска.
+    VPS_CLEANUP = "vps_cleanup"  # Сверка выпуска для очистки прежней SQLite.
+
+
+class _Target(StrEnum):
+    GITHUB = "github_api"
+    STORAGE = "artifact_storage"  # Запрос после redirect от API скачивания ZIP.
+
+
+@dataclass
+class _Totals:
+    attempts: int = 0
+    pages: int = 0
+    errors: int = 0
+    elapsed_ns: int = 0
+
+
+class HttpMetrics:
+    """Накапливает счётчики по месту, этапу, получателю и методу HTTP."""
+
+    def __init__(self, location: HttpLocation) -> None:
+        """Создаёт пустой набор счётчиков для указанного места выполнения."""
+        self._location = HttpLocation(location)
+        self._totals: dict[tuple[HttpPhase, _Target, str], _Totals] = {}
+
+    def rows(self) -> list[dict[str, str | int]]:
+        """Возвращает отсортированный снимок агрегатов для JSON-отчёта."""
+        return [
+            {"location": self._location.value, "phase": phase.value, "target": target.value,
+             "method": method, "attempts": total.attempts, "pages": total.pages,
+             "errors": total.errors, "elapsed_ns": total.elapsed_ns}
+            for (phase, target, method), total in sorted(self._totals.items())
+        ]
+
+
+_active_metrics: ContextVar[HttpMetrics | None] = ContextVar("github_http_metrics", default=None)
+_active_phase: ContextVar[HttpPhase] = ContextVar("github_http_phase", default=HttpPhase.OTHER)
+
+
+@contextmanager
+def collect_http_metrics(location: HttpLocation) -> Iterator[HttpMetrics]:
+    """Включает сбор в текущем контексте и возвращает агрегат этой операции."""
+    metrics = HttpMetrics(location)
+    token = _active_metrics.set(metrics)
+    phase_token = _active_phase.set(HttpPhase.OTHER)
+    try:
+        yield metrics
+    finally:
+        _active_phase.reset(phase_token)
+        _active_metrics.reset(token)
+
+
+@contextmanager
+def http_phase(phase: HttpPhase) -> Iterator[None]:
+    """Назначает HTTP-метку для блока и восстанавливает прежнюю при выходе."""
+    token = _active_phase.set(HttpPhase(phase))
+    try:
+        yield
+    finally:
+        _active_phase.reset(token)
+
+
+class _Attempt:
+    def __init__(self, totals: _Totals, page: bool) -> None:
+        self._totals = totals
+        self._failed = False
+        totals.attempts += 1
+        totals.pages += page
+
+    def fail(self) -> None:
+        """Учитывает отказ один раз, даже если ошибку видят несколько слоёв."""
+        if not self._failed:
+            self._failed = True
+            self._totals.errors += 1
+
+    def measure(self, operation, *args, **kwargs):
+        """Прибавляет время сетевой операции к начатому запросу."""
+        started = perf_counter_ns()
+        try:
+            return operation(*args, **kwargs)
+        except Exception:
+            self.fail()
+            raise
+        finally:
+            self._totals.elapsed_ns += perf_counter_ns() - started
+
+
+class _MeasuredResponse:
+    def __init__(self, response, attempt: _Attempt) -> None:
+        self._response = response
+        self._attempt = attempt
+
+    def __getattr__(self, name):
+        return getattr(self._response, name)
+
+    def __enter__(self):
+        self._response.__enter__()
+        return self
+
+    def __exit__(self, *args):
+        return self._response.__exit__(*args)
+
+    def read(self, *args, **kwargs):
+        """Измеряет чтение тела поверх времени соединения и заголовков."""
+        return self._attempt.measure(self._response.read, *args, **kwargs)
+
+
+class _MeasuredHandler(HTTPHandler, HTTPSHandler):
+    def __init__(self, metrics: HttpMetrics, original: Request, *, artifact: bool, page: bool) -> None:
+        super().__init__()
+        self._metrics = metrics
+        self._original = original
+        self._artifact = artifact
+        self._page = page
+        self.last_attempt: _Attempt | None = None
+
+    def _open(self, request: Request, operation):
+        original = request is self._original
+        target = _Target.STORAGE if self._artifact and not original else _Target.GITHUB
+        method = request.get_method()
+        key = (_active_phase.get(), target, method if method in {"GET", "POST"} else "OTHER")
+        totals = self._metrics._totals.setdefault(key, _Totals())
+        attempt = self.last_attempt = _Attempt(totals, self._page and original)
+        response = attempt.measure(operation, request)
+        if response.code >= 400:
+            attempt.fail()
+        return _MeasuredResponse(response, attempt)
+
+    def http_open(self, request: Request):
+        """Измеряет одну отправку HTTP через стандартный handler."""
+        return self._open(request, super().http_open)
+
+    def https_open(self, request: Request):
+        """Измеряет одну отправку HTTPS через стандартный handler."""
+        return self._open(request, super().https_open)
+
+
+def open_http(request: Request, *, timeout: int, fallback=urlopen,
+              artifact_redirect: HTTPRedirectHandler | None = None, page: bool = False):
+    """Открывает запрос и при активном замере считает каждый HTTP-переход.
+
+    Args:
+        request: Запрос GitHub API, данные которого не сохраняются в метриках.
+        timeout: Сетевой таймаут в секундах.
+        fallback: Обычный opener клиента для вызовов без замера.
+        artifact_redirect: Политика редиректов ZIP; последующие запросы
+            учитываются как обращения к хранилищу.
+        page: Первый запрос получает страницу списка с явным номером.
+
+    Returns:
+        HTTP-ответ, поддерживающий контекстный менеджер и чтение тела.
+
+    Raises:
+        OSError: Сбой обращения или HTTP-ошибка из opener.
+    """
+    metrics = _active_metrics.get()
+    handlers = [] if artifact_redirect is None else [artifact_redirect]
+    if metrics is None:
+        opener = build_opener(*handlers).open if handlers else fallback
+        return opener(request, timeout=timeout)
+
+    # urllib вызывает этот handler заново после каждого HTTP redirect.
+    measured = _MeasuredHandler(metrics, request, artifact=artifact_redirect is not None, page=page)
+    try:
+        return build_opener(measured, *handlers).open(request, timeout=timeout)
+    except Exception:
+        if measured.last_attempt is not None:
+            measured.last_attempt.fail()
+        raise
 
 
 class GitHub:
@@ -56,7 +252,18 @@ class GitHub:
         self.token = token
 
     def get(self, path: str, **parameters: str | int) -> object:
-        """Получает JSON или завершает работу при любой ошибке API."""
+        """Получает JSON через REST API репозитория.
+
+        Args:
+            path: Путь REST API относительно репозитория.
+            **parameters: Параметры запроса, включая номер страницы списка.
+
+        Returns:
+            Десериализованный ответ GitHub.
+
+        Raises:
+            ControllerError: Запрос или чтение JSON завершились ошибкой.
+        """
         url = self.root + path
         if parameters:
             url += "?" + urlencode(parameters)
@@ -69,7 +276,7 @@ class GitHub:
             headers["Authorization"] = f"Bearer {self.token}"
         request = Request(url, headers=headers)
         try:
-            with urlopen(request, timeout=20) as response:
+            with open_http(request, timeout=20, fallback=urlopen, page="page" in parameters) as response:
                 return json.load(response)
         except Exception as error:
             raise ControllerError(f"GitHub API недоступен: {path}: {error}") from error

@@ -16,7 +16,7 @@ import re
 import sqlite3
 import stat
 import subprocess
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request
 import zipfile
 
 from scripts import deploy_prepare as prep
@@ -28,7 +28,7 @@ from scripts.full_ci_admission import (
     Admission, COMPATIBILITY_CHECK, COMPATIBILITY_STEPS, FULL_CALLERS, MAIN_WORKFLOW,
     RELEASE_WORKFLOW, select_successful_run,
 )
-from scripts.full_ci_controller import GitHub
+from scripts.full_ci_controller import GitHub, open_http
 from scripts.repository_compatibility_contract import (
     BUILT_IN_POLICY, BUILT_IN_POLICY_VERSION, DEPLOYMENT_POLICY_VERSIONS, load_legacy_policy,
     verify_behavior_tests, verify_report,
@@ -87,7 +87,18 @@ class EvidenceAPI(GitHub):
     """Читает artifact по GitHub ID; URL и digest не берутся из evidence."""
 
     def download(self, artifact_id: int) -> bytes:
-        """Получает ZIP через доверенный endpoint с ограничением размера."""
+        """Получает ZIP через доверенный endpoint с ограничением размера.
+
+        Args:
+            artifact_id: Числовой ID артефакта GitHub Actions.
+
+        Returns:
+            Содержимое ZIP в пределах допустимого размера.
+
+        Raises:
+            PredeployError: Редирект или размер ответа не проходят проверку.
+            OSError: Не удалось получить или прочитать ответ.
+        """
         request = Request(f"{self.root}/actions/artifacts/{artifact_id}/zip", headers={
             "Authorization": f"Bearer {self.token}",
             "Accept": "application/vnd.github+json",
@@ -103,7 +114,7 @@ class EvidenceAPI(GitHub):
                 redirected.remove_header("Authorization")
                 return redirected
 
-        with build_opener(ArtifactRedirect()).open(request, timeout=30) as response:
+        with open_http(request, timeout=30, artifact_redirect=ArtifactRedirect()) as response:
             result = response.read(MAX_ARTIFACT + 1)
         if len(result) > MAX_ARTIFACT:
             raise PredeployError("SAFE_ARTIFACT_SIZE")
