@@ -125,9 +125,10 @@ async def _run_telegram_bot(
         bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
     )
 
-    def menu_update_handler(update: CommandMenuUpdate) -> None:
-        if not reconciliation_stop.is_set():
-            publish_menu(update)
+    def menu_update_handler(update: CommandMenuUpdate) -> bool | None:
+        if reconciliation_stop.is_set():
+            return False
+        return publish_menu(update)
 
     _register_handlers(
         dispatcher,
@@ -432,18 +433,18 @@ def _create_telegram_menu_update_handler(
     в механизм повторной сверки, не блокируя сам event loop.
     """
 
-    def publish(update: CommandMenuUpdate) -> None:
+    def publish(update: CommandMenuUpdate) -> bool:
         """Публикует команды только для положительного числового Telegram ID."""
         if update.address.channel != "telegram":
-            return
+            return False
         try:
             chat_id = int(update.address.chat_id)
         except (TypeError, ValueError):
             logger.warning("Skipping Telegram menu with non-numeric chat ID")
-            return
+            return False
         if chat_id <= 0:
             logger.warning("Skipping Telegram menu for a non-private chat")
-            return
+            return False
 
         commands = []
         if len(update.menu.items) > 100:
@@ -469,6 +470,7 @@ def _create_telegram_menu_update_handler(
         except FutureTimeoutError:
             future.cancel()
             raise TimeoutError("Telegram menu API call timed out")
+        return True
 
     return publish
 

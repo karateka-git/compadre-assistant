@@ -1,14 +1,18 @@
 """Один владелец экрана проходит настоящие входы и обе проекции каналов."""
 
+import asyncio
 from dataclasses import replace
 from itertools import count
 import json
 import logging
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
+
+import aiogram
 
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
 from compadre_assistant.core.data.sqlite.connection import connect_database
@@ -22,7 +26,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     IncomingResponse, PendingConfirmationQueryPort, ReplyAction, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import text_content
-from compadre_assistant.presentation.telegram.bot import _register_handlers
+from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
 from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handler, _handle_update
 from tests.test_incoming_boundary import FakeCapability
 from tests.test_telegram_bot import FakeAiogram
@@ -139,7 +143,7 @@ class ObservedVkClient(ProjectionClient):
 class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
     """Проверяет одинаковый сценарий через Telegram SDK и VK Long Poll."""
 
-    def setUp(self):
+    async def asyncSetUp(self):
         """Создаёт два независимых чата на актуальной временной схеме."""
         self.path = Path(self.enterContext(TemporaryDirectory(prefix="screen-actions-channels-"))) / "app.db"
         with connect_database(self.path) as connection:
@@ -149,7 +153,11 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 for chat in ("1001", "1002"):
                     service.register_with_name(IncomingIdentity(channel, chat, chat), display_name="Тест")
         self.owner = NeutralScreenCapability()
-        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.owner,))
+        self.open_channels({"telegram": "https://t.me/example_chat_bot", "vk": "https://vk.com/write-731"})
+
+    def open_channels(self, dialogs):
+        """Подключает два локальных клиента к процессору с публичными адресами установки."""
+        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.owner,), messenger_dialogs=dialogs)
         self.logger = logging.getLogger("test.screen-actions.channels")
         self.ids = count(42)
         self.telegram = []
@@ -170,10 +178,20 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
 
         self.bot = SimpleNamespace(send_message=AsyncMock(side_effect=send),
                                    edit_message_text=AsyncMock(side_effect=edit),
+                                   set_my_commands=AsyncMock(return_value=True),
                                    edit_message_reply_markup=AsyncMock(side_effect=clear))
+        publish = _create_telegram_menu_update_handler(self.bot, loop=asyncio.get_running_loop(),
+                                                       aiogram=aiogram, logger=self.logger)
+
+        def menu_update(update):
+            accepted = publish(update)
+            if accepted:
+                self.menus.append(update)
+            return accepted
+
         sdk = FakeAiogram()
         _register_handlers(sdk.dispatcher, sdk, incoming_message_processor=self.processor,
-                           logger=self.logger, menu_update_handler=self.menus.append)
+                           logger=self.logger, menu_update_handler=menu_update)
         self.router = sdk.dispatcher.included_router
         self.vk = ObservedVkClient()
         self.vk_menu = _create_vk_menu_update_handler(self.vk, logger=self.logger)
@@ -216,15 +234,84 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         if channel == "telegram":
             message_id, kwargs = self.telegram[-1]
             keyboard = kwargs.get("reply_markup")
-            actions = [(button.text, button.callback_data) for row in keyboard.inline_keyboard for button in row] if keyboard else []
+            actions = [(button.text, button.callback_data or button.url)
+                       for row in keyboard.inline_keyboard for button in row] if keyboard else []
             return kwargs["text"], actions, message_id
         event = next(item for item in reversed(self.vk.events) if item[0] in {"send", "edit"})
         text = self.vk.texts[event[1]]
         keyboard = event[2]
-        actions = ([(button["action"]["label"], json.loads(button["action"]["payload"])["token"])
+        actions = ([(button["action"]["label"], button["action"].get("link") or json.loads(button["action"]["payload"])["token"])
                     for row in keyboard["buttons"] for button in row]
                    if keyboard is not None and keyboard["inline"] else [])
         return text, actions, event[1]
+
+    def bottom(self):
+        """Читает последнюю доставленную нижнюю клавиатуру VK."""
+        keyboard = next(k for _, _, k in reversed(self.vk.events) if k and not k["inline"])
+        return {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
+
+    async def choose_section(self, channel, label, chat):
+        """Нажимает реально показанное действие раздела по правилам канала."""
+        if channel == "vk":
+            self.assertIn(label, self.bottom())
+            await self.send(channel, label, chat=chat, menu=True)
+        else:
+            _, actions, message_id = self.last(channel)
+            await self.press(channel, dict(actions)[label], message_id, chat=chat)
+
+    async def test_messenger_transfer_in_both_directions(self):
+        """Проверяет оба диалога, реальные клавиатуры переноса и восстановление по команде."""
+        for source, target, title, chat, url in (
+            ("telegram", "vk", "VK", "1001", "https://vk.com/write-731"),
+            ("vk", "telegram", "Telegram", "1002", "https://t.me/example_chat_bot"),
+        ):
+            with self.subTest(target=target):
+                await self.send(source, "/settings", chat=chat)
+                await self.choose_section(source, "Мессенджеры", chat)
+                self.assertIn(f"{title} — не привязан", self.last(source)[0])
+                await self.choose_section(source, f"Привязать {title}", chat)
+                prompt, buttons, _ = self.last(source)
+                code = re.search(r"/link ([\w-]+)", prompt).group(1)
+                self.assertEqual(dict(buttons)["Открыть бота"], url)
+                await self.send(target, "/settings", chat=chat)
+                await self.choose_section(target, "Мессенджеры", chat)
+                await self.choose_section(target, f"Привязать {title} к другому профилю", chat)
+                await self.send(target, "неверный-код", chat=chat)
+                self.assertIn(f"/connect {target}", self.last(target)[0])
+                await self.send(target, code, chat=chat)
+                # VK может отдельно доставить изменившееся нижнее меню.
+                if target == "vk":
+                    item = next(item for item in reversed(self.vk.events) if item[2] and item[2]["inline"])
+                    choose = next(button["action"] for row in item[2]["buttons"] for button in row
+                                  if button["action"]["label"] == "Перенести аккаунт")
+                    token, message_id = json.loads(choose["payload"])["token"], item[1]
+                else:
+                    _, actions, message_id = self.last(target)
+                    token = dict(actions)["Перенести аккаунт"]
+                await self.press(target, token, message_id, chat=chat)
+                self.assertIn("перепривязал", self.last(target)[0])
+                await self.send(source, "/connect", chat=chat)
+                self.assertIn(f"{title} — привязан", self.last(source)[0])
+                if source == "vk":
+                    self.assertIn("Открыть бота", self.bottom())
+                delivered_url = (self.bottom()["Открыть бота"]["link"] if source == "vk"
+                                 else dict(self.last(source)[1])["Открыть бота"])
+                self.assertEqual(delivered_url, url)
+
+    async def test_first_entry_and_missing_public_address_keep_manual_link(self):
+        """Без публичного имени Telegram ручной путь работает до регистрации."""
+        self.open_channels({"telegram": None, "vk": "https://vk.com/write-731"})
+        await self.send("vk", "/settings")
+        await self.send("vk", "/connect telegram")
+        prompt, actions, _ = self.last("vk")
+        self.assertIn("Адрес бота не указан", prompt)
+        self.assertNotIn("Открыть бота", dict(actions))
+        code = re.search(r"/link ([\w-]+)", prompt).group(1)
+        await self.send("telegram", "/start", chat="3003")
+        self.assertEqual([name for name, _ in self.last("telegram")[1]], ["Создать профиль", "У меня есть код"])
+        await self.choose_section("telegram", "У меня есть код", "3003")
+        await self.send("telegram", f"/link {code}", chat="3003")
+        self.assertIn("привязал", self.last("telegram")[0])
 
     async def test_core_catalog_entry_and_same_section_description_reach_both_channels(self):
         """Вход ядра, меню владельца и обычный текст имеют разные проекции."""
