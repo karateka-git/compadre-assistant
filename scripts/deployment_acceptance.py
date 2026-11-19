@@ -335,7 +335,7 @@ def _baseline_claim(raw: dict, sha: str) -> InstallationReceipt:
 
 
 @dataclass(frozen=True)
-class _Attempt:
+class DeploymentAttempt:
     """Сохраняет неизменные реквизиты начала установки до появления результата."""
 
     schema_version: int
@@ -348,24 +348,30 @@ class _Attempt:
     run_attempt: int
     baseline: AcceptedBaseline
 
+    def __post_init__(self) -> None:
+        """Проверяет ключ исходного запуска, версию схемы и точные реквизиты CI."""
+        if (type(self.schema_version) is not int or self.schema_version != 2
+                or not isinstance(self.attempt_key, str) or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", self.attempt_key)
+                or not isinstance(self.sha, str) or not SHA_PATTERN.fullmatch(self.sha)
+                or not isinstance(self.version, str) or not VERSION_PATTERN.fullmatch(self.version)
+                or self.version == LEGACY_INSTALLATION_VERSION or self.kind not in ("ordinary", "emergency")
+                or not isinstance(self.baseline, AcceptedBaseline)):
+            raise DeploymentAcceptanceError("Реквизиты попытки v2 не подтверждены")
+        for value in (self.release_id, self.run_id, self.run_attempt):
+            _positive(value, "Release или попытки CI")
 
-def _attempt(raw: dict) -> _Attempt:
+
+def _attempt(raw: dict) -> DeploymentAttempt:
     """Строго проверяет payload v2 и прямую ссылку на принятую базу."""
     payload = raw.get("payload")
     try:
         fields = dict(payload)
         fields["baseline"] = AcceptedBaseline(**fields["baseline"])
-        result = _Attempt(**fields)
+        result = DeploymentAttempt(**fields)
     except (TypeError, KeyError, ValueError) as error:
         raise DeploymentAcceptanceError("Некорректный payload попытки v2") from error
-    if (not isinstance(payload, dict) or type(result.schema_version) is not int or result.schema_version != 2
-            or not isinstance(result.attempt_key, str) or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", result.attempt_key)
-            or result.sha != raw["sha"] or not isinstance(result.version, str) or not VERSION_PATTERN.fullmatch(result.version)
-            or result.version == LEGACY_INSTALLATION_VERSION or result.kind not in ("ordinary", "emergency")
-            or result.baseline.deployment_id == raw["id"]):
-        raise DeploymentAcceptanceError("Реквизиты попытки v2 не подтверждены")
-    for value in (result.release_id, result.run_id, result.run_attempt):
-        _positive(value, "Release или попытки CI")
+    if not isinstance(payload, dict) or result.sha != raw["sha"] or result.baseline.deployment_id == raw["id"]:
+        raise DeploymentAcceptanceError("Повреждена ссылка попытки v2")
     return result
 
 
@@ -375,7 +381,7 @@ def _v1(raw: dict) -> bool:
     return isinstance(payload, dict) and type(payload.get("schema_version")) is int and payload["schema_version"] == 1
 
 
-def _check_attempt_release(api: GitHub, attempt: _Attempt) -> None:
+def _check_attempt_release(api: GitHub, attempt: DeploymentAttempt) -> None:
     """Связывает попытку с опубликованным SHA, Release, CI и базой обычного тега."""
     try:
         release, run, retry = _published_release(api, attempt.version, attempt.sha, attempt.kind, baseline=attempt.baseline)
@@ -385,7 +391,7 @@ def _check_attempt_release(api: GitHub, attempt: _Attempt) -> None:
         raise DeploymentAcceptanceError("Release или CI расходится с попыткой v2")
 
 
-def _v2_receipt(api: GitHub, attempt: _Attempt, record: DeploymentRecord) -> InstallationReceipt:
+def _v2_receipt(api: GitHub, attempt: DeploymentAttempt, record: DeploymentRecord) -> InstallationReceipt:
     """Восстанавливает результат приёмки только из текущего доверенного success."""
     description = record.description
     if record.state is not DeploymentState.SUCCESS or not isinstance(description, str) or len(description) > 140:
@@ -408,6 +414,31 @@ def _selected(api: GitHub, raw: dict, record: DeploymentRecord) -> AcceptedBasel
         return _accepted_baseline(api, _baseline_claim(raw, raw["sha"]), record)
     receipt = _v2_receipt(api, _attempt(raw), record)
     return AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
+
+
+def baseline_receipt(api: GitHub, baseline: AcceptedBaseline) -> InstallationReceipt:
+    """Читает поколение, миграцию и CI точной уже принятой установки.
+
+    Args:
+        api: Читающий GitHub-клиент репозитория.
+        baseline: Сохранённая прямая ссылка на прежний success.
+
+    Returns:
+        Реквизиты установки с техническим заполнителем runtime_id.
+
+    Raises:
+        DeploymentAcceptanceError: Текущий статус или реквизиты базы изменились.
+    """
+    raw, status = _exact_production(api, baseline.deployment_id)
+    if _v1(raw):
+        receipt = _baseline_claim(raw, raw["sha"])
+        actual = _accepted_baseline(api, receipt, status)
+    else:
+        receipt = _v2_receipt(api, _attempt(raw), status)
+        actual = AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, status.deployment_id, status.status_id)
+    if actual != baseline:
+        raise DeploymentAcceptanceError("Точная принятая база изменилась")
+    return receipt
 
 
 def _accepted_baseline(api: GitHub, receipt: InstallationReceipt, record: DeploymentRecord) -> AcceptedBaseline:
