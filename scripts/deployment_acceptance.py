@@ -25,8 +25,10 @@ OWNER_LOGIN = "karateka-git"
 LEGACY_INSTALLATION_VERSION = "v3.2.0"
 # REST нужен только для числовых ID и реквизитов записи с известным GraphQL ID.
 _MATCH_LIMIT = 10
-# До проверки прав CI/VPS установленный snapshot пользуется REST-контрактом v1.
-_DEFAULT_READER = "v1"
+# Reader snapshot, runner и CI используют один контракт даже после env -i.
+_DEFAULT_READER = "v2"
+# GitHub позволяет прочитать global IDs группы исторических записей одним запросом.
+_HISTORY_BATCH_SIZE = 50
 _ORDERED = """
     deployments(first:2, environments:["production"], orderBy:{field:CREATED_AT, direction:DESC}) {
       totalCount nodes { id createdAt latestStatus { id } }
@@ -36,6 +38,9 @@ _FOR_COMMIT = """query($owner:String!, $name:String!, $sha:GitObjectID!) {
   repository(owner:$owner,name:$name) { nameWithOwner object(oid:$sha) { ... on Commit { oid """ + _ORDERED + "} } } }"
 _EXACT = """query($id:ID!) {
   node(id:$id) { ... on Deployment { id createdAt latestStatus { id } } }
+}"""
+_HISTORY = """query($ids:[ID!]!) {
+  nodes(ids:$ids) { ... on Deployment { id createdAt latestStatus { id } } }
 }"""
 
 
@@ -313,6 +318,23 @@ def _exact_status(api: GitHub, raw: dict) -> DeploymentRecord:
     return _graph_status(api, raw, node)
 
 
+def _history_nodes(api: GitHub, rows: list[dict], observed_id: str) -> dict[str, dict]:
+    """Сверяет полноту пакетов GraphQL для известных исторических записей."""
+    node_ids = [_node_id(row, "node_id") for row in rows]
+    if len(set(node_ids)) != len(node_ids):
+        raise DeploymentAcceptanceError("REST вернул дубликат глобального ID Deployment")
+    node_ids.remove(observed_id)
+    result = {}
+    for start in range(0, len(node_ids), _HISTORY_BATCH_SIZE):
+        ids = node_ids[start:start + _HISTORY_BATCH_SIZE]
+        nodes = api.graphql(_HISTORY, ids=ids).get("nodes")
+        if (not isinstance(nodes, list) or len(nodes) != len(ids)
+                or {_node_id(node) for node in nodes} != set(ids)):
+            raise DeploymentAcceptanceError("GraphQL не подтвердил все исторические записи Deployment")
+        result.update((_node_id(node), node) for node in nodes)
+    return result
+
+
 def _claimed_receipt(raw: dict) -> InstallationReceipt:
     """Читает только реквизиты Deployment для сверки с опубликованным Release."""
     payload = raw.get("payload")
@@ -497,14 +519,28 @@ def _resolve_observed_baseline(
     ids: set[int] = set()
     shas: set[str] = set()
     accepted = []
-    for raw in api.pages("/deployments", task=TASK, environment=ENVIRONMENT):
+    rows = api.pages("/deployments", task=TASK, environment=ENVIRONMENT)
+    history = []
+    for raw in rows:
         deployment_id, sha = _deployment(api, raw)
         if deployment_id in ids or sha in shas:
             raise DeploymentAcceptanceError("Найдены дубликаты записей приёмки")
         ids.add(deployment_id)
         shas.add(sha)
-        receipt = _baseline_claim(raw, sha)
-        record = _exact_status(api, raw) if latest is not None else _current_status(api, deployment_id)
+        history.append((raw, _baseline_claim(raw, sha), deployment_id))
+    if latest is not None:
+        newest_raw, newest_record = latest
+        # GraphQL и полный REST должны подтвердить один и тот же снимок свежей записи.
+        if newest_raw not in rows:
+            raise DeploymentAcceptanceError("История REST не подтвердила последнюю попытку production")
+        nodes = _history_nodes(api, rows, _node_id(newest_raw, "node_id"))
+    for raw, receipt, deployment_id in history:
+        if latest is None:
+            record = _current_status(api, deployment_id)
+        elif raw == newest_raw:
+            record = newest_record
+        else:
+            record = _graph_status(api, raw, nodes[_node_id(raw, "node_id")])
         if record.state is DeploymentState.UNKNOWN:
             raise DeploymentAcceptanceError("Неизвестный текущий статус Deployment")
         if record.state is DeploymentState.SUCCESS:

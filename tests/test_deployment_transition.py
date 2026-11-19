@@ -1,7 +1,9 @@
 """Проверяет переход на Deployments при сбоях записи и чтения GitHub."""
 
+import os
 import unittest
 from urllib.error import HTTPError
+from unittest.mock import patch
 
 from scripts import publish_deployment_acceptance as publisher
 from scripts import publish_installation_tag as installation
@@ -68,6 +70,10 @@ class DeniedReadGitHub(WritableGitHub):
 
 class DeploymentTransitionTests(unittest.TestCase):
     """Проверяет остановку и повтор без реальных GitHub-запросов."""
+
+    def setUp(self) -> None:
+        """Закрепляет REST-контракт для исторического пути публикации."""
+        self.enterContext(patch.dict(os.environ, COMPADRE_DEPLOYMENT_READER="v1"))
 
     def test_interrupted_deployment_readback_resumes_without_duplicate(self) -> None:
         """После неизвестного ответа следующий сеанс находит созданный Deployment."""

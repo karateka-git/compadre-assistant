@@ -39,11 +39,14 @@ class AttemptGitHub(FakeGitHub):
         """Отдаёт отсортированную пару независимо от порядка REST."""
         self.calls.append(("graphql", variables))
         def node(raw):
-            status = self.status if raw is self.latest else self.statuses[0]
+            statuses = self.statuses_by_deployment.get(raw["id"], self.statuses)
+            status = self.status if raw is self.latest else statuses[0]
             return {"id": raw["node_id"], "createdAt": raw["created_at"], "latestStatus": {"id": status["node_id"]}}
         if "id" in variables:
             return {"node": next(node(row) for row in self.deployments if row["node_id"] == variables["id"])}
-        connection = {"nodes": [node(row) for row in reversed(self.deployments)], "totalCount": self.count}
+        if "ids" in variables:
+            return {"nodes": [node(row) for row in self.deployments if row["node_id"] in variables["ids"]]}
+        connection = {"nodes": [node(row) for row in self.deployments[-2:][::-1]], "totalCount": self.count}
         return {"repository": {"nameWithOwner": self.repository, "deployments": connection,
                                "object": {"oid": SHA, "deployments": connection}}}
 
@@ -51,9 +54,11 @@ class AttemptGitHub(FakeGitHub):
         """Возвращает ограниченные страницы и delegate для Release и Git."""
         if (parameters.get("per_page") == 10 or path in ("/deployments/7", "/deployments/11")):
             self.calls.append((path, parameters))
+            if path.startswith("/deployments/") and path.endswith("/statuses"):
+                key = int(path.split("/")[2])
+                return [self.status] if key == 11 else self.statuses_by_deployment.get(key, self.statuses)
             return {"/deployments": self.deployments, "/deployments/7": self.deployments[0],
-                    "/deployments/11": self.latest, "/deployments/7/statuses": self.statuses,
-                    "/deployments/11/statuses": [self.status]}[path]
+                    "/deployments/11": self.latest}[path]
         return super().get(path, **parameters)
 
 
@@ -86,15 +91,51 @@ class AttemptReaderTests(unittest.TestCase):
         summary = summarize_deployment(self.api, VERSION, SHA, 41, 107, 2, RECEIPT.migration)
         self.assertEqual(summary["deployment_state"], "pending")
 
-    def test_default_mode_keeps_v1_transport(self):
-        """Старый токен обходится REST, появление v2 закрывает старый допуск."""
+    def test_default_mode_reads_v2_and_v1_can_be_selected_explicitly(self):
+        """Чистое окружение включает v2, а принудительный v1 требует только REST."""
         with patch.dict(os.environ, COMPADRE_DEPLOYMENT_READER="v1"):
             self.assertEqual(resolve_accepted_baseline(FakeGitHub()), BASE)
             with self.assertRaises(DeploymentAcceptanceError):
                 resolve_accepted_baseline(self.api)
+        del os.environ["COMPADRE_DEPLOYMENT_READER"]
+        self.assertEqual(resolve_accepted_baseline(self.api), AcceptedBaseline(SHA, VERSION, 41, 11, 12))
+
+    def test_history_batches_global_ids_and_reuses_latest_observation(self):
+        """Подтверждает полный список v1 и отклоняет неполные пакеты и конфликт REST."""
+        newest = self.api.deployments[0]
+        for identifier in (1, 2, 3):
+            sha = str(identifier + 3) * 40
+            current = newest | {"id": identifier, "node_id": f"D{identifier}", "sha": sha, "ref": sha,
+                                "created_at": f"2025-12-0{identifier}T00:00:00Z",
+                                "payload": newest["payload"] | {"sha": sha}}
+            self.api.deployments.insert(0, current)
+            self.api.statuses_by_deployment[identifier] = [
+                self.api.statuses[0] | {"id": identifier, "node_id": f"S{identifier}", "state": "failure"}]
         self.api.deployments.pop()
-        self.api.count = 1
-        self.assertEqual(resolve_accepted_baseline(self.api), BASE)
+        self.api.count = len(self.api.deployments)
+
+        with patch("scripts.deployment_acceptance._HISTORY_BATCH_SIZE", 2):
+            self.assertEqual(resolve_accepted_baseline(self.api), BASE)
+        self.assertEqual([len(params["ids"]) for path, params in self.api.calls if "ids" in params], [2, 1])
+        self.assertEqual(sum(path == "/deployments/7/statuses" for path, params in self.api.calls), 1)
+
+        original = self.api.graphql
+        for response in ({"nodes": []}, {"nodes": [{"id": "D999"}] * 3}):
+            with self.subTest(response=response), patch.object(
+                self.api, "graphql", side_effect=lambda query, **params: response if "ids" in params else original(query, **params)
+            ), self.assertRaisesRegex(DeploymentAcceptanceError, "исторические записи"):
+                resolve_accepted_baseline(self.api)
+        with patch.dict(self.api.statuses_by_deployment[1][0], creator={}), self.assertRaises(DeploymentAcceptanceError):
+            resolve_accepted_baseline(self.api)
+        get = self.api.get
+        def duplicate_global_id(path, **params):
+            result = get(path, **params)
+            if path == "/deployments" and params.get("per_page") == 100:
+                result[0] = result[0] | {"node_id": newest["node_id"]}
+            return result
+        with patch.object(self.api, "get", side_effect=duplicate_global_id), self.assertRaisesRegex(
+                DeploymentAcceptanceError, "дубликат глобального ID"):
+            resolve_accepted_baseline(self.api)
 
     def test_exact_restoration_only(self):
         """Только прямой возврат с точным доверенным success открывает старую базу."""

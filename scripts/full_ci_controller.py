@@ -303,12 +303,12 @@ class GitHub:
             cache[key] = self._json(url, path)
         return deepcopy(cache[key])
 
-    def graphql(self, query: str, **variables: str) -> dict:
+    def graphql(self, query: str, **variables: str | list[str]) -> dict:
         """Выполняет запрос чтения и отклоняет частичный ответ GraphQL.
 
         Args:
             query: Документ GraphQL с операцией чтения.
-            **variables: Значения переменных операции.
+            **variables: Строковые значения или списки строк операции.
 
         Returns:
             Объект data полного ответа.

@@ -31,6 +31,10 @@ TOKENS = {name: f"fixture-{name}" for name in (
 class DeployAndPublishTests(unittest.TestCase):
     """Запускает CLI с реальной сборкой команды SSH, подменяя только внешние вызовы."""
 
+    def setUp(self) -> None:
+        """Закрепляет REST-контракт для сценариев писателя v1."""
+        self.enterContext(patch.dict(os.environ, COMPADRE_DEPLOYMENT_READER="v1"))
+
     def _invoke(self, api, run_ssh, *flags, error=None, sha=SHA):
         """Выполняет CLI и проверяет результат или ожидаемую диагностику."""
         stdout, stderr = StringIO(), StringIO()

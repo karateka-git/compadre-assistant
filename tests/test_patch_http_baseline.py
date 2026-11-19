@@ -425,6 +425,10 @@ class _V2RestFixture(_RestFixture):
             identifier = int(variables["id"].removeprefix("deployment-"))
             self.graphql_routes[location, "node"] += 1
             return {"node": self._node(self.deployments[identifier])}
+        if "ids" in variables:
+            self.graphql_routes[location, "history"] += 1
+            ids = [int(value.removeprefix("deployment-")) for value in variables["ids"]]
+            return {"nodes": [self._node(self.deployments[identifier]) for identifier in ids]}
         order = re.search(r"field:\s*CREATED_AT,\s*direction:\s*DESC", query)
         if f"{variables['owner']}/{variables['name']}" != REPOSITORY or order is None:
             raise AssertionError("Deployment query must request newest first")
@@ -849,7 +853,10 @@ class PatchHttpBaselineTests(unittest.TestCase):
             short_total, long_total = _summary(short)[location], _summary(long)[location]
             self.assertEqual({key: value for key, value in short_total.items() if key != "http_ns"},
                              {key: value for key, value in long_total.items() if key != "http_ns"})
+            self.assertNotIn("history", short["routes"][location]["graphql"])
             self.assertGreater(_summary(first)[location]["base_graphql"], short_total["base_graphql"])
+        self.assertEqual(first["routes"]["runner"]["graphql"].get("history"), 4)
+        self.assertEqual(first["routes"]["vps"]["graphql"].get("history"), 2)
         for result in (short, long, first, ready, lost_reply):
             self.assertEqual(result["status_writes"], ["in_progress", "success"])
             self.assertEqual(result["posts"].count("/deployments"), 1)
