@@ -231,7 +231,7 @@ def open_http(request: Request, *, timeout: int, fallback=urlopen,
 
 
 class GitHub:
-    """Читает REST API репозитория с token или без него для публичных данных."""
+    """Читает данные репозитория через REST и GraphQL GitHub."""
 
     def __init__(self, repository: str, token: str, *, allow_anonymous: bool = False) -> None:
         """Сохраняет проверенные реквизиты API.
@@ -267,6 +267,29 @@ class GitHub:
         url = self.root + path
         if parameters:
             url += "?" + urlencode(parameters)
+        return self._json(url, path, page="page" in parameters)
+
+    def graphql(self, query: str, **variables: str) -> dict:
+        """Выполняет запрос чтения и отклоняет частичный ответ GraphQL.
+
+        Args:
+            query: Документ GraphQL с операцией чтения.
+            **variables: Значения переменных операции.
+
+        Returns:
+            Объект data полного ответа.
+
+        Raises:
+            ControllerError: GitHub не подтвердил выполнение запроса целиком.
+        """
+        body = json.dumps({"query": query, "variables": variables}).encode()
+        result = self._json("https://api.github.com/graphql", "graphql", body=body)
+        if not isinstance(result, dict) or "errors" in result or not isinstance(result.get("data"), dict):
+            raise ControllerError("Получен неполный ответ GitHub GraphQL")
+        return result["data"]
+
+    def _json(self, url: str, path: str, *, page: bool = False, body: bytes | None = None) -> object:
+        """Отправляет измеряемый запрос и читает JSON."""
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -274,9 +297,11 @@ class GitHub:
         }
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
-        request = Request(url, headers=headers)
+        if body is not None:
+            headers["Content-Type"] = "application/json"
+        request = Request(url, headers=headers, data=body)
         try:
-            with open_http(request, timeout=20, fallback=urlopen, page="page" in parameters) as response:
+            with open_http(request, timeout=20, fallback=urlopen, page=page) as response:
                 return json.load(response)
         except Exception as error:
             raise ControllerError(f"GitHub API недоступен: {path}: {error}") from error

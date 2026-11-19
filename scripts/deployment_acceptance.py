@@ -21,6 +21,19 @@ OWNER_ID = 42288695
 OWNER_LOGIN = "karateka-git"
 # Единственный выпуск, принятый до появления записи Deployments.
 LEGACY_INSTALLATION_VERSION = "v3.2.0"
+# REST нужен только для числовых ID и реквизитов записи с известным GraphQL ID.
+_MATCH_LIMIT = 10
+_LATEST = """query($owner:String!, $name:String!) {
+  repository(owner:$owner, name:$name) {
+    nameWithOwner
+    deployments(first:2, environments:["production"], orderBy:{field:CREATED_AT, direction:DESC}) {
+      totalCount nodes { id createdAt latestStatus { id } }
+    }
+  }
+}"""
+_EXACT = """query($id:ID!) {
+  node(id:$id) { ... on Deployment { id createdAt latestStatus { id } } }
+}"""
 
 
 class DeploymentAcceptanceError(RuntimeError):
@@ -53,6 +66,7 @@ class DeploymentRecord:
     state: DeploymentState
     status_id: int | None
     status_created_at: datetime | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,11 +178,7 @@ def _current_status(api: GitHub, deployment_id: int) -> DeploymentRecord:
         if status_id in ids:
             raise DeploymentAcceptanceError("Дубликат статуса Deployment")
         ids.add(status_id)
-        created_at = candidate.get("created_at")
-        try:
-            created = datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ")
-        except (TypeError, ValueError) as error:
-            raise DeploymentAcceptanceError("Некорректная дата статуса Deployment") from error
+        created = _timestamp(candidate.get("created_at"))
         dated.append((created, status_id, candidate))
     newest = max(item[0] for item in dated)
     latest = [item for item in dated if item[0] == newest]
@@ -176,15 +186,94 @@ def _current_status(api: GitHub, deployment_id: int) -> DeploymentRecord:
     # При одинаковой точности timestamp невозможно доказать, какой статус текущий.
     if len(latest) != 1:
         raise DeploymentAcceptanceError("Неоднозначный текущий статус Deployment")
-    status = latest[0][2]
+    return _parse_status(deployment_id, latest[0][2])
+
+
+def _timestamp(value: object) -> datetime:
+    """Проверяет время UTC, используемое GitHub для Deployments."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError) as error:
+        raise DeploymentAcceptanceError("Некорректная дата Deployment или статуса") from error
+
+
+def _parse_status(deployment_id: int, status: dict) -> DeploymentRecord:
+    """Сверяет доверенного автора и распознаёт состояние текущего статуса."""
     if not isinstance(status, dict) or status.get("environment") != ENVIRONMENT:
         raise DeploymentAcceptanceError("Статус относится к другому окружению")
     _owner(status.get("creator"), "статуса Deployment")
-    status_id = latest[0][1]
+    status_id = _positive(status.get("id"), "статуса Deployment")
     value = status.get("state")
     known = {item.value for item in DeploymentState if item not in (DeploymentState.MISSING, DeploymentState.UNKNOWN)}
     state = DeploymentState(value) if isinstance(value, str) and value in known else DeploymentState.UNKNOWN
-    return DeploymentRecord(deployment_id, state, status_id, newest)
+    return DeploymentRecord(deployment_id, state, status_id, _timestamp(status.get("created_at")),
+                            status.get("description"))
+
+
+def _node_id(node: object, key: str = "id") -> str:
+    """Требует непрозрачный глобальный ID и сохраняет его без декодирования."""
+    if not isinstance(node, dict) or not isinstance(node.get(key), str) or not node[key]:
+        raise DeploymentAcceptanceError("Отсутствует глобальный ID GitHub")
+    return node[key]
+
+
+def _match_node(api: GitHub, path: str, node: dict | None, **filters: str) -> dict | None:
+    """Ищет известный глобальный ID в ограниченной REST-странице."""
+    page = api.get(path, page=1, per_page=_MATCH_LIMIT, **filters)
+    if not isinstance(page, list) or len(page) > _MATCH_LIMIT:
+        raise DeploymentAcceptanceError("Некорректная страница Deployments")
+    if node is None and not page:
+        return None
+    expected = _node_id(node)
+    matches = [row for row in page if _node_id(row, "node_id") == expected]
+    if len(matches) != 1:
+        raise DeploymentAcceptanceError("REST не подтвердил единственную запись GraphQL")
+    return matches[0]
+
+
+def _graph_status(api: GitHub, raw: dict, node: dict) -> DeploymentRecord:
+    """Связывает latestStatus GitHub с точным числовым ID REST."""
+    deployment_id, _ = _deployment(api, raw)
+    if (_node_id(node) != _node_id(raw, "node_id")
+            or _timestamp(node.get("createdAt")) != _timestamp(raw.get("created_at"))
+            or "latestStatus" not in node):
+        raise DeploymentAcceptanceError("GraphQL не подтвердил реквизиты Deployment")
+    status = _match_node(api, f"/deployments/{deployment_id}/statuses", node["latestStatus"])
+    if status is None:
+        return DeploymentRecord(deployment_id, DeploymentState.MISSING, None)
+    return _parse_status(deployment_id, status)
+
+
+def _latest_production(api: GitHub) -> tuple[dict, DeploymentRecord]:
+    """Читает свежую попытку независимо от порядка строк REST."""
+    if api.repository != EXPECTED_REPOSITORY:
+        raise DeploymentAcceptanceError("Репозиторий Deployment не совпадает с проектом")
+    owner, name = api.repository.split("/")
+    repo = api.graphql(_LATEST, owner=owner, name=name).get("repository")
+    if not isinstance(repo, dict) or repo.get("nameWithOwner") != api.repository:
+        raise DeploymentAcceptanceError("GraphQL не подтвердил репозиторий")
+    connection = repo.get("deployments")
+    if not isinstance(connection, dict):
+        raise DeploymentAcceptanceError("Отсутствует список production Deployment")
+    nodes, count = connection.get("nodes"), connection.get("totalCount")
+    if (type(count) is not int or count < 1 or not isinstance(nodes, list)
+            or len(nodes) != min(2, count) or len({_node_id(node) for node in nodes}) != len(nodes)):
+        raise DeploymentAcceptanceError("Неполная или пустая выборка production Deployment")
+    node = nodes[0]
+    if len(nodes) == 2 and _timestamp(node.get("createdAt")) <= _timestamp(nodes[1].get("createdAt")):
+        raise DeploymentAcceptanceError("Неоднозначная последняя попытка production")
+    raw = _match_node(api, "/deployments", node, environment=ENVIRONMENT)
+    return raw, _graph_status(api, raw, node)
+
+
+def _exact_production(api: GitHub, deployment_id: int) -> tuple[dict, DeploymentRecord]:
+    """Подтверждает Deployment по числовому ID и читает его актуальный статус."""
+    raw = api.get(f"/deployments/{_positive(deployment_id, 'Deployment')}")
+    actual_id, _ = _deployment(api, raw)
+    if actual_id != deployment_id:
+        raise DeploymentAcceptanceError("GitHub вернул другую запись приёмки")
+    node = api.graphql(_EXACT, id=_node_id(raw, "node_id")).get("node")
+    return raw, _graph_status(api, raw, node)
 
 
 def _claimed_receipt(raw: dict) -> InstallationReceipt:
