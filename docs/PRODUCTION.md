@@ -31,7 +31,8 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 формат команды парсером установленного snapshot и вызывает
 `/usr/local/sbin/deploy-prod` с точными аргументами `--attempt` в очищенном
 окружении. Перед изменением доступа сверяйте права файлов, правило sudo и
-SHA snapshot. [Обновить controller snapshot](OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot)
+SHA snapshot. [Допустимая SSH-команда](OPERATIONS.md#проверить-ограниченный-ssh-вход-runner) ·
+[Обновить controller snapshot](OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot)
 
 ## Последний проверенный снимок 19.11.2026, 16:07 UTC
 
