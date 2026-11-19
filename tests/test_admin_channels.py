@@ -331,7 +331,7 @@ class AdminChannelsTest(unittest.TestCase):
         self.configure(str(self.owner_id))
         with create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
             self.assert_channel_menus(processor, {"/admin", "/settings", "/help"},
-                                      {"/admin", "Настройки", "Помощь"})
+                                      {"Администрирование", "Настройки", "Помощь"})
             for text in (self.telegram(processor, "/help")[0], self.vk(processor, "/help").messages[-1][1]):
                 self.assertIn("/admin", text)
                 self.assertIn("/settings", text)

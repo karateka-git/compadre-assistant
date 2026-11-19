@@ -52,6 +52,7 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, Sect
         enabled_by_default=True,
         requires_profile_access=True,
         private_chat_hint=_PRIVATE_CHAT_HINT,
+        display_name="Администрирование",
     )
 
     def __init__(self, cost_report: GetGatewayCostReport) -> None:

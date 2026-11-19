@@ -86,6 +86,18 @@ class ContextualHelpTest(unittest.TestCase):
         self.send("/cancel")
         self.assertNotIn("/cancel", self.send())
 
+    def test_settings_screen_keeps_manual_commands_in_help(self):
+        """В личном чате действия настроек видны на кнопках, а синтаксис — в справке."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                response = self.dispatcher.execute(_event("/settings", "101", channel))
+                self.assertEqual(response_text(response), "Настройки открыты. Профиль: Имя.")
+                commands = {action.command for action in response.suggested_actions}
+                help_text = self.send(channel=channel)
+                for command in ("/name", "/connect", "/capabilities", "/help", "/exit"):
+                    self.assertIn(command, commands)
+                    self.assertIn(command, help_text)
+
     def test_main_lists_entries_without_subject_commands(self):
         """Основной режим показывает входы, но не внутренние команды возможностей."""
         text = self.send()

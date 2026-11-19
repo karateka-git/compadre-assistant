@@ -124,7 +124,8 @@ class CapabilityCompositionTest(unittest.TestCase):
         self.assertIn("/enable obsidian", response_text(self.process("обычный текст")))
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
-        self.assertIn("включена", response_text(self.process("/enable obsidian", chat="settings-chat")))
+        self.assertIn("Личный доступ к возможности «Статьи в Obsidian» включён",
+                      response_text(self.process("/enable obsidian", chat="settings-chat")))
         self.assertNotIn("/enable obsidian", response_text(self.process("обычный текст")))
 
     def test_processor_closes_only_owned_process_clients(self) -> None:

@@ -187,7 +187,7 @@ class AiChannelsTest(unittest.TestCase):
             send("Тест", single_reply=False)
             reply, actions = send("/ai")
             self.assertIn("Режим ИИ включён", reply)
-            self.assertIn("/get_text_from_image", reply)
+            self.assertNotIn("/", reply)
             self.assertEqual(set(actions), {"Задать вопрос", "Извлечь текст с фото", "Выйти из режима"})
             self.assertEqual(send("обычный вопрос")[1], {})
 
@@ -196,7 +196,7 @@ class AiChannelsTest(unittest.TestCase):
                 with self.subTest(label=label):
                     reply, cancel = send(label, payload=actions[label])
                     self.assertIn(hint, reply)
-                    self.assertIn("/cancel", reply)
+                    self.assertNotIn("/", reply)
                     self.assertEqual(set(cancel), {"Отмена"})
                     stale, menu = send(label, payload=actions[label])
                     self.assertIn("кнопка меню устарела", stale)
@@ -691,9 +691,9 @@ class AiChannelsTest(unittest.TestCase):
                     send("Тест")
                     self.assertIn("войди в режим", send(command))
                     self.assertNotIn(command, photo("/ai"))
-                    self.assertIn(command, send("/ai"))
+                    self.assertNotIn("/", send("/ai"))
                     self.assertIn(command, send("/help"))
-                    self.assertIn(command, photo(command))
+                    self.assertIn("Извлечь текст с фото", photo(command))
                     if channel == "telegram":
                         self.assertIn("Пришли одно фото", self.press_action(
                             channel, processor, self.keyboard, "Извлечь текст с фото",
@@ -707,7 +707,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.assertEqual((len(downloads), len(requests)), (initial_downloads, initial_requests))
                     result = photo("/exit")
                     self.assertEqual(result, escape(transcription, quote=False) if channel == "telegram" else transcription)
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     self.assertIn("Пришли одно фото", send(command))
                     self.assertEqual(photo(), "На фото нет текста.")
                     send(command)
@@ -717,7 +717,7 @@ class AiChannelsTest(unittest.TestCase):
                         ))
                     else:
                         send("/cancel")
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     send(command)
                     # Обычное неподходящее значение не продлевает исходный срок.
                     timestamp += timedelta(minutes=9)
@@ -736,7 +736,7 @@ class AiChannelsTest(unittest.TestCase):
                     send("/enable ai", chat_id=8)
                     send(command)
                     self.assertIn("Не удалось прочитать фото", photo(file_id="broken"))
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     send(command)
                     self.assertIn("Не удалось распознать", photo())
                     self.assertIn("Введи один вопрос", send("/ask"))

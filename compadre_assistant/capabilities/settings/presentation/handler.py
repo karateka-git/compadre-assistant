@@ -137,7 +137,7 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         return CapabilityResult(response, CapabilityMode.ACTIVE)
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
-        """Открывает настройки и показывает текущий профиль и команды.
+        """Открывает настройки и показывает текущий профиль.
 
         Args:
             context: Контекст с зарегистрированным профилем.
@@ -153,16 +153,10 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
             )), CapabilityMode.COMPLETE)
         name = context.app_user.display_name or "имя ещё не задано"
         self._messenger_sections.pop(event.reply_address, None)
-        connection = ("Мессенджеры: ", code_span("/connect"), ".\n") if is_private_chat_address(
-            event.channel, event.external_user_id, event.chat_id,
-        ) else ()
-        return self._screen(context, event, IncomingResponse(compose_content(
-            "Настройки открыты. Профиль: ", name, ".\n"
-            "Изменить имя: ", code_span("/name"), ".\n",
-            *connection,
-            "Управлять возможностями: ", code_span("/capabilities"), ".\n"
-            "Все команды: ", code_span("/help"), ". На главную: ", code_span("/exit"), ".",
-        )))
+        content = compose_content("Настройки открыты. Профиль: ", name, ".")
+        if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            content = compose_content(content, "\nКоманды настроек: ", code_span("/help"), ".")
+        return self._screen(context, event, IncomingResponse(content))
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Передаёт распознанную команду настроек публичной операции ядра.

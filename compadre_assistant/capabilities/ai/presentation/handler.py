@@ -70,11 +70,8 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort, Section
             return CapabilityResult(IncomingResponse(text_content(
                 f"Используй /ai без аргументов. Затем отправь /ask или {_OCR_COMMAND} отдельным сообщением."
             ), ValueError("Аргументы команды входа в режим ИИ")))
-        return CapabilityResult(IncomingResponse(compose_content(
-            "Режим ИИ включён. Чтобы задать один вопрос, отправь ",
-            code_span("/ask <question>"), " или ", code_span("/ask"),
-            ". Чтобы получить текст с фото, отправь ", code_span(_OCR_COMMAND),
-            ". Чтобы выйти из режима, вызови ", code_span("/exit"), ".",
+        return CapabilityResult(IncomingResponse(text_content(
+            "Режим ИИ включён. Здесь можно задать вопрос или распознать текст на фото.",
         ), suggested_actions=_AI_ACTIONS))
 
     def section_actions(
@@ -104,17 +101,15 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort, Section
             Ответ, запрос ожидаемого ввода или подсказка с сохранением режима.
         """
         if event.images:
-            return CapabilityResult(IncomingResponse(compose_content(
-                "Чтобы получить текст с фото, вызови ", code_span(_OCR_COMMAND),
-                " и пришли фото следующим сообщением.",
+            return CapabilityResult(IncomingResponse(text_content(
+                "Выбери «Извлечь текст с фото» и пришли фото следующим сообщением.",
             ), suggested_actions=(_OCR_ACTION,)))
         parts = event.text.split(maxsplit=1)
         if parts and parts[0] == _OCR_COMMAND:
             return CapabilityResult(self._begin_ocr(context, event, parts[1] if len(parts) > 1 else ""))
         if not parts or parts[0] != "/ask":
-            return CapabilityResult(IncomingResponse(compose_content(
-                "Чтобы задать вопрос модели, отправь ", code_span("/ask <question>"),
-                " или ", code_span("/ask"), ".",
+            return CapabilityResult(IncomingResponse(text_content(
+                "Выбери «Задать вопрос» и пришли свой вопрос следующим сообщением.",
             ), suggested_actions=(_ASK_ACTION,)))
 
         question = parts[1] if len(parts) > 1 else ""
@@ -126,7 +121,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort, Section
             )
             return CapabilityResult(IncomingResponse(text_content(
                 "Введи один вопрос для модели следующим сообщением. "
-                "Ожидание действует 10 минут. Для отмены введи /cancel."
+                "Ожидание действует 10 минут."
             ), suggested_actions=_WAITING_ACTIONS))
         try:
             question = self._question.validate_question(question)
@@ -162,9 +157,8 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort, Section
             app_user_id=context.app_user.id, required_mode=self.descriptor.capability_id, accepts_images=True,
             value_label="фото для распознавания", retry_command=_OCR_COMMAND, cancel_only_menu=True,
         )
-        return IncomingResponse(compose_content(
-            "Пришли одно фото или скриншот следующим сообщением. Ожидание действует 10 минут. "
-            "Для отмены введи ", code_span("/cancel"), ".",
+        return IncomingResponse(text_content(
+            "Пришли одно фото или скриншот следующим сообщением. Ожидание действует 10 минут.",
         ), suggested_actions=_WAITING_ACTIONS)
 
     def _recognize(self, attachment: ImageAttachment, is_cancelled: Callable[[], bool]) -> IncomingResponse:
