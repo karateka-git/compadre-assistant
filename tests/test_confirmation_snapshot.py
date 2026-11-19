@@ -2,26 +2,45 @@
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
-from unittest.mock import Mock
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 import unittest
 
+import aiogram
+
+from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
+
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
-from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import ObsidianProposalConfirmationService
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import (
+    ObsidianConfirmationResult, ObsidianConfirmationStatus, ObsidianProposalConfirmationService,
+)
 from compadre_assistant.capabilities.obsidian.domain.reviews.entities import ObsidianProposalAction
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
+from compadre_assistant.core.data.sqlite.connection import connect_database
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
 from compadre_assistant.core.domain.users.entities import AppUser, IdentityRebindConfirmation, IncomingIdentity
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
-from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     ConfirmationAction, ConfirmationQueryResult, HandlerContext,
     PendingConfirmation, PendingConfirmationQueryPort,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
+from compadre_assistant.presentation.telegram.bot import _serialize_telegram_inline_keyboard
+from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
+from compadre_assistant.presentation.vk.rendering import render_vk_content
 from tests.capability_preference_helpers import MemoryCapabilityPreferences
 from tests.response_assertions import response_text
 from tests.test_incoming_boundary import FakeCapability, MemoryChatModes, _event, _private_event
-from tests.test_process_incoming_message import FakeArticleUrlUseCase, FakeVaultSelectionManager, _proposal as incoming_proposal
+from tests.test_process_incoming_message import (
+    FakeArticleUrlUseCase, FakeVaultSelectionManager, _proposal as incoming_proposal, _test_vault,
+)
 from tests.test_obsidian_proposal_repository import _database, _proposal
 from tests.test_user_identity_repository import _service as identity_service
 from tests.test_vault_selection import _service as vault_service, FakeGitHubRepositoryGateway
@@ -219,6 +238,28 @@ class ObsidianConfirmationSnapshotTest(unittest.TestCase):
         self.service.confirm.assert_not_called()
         self.assertTrue(self.manager.disconnect_pending)
 
+    def test_short_hint_uses_complete_snapshot_of_shown_actions(self):
+        """Только одно актуальное действие даёт подсказку о коротком ответе."""
+        event = _event("/obsidian")
+        context = HandlerContext(self.user)
+        response = self.handler.enter(context, event, "").response
+        self.assertIn("можно ответить «да»", response_text(response))
+        self.assertEqual(response.actions, self.query().confirmations[0].actions)
+
+        self.manager.disconnect_pending = True
+        response = self.handler.enter(context, event, "").response
+        self.assertNotIn("можно ответить «да»", response_text(response))
+        self.assertEqual(len(response.actions), 4)
+        self.assertIn("/confirm", {action.command for action in response.suggested_actions})
+
+        self.service.list_pending.side_effect = RuntimeError("offline")
+        with self.assertLogs("compadre_assistant.capabilities.obsidian.presentation.processing", level="ERROR"):
+            response = self.handler.enter(context, event, "").response
+        self.assertNotIn("можно ответить «да»", response_text(response))
+        self.assertEqual(tuple(action.command for action in response.actions),
+                         ("/confirm obsidian disconnect 1 1 yes", "/confirm obsidian disconnect 1 1 no"))
+        self.assertIn("/confirm", response_text(response))
+
     def test_missing_or_failing_service_preserves_known_actions(self):
         """Неполный снимок сохраняет команды, но запрещает короткое решение."""
         self.manager.disconnect_pending = True
@@ -275,6 +316,69 @@ class ObsidianConfirmationSnapshotTest(unittest.TestCase):
         dispatcher.execute(_event("да", chat="other"))
         self.service.list_pending.assert_not_called()
         self.service.confirm.assert_not_called()
+
+
+class ObsidianConfirmationChannelTest(unittest.TestCase):
+    """Сверяет привязку, ограничения подписей и точный ручной путь."""
+
+    def test_long_note_path_does_not_hide_decisions_and_partial_snapshot_keeps_commands(self):
+        """Длинный путь остаётся в тексте, а компактные действия проходят обе проекции."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel), TemporaryDirectory(prefix="obsidian-actions-") as directory:
+                database = Path(directory) / "app.db"
+                with connect_database(database) as connection:
+                    apply_migrations(connection)
+                    user = create_user_identity_service(connection).register_with_name(
+                        IncomingIdentity(channel, "101", "101"), display_name="Тест",
+                    )
+                    SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                        UserCapabilityPreference(user.id, "obsidian", True),
+                    )
+                path = "Vault/" + "Название длинной заметки " * 8 + ".md"
+                proposal = replace(incoming_proposal(), app_user_id=user.id, origin=PendingOrigin(channel, "101"),
+                                   article_id=2**63 - 1, action=ObsidianProposalAction.ADD,
+                                   target_path=path, proposed_markdown="# Статья")
+                service = Mock()
+                service.list_pending.return_value = (proposal,)
+                service.cancel.return_value = ObsidianConfirmationResult(ObsidianConfirmationStatus.CANCELLED)
+                vaults = FakeVaultSelectionManager(selected=_test_vault(user.id))
+                handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(),
+                                                 vault_selection_manager=vaults, obsidian_confirmation_service=service)
+                processor = ChannelMessageProcessor(database_path=database, capabilities=(handler,))
+                self.addCleanup(processor.close_deferred_actions)
+                event = IncomingEvent(channel, "101", "message", "/obsidian", "101")
+                response = processor(event)
+                self.assertIn(path, response_text(response))
+                report = processor(replace(event, text="/confirm"))
+                if channel == "telegram":
+                    keyboard = _serialize_telegram_inline_keyboard(report, aiogram)
+                    labels = [button.text for row in keyboard.inline_keyboard for button in row]
+                    render = render_telegram_content
+                else:
+                    keyboard = json.loads(_serialize_vk_inline_keyboard(report))
+                    labels = [button["action"]["label"] for row in keyboard["buttons"] for button in row]
+                    render = render_vk_content
+                self.assertEqual(labels, [f"Принять предложение №{proposal.article_id}",
+                                          f"Отменить запрос №{proposal.article_id}"])
+                self.assertTrue(all(len(label) <= 40 for label in labels))
+                token = report.bound_actions[1].token
+                foreign = processor.select_action(replace(event, chat_id="102", external_user_id="102"), token)
+                self.assertIn("больше недоступна", response_text(foreign))
+                service.cancel.assert_not_called()
+
+                with patch.object(vaults, "get_pending", side_effect=RuntimeError("offline")), self.assertLogs(
+                    "compadre_assistant.capabilities.obsidian.presentation.processing", level="ERROR",
+                ):
+                    report = processor(replace(event, text="/confirm"))
+                    self.assertEqual(report.bound_actions, ())
+                    command = f"/confirm obsidian proposal {proposal.id} {proposal.version} no"
+                    rendered = "".join(part.text for part in render(report.content, report.actions))
+                    self.assertIn(command, rendered)
+                    decided = processor(replace(event, text=command))
+                self.assertIn("Предложение отменено", response_text(decided))
+                service.cancel.assert_called_once_with(
+                    user.id, proposal_id=proposal.id, origin=proposal.origin, version=proposal.version,
+                )
 
 
 class ConfirmationSnapshotSQLiteTest(unittest.TestCase):

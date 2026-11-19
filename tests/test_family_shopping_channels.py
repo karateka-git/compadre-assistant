@@ -807,7 +807,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
 
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
-        no_family = ["Создать семью", "Вступить по коду"]
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
         home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
         shopping = ["Добавить", "Назад"]
         self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
@@ -831,6 +831,44 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._single_reply(lambda: self._press(self._actions(confirmation)["Отменить"], self.last_cmid), "Действие отменено")
         self._single_reply(lambda: self._menu_press("Выйти из режима"), "Режим этого чата завершён")
         self._single_reply(lambda: self._send("/family"), "Семья «Дом»", labels=home)
+
+    def test_shopping_to_invitation_and_members_keeps_inline_actions_with_new_bottom_menu(self) -> None:
+        """VK возвращает нижнее меню семьи вместе с подтверждёнными кнопками нового экрана."""
+        home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        for command, title, inline_labels in (
+            ("/family_invite", "Приглашение в семью «Дом»", ["Создать код", "Назад"]),
+            ("/family_members", "Участники семьи «Дом»", ["1. Лена", "Закрыть семью", "Назад"]),
+        ):
+            with self.subTest(command=command):
+                self._menu_press("Покупки")
+                self.assertEqual(list(self._visible_menu()), ["Добавить", "Назад"])
+                previous = len(self.calls)
+                self._send(command)
+                sent = [params for method, params in self.calls[previous:] if method == "messages.send"]
+                self.assertEqual(len(sent), 2)
+                self.assertIn(title, sent[0]["message"])
+                actions = self._actions(sent[0])
+                self.assertEqual(list(actions), inline_labels)
+                self.assertIn("/help", sent[1]["message"])
+                self.assertEqual(list(self._visible_menu()), home)
+                source = next(cmid for cmid, message in reversed(self.sent_messages.items()) if title in message["text"])
+                if command == "/family_invite":
+                    self._single_reply(lambda: self._press(actions["Создать код"], source), "Код:")
+                else:
+                    self._single_reply(lambda: self._press(actions["1. Лена"], source), "Владелец семьи «Дом».")
+
+    def test_join_retry_and_cancel_keep_the_same_waiting_input_path(self) -> None:
+        """Отмена по кнопке VK завершает ввод кода и возвращает начальное меню семьи."""
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
+        self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
+        self._single_reply(lambda: self._menu_press("Вступить по коду"), "/cancel", labels=["Отмена"])
+        self._single_reply(lambda: self._send("недействительный код"), "/cancel")
+        self.assertEqual(list(self._visible_menu()), ["Отмена"])
+        self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=no_family)
+        self._single_reply(lambda: self._send("другой текст"), "Семья")
 
     def test_family_menu_help_and_typed_help_preserve_shopping_context(self) -> None:
         """Кнопка VK открывает справку из семьи, а ручная команда не отменяет выбор."""

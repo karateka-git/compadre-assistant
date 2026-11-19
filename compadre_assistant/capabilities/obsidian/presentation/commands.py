@@ -49,13 +49,13 @@ def help_sections() -> tuple[HelpSection, ...]:
     return (
         HelpSection("Obsidian vault", (
             CapabilityCommand(ObsidianCommand.GITHUB_STATUS.value, (), "показать состояние локальной копии vault"),
-            CapabilityCommand(ObsidianCommand.GITHUB_SYNC.value, (), "проверить GitHub и синхронизировать vault"),
-            CapabilityCommand(ObsidianCommand.GITHUB_DISCONNECT.value, (), "отключить vault после подтверждения"),
+            CapabilityCommand(ObsidianCommand.GITHUB_SYNC.value, (), "проверить GitHub и синхронизировать подключённое хранилище"),
+            CapabilityCommand(ObsidianCommand.GITHUB_DISCONNECT.value, (), "отключить подключённое хранилище после подтверждения"),
         )),
         HelpSection("Статьи", (
             CapabilityCommand(ObsidianCommand.REANALYZE.value,
                               (CommandParameter("ID статьи", "<article_id>", False),),
-                              "выполнить анализ статьи повторно"),
+                              "повторить анализ своей статьи при подключённом хранилище и доступном ИИ"),
         )),
     )
 
@@ -69,7 +69,7 @@ def obsidian_descriptor() -> CapabilityDescriptor:
         CapabilityHelp(
             sections=help_sections(),
             instructions=(
-                "Подключение vault выполняется внутри этого режима.",
+                "Для подключения хранилища пришли ссылку на GitHub repository. Папку можно указать после ссылки.",
                 "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
             ),
         ),

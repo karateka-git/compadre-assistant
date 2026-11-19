@@ -9,22 +9,31 @@ from compadre_assistant.capabilities.ai.domain.errors import (
 )
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import ExtractImageText
-from compadre_assistant.core.presentation.incoming.events import ImageAttachment, ImageLoadError, IncomingEvent
+from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
+from compadre_assistant.core.presentation.incoming.events import ImageAttachment, ImageLoadError, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    CancellableAction, CapabilityCommand, CommandParameter, CapabilityDescriptor, CapabilityHelp, CapabilityResult, HandlerContext,
-    HelpSection,
-    IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
-    PendingInputResult, PendingInputOutcome, PendingInput, ReplyAction,
+    CANCEL_SECTION_ACTION, CancellableAction, CapabilityCommand, CapabilityDescriptor, CapabilityHelp,
+    CapabilityResult, CommandParameter, HandlerContext, HelpSection, IncomingCapabilityPort,
+    IncomingResponse, PendingInput, PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
+    ReplyAction, SectionActionsQueryPort,
 )
 
 
 _OCR_COMMAND = "/get_text_from_image"
 _OCR_INPUT_KIND = "ocr_image"
-_OCR_ACTION = ReplyAction("Извлечь текст с фото", _OCR_COMMAND)
+_ASK_ACTION = ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION)
+_OCR_ACTION = ReplyAction("Извлечь текст с фото", _OCR_COMMAND, scope=ActionScope.SECTION)
+_AI_ACTIONS = (
+    _ASK_ACTION, _OCR_ACTION,
+    ReplyAction("Выйти из режима", "/exit", scope=ActionScope.SECTION,
+                purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("main")),
+)
+_WAITING_ACTIONS = (CANCEL_SECTION_ACTION,)
 _QUESTION_RECEIPT = IncomingResponse(text_content("Вопрос принят. Готовлю ответ… Для отмены введи /cancel."))
 
 
-class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
+class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort, SectionActionsQueryPort):
     """Открывает режим ИИ для независимых вопросов и распознавания текста."""
 
     descriptor = CapabilityDescriptor(
@@ -66,7 +75,23 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             code_span("/ask <question>"), " или ", code_span("/ask"),
             ". Чтобы получить текст с фото, отправь ", code_span(_OCR_COMMAND),
             ". Чтобы выйти из режима, вызови ", code_span("/exit"), ".",
-        ), suggested_actions=(ReplyAction("Задать вопрос", "/ask"), _OCR_ACTION)))
+        ), suggested_actions=_AI_ACTIONS))
+
+    def section_actions(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
+    ) -> tuple[ReplyAction, ...]:
+        """Возвращает действия ИИ для проверенного состояния текущего чата.
+
+        Args:
+            app_user: Допущенный профиль.
+            address: Чат с активным режимом ИИ.
+            mode_revision: Проверенная ревизия режима.
+            pending: Проверенное ожидание, если оно действует.
+
+        Returns:
+            Действия режима или отмена в ожидании значения.
+        """
+        return _WAITING_ACTIONS if pending is not None and pending.cancel_only_menu else _AI_ACTIONS
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Принимает команду в активном режиме или подсказывает подходящее действие.
@@ -90,7 +115,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             return CapabilityResult(IncomingResponse(compose_content(
                 "Чтобы задать вопрос модели, отправь ", code_span("/ask <question>"),
                 " или ", code_span("/ask"), ".",
-            ), suggested_actions=(ReplyAction("Задать вопрос", "/ask"),)))
+            ), suggested_actions=(_ASK_ACTION,)))
 
         question = parts[1] if len(parts) > 1 else ""
         if not question.strip() and context.pending_inputs is not None:
@@ -102,7 +127,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             return CapabilityResult(IncomingResponse(text_content(
                 "Введи один вопрос для модели следующим сообщением. "
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
-            )))
+            ), suggested_actions=_WAITING_ACTIONS))
         try:
             question = self._question.validate_question(question)
         except EmptyQuestionError as error:
@@ -121,7 +146,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
                 )
             return CapabilityResult(IncomingResponse(
                 retry_content, error,
-                suggested_actions=(ReplyAction("Ввести вопрос заново", "/ask"),)
+                suggested_actions=(_ASK_ACTION,)
                 if context.pending_inputs is not None else (),
             ))
         return CapabilityResult(_QUESTION_RECEIPT, cancellable_action=self._question_action(question))
@@ -140,7 +165,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         return IncomingResponse(compose_content(
             "Пришли одно фото или скриншот следующим сообщением. Ожидание действует 10 минут. "
             "Для отмены введи ", code_span("/cancel"), ".",
-        ))
+        ), suggested_actions=_WAITING_ACTIONS)
 
     def _recognize(self, attachment: ImageAttachment, is_cancelled: Callable[[], bool]) -> IncomingResponse:
         """Преобразует результат распознавания в текст для исходного канала."""
@@ -201,7 +226,7 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
             if len(event.images) != 1:
                 return PendingInputResult(IncomingResponse(compose_content(
                     "Пришли одно фото или скриншот либо введи ", code_span("/cancel"), ".",
-                )), PendingInputOutcome.RETRY)
+                ), suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
             attachment = event.images[0]
             receipt = IncomingResponse(text_content("Фото получено. Распознаю текст. Для отмены введи /cancel."))
             return PendingInputResult(receipt, PendingInputOutcome.COMPLETE,
@@ -215,10 +240,10 @@ class AiCapability(IncomingCapabilityPort, PendingInputContinuationPort):
         except EmptyQuestionError as error:
             return PendingInputResult(IncomingResponse(text_content(
                 "Вопрос пуст. Отправь непустой вопрос ещё раз или введи /cancel."
-            ), error), PendingInputOutcome.RETRY)
+            ), error, suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
         except QuestionTooLongError as error:
             return PendingInputResult(IncomingResponse(text_content(
                 str(error) + " Сократи вопрос и отправь его ещё раз или введи /cancel."
-            ), error), PendingInputOutcome.RETRY)
+            ), error, suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
         return PendingInputResult(_QUESTION_RECEIPT, PendingInputOutcome.COMPLETE,
                                   cancellable_action=self._question_action(question))

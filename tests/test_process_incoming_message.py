@@ -933,6 +933,11 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(result.github_connection.authorization.user_code, "ABCD-EFGH")
         self.assertEqual(starter.app_user_ids, [42])
+        response = use_case.dispatcher.execute(_telegram_message("https://github.com/octocat/notes"))
+        self.assertIn("ABCD-EFGH", response_text(response))
+        self.assertIn("https://github.com/login/device", response_text(response))
+        self.assertEqual(tuple(action.url for action in response.suggested_actions),
+                         ("https://github.com/login/device",))
 
     def test_execute_reports_unconfigured_github_connector(self) -> None:
         """Repository URL сообщает об отключённой GitHub App конфигурации."""
