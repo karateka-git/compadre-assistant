@@ -164,7 +164,7 @@ def require_published_release(api: GitHub, receipt: InstallationReceipt) -> None
 
 
 def _published_release(api: GitHub, version: str, sha: str,
-                       kind: str | None = None) -> tuple[int, int | None, int | None]:
+                       kind: str | None = None, *, baseline=None) -> tuple[int, int | None, int | None]:
     """Читает точный immutable Release и удостоверяет его тег и манифест."""
     _version(version)
     if api.repository != EXPECTED_REPOSITORY or not SHA_PATTERN.fullmatch(sha):
@@ -176,6 +176,8 @@ def _published_release(api: GitHub, version: str, sha: str,
     if kind is None:
         kind = "emergency" if "Тип выпуска: аварийный" in body.splitlines() else "ordinary"
     tag_sha, _, annotation = _tag(api, version, allow_annotation=kind == "ordinary")
+    if baseline is not None and kind == "ordinary" and getattr(annotation, "baseline", None) != baseline:
+        raise InstallationTagError("База попытки не совпадает с аннотацией релизного тега")
     run_id = run_attempt = None
     if kind == "ordinary":
         manifest_sha, _, run_id, run_attempt = _manifest(body, version, api.repository)

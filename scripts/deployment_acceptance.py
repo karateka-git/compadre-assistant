@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from enum import Enum
+import os
+import re
 
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.deploy_prepare import SHA_PATTERN, VERSION_PATTERN
@@ -23,14 +25,15 @@ OWNER_LOGIN = "karateka-git"
 LEGACY_INSTALLATION_VERSION = "v3.2.0"
 # REST нужен только для числовых ID и реквизитов записи с известным GraphQL ID.
 _MATCH_LIMIT = 10
-_LATEST = """query($owner:String!, $name:String!) {
-  repository(owner:$owner, name:$name) {
-    nameWithOwner
+# До проверки прав CI/VPS установленный snapshot пользуется REST-контрактом v1.
+_DEFAULT_READER = "v1"
+_ORDERED = """
     deployments(first:2, environments:["production"], orderBy:{field:CREATED_AT, direction:DESC}) {
       totalCount nodes { id createdAt latestStatus { id } }
-    }
-  }
-}"""
+    }"""
+_LATEST = "query($owner:String!, $name:String!) { repository(owner:$owner,name:$name) {nameWithOwner " + _ORDERED + "} }"
+_FOR_COMMIT = """query($owner:String!, $name:String!, $sha:GitObjectID!) {
+  repository(owner:$owner,name:$name) { nameWithOwner object(oid:$sha) { ... on Commit { oid """ + _ORDERED + "} } } }"
 _EXACT = """query($id:ID!) {
   node(id:$id) { ... on Deployment { id createdAt latestStatus { id } } }
 }"""
@@ -94,6 +97,14 @@ def _positive(value: object, label: str) -> int:
     if type(value) is not int or value <= 0:
         raise DeploymentAcceptanceError(f"Некорректный ID {label}")
     return value
+
+
+def _reader_v2() -> bool:
+    """Проверяет выбранный доверенным процессом контракт чтения."""
+    mode = os.environ.get("COMPADRE_DEPLOYMENT_READER", _DEFAULT_READER)
+    if mode not in ("v1", "v2"):
+        raise DeploymentAcceptanceError("Неизвестный режим читателя Deployment")
+    return mode == "v2"
 
 
 def _owner(value: object, label: str) -> None:
@@ -246,23 +257,44 @@ def _graph_status(api: GitHub, raw: dict, node: dict) -> DeploymentRecord:
 
 def _latest_production(api: GitHub) -> tuple[dict, DeploymentRecord]:
     """Читает свежую попытку независимо от порядка строк REST."""
+    pair = _latest_for(api)
+    if pair is None:
+        raise DeploymentAcceptanceError("Отсутствует принятая база production")
+    return pair
+
+
+def _latest_for(api: GitHub, sha: str | None = None) -> tuple[dict, DeploymentRecord] | None:
+    """Читает свежую попытку всего окружения или точного коммита."""
     if api.repository != EXPECTED_REPOSITORY:
         raise DeploymentAcceptanceError("Репозиторий Deployment не совпадает с проектом")
     owner, name = api.repository.split("/")
-    repo = api.graphql(_LATEST, owner=owner, name=name).get("repository")
+    params = {"owner": owner, "name": name}
+    if sha is not None:
+        params["sha"] = sha
+    repo = api.graphql(_LATEST if sha is None else _FOR_COMMIT, **params).get("repository")
     if not isinstance(repo, dict) or repo.get("nameWithOwner") != api.repository:
         raise DeploymentAcceptanceError("GraphQL не подтвердил репозиторий")
-    connection = repo.get("deployments")
+    source = repo if sha is None else repo.get("object")
+    if not isinstance(source, dict) or (sha is not None and source.get("oid") != sha):
+        raise DeploymentAcceptanceError("GraphQL не подтвердил коммит")
+    connection = source.get("deployments")
     if not isinstance(connection, dict):
         raise DeploymentAcceptanceError("Отсутствует список production Deployment")
     nodes, count = connection.get("nodes"), connection.get("totalCount")
-    if (type(count) is not int or count < 1 or not isinstance(nodes, list)
+    if (type(count) is not int or count < 0 or not isinstance(nodes, list)
             or len(nodes) != min(2, count) or len({_node_id(node) for node in nodes}) != len(nodes)):
         raise DeploymentAcceptanceError("Неполная или пустая выборка production Deployment")
+    if not nodes:
+        return None
     node = nodes[0]
     if len(nodes) == 2 and _timestamp(node.get("createdAt")) <= _timestamp(nodes[1].get("createdAt")):
         raise DeploymentAcceptanceError("Неоднозначная последняя попытка production")
-    raw = _match_node(api, "/deployments", node, environment=ENVIRONMENT)
+    filters = {"environment": ENVIRONMENT}
+    if sha is not None:
+        filters["sha"] = sha
+    raw = _match_node(api, "/deployments", node, **filters)
+    if sha is not None and raw.get("sha") != sha:
+        raise DeploymentAcceptanceError("REST не подтвердил коммит попытки")
     return raw, _graph_status(api, raw, node)
 
 
@@ -272,8 +304,13 @@ def _exact_production(api: GitHub, deployment_id: int) -> tuple[dict, Deployment
     actual_id, _ = _deployment(api, raw)
     if actual_id != deployment_id:
         raise DeploymentAcceptanceError("GitHub вернул другую запись приёмки")
+    return raw, _exact_status(api, raw)
+
+
+def _exact_status(api: GitHub, raw: dict) -> DeploymentRecord:
+    """Читает текущий статус уже известной REST-записи без обхода истории."""
     node = api.graphql(_EXACT, id=_node_id(raw, "node_id")).get("node")
-    return raw, _graph_status(api, raw, node)
+    return _graph_status(api, raw, node)
 
 
 def _claimed_receipt(raw: dict) -> InstallationReceipt:
@@ -297,6 +334,82 @@ def _baseline_claim(raw: dict, sha: str) -> InstallationReceipt:
     return receipt
 
 
+@dataclass(frozen=True)
+class _Attempt:
+    """Сохраняет неизменные реквизиты начала установки до появления результата."""
+
+    schema_version: int
+    attempt_key: str
+    version: str
+    sha: str
+    kind: str
+    release_id: int
+    run_id: int
+    run_attempt: int
+    baseline: AcceptedBaseline
+
+
+def _attempt(raw: dict) -> _Attempt:
+    """Строго проверяет payload v2 и прямую ссылку на принятую базу."""
+    payload = raw.get("payload")
+    try:
+        fields = dict(payload)
+        fields["baseline"] = AcceptedBaseline(**fields["baseline"])
+        result = _Attempt(**fields)
+    except (TypeError, KeyError, ValueError) as error:
+        raise DeploymentAcceptanceError("Некорректный payload попытки v2") from error
+    if (not isinstance(payload, dict) or type(result.schema_version) is not int or result.schema_version != 2
+            or not isinstance(result.attempt_key, str) or not re.fullmatch(r"[1-9][0-9]*:[1-9][0-9]*", result.attempt_key)
+            or result.sha != raw["sha"] or not isinstance(result.version, str) or not VERSION_PATTERN.fullmatch(result.version)
+            or result.version == LEGACY_INSTALLATION_VERSION or result.kind not in ("ordinary", "emergency")
+            or result.baseline.deployment_id == raw["id"]):
+        raise DeploymentAcceptanceError("Реквизиты попытки v2 не подтверждены")
+    for value in (result.release_id, result.run_id, result.run_attempt):
+        _positive(value, "Release или попытки CI")
+    return result
+
+
+def _v1(raw: dict) -> bool:
+    """Разрешает старый разбор только для явной целочисленной версии 1."""
+    payload = raw.get("payload")
+    return isinstance(payload, dict) and type(payload.get("schema_version")) is int and payload["schema_version"] == 1
+
+
+def _check_attempt_release(api: GitHub, attempt: _Attempt) -> None:
+    """Связывает попытку с опубликованным SHA, Release, CI и базой обычного тега."""
+    try:
+        release, run, retry = _published_release(api, attempt.version, attempt.sha, attempt.kind, baseline=attempt.baseline)
+    except (DeploySelectionError, InstallationTagError, PublishError, ValueError) as error:
+        raise DeploymentAcceptanceError("Release попытки v2 не подтверждён") from error
+    if release != attempt.release_id or (run is not None and (run, retry) != (attempt.run_id, attempt.run_attempt)):
+        raise DeploymentAcceptanceError("Release или CI расходится с попыткой v2")
+
+
+def _v2_receipt(api: GitHub, attempt: _Attempt, record: DeploymentRecord) -> InstallationReceipt:
+    """Восстанавливает результат приёмки только из текущего доверенного success."""
+    description = record.description
+    if record.state is not DeploymentState.SUCCESS or not isinstance(description, str) or len(description) > 140:
+        raise DeploymentAcceptanceError("Нет результата свежей приёмки v2")
+    match = re.fullmatch(r"v1 gen=([0-9a-f]{32}) migration=([0-9]{4}_[a-z0-9_]+\.sql)", description)
+    if match is None:
+        raise DeploymentAcceptanceError("Некорректный результат приёмки v2")
+    result = InstallationReceipt(1, attempt.version, attempt.sha, attempt.kind, attempt.release_id,
+                                 attempt.run_id, attempt.run_attempt, match[1], match[2], "0" * 64)
+    _schema_evidence(result)
+    _check_attempt_release(api, attempt)
+    if expected_migration_at(api, attempt.sha) != result.migration:
+        raise DeploymentAcceptanceError("Миграция статуса расходится с коммитом")
+    return result
+
+
+def _selected(api: GitHub, raw: dict, record: DeploymentRecord) -> AcceptedBaseline:
+    """Подтверждает success указанной записи без следования по ссылкам."""
+    if _v1(raw):
+        return _accepted_baseline(api, _baseline_claim(raw, raw["sha"]), record)
+    receipt = _v2_receipt(api, _attempt(raw), record)
+    return AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
+
+
 def _accepted_baseline(api: GitHub, receipt: InstallationReceipt, record: DeploymentRecord) -> AcceptedBaseline:
     """Сверяет принятую запись с Release, тегом и миграцией точного коммита."""
     if record.state is not DeploymentState.SUCCESS or record.status_id is None:
@@ -310,7 +423,7 @@ def _accepted_baseline(api: GitHub, receipt: InstallationReceipt, record: Deploy
 
 @http_phase(HttpPhase.DEPLOYMENT_BASE)
 def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
-    """Выбирает последний доверенный текущий success по времени статуса.
+    """Выбирает принятую базу по контракту v1 или последней попытке v2.
 
     Args:
         api: Читающий GitHub-клиент репозитория выпуска.
@@ -324,6 +437,23 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
     """
     if api.repository != EXPECTED_REPOSITORY:
         raise DeploymentAcceptanceError("Репозиторий Deployment не совпадает с проектом")
+    bounded = _reader_v2()
+    if bounded:
+        raw, record = _latest_production(api)
+        if not _v1(raw):
+            if record.state is not DeploymentState.FAILURE:
+                return _selected(api, raw, record)
+            attempt = _attempt(raw)
+            base = attempt.baseline
+            if record.description != f"v1 restored={base.deployment_id}/{base.status_id}":
+                raise DeploymentAcceptanceError("Не подтверждён возврат на принятую базу")
+            _check_attempt_release(api, attempt)
+            previous, status = _exact_production(api, base.deployment_id)
+            if (_timestamp(previous.get("created_at")) >= _timestamp(raw.get("created_at"))
+                    or (not _v1(previous) and _attempt(previous).baseline.deployment_id == record.deployment_id)
+                    or status.status_id != base.status_id or _selected(api, previous, status) != base):
+                raise DeploymentAcceptanceError("Возврат не соответствует принятой базе")
+            return base
     ids: set[int] = set()
     shas: set[str] = set()
     accepted = []
@@ -334,7 +464,7 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
         ids.add(deployment_id)
         shas.add(sha)
         receipt = _baseline_claim(raw, sha)
-        record = _current_status(api, deployment_id)
+        record = _exact_status(api, raw) if bounded else _current_status(api, deployment_id)
         if record.state is DeploymentState.UNKNOWN:
             raise DeploymentAcceptanceError("Неизвестный текущий статус Deployment")
         if record.state is DeploymentState.SUCCESS:
@@ -371,6 +501,11 @@ def verify_accepted_baseline(api: GitHub, deployment_id: int, status_id: int) ->
         raise DeploymentAcceptanceError("Репозиторий Deployment не совпадает с проектом")
     _positive(deployment_id, "Deployment")
     _positive(status_id, "статуса Deployment")
+    if _reader_v2():
+        raw, record = _exact_production(api, deployment_id)
+        if record.status_id != status_id:
+            raise DeploymentAcceptanceError("Текущий статус выбранной базы изменился")
+        return _selected(api, raw, record)
     raw = api.get(f"/deployments/{deployment_id}")
     actual_id, sha = _deployment(api, raw)
     if actual_id != deployment_id:
@@ -396,7 +531,20 @@ def require_accepted_deployment(api: GitHub, receipt: InstallationReceipt) -> De
         ControllerError: GitHub API недоступен или список страниц неполон.
         DeploySelectionError: Immutable Release не подтвердился.
     """
-    record = read_deployment_record(api, receipt)
+    if _reader_v2():
+        pair = _latest_for(api, receipt.sha)
+        if pair is None:
+            raise DeploymentAcceptanceError("Запись приёмки отсутствует")
+        raw, record = pair
+        if _v1(raw):
+            observed = _baseline_claim(raw, receipt.sha)
+            _expected_payload(api, observed)
+        else:
+            observed = _v2_receipt(api, _attempt(raw), record)
+        if asdict(observed) | {"runtime_id": receipt.runtime_id} != asdict(receipt):
+            raise DeploymentAcceptanceError("Текущая приёмка расходится с Deployment")
+    else:
+        record = read_deployment_record(api, receipt)
     if record is None or record.state is not DeploymentState.SUCCESS:
         raise DeploymentAcceptanceError("Текущая приёмка GitHub Deployments не подтверждена")
     return record
@@ -428,20 +576,39 @@ def summarize_deployment(api: GitHub, version: str, sha: str, release_id: int,
         summary = build_summary(version, sha, release_id, run_id, run_attempt, expected_migration, None)
     except ValueError as error:
         raise DeploymentAcceptanceError("Исходные данные сводки SQLite не подтверждены") from error
-    records = api.pages("/deployments", sha=sha, task=TASK, environment=ENVIRONMENT)
-    if not records:
-        return summary | {"deployment_id": None, "deployment_status_id": None,
-                          "deployment_state": "absent"}
-    if len(records) != 1 or not isinstance(records[0], dict):
-        raise DeploymentAcceptanceError("Неоднозначная запись Deployments для сводки SQLite")
-    record_claim = _claimed_receipt(records[0])
+    if _reader_v2():
+        pair = _latest_for(api, sha)
+        if pair is None:
+            return summary | {"deployment_id": None, "deployment_status_id": None, "deployment_state": "absent"}
+        raw, record = pair
+        if _v1(raw):
+            record_claim = _baseline_claim(raw, sha)
+            _expected_payload(api, record_claim)
+        else:
+            attempt = _attempt(raw)
+            if ((attempt.version, attempt.sha, attempt.release_id) != (version, sha, release_id)
+                    or (run_id is not None and (attempt.run_id, attempt.run_attempt) != (run_id, run_attempt))):
+                raise DeploymentAcceptanceError("Попытка расходится с опубликованным Release")
+            if record.state is not DeploymentState.SUCCESS:
+                _check_attempt_release(api, attempt)
+                return summary | {"deployment_id": record.deployment_id, "deployment_status_id": record.status_id,
+                                  "deployment_state": record.state.value}
+            record_claim = _v2_receipt(api, attempt, record)
+    else:
+        records = api.pages("/deployments", sha=sha, task=TASK, environment=ENVIRONMENT)
+        if len(records) > 1 or (records and not isinstance(records[0], dict)):
+            raise DeploymentAcceptanceError("Неоднозначная запись Deployments для сводки SQLite")
+        if records:
+            record_claim = _claimed_receipt(records[0])
+            record = read_deployment_record(api, record_claim)
+            if record is None:
+                raise DeploymentAcceptanceError("Запись Deployments исчезла во время сверки")
+        else:
+            return summary | {"deployment_id": None, "deployment_status_id": None, "deployment_state": "absent"}
     if ((record_claim.version, record_claim.sha, record_claim.release_id, record_claim.migration)
             != (version, sha, release_id, expected_migration)
             or (run_id is not None and (record_claim.run_id, record_claim.run_attempt) != (run_id, run_attempt))):
         raise DeploymentAcceptanceError("Запись Deployments расходится с опубликованным Release")
-    record = read_deployment_record(api, record_claim)
-    if record is None:
-        raise DeploymentAcceptanceError("Запись Deployments исчезла во время сверки")
     result = summary | {"deployment_id": record.deployment_id, "deployment_status_id": record.status_id,
                         "deployment_state": record.state.value}
     if record.state is not DeploymentState.SUCCESS:
