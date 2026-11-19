@@ -1,15 +1,31 @@
 """Проекция публичного каталога в меню без зависимости от канала доставки."""
 
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion, ConfirmationQueryResult,
+    CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion,
+    ConfirmationQueryResult, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
 
 
 # Пока принятое действие занимает чат, только отмена может изменить его состояние.
 BUSY_COMMAND_MENU = CommandMenu((CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),))
+
+
+def main_actions(personal: PersonalCapabilityRegistry | None, pending: PendingInput | None) -> tuple[ReplyAction, ...]:
+    """Возвращает действия первого входа, ожидания или главного меню по допуску профиля."""
+    if pending is not None:
+        return (CANCEL_SECTION_ACTION,)
+    if personal is None:
+        return (ReplyAction("Создать профиль", "/register", scope=ActionScope.SECTION),
+                ReplyAction("У меня есть код", "/link", scope=ActionScope.SECTION))
+    return tuple(
+        ReplyAction(access.descriptor.display_name or access.descriptor.entry.name,
+                    access.descriptor.entry.name, scope=ActionScope.SECTION)
+        for access in personal.access if access.effective
+    ) + (ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),)
 
 
 def build_command_menu(

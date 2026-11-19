@@ -1,5 +1,10 @@
 """Представляет настройки через публичные операции ядра."""
 
+from dataclasses import replace
+
+from compadre_assistant.core.domain.users.entities import AppUser, is_private_chat_address
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope, SectionMenuDelivery
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.commands import (
     ChatCommand, ParsedChatCommand, PROFILE_COMMANDS,
 )
@@ -7,7 +12,7 @@ from compadre_assistant.core.presentation.incoming.events import IncomingEvent, 
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult,
     CommandParameter, ConfirmationQueryResult, HandlerContext, HelpSection, IncomingCapabilityPort,
-    IncomingResponse, PendingConfirmationQueryPort,
+    CANCEL_SECTION_ACTION, IncomingResponse, PendingConfirmationQueryPort, ReplyAction, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import code_span, compose_content
 
@@ -20,7 +25,7 @@ def _command(command: ChatCommand) -> CapabilityCommand:
     return CapabilityCommand(command.value, parameters, command.description)
 
 
-class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
+class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, SectionActionsQueryPort):
     """Открывает настройки профиля, связей каналов и личного выбора."""
 
     descriptor = CapabilityDescriptor(
@@ -38,6 +43,26 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
         profile_commands=PROFILE_COMMANDS,
     )
 
+    def section_actions(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
+    ) -> tuple[ReplyAction, ...]:
+        """Возвращает действия настроек личного чата либо отмену текущего ввода."""
+        if pending:
+            return (CANCEL_SECTION_ACTION,)
+        return tuple(ReplyAction(label, command, scope=ActionScope.SECTION) for label, command in (
+            ("Профиль", "/status"), ("Изменить имя", "/name"), ("Личные возможности", "/capabilities"),
+            ("Получить код", "/link_code"), ("Ввести код", "/link"), ("Помощь", "/help"), ("На главную", "/exit"),
+        ))
+
+    def _screen(self, context: HandlerContext, event: IncomingEvent, response: IncomingResponse) -> CapabilityResult:
+        if is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            pending = context.pending_inputs.get(event.reply_address) if context.pending_inputs is not None else None
+            actions = self.section_actions(context.app_user, event.reply_address, context.mode_revision or 0, pending)
+            screen = tuple(action for action in response.suggested_actions if action.scope == ActionScope.SCREEN)
+            response = replace(response, suggested_actions=(*screen, *actions),
+                               command_menu_delivery=SectionMenuDelivery.RECONCILE)
+        return CapabilityResult(response, CapabilityMode.ACTIVE)
+
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Открывает настройки и показывает текущий профиль и команды.
 
@@ -54,13 +79,13 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
                 "Используй ", code_span("/settings"), " без аргументов.",
             )), CapabilityMode.COMPLETE)
         name = context.app_user.display_name or "имя ещё не задано"
-        return CapabilityResult(IncomingResponse(compose_content(
+        return self._screen(context, event, IncomingResponse(compose_content(
             "Настройки открыты. Профиль: ", name, ".\n"
             "Изменить имя: ", code_span("/name"), ".\n"
             "Связать Telegram и VK: ", code_span("/link_code"), " или ", code_span("/link"), ".\n"
             "Управлять возможностями: ", code_span("/capabilities"), ".\n"
             "Все команды: ", code_span("/help"), ". На главную: ", code_span("/exit"), ".",
-        )), CapabilityMode.ACTIVE)
+        )))
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Передаёт распознанную команду настроек публичной операции ядра.
@@ -74,10 +99,10 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
         """
         parsed = ParsedChatCommand.parse(event.text.strip())
         if parsed is not None and parsed.command in PROFILE_COMMANDS and context.profile_operation is not None:
-            return CapabilityResult(context.profile_operation(parsed.command, parsed.arguments), CapabilityMode.ACTIVE)
-        return CapabilityResult(IncomingResponse(compose_content(
+            return self._screen(context, event, context.profile_operation(parsed.command, parsed.arguments))
+        return self._screen(context, event, IncomingResponse(compose_content(
             "Выбери команду настроек через ", code_span("/help"), ".",
-        )), CapabilityMode.ACTIVE)
+        )))
 
     def list_pending_confirmations(
         self, context: HandlerContext, origin: ReplyAddress,

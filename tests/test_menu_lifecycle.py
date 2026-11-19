@@ -54,7 +54,8 @@ class MenuLifecycleTest(unittest.TestCase):
     def assert_menu_matches_help(self, identity):
         """Сверяет выполнимые пункты меню с текущей текстовой справкой."""
         help_text = response_text(self.send(identity, "/help"))
-        for item in self.menu(identity).items:
+        menu = self.menu(identity)
+        for item in (menu.section_actions if identity.channel == "vk" else menu.items):
             with self.subTest(channel=identity.channel, command=item.command):
                 self.assertIn(item.command, help_text)
 
@@ -76,13 +77,13 @@ class MenuLifecycleTest(unittest.TestCase):
             user = service.resolve(self.telegram)
             code = service.create_link_code(user.id).code
         self.send(self.vk, "/link " + code)
-        self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).items))
+        self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assert_menu_matches_help(self.vk)
 
         self.send(self.telegram, "/selected")
         self.assertEqual(tuple(item.command for item in self.menu(self.telegram).items),
                          ("/exit",))
-        self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).items))
+        self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assert_menu_matches_help(self.telegram)
 
         def fail(_update):
@@ -96,18 +97,18 @@ class MenuLifecycleTest(unittest.TestCase):
         self.assertIn(ReplyAddress("vk", "202"), self.processor.menu_delivery_failures)
         self.assertIn("/exit", response_text(self.send(self.telegram, "/help", handler=fail)))
         self.processor.reconcile_menus(self.updates.append)
-        self.assertNotIn("/selected", tuple(item.command for item in self.menu(self.vk).items))
+        self.assertNotIn("/selected", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assertIn("/exit", tuple(item.command for item in self.menu(self.telegram).items))
         self.assert_menu_matches_help(self.telegram)
         self.assert_menu_matches_help(self.vk)
 
         self.send(self.vk, "/name")
-        self.assertIn("/cancel", tuple(item.command for item in self.menu(self.vk).items))
+        self.assertIn("/cancel", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assert_menu_matches_help(self.vk)
         restarted = ChannelMessageProcessor(database_path=self.database_path,
                                             capabilities=(self.capability,))
         restarted.reconcile_menus(self.updates.append)
-        self.assertNotIn("/cancel", tuple(item.command for item in self.menu(self.vk).items))
+        self.assertNotIn("/cancel", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assertIn("/exit", tuple(item.command for item in self.menu(self.telegram).items))
 
     def test_confirmation_menu_tracks_complete_snapshot_and_text_path(self):

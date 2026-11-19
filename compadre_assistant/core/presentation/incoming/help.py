@@ -86,6 +86,7 @@ def format_contextual_help(
             line("Возможности:" if available else "Сейчас нет доступных возможностей.")
             for item in available:
                 entry(item.descriptor.entry, one_shot=not item.descriptor.persistent_mode)
+            command("/help", ChatCommand.HELP.description)
     if pending is not None and not registration:
         label = pending.value_label
         if pending.owner_id == "core":

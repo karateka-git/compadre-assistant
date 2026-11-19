@@ -8,10 +8,10 @@ import logging
 
 from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
 from compadre_assistant.core.presentation.incoming.commands import PROFILE_COMMANDS, ChatCommand, ParsedChatCommand
-from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, SectionMenuDelivery
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
-from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
+from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu, main_actions
 from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, CancellableAction, ConfirmationAction, BackgroundReply,
     CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
@@ -374,6 +374,8 @@ class IncomingMessageDispatcher:
         command, *arguments = text.split()
         if command == "/cancel":
             return context.pending_request_id is not None
+        if context.app_user_id is None:
+            return command in {"/register", "/link", "/help"} and not arguments
         effective = {identifier for identifier, server, enabled, allowed in context.access
                      if server and enabled and allowed}
         owner = self._registry.mode_command_owner(command)
@@ -490,24 +492,36 @@ class IncomingMessageDispatcher:
             except Exception:
                 LOGGER.exception("Could not read command menu before incoming action")
 
+        pending_before = self._pending_inputs.get(event.reply_address)
         result = self._execute(event, completion_handler)
         if isinstance(result, IncomingResponse):
             response = result
         else:
-            suggested_actions = (
-                (ReplyAction("Посмотреть команды", "/help"),)
-                if result.type in {IncomingMessageResultType.REGISTRATION_NAME_SAVED,
-                                   IncomingMessageResultType.MODE_EXITED}
-                else ()
-            )
+            suggested_actions = ()
+            if result.type in {
+                IncomingMessageResultType.START_UNREGISTERED, IncomingMessageResultType.UNKNOWN_IDENTITY,
+                IncomingMessageResultType.START_REGISTERED, IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
+                IncomingMessageResultType.REGISTRATION_NAME_SAVED, IncomingMessageResultType.MODE_EXITED,
+                IncomingMessageResultType.MODE_HINT, IncomingMessageResultType.LINKED,
+            } and is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+                personal = self._personal_registry(result.app_user, event) if result.app_user else None
+                suggested_actions = main_actions(personal, self._pending_inputs.get(event.reply_address))
             response = IncomingResponse(
                 format_incoming_message_result(result), result.error,
                 suggested_actions=suggested_actions,
-                command_menu_delivery=("prefer" if result.type is IncomingMessageResultType.MODE_EXITED
-                                       and previous_menu is not None
-                                       and (previous_menu.section_actions is not None
-                                            or any(item.label is not None for item in previous_menu.items)) else None),
+                command_menu_delivery=SectionMenuDelivery.RECONCILE,
             )
+        if (pending_before is not None and pending_before.owner_id == "core"
+                and not response.suggested_actions and not response.actions
+                and (not event.text.lstrip().startswith("/") or event.text.strip() == "/cancel" or event.menu_choice)
+                and is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):
+            try:
+                menu, _ = self._command_menu_snapshot(event, cleanup_pending=False)
+                if menu.section_actions is not None:
+                    response = replace(response, suggested_actions=menu.section_actions,
+                                       command_menu_delivery=SectionMenuDelivery.RECONCILE)
+            except Exception:
+                LOGGER.exception("Could not refresh actions after profile input")
         if menu_update_handler is not None:
             # Действие могло занять чат между снимком меню и повторным допуском.
             if result is _DEFERRED_CANCELLED_REPLY:
@@ -857,7 +871,13 @@ class IncomingMessageDispatcher:
         if command is ChatCommand.CAPABILITIES:
             if arguments:
                 return IncomingResponse(compose_content('Используй ', code_span('/capabilities'), ' без аргументов.'))
-            return IncomingResponse(text_content(self._capability_catalog(personal)))
+            actions = []
+            configurable = tuple(item for item in personal.visible_access if item.descriptor.personally_configurable)
+            if any(item.server_available and not item.user_enabled for item in configurable):
+                actions.append(ReplyAction("Включить возможность", "/enable"))
+            if any(item.user_enabled for item in configurable):
+                actions.append(ReplyAction("Выключить возможность", "/disable"))
+            return IncomingResponse(text_content(self._capability_catalog(personal)), suggested_actions=tuple(actions))
         if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
             return self._change_capability(command, arguments, user, event, personal, required_mode=mode_id)
         if command is ChatCommand.LINK:
@@ -911,7 +931,7 @@ class IncomingMessageDispatcher:
         )
         return IncomingResponse(text_content(
             "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
-        ))
+        ), suggested_actions=(CANCEL_SECTION_ACTION,))
 
     def _link_identity(self, code: str, identity: IncomingIdentity) -> ProcessIncomingMessageResult | IncomingResponse:
         """Применяет код одинаково для прямой команды и ожидаемого значения."""
@@ -1165,12 +1185,14 @@ class IncomingMessageDispatcher:
                 command_text = f"{command.value} {descriptor.capability_id}"
                 detail = command_text if descriptor.display_name else descriptor.entry.description
                 option_lines.append(f"{label} — {detail}")
-                actions.append(ReplyAction(f"{action} {label}", command_text))
+                actions.append(ReplyAction(f"{action} {label}", command_text, purpose=ActionPurpose.SELECTION))
             options = "\n".join(option_lines)
+            private = is_private_chat_address(event.channel, event.external_user_id, event.chat_id)
             return IncomingResponse(text_content(
                 f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
                 "Ожидание действует 10 минут. Для отмены введи /cancel."
-            ), suggested_actions=tuple(actions))
+            ), suggested_actions=tuple(actions) if private else (),
+                view=ResponseView("profile-capability-choice") if private else None)
         if len(parts) != 1:
             return IncomingResponse(text_content(
                 "Значение не принято. Введи один ID из предложенного списка ещё раз или введи /cancel."
@@ -1463,6 +1485,9 @@ class IncomingMessageDispatcher:
             return CommandMenu(menu_items), True
         complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
         menu = build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help)
+        if (pending is None and section_actions is not None and any(action.command == "/help" for action in section_actions)
+                and not any(item.command == "/help" for item in menu.items)):
+            menu = replace(menu, items=(*menu.items, CommandSuggestion("/help", ChatCommand.HELP.description)))
         return replace(menu, section_actions=section_actions), complete
 
     def _command_context(
@@ -1498,6 +1523,10 @@ class IncomingMessageDispatcher:
         )
         mode_id = personal.visible_mode(mode.capability_id) if personal is not None and mode else None
         section_actions = None
+        if include_menu and active is None and is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
+            section_actions = main_actions(personal, valid_pending)
+            if mode_id and valid_pending is None:
+                section_actions = (ReplyAction("На главную", "/exit", scope=ActionScope.SECTION), *section_actions)
         if (include_menu and user is not None and mode is not None
                 and isinstance(active, SectionActionsQueryPort)
                 and is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):

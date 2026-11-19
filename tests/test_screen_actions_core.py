@@ -101,18 +101,22 @@ class ScreenActionsCoreTest(unittest.TestCase):
             self.processor.section_actions(self.event)
         self.owner.read_error = None
         self.processor(replace(self.event, text="/exit"))
-        self.assertIsNone(self.processor.section_actions(self.event))
+        self.assertIn("/selected", {action.command for action in self.processor.section_actions(self.event)})
 
     def test_unknown_foreign_and_revoked_context_do_not_query_owner(self):
         """Нижнее меню не раскрывается чужому автору или недоступному режиму."""
-        for event in (replace(self.event, external_user_id="other"),
-                      replace(self.event, chat_id="2002", external_user_id="2002")):
-            self.assertIsNone(self.processor.section_actions(event))
+        self.assertIsNone(self.processor.section_actions(replace(self.event, external_user_id="other")))
+        unknown = replace(self.event, chat_id="2002", external_user_id="2002", text="/start")
+        first = self.processor.section_actions(unknown)
+        self.assertEqual([action.command for action in first], ["/register", "/link"])
+        welcome = self.processor(unknown)
+        self.assertEqual(welcome.suggested_actions, first)
+        self.assertEqual([action.label for action in welcome.bound_actions], ["Создать профиль", "У меня есть код"])
         self.assertEqual(self.owner.reads, [])
         self.processor(replace(self.event, text="/settings"))
         self.processor(replace(self.event, text="/disable selected"))
         self.owner.reads.clear()
-        self.assertIsNone(self.processor.section_actions(self.event))
+        self.assertIn("/status", {action.command for action in self.processor.section_actions(self.event)})
         self.assertEqual(self.owner.reads, [])
 
     def test_query_filters_unknown_owner_and_direct_confirmation_and_rejects_screen_scope(self):
@@ -128,6 +132,20 @@ class ScreenActionsCoreTest(unittest.TestCase):
         self.owner.available = (ReplyAction("Выбор", "/choose first"),)
         with self.assertRaisesRegex(ValueError, "belonging to a screen"):
             self.processor.section_actions(self.event)
+
+    def test_profile_choice_requires_delivered_message_and_current_request(self):
+        """Старый выбор доступа не исполняется до доставки и после отмены."""
+        self.processor(replace(self.event, text="/settings"))
+        choice = self.processor(replace(self.event, text="/disable"))
+        button = next(action for action in choice.bound_actions if action.purpose == ActionPurpose.SELECTION)
+        press = replace(self.event, callback_message_id="42")
+        self.assertIn("недоступна", response_text(self.processor.select_action(press, button.token)))
+        self.assertTrue(choice.view_delivery.start())
+        choice.view_delivery.finish("42")
+        self.processor(replace(self.event, text="/cancel"))
+        self.assertIn("недоступна", response_text(self.processor.select_action(press, button.token)))
+        self.processor(replace(self.event, text="/disable"))
+        self.assertIn("выключена", response_text(self.processor(replace(self.event, text="selected"))))
 
     def test_menu_label_executes_current_command_and_rejects_removed_action(self):
         """Подпись не исполняется как текст; исчезнувшее действие не запускается."""

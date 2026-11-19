@@ -1,6 +1,7 @@
 """Проверяет небольшие следующие действия и их ручной текстовый путь."""
 
 import unittest
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,23 +22,25 @@ from tests.test_process_incoming_message import _test_vault
 class ReplySuggestionsTest(unittest.TestCase):
     """Проверяет сценарии ядра, Ask и Obsidian без копирования меню."""
 
-    def test_registration_and_mode_exit_offer_only_help(self) -> None:
-        """Оба перехода дают исполнимую справку с видимой командой."""
+    def test_registration_and_mode_exit_offer_accessible_entries_and_help(self) -> None:
+        """Оба перехода показывают те же доступные входы и справку."""
         fixture = ContextualHelpTest()
         fixture.setUp()
         user = AppUser(23, "Имя")
         fixture.identity.resolve.side_effect = [None, None, user, user, user]
         fixture.identity.register_with_name.return_value = user
 
-        fixture.dispatcher.execute(_event("/register"))
-        registered = fixture.dispatcher.execute(_event("Имя"))
-        self.assertEqual(registered.suggested_actions, (ReplyAction("Посмотреть команды", "/help"),))
+        event = replace(_event("/register", "123"), external_user_id="123")
+        fixture.dispatcher.execute(event)
+        registered = fixture.dispatcher.execute(replace(event, text="Имя"))
+        self.assertEqual({action.command for action in registered.suggested_actions},
+                         {"/obsidian", "/ai", "/other", "/settings", "/help"})
         self._assert_command_visible_in_channels(registered, "/help")
 
         fixture.identity.resolve.side_effect = None
         fixture.identity.resolve.return_value = user
-        exited = fixture.dispatcher.execute(_event("/exit"))
-        self.assertEqual(exited.suggested_actions, (ReplyAction("Посмотреть команды", "/help"),))
+        exited = fixture.dispatcher.execute(replace(event, text="/exit"))
+        self.assertEqual(exited.suggested_actions, registered.suggested_actions)
         self._assert_command_visible_in_channels(exited, "/help")
         self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
 

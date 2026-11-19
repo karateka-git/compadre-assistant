@@ -439,9 +439,9 @@ class ChannelMessageProcessor:
                     event = replace(event, external_user_id=current.external_user_id)
                 elif event.external_user_id != current.external_user_id:
                     return None
-            elif read_only or not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
+            elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
                 return None
-            else:
+            elif not read_only:
                 self._unregistered_menu_events[address] = event
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry, pending_inputs=self._pending_inputs,
