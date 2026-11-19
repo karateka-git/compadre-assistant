@@ -1,7 +1,7 @@
 # Production VPS
 
 Здесь находятся доступ, ограничения и **последний документированный снимок** VPS.
-Он зафиксирован 17.11.2026. Перед
+Он зафиксирован 19.11.2026. Перед
 любой работой повторно проверьте факты на VPS. Установка, диагностика, backup и
 восстановление описаны в [OPERATIONS.md](OPERATIONS.md), допуск версии — в
 [RELEASES.md](RELEASES.md).
@@ -22,16 +22,29 @@
 ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.142
 ```
 
-Для ручного выпуска из GitHub Actions нужен выделенный SSH-вход runner с
-отдельным ключом и заранее сверенным ключом VPS. Ограничьте этот вход
-штатным root-wrapper `/usr/local/sbin/deploy-prod`. Через `sudo -n` разрешите
-только обычную установку по версии, `--verify-installed SHA` и
-`--cleanup-old SHA RUNTIME_ID` с точной версией. Произвольный shell, `env`,
-Python и другие режимы контроллера этому входу не предоставляйте. Перед
-первым запуском сверяйте права и установленный controller snapshot с
-[инструкцией GitHub Actions](OPERATIONS.md#выпустить-обычную-версию-из-github-actions).
+Для выпуска из GitHub Actions используется отдельная учётная запись
+`compadre-release` с выделенным ключом и заранее сверенным ключом VPS.
+Ограниченный ключ вызывает root-owned `/usr/local/libexec/compadre-release-entry`.
+Этот вход передаёт одну команду через stdin в
+`/usr/local/libexec/compadre-release-ssh`. Sudo разрешает учётной записи
+вызвать только этот dispatcher без аргументов. Dispatcher проверяет
+формат команды парсером установленного snapshot и вызывает
+`/usr/local/sbin/deploy-prod` с точными аргументами `--attempt` в очищенном
+окружении. Перед изменением доступа сверяйте права файлов, правило sudo и
+SHA snapshot. [Обновить controller snapshot](OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot)
 
-## Последний проверенный снимок 17.11.2026, после 11:09 UTC
+## Последний проверенный снимок 19.11.2026, 16:07 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск и допуск | Установлена `v4.2.5`, SHA `7aa730cd24ad71997a4097e43c47e68261522d15`. Immutable Release `451572990`. Полный CI `44558320565/1` подтвердил совместимость с `v4.2.4`. Первый Deployment v2 `7918397506` получил статус `22643154420` (`success`) в 16:02:38 UTC. Журнал VPS для попытки `44560296240:1` закрыт. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.5) · [Полный CI](https://github.com/karateka-git/compadre-assistant/actions/runs/44558320565/attempts/1) · [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7918397506/statuses) |
+| Контроллер | Snapshot и локальный policy pin `7b4629b4254df085fb54cbff1a088c9f4ee405e1`. GitHub использует тот же SHA в `COMPATIBILITY_POLICY_SHA` и `PRODUCTION_CONTROLLER_SHA`. Writer установлен в `v2`. |
+| SQLite и backup | Активное поколение `fd7495e834234c52ba9e650ece1675fa`, последняя миграция `0007_family.sql`. Подтверждены SHA-256, целостность и внешние ключи финальной копии, режим `0400` и выбор активной базы для планового backup. Файл прежнего поколения и его SQLite sidecars отсутствуют после штатной очистки. Сервис backup завершился успешно, таймер активен, следующий запуск 20.11 в 03:15 UTC. |
+| Каналы | Telegram и VK `healthy`, перезапусков 0. Основной сервис активен, `family` включена в обоих контейнерах. Квитанция работающего экземпляра совпала с сохранённым результатом выпуска. |
+| Длительность | Workflow занял 7 мин 18 с. Контроллер начал установку в 15:59:06.109 UTC и завершил в 16:01:55.544 UTC. В отчёте установки 169,435 с работы и 80,744 с простоя. [Журнал выпуска](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) |
+| Проверка владельцем | 19.11.2026 владелец подтвердил, что после выпуска `v4.2.5` оба бота ответили как обычно в Telegram и VK. |
+
+## Исторический снимок 17.11.2026, после 11:09 UTC
 
 | Область | Результат проверки |
 | --- | --- |

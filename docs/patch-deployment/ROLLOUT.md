@@ -70,15 +70,17 @@ wrapper и ограничения отдельного ключа runner. Опе
    В окружении `production-release` установить `PRODUCTION_CONTROLLER_SHA=M`.
    Проверить, что production runner получит код проверенного `main`,
    а фактически установленный snapshot равен pin.
-4. Настроить на отдельной учётной записи runner для его ключа
-   `restrict,command="/usr/bin/python3 -I /usr/local/lib/compadre-assistant-deploy/deploy/attempt-ssh.py"`
-   и ограниченный `sudo -n /usr/local/sbin/deploy-prod` для точной команды
-   `--attempt`. Сверить владельцев и права файлов. Убрать действующий
-   доступ runner через `compadre-release-entry` и его sudo-разрешение на
-   `compadre-release-ssh`. Исключить ручных писателей до открытия
-   приёмки. Повторить read-only
-   сверку текущей установки, обоих каналов, незанятой секции backup и
-   прав штатного GitHub read token.
+4. Под тем же `deploy.lock` установить dispatcher v2 для выделенной
+   учётной записи runner. Сохранить `restrict` и forced command
+   `/usr/local/libexec/compadre-release-entry`. Эта команда передаёт
+   исходную строку через stdin в root-owned `compadre-release-ssh`,
+   вызываемый через sudo без аргументов. Dispatcher проверяет команду
+   штатным парсером `deploy/attempt-ssh.py` из закрытого snapshot и
+   запускает wrapper только для точного `--attempt` в очищенном
+   окружении. Сверить владельцев и права файлов и отказ на старый
+   протокол. Исключить ручных писателей до открытия приёмки. Повторить
+   read-only сверку установки, обоих каналов, незанятой секции backup
+   и прав штатного GitHub read token. [Доступ на VPS](../PRODUCTION.md#доступ)
 
 ## Запустить согласованный первый PATCH
 
@@ -114,11 +116,11 @@ workflow уже обновлённых линий с возвращённым pi
 
 ## Результат чтения 19.11.2026
 
-Текущая вершина `release/4.2` совпала с commit тега последнего immutable
+Перед переключением вершина `release/4.2` совпала с commit тега immutable
 Release `v4.2.4` (`448512857`,
 `5edb92b7b0dbbaec0270889a8a34849eee77580c`). Открытых PR и
 выполняющихся либо ожидающих production runs на момент сверки не было.
-Подходящего следующего PATCH на вершине нет.
+Следующий PATCH появился после этой сверки.
 [Release v4.2.4](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.4)
 
 SSH администратора с проверкой host key и `sudo -n` на VPS прошли.
@@ -176,3 +178,47 @@ PR и их exact SHA предстоят штатные полные CI в GitHub
 `efe22a4f019e68a0436ee3d5e1825ab9248934e0` проверен её прежний полный CI
 с `v3.4.0` в качестве базы, с полным evidence в artifact `14015696076`.
 [Полный CI 43378457266/1](https://github.com/karateka-git/compadre-assistant/actions/runs/43378457266/attempts/1)
+
+## Результат первой выкладки v2 19.11.2026
+
+Парные PR прошли через `main` и `release/4.2`. Технический PATCH
+синхронизировал два workflow полного CI на линии `release/4.2`.
+Контроллер `7b4629b4254df085fb54cbff1a088c9f4ee405e1` прошёл полный
+CI `44557528623/1`. Кандидат `7aa730cd24ad71997a4097e43c47e68261522d15`
+прошёл полный CI `44558320565/1` с принятой базой `v4.2.4`.
+[PR main](https://github.com/karateka-git/compadre-assistant/pull/138) ·
+[PR release/4.2](https://github.com/karateka-git/compadre-assistant/pull/139) ·
+[CI main](https://github.com/karateka-git/compadre-assistant/actions/runs/44557528623/attempts/1) ·
+[CI кандидата](https://github.com/karateka-git/compadre-assistant/actions/runs/44558320565/attempts/1)
+
+В согласованном окне snapshot и локальный policy pin установили под
+существующим `deploy.lock`. Snapshot проверен по manifest на 75 файлов.
+Архив snapshot имел SHA-256
+`1927da3cbd84c4d30b79f18c06108be26a58005386062f163227bfac3f36e708`.
+Закрытый каталог snapshot требовал запуска парсера после перехода в root.
+Сохранили действующий ограниченный ключ и forced command
+`compadre-release-entry`. Root dispatcher `compadre-release-ssh`
+загружает штатный парсер v2 из snapshot и запускает wrapper в очищенном
+окружении. SHA-256 dispatcher
+`6be555b97a4f82c3d5edd3eb5af2eb9fa4e926d3535a2fccb1776b154c5f2f32`.
+До включения writer читатели и прямое чтение подтвердили одну базу
+`7851484607/22412109090`. Данные и два работающих канала оставались
+доступны при обновлении контроллера.
+
+Попытка `44560296240:1` опубликовала immutable Release `451572990`
+версии `v4.2.5` и записала Deployment v2 `7918397506`. GitHub
+подтвердил `in_progress` со статусом `22642834674` и `success` со
+статусом `22643154420`. Сохранённый D17 ссылается на `v4.2.4` и
+`7851484607/22412109090`.
+[Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.2.5) ·
+[Deployment и статусы](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7918397506/statuses)
+
+В 16:07 UTC независимая проверка под lock прочитала закрытый журнал с
+сохранёнными `create`, `in_progress`, `finish` и исходом `success`.
+Локальная квитанция, выбранная база и прямое чтение D18 штатным токеном
+совпали по выпуску, точному CI, поколению `fd7495e834234c52ba9e650ece1675fa`
+и миграции `0007_family.sql`. VPS подтвердил SHA-256, integrity и внешние
+ключи финальной копии, активное поколение для планового backup и завершённую
+очистку прежнего поколения. Telegram и VK здоровы, перезапусков 0. В тот же
+день владелец подтвердил обычные ответы обоих ботов в Telegram и VK.
+[Снимок VPS](../PRODUCTION.md) · [Замер выпуска](BASELINE.md#измерить-первую-production-выкладку-v2)
