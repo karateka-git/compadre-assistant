@@ -22,8 +22,8 @@ from compadre_assistant.capabilities.family.presentation.members import (
 )
 from compadre_assistant.capabilities.family.presentation.shopping import (
     ADD_COMMAND, BUY_COMMAND, CLEAR_BOUGHT_COMMAND, DELETE_COMMAND, SHOPPING_COMMAND,
-    ShoppingChoice, ShoppingSection, ShoppingSections, ShoppingSelection, parse_item_number, shopping_list,
-    shopping_notice, shopping_page,
+    ShoppingChoice, ShoppingSection, ShoppingSections, ShoppingSelection, choice_page_for_list, parse_item_number,
+    selection_page_size, shopping_list, shopping_notice, shopping_page, shopping_section_actions,
 )
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -54,13 +54,6 @@ _VK_FAMILY_MENU = (
     CommandSuggestion("/help", "показать справку о покупках", "Помощь"),
     CommandSuggestion("/exit", "выйти из режима семьи", "Выйти из режима"),
 )
-_VK_SHOPPING_MENU = (
-    CommandSuggestion(ADD_COMMAND, "добавить покупки", "Добавить"),
-    CommandSuggestion(BUY_COMMAND, "отметить купленными", "Купить"),
-    CommandSuggestion(DELETE_COMMAND, "удалить из списка", "Удалить"),
-)
-_VK_CLEAR_BOUGHT_MENU = CommandSuggestion(CLEAR_BOUGHT_COMMAND, "очистить купленное", "Очистить купленное")
-_VK_SHOPPING_BACK = CommandSuggestion(f"{SHOPPING_COMMAND} up", "вернуться на предыдущий экран", "Назад")
 
 
 class FamilyCapability(
@@ -232,14 +225,17 @@ class FamilyCapability(
                 return _VK_NO_FAMILY_MENU
             if not section.matches(family.id, actor.joined_at):
                 return _VK_FAMILY_MENU
-        actions = list(_VK_SHOPPING_MENU)
-        if section.bought_visible:
-            actions.append(_VK_CLEAR_BOUGHT_MENU)
-        for page, label in ((section.ordinary_page - 1, "Предыдущая страница"),
-                            (section.ordinary_page + 1, "Следующая страница")):
-            if 1 <= page <= section.ordinary_last_page:
-                actions.append(CommandSuggestion(f"{SHOPPING_COMMAND} page {page}", label, label))
-        return (*actions, _VK_SHOPPING_BACK)
+        # Прежнее нижнее меню открывает выбор даже при пустой группе и начинает с первой страницы.
+        items = []
+        for action in shopping_section_actions(replace(section, needed_visible=True)):
+            command = action.command
+            match command.split():
+                case [_, "choose", selection, _]:
+                    command = f"/{selection}"
+                case [_, "home"]:
+                    command = f"{SHOPPING_COMMAND} up"
+            items.append(CommandSuggestion(command, action.label, action.label))
+        return tuple(items)
 
     def reply_action_recovery_command(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
@@ -583,6 +579,10 @@ class FamilyCapability(
             case ["clear", _]:
                 items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=joined_at)
                 return self._show_shopping_list(context, address, section, items, page, update=True)
+            case ["choose", _, "buy" | "delete" as view]:
+                items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
+                choice_page = choice_page_for_list(page, selection_page_size(context.action_layout))
+                return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), choice_page)
             case ["pick", _, "buy" | "delete" as view, position_text, value]:
                 number = parse_item_number(value)
                 position = parse_item_number(position_text)
@@ -636,7 +636,8 @@ class FamilyCapability(
         self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection, items: tuple[ShoppingItem, ...],
         selection: ShoppingSelection, page: int, *, notice: str | None = None,
     ) -> IncomingResponse:
-        page, _, visible = shopping_page(items, page, selecting=True, vk_menu=section.vk_menu)
+        page_size = selection_page_size(context.action_layout, text_page_size=4 if section.vk_menu else 5)
+        snapshot = shopping_page(items, page, selection_size=page_size)
         update = not section.vk_menu or section.selection_open
         pending_inputs = context.pending_inputs
         if pending_inputs is None:
@@ -648,20 +649,23 @@ class FamilyCapability(
             if current is not section:
                 return self._open_shopping_hint()
             choice = None
-            if visible:
+            if snapshot.visible:
                 pending = pending_inputs.begin(
                     address, self.descriptor.capability_id, command, app_user_id=app_user_id,
                     required_mode=self.descriptor.capability_id, value_label="номер покупки", retry_command=command,
                     cancel_return_command=SHOPPING_COMMAND,
                 )
-                choice = ShoppingChoice(pending.request_id, selection, page,
-                                        tuple((position, item.number) for position, item in visible))
+                choice = ShoppingChoice(pending.request_id, selection, snapshot.number,
+                                        tuple((position, item.number) for position, item in snapshot.visible))
             selection_view = replace(section, choice=choice, selection_open=True)
             if not self._shopping_sections.replace(app_user_id, address, section, selection_view):
                 if choice is not None:
                     pending_inputs.clear(address, choice.request_id)
                 return self._open_shopping_hint()
-        return shopping_list(items, selection_view, page, update=update, selection=selection, choice=choice, notice=notice)
+        return shopping_list(
+            items, selection_view, update=update, selection=selection, selection_page=snapshot, choice=choice,
+            notice=notice,
+        )
 
     def _show_shopping_list(
         self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection, items: tuple[ShoppingItem, ...],

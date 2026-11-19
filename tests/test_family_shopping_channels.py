@@ -20,10 +20,15 @@ from compadre_assistant.bootstrap import (
 )
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.shopping import ManageShopping, ShoppingItem, ShoppingItemStatus
-from compadre_assistant.capabilities.family.presentation.shopping import ShoppingSection, shopping_list
+from compadre_assistant.capabilities.family.presentation.shopping import (
+    ShoppingSection, choice_page_for_list, selection_page_size, shopping_list, shopping_page, shopping_section_actions,
+)
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.action_contracts import (
+    ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination,
+)
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.presentation.telegram.bot import (
     _create_telegram_menu_update_handler, _register_handlers, safe_send_telegram_reply,
@@ -125,6 +130,52 @@ class ShoppingPageTest(unittest.TestCase):
         final = response_text(shopping_list(items, section, 2))
         self.assertIn("11. Товар 11\n\nПокупки с неизвестным состоянием\n1. Другой товар", final)
         self.assertNotIn("Куплено", final)
+
+    def test_section_actions_describe_availability_and_navigation(self) -> None:
+        """Обычный список описывает доступные действия по статусам и фактической странице."""
+        now = datetime.now(UTC)
+        section = ShoppingSection(1, 1, now)
+        empty = shopping_section_actions(section.ordinary_view((), 1))
+        self.assertEqual([action.label for action in empty], ["Добавить", "Назад"])
+        self.assertEqual(empty[-1].destination, ScreenDestination("family-home"))
+        bought = ShoppingItem(22, "Куплено", ShoppingItemStatus.BOUGHT, 1, now, None, None)
+        bought_only = shopping_section_actions(section.ordinary_view((bought,), 1))
+        self.assertEqual([action.label for action in bought_only], ["Добавить", "Очистить купленное", "Назад"])
+        needed = tuple(
+            ShoppingItem(number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
+            for number in range(1, 22)
+        )
+        actions = shopping_section_actions(section.ordinary_view(needed + (bought,), 2))
+        self.assertTrue(all(action.scope is ActionScope.SECTION for action in actions))
+        self.assertEqual([action.label for action in actions], [
+            "Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Следующая страница", "Назад",
+        ])
+        self.assertEqual(actions[1].command, "/family_shopping choose buy 2")
+        self.assertIs(actions[1].purpose, ActionPurpose.NAVIGATION)
+        self.assertEqual(actions[4].destination, ScreenDestination("shopping-list", 1))
+        self.assertEqual(actions[5].destination, ScreenDestination("shopping-list", 3))
+
+    def test_selection_capacity_preserves_positions_and_text_fallback(self) -> None:
+        """Размер зависит от обоих ограничений, а отсутствие кнопок допускает ручной номер."""
+        now = datetime.now(UTC)
+        items = tuple(
+            ShoppingItem(2 * number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
+            for number in range(1, 14)
+        )
+        variants = (
+            (ActionLayoutLimits(100, 100, 8, 64), 5, 3, (11, 12, 13)),
+            (ActionLayoutLimits(30, 6, 5, 40), 4, 3, (9, 10, 11, 12)),
+            (ActionLayoutLimits(6, 6, 5, 40), 3, 4, (10, 11, 12)),
+            (ActionLayoutLimits(), 5, 3, (11, 12, 13)),
+        )
+        for layout, expected_size, expected_page, numbers in variants:
+            with self.subTest(layout=layout):
+                size = selection_page_size(layout)
+                self.assertEqual(size, expected_size)
+                page = shopping_page(items, choice_page_for_list(2, size), selection_size=size)
+                self.assertEqual(page.number, expected_page)
+                self.assertEqual(tuple((position, item.number) for position, item in page.visible),
+                                 tuple((number, 2 * number) for number in numbers))
 
 
 class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
