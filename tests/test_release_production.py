@@ -12,12 +12,15 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.request import AbstractHTTPHandler
 
 from scripts import release_production as production
-from scripts.full_ci_controller import ControllerError
+from scripts.full_ci_controller import ControllerError, GitHub
 from scripts.github_publishing import PublishingError
+from scripts.publish_installation_tag import run_vps_command
 from scripts.select_deploy_release import SelectedRelease
 from tests.test_deployment_acceptance import RECEIPT, SHA, VERSION
+from tests.test_github_http_metrics import _response
 from tests.test_publish_deployment_acceptance import WritableGitHub
 
 
@@ -77,11 +80,12 @@ class ProductionReleaseTests(unittest.TestCase):
                 self.assertIn(error, stderr.getvalue())
         self.assertNotIn(RECEIPT.runtime_id, stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(_CLEANUP["old_host_path"], stdout.getvalue() + stderr.getvalue())
+        return stderr.getvalue()
 
     def _release(self, *, error=None, version=VERSION, sha=SHA):
         """Запускает CLI с параметрами обычной публикации."""
-        self._run("--release", "--change", "patch", "--notes-file", str(self.notes),
-                  error=error, version=version, sha=sha)
+        return self._run("--release", "--change", "patch", "--notes-file", str(self.notes),
+                         error=error, version=version, sha=sha)
 
     def test_creates_missing_release_before_install_and_cleanup(self) -> None:
         """Только 404 открывает публикацию, после которой читается точный Release."""
@@ -113,6 +117,57 @@ class ProductionReleaseTests(unittest.TestCase):
         self.assertNotIn(_DEPLOY, self.remote)
         self.assertEqual(self.remote[:3], [_VERIFY, _REMOVE, _VERIFY])
         self.assertEqual(len(self.api.posts), 2)
+
+    def test_relays_only_safe_ssh_http_reports_on_failure_and_resume(self) -> None:
+        """Получает отчёт даже при ненулевом коде SSH и повторной приёмке."""
+        operations = {_DEPLOY: "install", _VERIFY: "verify_installed", _REMOVE: "cleanup_old"}
+        phases = {_DEPLOY: "vps_prepare", _VERIFY: "vps_accept", _REMOVE: "vps_cleanup"}
+        failed = True
+
+        def execute_ssh(command, **options):
+            args = tuple(command[command.index("--") + 2:])
+            result = self._vps(args, **options)
+            is_failure = failed and args == _REMOVE
+            row = {"location": "vps", "phase": phases[args], "target": "github_api", "method": "GET",
+                   "attempts": 1, "pages": 0, "errors": int(is_failure), "elapsed_ns": 100}
+            report = {"schema_version": 1, "location": "vps", "operation": operations[args],
+                      "result": "failure" if is_failure else "success", "http": [row]}
+            invalid = report | {"http": [row | {"target": "SECRET_STORAGE_URL"}]}
+            stderr = (f"SECRET_OTHER_STDERR\ndeploy-http-metrics {json.dumps(report)}\n"
+                      f"deploy-http-metrics {json.dumps(invalid)}\n")
+            if is_failure:
+                raise subprocess.CalledProcessError(1, command, stderr=stderr)
+            result.stderr = stderr
+            return result
+
+        def select(api, version):
+            GitHub(api.repository, "fixture").get("/test")
+            return _RELEASE
+
+        def reports(stderr):
+            self.assertNotIn("SECRET", stderr)
+            prefix = "deploy-http-metrics "
+            return [json.loads(line.removeprefix(prefix)) for line in stderr.splitlines() if line.startswith(prefix)]
+
+        self.selected.side_effect = select
+        with (patch.object(production, "run_vps_command", run_vps_command),
+              patch.object(subprocess, "run", side_effect=execute_ssh),
+              patch.object(AbstractHTTPHandler, "do_open",
+                           side_effect=lambda connection, request, **options: _response(request, b"{}"))):
+            first = reports(self._release(error="Очистка SQLite не подтверждена"))
+            self.assertEqual([(report["operation"], report["result"]) for report in first],
+                             [("install", "success"), ("verify_installed", "success"),
+                              ("cleanup_old", "failure"), ("release", "failure")])
+            self.assertEqual(first[2]["http"][0]["errors"], 1)
+            self.assertEqual(first[-1]["http"][0]["phase"], "release_select")
+            failed = False
+            self.remote.clear()
+            resumed = reports(self._run("--resume"))
+
+        self.assertNotIn(_DEPLOY, self.remote)
+        self.assertEqual([report["operation"] for report in resumed],
+                         [operations[args] for args in self.remote] + ["resume"])
+        self.assertTrue(all(report["result"] == "success" for report in resumed))
 
     def test_fails_closed_on_api_error_or_release_mismatch(self) -> None:
         """403 и чужой SHA останавливают выпуск до публикации и SSH."""

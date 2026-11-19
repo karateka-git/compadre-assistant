@@ -99,9 +99,12 @@ class CleanupOldTests(unittest.TestCase):
                   patch.object(prep, "deploy_lock", return_value=nullcontext()) as lock,
                   patch.object(prep, "require_exact_tag")):
                 for _ in range(2):
-                    with redirect_stdout(StringIO()) as output:
+                    with redirect_stdout(StringIO()) as output, redirect_stderr(StringIO()) as metrics:
                         prod.main()
                     self.assertEqual(json.loads(output.getvalue()), switch.old_cleanup_record(state))
+                    self.assertEqual(len(output.getvalue().splitlines()), 1)
+                    self.assertEqual(json.loads(metrics.getvalue().removeprefix("deploy-http-metrics "))["operation"],
+                                     "cleanup_old")
                 deploy.assert_not_called()
                 lock.assert_called_with(host.state_dir, host.checkout)
             self.assertFalse(Path(state["old"]["host_path"]).exists())

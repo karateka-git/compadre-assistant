@@ -24,7 +24,7 @@ from scripts import deploy_database_switch as database_switch
 from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
-from scripts.full_ci_controller import GitHub
+from scripts.full_ci_controller import GitHub, HttpLocation, HttpPhase, http_phase
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
@@ -1092,7 +1092,8 @@ class Host:
                                           lambda work: self.migrate_copy(candidate_id, work))
         if not annotated:
             # Исторический допуск зависит от доступности artifact после миграции.
-            with metrics.stage("predeploy.evidence_recheck"), compatibility.check("SAFE_EVIDENCE_RECHECK"):
+            with (metrics.stage("predeploy.evidence_recheck"), http_phase(HttpPhase.VPS_RECHECK),
+                  compatibility.check("SAFE_EVIDENCE_RECHECK")):
                 if (compatibility.private_text(pin_path) != policy_sha
                         or compatibility.verify_evidence(api, selected, policy_sha, old_sha) != evidence):
                     raise compatibility.PredeployError("SAFE_EVIDENCE_CHANGED")
@@ -1631,7 +1632,7 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with compatibility.check("SAFE_INSTALLED_RUNTIME"):
                     host.require_baseline(last_good, old_sha, old_id)
             if switch_state is not None or initial_switch:
-                with metrics.stage("v2.admission_recheck"):
+                with metrics.stage("v2.admission_recheck"), http_phase(HttpPhase.VPS_RECHECK):
                     host.require_switch_candidate(state)
                 _state(host, state, "ready")
             critical = True
@@ -1804,7 +1805,8 @@ def _report_acceptance(host: Host, version: str, sha: str, *, machine: bool) -> 
     from scripts import deploy_acceptance
 
     try:
-        receipt = deploy_acceptance.verify_installed(host, version, sha)
+        with http_phase(HttpPhase.VPS_ACCEPT):
+            receipt = deploy_acceptance.verify_installed(host, version, sha)
     except (DeployError, deploy_acceptance.DeployError) as error:
         # При python -m текущий DeployError принадлежит __main__.
         raise DeployError(f"Техническая приёмка не пройдена ({error})") from error
@@ -1840,22 +1842,27 @@ def main() -> None:
         if args.verify_pinned:
             verify_pinned(host)
         elif args.verify_installed is not None:
-            _report_acceptance(host, args.version, args.verify_installed, machine=True)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.VERIFY_INSTALLED):
+                _report_acceptance(host, args.version, args.verify_installed, machine=True)
         elif args.cleanup_old is not None:
             from scripts import deploy_cleanup_old
 
-            sha, runtime_id = args.cleanup_old
-            try:
-                result = deploy_cleanup_old.cleanup_old(host, args.version, sha, runtime_id)
-            except (DeployError, deploy_cleanup_old.DeployError, prep.PreparationError, ValueError) as error:
-                raise DeployError(f"Прежняя SQLite не очищена ({error})") from error
-            except OSError as error:
-                raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
-            print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.CLEANUP_OLD):
+                sha, runtime_id = args.cleanup_old
+                try:
+                    with http_phase(HttpPhase.VPS_CLEANUP):
+                        result = deploy_cleanup_old.cleanup_old(host, args.version, sha, runtime_id)
+                except (DeployError, deploy_cleanup_old.DeployError, prep.PreparationError, ValueError) as error:
+                    raise DeployError(f"Прежняя SQLite не очищена ({error})") from error
+                except OSError as error:
+                    raise DeployError(f"Файловая операция очистки не завершена ({type(error).__name__})") from error
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
         else:
-            installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
-            if installed_sha is not None:
-                _report_acceptance(host, args.version, installed_sha, machine=False)
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.INSTALL):
+                with http_phase(HttpPhase.VPS_PREPARE):
+                    installed_sha = deploy(host, args.version, emergency=args.emergency, reason=args.reason)
+                if installed_sha is not None:
+                    _report_acceptance(host, args.version, installed_sha, machine=False)
     except DeployError as error:
         print(f"deploy-prod: {error}", file=sys.stderr)
         raise SystemExit(1) from error

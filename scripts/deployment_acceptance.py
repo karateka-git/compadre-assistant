@@ -8,7 +8,7 @@ from enum import Enum
 
 from scripts.create_release_branch import EXPECTED_REPOSITORY
 from scripts.deploy_prepare import SHA_PATTERN, VERSION_PATTERN
-from scripts.full_ci_controller import GitHub
+from scripts.full_ci_controller import GitHub, HttpPhase, http_phase
 from scripts.publish_installation_tag import InstallationReceipt, InstallationTagError, _published_release
 from scripts.publish_release import PublishError
 from scripts.release_sqlite_summary import InstallationSchemaEvidence, build_summary, expected_migration_at
@@ -219,6 +219,7 @@ def _accepted_baseline(api: GitHub, receipt: InstallationReceipt, record: Deploy
     return AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
 
 
+@http_phase(HttpPhase.DEPLOYMENT_BASE)
 def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
     """Выбирает последний доверенный текущий success по времени статуса.
 
@@ -261,6 +262,7 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
     return _accepted_baseline(api, receipt, record)
 
 
+@http_phase(HttpPhase.DEPLOYMENT_BASE)
 def verify_accepted_baseline(api: GitHub, deployment_id: int, status_id: int) -> AcceptedBaseline:
     """Сверяет ранее выбранную базу по точным Deployment и текущему статусу.
 
