@@ -92,7 +92,10 @@ class CapabilityPendingInputTest(unittest.TestCase):
 
     def test_reanalyze_retry_then_direct_preserve_mode(self):
         """ID проверяет Obsidian, прямой и пошаговый пути сохраняют сценарий."""
-        self.assertIn('числовой ID', response_text(self.send('/reanalyze')))
+        prompt = self.send('/reanalyze')
+        self.assertIn('числовой ID', response_text(prompt))
+        self.assertEqual([(action.label, action.command) for action in prompt.suggested_actions],
+                         [('Отмена', '/cancel')])
         pending = self.store.get(_event('x').reply_address)
         self.now += timedelta(minutes=9)
         for invalid in ('  ', 'abc', '7 8', '²', '9' * 5000):

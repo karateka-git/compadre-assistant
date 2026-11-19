@@ -193,8 +193,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
             return (
                 compose_content(
                     vault_description,
-                    ' вместо текущего vault? При подтверждении текущее подключение и его локальные данные будут заменены; repository на GitHub не изменится.\nЕсли это единственное ожидающее действие Obsidian в этом чате, ответь ',
-                    '«да», чтобы заменить, или «нет», чтобы сохранить текущее подключение. Ожидание действует 10 минут. Используй адресные команды ниже для нужного действия.',
+                    ' вместо текущего vault? При подтверждении текущее подключение и его локальные данные будут заменены; repository на GitHub не изменится. Ожидание действует 10 минут.',
                 )
             )
         case ObsidianResultType.GITHUB_VAULT_REPLACED:
@@ -285,7 +284,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
                 compose_content(
                     'Отключить хранилище ',
                     repository,
-                    '? При подтверждении локальные Markdown-файлы и связанные metadata будут удалены. Repository на GitHub не изменится; профиль, связанные каналы, статьи и анализы сохранятся.\nЕсли это единственное ожидающее действие Obsidian в этом чате, ответь «да», чтобы отключить, или «нет», чтобы оставить vault подключённым. Ожидание действует 10 минут. Используй адресные команды ниже для нужного действия.',
+                    '? При подтверждении локальные Markdown-файлы и связанные metadata будут удалены. Repository на GitHub не изменится; профиль, связанные каналы, статьи и анализы сохранятся.\nОжидание действует 10 минут.',
                 )
             )
         case ObsidianResultType.GITHUB_DISCONNECTED:
@@ -354,7 +353,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
                 compose_content(
                     'Ожидаю решения по предложению',
                     target,
-                    '. Если в этом чате ожидает только одно действие Obsidian, ответь «да», чтобы применить предложение, или «нет», чтобы отменить его.',
+                    '.',
                 )
             )
         case ObsidianResultType.ARTICLE_REVIEW_CANCELLED:
@@ -394,13 +393,13 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
         case ObsidianResultType.ARTICLE_REVIEW_IN_PROGRESS:
             return (
                 compose_content(
-                    'Хранилище сейчас занято синхронизацией или записью из другого связанного канала. Предложение сохранено. После завершения операции, если в этом чате ожидает только одно действие Obsidian, ответь «да», чтобы повторить запись, или «нет», чтобы отменить предложение.',
+                    'Хранилище сейчас занято синхронизацией или записью из другого связанного канала. Предложение сохранено. После завершения операции повтори адресную команду из запроса или открой /confirm.',
                 )
             )
         case ObsidianResultType.ARTICLE_REVIEW_APPLY_FAILED:
             return (
                 compose_content(
-                    'Не удалось записать изменение в GitHub. Предложение и текст статьи сохранены. После устранения ошибки, если в этом чате ожидает только одно действие Obsidian, ответь «да», чтобы повторить запись, или «нет», чтобы отменить предложение.',
+                    'Не удалось записать изменение в GitHub. Предложение и текст статьи сохранены. После устранения ошибки повтори адресную команду из запроса или открой /confirm.',
                 )
             )
         case ObsidianResultType.ARTICLE_REVIEWED_RESULT:
@@ -504,7 +503,7 @@ def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
             compose_content(
                 'Анализ готов. Предлагаю не менять хранилище.\nПричина: ',
                 str(proposal.reasoning),
-                '\n\nХранилище пока не изменено. Если в этом чате ожидает только одно действие Obsidian, ответь «да», чтобы завершить рассмотрение без изменений, или «нет», чтобы отменить предложение.',
+                '\n\nХранилище пока не изменено.',
             )
         )
     action = (
@@ -538,7 +537,7 @@ def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
             str(preview_label),
             ':\n',
             str(preview),
-            '\n\nХранилище пока не изменено. Если в этом чате ожидает только одно действие Obsidian, ответь «да», чтобы применить предложение, или «нет», чтобы отменить его.',
+            '\n\nХранилище пока не изменено.',
         )
     )
 
