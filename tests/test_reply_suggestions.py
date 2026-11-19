@@ -9,6 +9,7 @@ from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultConfirmationAction
 from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.ports import HandlerContext, ReplyAction
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
@@ -48,7 +49,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         ask = AiCapability(question, Mock())
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
-        self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
+        self.assertEqual(response.suggested_actions,
+                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION),))
         self.assertIn("вызови /ask", content_text(response.content))
         self._assert_command_visible_in_channels(response, "/ask")
         model.answer.assert_not_called()
