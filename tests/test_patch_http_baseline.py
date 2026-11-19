@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import sqlite3
 import subprocess
 import sys
@@ -21,7 +22,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from urllib.request import AbstractHTTPHandler, Request
 from urllib.response import addinfourl
 
-from scripts import deploy_acceptance, deploy_cleanup_old, deploy_prod, release_production
+from scripts import deploy_acceptance, deploy_cleanup_old, deploy_prod, publish_release, release_production
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY as REPOSITORY
 from scripts.deployment_acceptance import AcceptedBaseline, ENVIRONMENT, TASK
@@ -104,6 +105,28 @@ def _make_graph(checkout: Path, workflow_bytes: bytes) -> _Graph:
     return _Graph(checkout, base, candidate, main, pairs)
 
 
+def _main_checkout(graph: _Graph, checkout: Path) -> Path:
+    """Воспроизводит shallow checkout из workflow без Git-объекта кандидата."""
+    _git(graph.checkout, "clone", "--quiet", "--depth", "1", "--single-branch", "--branch", "main",
+         graph.checkout.as_uri(), str(checkout))
+    _git(checkout, "remote", "set-url", "origin", f"https://github.com/{REPOSITORY}.git")
+    candidate = subprocess.run(("git", "cat-file", "-e", f"{graph.candidate}^{{commit}}"),
+                               cwd=checkout, capture_output=True)
+    if _git(checkout, "rev-parse", "HEAD") != graph.main or candidate.returncode == 0:
+        raise AssertionError("Runner checkout must contain main without the release candidate")
+    return checkout
+
+
+def _fixture(root: Path) -> tuple[_Graph, Path, str]:
+    """Создаёт независимый checkout runner, граф GitHub/VPS и схему SQLite."""
+    graph = _make_graph(root / "checkout", ArtifactAPI().workflow_bytes)
+    runner = _main_checkout(graph, root / "runner")
+    with closing(sqlite3.connect(root / "schema.db")) as database:
+        database.execute("CREATE TABLE schema_migrations (version INTEGER, name TEXT)")
+        database.execute("INSERT INTO schema_migrations VALUES (1, ?)", (MIGRATION,))
+        return graph, runner, compatibility.schema_fingerprint(database)
+
+
 def _deployment(identifier: int, receipt: InstallationReceipt) -> dict:
     payload = asdict(receipt)
     del payload["runtime_id"]
@@ -133,7 +156,9 @@ class _RestFixture:
         self.deployments: dict[int, dict] = {}
         self.statuses: dict[int, list[dict]] = {}
         self.pulls: dict[int, dict] = {}
+        self.release_tip = graph.candidate
         self.calls: Counter[tuple[str, str, str]] = Counter()
+        self.publisher_gets: Counter[tuple[str, str]] = Counter()
         self.posts: list[str] = []
         self.rule = {"id": 1, "target": "tag", "enforcement": "active", "bypass_actors": [],
                      "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
@@ -226,7 +251,7 @@ class _RestFixture:
         if path in {"/git/ref/heads/main", f"/git/ref/heads/{BRANCH}"}:
             branch = path.removeprefix("/git/ref/heads/")
             return {"ref": f"refs/heads/{branch}", "object": {"type": "commit", "sha": (
-                self.graph.main if branch == "main" else self.graph.candidate)}}
+                self.graph.main if branch == "main" else self.release_tip)}}
         if path.startswith("/git/ref/tags/"):
             return self.refs[path.removeprefix("/git/ref/tags/")]
         if path.startswith("/git/commits/"):
@@ -310,6 +335,8 @@ class _RestFixture:
             record = self._write(path, json.loads(request.data))
             return _response(request, json.dumps(record).encode(), code=201)
         query = {key: values[0] for key, values in parse_qs(parts.query).items()}
+        if location == "runner" and "/releases" not in self.posts:
+            self.publisher_gets[path, query.get("ref", "")] += 1
         value = self._read(path, query)
         return _response(request, json.dumps(value).encode(), code=404 if value is None else 200)
 
@@ -391,16 +418,16 @@ class _ControllerFixture:
         return subprocess.CompletedProcess(arguments, 0, stdout.getvalue(), stderr.getvalue())
 
 
-def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = False) -> dict:
+def _measure(root: Path, mode: str, api: _RestFixture, runner: Path, *, installed: bool = False,
+             sha: str | None = None, expected_error: str | None = None) -> dict:
     stdout, stderr = io.StringIO(), io.StringIO()
     notes = root / "notes.md"
     notes.write_text("Фикстура PATCH\n", encoding="utf-8")
     flags = ["--resume"] if installed else ["--release", "--change", "patch", "--notes-file", str(notes)]
-    sha = api.graph.main if mode == "wrong_sha" else api.graph.candidate
-    argv = ["release_production", VERSION, sha, "--ssh-host", "vps.example.invalid",
+    argv = ["release_production", VERSION, sha or api.graph.candidate, "--ssh-host", "vps.example.invalid",
             "--known-hosts", str(notes), *flags]
     with (patch.object(system, "OLD_SHA", api.graph.base), patch.object(system, "NEW_SHA", api.graph.candidate),
-          chdir(api.graph.checkout)):
+          chdir(runner)):
         controller = _ControllerFixture(root / mode, api, installed)
         with (patch.object(release_production, "run_vps_command", side_effect=controller.execute),
               patch.object(AbstractHTTPHandler, "do_open", side_effect=api.transport),
@@ -415,8 +442,8 @@ def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = Fals
             elapsed = perf_counter_ns() - started
     reports = [json.loads(line.removeprefix("deploy-http-metrics ")) for line in stderr.getvalue().splitlines()
                if line.startswith("deploy-http-metrics ")]
-    if mode == "wrong_sha":
-        if exit_code != 1 or "Candidate не является текущим tip" not in stderr.getvalue():
+    if expected_error is not None:
+        if exit_code != 1 or expected_error not in stderr.getvalue():
             raise AssertionError(stderr.getvalue())
     elif exit_code != 0 or json.loads(stdout.getvalue().splitlines()[-1])["state"] != "success":
         raise AssertionError(f"{mode}: {stderr.getvalue()}\n{stdout.getvalue()}\n{controller.errors}")
@@ -432,27 +459,32 @@ def _measure(root: Path, mode: str, api: _RestFixture, *, installed: bool = Fals
             "ssh": controller.calls}
 
 
-def measure_baseline() -> list[dict]:
+def measure_patch() -> list[dict]:
     """Измеряет четыре сценария с одинаковым PATCH и историей выпусков."""
     with TemporaryDirectory(prefix="patch-http-baseline-") as directory:
         root = Path(directory)
-        graph = _make_graph(root / "checkout", ArtifactAPI().workflow_bytes)
-        schema = root / "schema.db"
-        with closing(sqlite3.connect(schema)) as database:
-            database.execute("CREATE TABLE schema_migrations (version INTEGER, name TEXT)")
-            database.execute("INSERT INTO schema_migrations VALUES (1, ?)", (MIGRATION,))
-            fingerprint = compatibility.schema_fingerprint(database)
+        graph, runner, fingerprint = _fixture(root)
 
         first = _RestFixture(graph, fingerprint)
-        published = _measure(root, "publish", first)
+        published = _measure(root, "publish", first, runner)
+        published["paired_prs"] = re.findall(r"^- release .+?/pull/(\d+), main .+?/pull/(\d+);",
+                                             first.releases[VERSION]["body"], re.MULTILINE)
+        published["publisher_gets"] = {
+            "parents_per_commit": [first.publisher_gets[f"/git/commits/{sha}", ""] for sha, _ in graph.pairs],
+            "migration_for_candidate": first.publisher_gets[f"/contents/{MIGRATIONS_PREFIX.rstrip('/')}",
+                                                            graph.candidate],
+            "workflow": first.publisher_gets[f"/actions/workflows/{RELEASE_WORKFLOW}", ""],
+            "run_list": first.publisher_gets[f"/actions/workflows/{RELEASE_WORKFLOW}/runs", ""],
+            "attempt_jobs": first.publisher_gets["/actions/runs/1/attempts/1/jobs", ""],
+        }
         ready = _RestFixture(graph, fingerprint)
         ready.seed_release(first)
-        installed = _measure(root, "install_ready", ready)
+        installed = _measure(root, "install_ready", ready, runner)
         resumed = _RestFixture(graph, fingerprint)
         resumed.seed_release(first, installed=True)
-        continued = _measure(root, "resume", resumed, installed=True)
-        _git(graph.checkout, "checkout", "--quiet", "--detach", graph.main)
-        refused = _measure(root, "wrong_sha", _RestFixture(graph, fingerprint))
+        continued = _measure(root, "resume", resumed, runner, installed=True)
+        refused = _measure(root, "wrong_sha", _RestFixture(graph, fingerprint), runner, sha=graph.main,
+                           expected_error="Candidate не является текущим tip")
         return [published, installed, continued, refused]
 
 
@@ -479,7 +511,7 @@ class PatchHttpBaselineTests(unittest.TestCase):
 
     def test_patch_routes(self) -> None:
         """Определяет зафиксированные операции публикации, установки, resume и отказа."""
-        publish, ready, resume, refused = measure_baseline()
+        publish, ready, resume, refused = measure_patch()
         status = f"/deployments/{HISTORY_SIZE + 1}/statuses"
         self.assertEqual(publish["posts"], ["/git/tags", "/git/refs", "/releases", "/deployments", status])
         self.assertEqual(ready["posts"], ["/deployments", status])
@@ -487,8 +519,85 @@ class PatchHttpBaselineTests(unittest.TestCase):
         self.assertEqual((refused["posts"], refused["ssh"]), ([], []))
         self.assertEqual([publish["ssh"][0], ready["ssh"][0], resume["ssh"][0]],
                          ["install", "install", "--verify-installed"])
+        self.assertEqual(publish["paired_prs"], [("1", "11"), ("2", "12")])
+        self.assertEqual(publish["publisher_gets"], {"parents_per_commit": [1, 1], "migration_for_candidate": 1,
+                                                   "workflow": 3, "run_list": 3, "attempt_jobs": 3})
+
+    def test_patch_refusals_close_before_writes_or_ssh(self) -> None:
+        """Сдвиг ветки, неполная история, неверная связь и чужой CI закрывают допуск."""
+        root = Path(self.enterContext(TemporaryDirectory(prefix="patch-http-refusals-")))
+        graph, runner, fingerprint = _fixture(root)
+
+        def assert_refusal(case: str, api: _RestFixture, message: str) -> None:
+            scenario = _measure(root, case, api, runner, expected_error=message)
+            self.assertEqual((scenario["posts"], scenario["ssh"]), ([], []))
+
+        moving_branch = _RestFixture(graph, fingerprint)
+        read_moving_branch = moving_branch._read
+
+        def move_tip_during_history(path: str, query: dict[str, str]) -> object:
+            if path == "/pulls/1":
+                moving_branch.release_tip = graph.pairs[0][0]
+            return read_moving_branch(path, query)
+
+        with patch.object(moving_branch, "_read", side_effect=move_tip_during_history):
+            assert_refusal("moved_tip", moving_branch, "Релизная ветка сдвинулась")
+
+        missing_history = _RestFixture(graph, fingerprint)
+        read_missing_history = missing_history._read
+
+        def omit_commit_parents(path: str, query: dict[str, str]) -> object:
+            if path == f"/git/commits/{graph.pairs[0][0]}":
+                return {"sha": graph.pairs[0][0]}
+            return read_missing_history(path, query)
+
+        with patch.object(missing_history, "_read", side_effect=omit_commit_parents):
+            assert_refusal("incomplete_history", missing_history, "Не подтверждены родители")
+
+        wrong_link = _RestFixture(graph, fingerprint)
+        wrong_link.pulls[12]["body"] = f"Hotfix-Links:\nhttps://github.com/{REPOSITORY}/pull/1\n"
+        assert_refusal("wrong_pair", wrong_link, "однозначную группу")
+
+        wrong_ci = _RestFixture(graph, fingerprint)
+        wrong_ci.run["head_sha"] = graph.main
+        assert_refusal("wrong_ci", wrong_ci, "Нет успешного полного CI")
+
+        failed_ci = _RestFixture(graph, fingerprint)
+        failed_ci.jobs[-1]["conclusion"] = "failure"
+        assert_refusal("failed_ci", failed_ci, "Нет успешного полного CI")
+
+    def test_manual_publisher_requires_clean_candidate_checkout(self) -> None:
+        """Ручной CLI отказывает на main и грязном checkout, затем публикует с точного SHA."""
+        root = Path(self.enterContext(TemporaryDirectory(prefix="patch-http-manual-")))
+        graph, runner, fingerprint = _fixture(root)
+        api = _RestFixture(graph, fingerprint)
+        notes = root / "notes.md"
+        notes.write_text("Ручной PATCH\n", encoding="utf-8")
+        argv = ["publish_release", VERSION, graph.candidate, "--change", "patch", "--notes-file", str(notes), "--publish"]
+
+        def run(checkout: Path, expected_error: str | None = None) -> str:
+            stdout, stderr = io.StringIO(), io.StringIO()
+            with (chdir(checkout), patch.object(AbstractHTTPHandler, "do_open", side_effect=api.transport),
+                  patch.object(sys, "argv", argv), patch.dict(os.environ, {"GITHUB_TOKEN": RUNNER_TOKEN}),
+                  redirect_stdout(stdout), redirect_stderr(stderr)):
+                if expected_error is None:
+                    publish_release.main()
+                else:
+                    with self.assertRaises(SystemExit) as error:
+                        publish_release.main()
+                    self.assertEqual(error.exception.code, 1)
+                    self.assertIn(expected_error, stderr.getvalue())
+            return stdout.getvalue()
+
+        run(runner, "HEAD не соответствует candidate SHA")
+        with TemporaryDirectory(dir=graph.checkout) as dirty:
+            (Path(dirty) / "untracked.txt").touch()
+            run(graph.checkout, "Для публикации нужен чистый checkout")
+        self.assertEqual(api.posts, [])
+        self.assertIn("Опубликовано:", run(graph.checkout))
+        self.assertEqual(api.posts, ["/git/tags", "/git/refs", "/releases"])
 
 
 if __name__ == "__main__":
-    scenarios = measure_baseline()
+    scenarios = measure_patch()
     print(json.dumps({"summary": [_summary(scenario) for scenario in scenarios], "scenarios": scenarios}, indent=2))
