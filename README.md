@@ -10,9 +10,9 @@ Compadre Assistant — личный ассистент в Telegram и VK. Он �
 Реализованы общие профили Telegram и VK, режимы по чатам, независимые
 возможности ИИ (`ai`), Admin, Obsidian, «Семья» (`family`) и настройки профиля (`settings`),
 индекс vault и подтверждаемая запись в GitHub.
-В [снимке VPS за 13.11.2026](docs/PRODUCTION.md#исторический-снимок-13112026)
-зафиксированы установленная `v3.4.0`, оба работающих канала и переход
-на выбор базы CI из GitHub Deployments.
+В снимке VPS за 19.11.2026 зафиксированы установленная `v4.2.5`, первый
+принятый Deployment v2 и работа Telegram и VK.
+[Снимок VPS](docs/PRODUCTION.md#последний-проверенный-снимок-19112026-1607-utc)
 Перед эксплуатационным действием состояние сервера проверяют заново.
 Изменения опубликованных версий перечислены в
 [GitHub Releases](https://github.com/karateka-git/compadre-assistant/releases),
@@ -132,11 +132,12 @@ embeddings поиск использует FTS fallback.
 
 ## Production VPS
 
-Разработка идёт через PR с быстрыми проверками в `main`, затем полный CI
-проверяет кандидата для `release/X.Y`. Защищённый тег и GitHub Release
-фиксируют конкретную версию; VPS обновляется только отдельной командой
-оператора. Схема веток, версий и допуска — в [RELEASES.md](docs/RELEASES.md),
-порядок обновления и возврата — в [OPERATIONS.md](docs/OPERATIONS.md).
+Для PATCH полный CI проверяет SHA релизной ветки. Для первого выпуска новой
+линии он проверяет SHA в `main`, на котором создают `release/X.Y`. Оператор
+вручную запускает `Production release` из защищённой `main`. Workflow
+подтверждает immutable Release, координирует установку на VPS и записывает
+результат в Deployment. [Маршрут выпуска](docs/RELEASES.md#маршрут-выпуска) ·
+[Выпуск из GitHub Actions](docs/OPERATIONS.md#выпустить-обычную-версию-из-github-actions)
 
 ## Документация
 
