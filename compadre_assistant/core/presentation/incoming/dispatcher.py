@@ -13,7 +13,8 @@ from compadre_assistant.core.presentation.incoming.deferred_actions import Defer
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.menu import BUSY_COMMAND_MENU, build_command_menu
 from compadre_assistant.core.presentation.incoming.ports import (
-    CancellableAction, ConfirmationAction, BackgroundReply, CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
+    CANCEL_SECTION_ACTION, CancellableAction, ConfirmationAction, BackgroundReply,
+    CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
     HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
@@ -504,7 +505,8 @@ class IncomingMessageDispatcher:
                 suggested_actions=suggested_actions,
                 command_menu_delivery=("prefer" if result.type is IncomingMessageResultType.MODE_EXITED
                                        and previous_menu is not None
-                                       and any(item.label is not None for item in previous_menu.items) else None),
+                                       and (previous_menu.section_actions is not None
+                                            or any(item.label is not None for item in previous_menu.items)) else None),
             )
         if menu_update_handler is not None:
             # Действие могло занять чат между снимком меню и повторным допуском.
@@ -1381,7 +1383,7 @@ class IncomingMessageDispatcher:
 
     def command_menu_snapshot(
         self, event: IncomingEvent, *, known_user: AppUser | None = None,
-        preserve_expired: bool = False,
+        preserve_expired: bool = False, cleanup_pending: bool = True,
     ) -> tuple[CommandMenu, bool]:
         """Возвращает меню и полноту снимка подтверждений для безопасной публикации.
 
@@ -1389,11 +1391,14 @@ class IncomingMessageDispatcher:
             event: Сохранённый адрес и identity; текст не исполняется.
             known_user: Повторно проверенный владелец адреса без обновления identity.
             preserve_expired: Сохранить просроченную запись для фонового уведомления.
+            cleanup_pending: Удалять утратившее силу ожидание при подготовке меню.
 
         Returns:
             Меню и признак успешного чтения всех источников подтверждений.
         """
-        return self._command_menu_snapshot(event, known_user=known_user, preserve_expired=preserve_expired)
+        return self._command_menu_snapshot(
+            event, known_user=known_user, preserve_expired=preserve_expired, cleanup_pending=cleanup_pending,
+        )
 
     def _section_actions_for_context(
         self, event: IncomingEvent, user: AppUser, active: SectionActionsQueryPort,
@@ -1406,7 +1411,7 @@ class IncomingMessageDispatcher:
                            for identifier, server, enabled, allowed in before.access)):
             raise RuntimeError("section action owner changed before query")
         if pending is not None and pending.cancel_only_menu:
-            return (ReplyAction("Отмена", "/cancel", scope=ActionScope.SECTION, purpose=ActionPurpose.CANCEL),)
+            return (CANCEL_SECTION_ACTION,)
         actions = active.section_actions(user, event.reply_address, before.mode_revision, pending)
         if any(action.scope != ActionScope.SECTION for action in actions):
             raise ValueError("section action query returned an action belonging to a screen")

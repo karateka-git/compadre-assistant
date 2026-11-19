@@ -13,7 +13,7 @@ from compadre_assistant.capabilities.family.domain.shopping import (
     MAX_ITEM_NUMBER, ItemChange, ItemChangeStatus, ShoppingItem, ShoppingItemStatus,
 )
 from compadre_assistant.core.presentation.incoming.action_contracts import (
-    ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination,
+    ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
 )
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse, ReplyAction, ResponseView
@@ -30,7 +30,6 @@ _SELECTION_PAGE_SIZE = 5  # Предметный предел числа тов�
 _SELECTION_RESERVED_ROWS = 2  # Перелистывание и возврат занимают разные ряды.
 _SELECTION_RESERVED_BUTTONS = 3  # Две страницы и возврат доступны одновременно.
 _TITLE_PREVIEW = 90  # Оставляет место для текста команд при HTML-экранировании.
-_BUTTON_LABEL_LIMIT = 40  # Ограничение длины подписи VK применяется для обоих каналов.
 _MAX_SECTIONS = 4096  # Разделы давно не использованных чатов вытесняются из памяти.
 _RECENT_NUMBER_MESSAGES = 128  # Повторное событие канала не меняет следующий товар.
 
@@ -75,13 +74,10 @@ class ShoppingSection:
     revision: int
     family_id: int
     joined_at: datetime
-    inline_commands: bool = False  # Команды обычного списка видны под сообщением.
-    vk_menu: bool = False  # Вместо кнопок обычного списка используется нижнее меню.
     needed_visible: bool = field(default=False, compare=False)  # Доступность выбора покупок в меню.
     bought_visible: bool = field(default=False, compare=False)  # Доступность очистки купленного в меню.
     ordinary_page: int = field(default=1, compare=False)
     ordinary_last_page: int = field(default=1, compare=False)
-    selection_open: bool = field(default=False, compare=False)
     add_request_id: str | None = field(default=None, compare=False)
     choice: ShoppingChoice | None = field(default=None, compare=False)
     number_message_ids: tuple[str, ...] = field(default=(), compare=False)
@@ -104,14 +100,13 @@ class ShoppingSection:
             page: Запрошенная страница, начиная с 1.
 
         Returns:
-            Состояние обычного экрана. В VK смена ключа закрывает прежний выбор.
+            Состояние обычного экрана с актуальными группами и страницами.
         """
-        key = token_urlsafe(12) if self.vk_menu and self.selection_open else self.action_key
         ordinary = shopping_page(items, page)
-        return replace(self, selection_open=False, choice=None, add_request_id=None,
+        return replace(self, choice=None, add_request_id=None,
                        needed_visible=any(item.status is ShoppingItemStatus.NEEDED for item in items),
                        bought_visible=any(item.status is ShoppingItemStatus.BOUGHT for item in items),
-                       ordinary_page=ordinary.number, ordinary_last_page=ordinary.last, action_key=key)
+                       ordinary_page=ordinary.number, ordinary_last_page=ordinary.last)
 
 
 class ShoppingSections:
@@ -131,14 +126,17 @@ class ShoppingSections:
             if len(self._opened) > _MAX_SECTIONS:
                 self._opened.popitem(last=False)
 
-    def current(self, app_user_id: int, address: ReplyAddress, revision: int) -> ShoppingSection | None:
-        """Возвращает раздел только для проверенной ревизии режима чата."""
+    def current(
+        self, app_user_id: int, address: ReplyAddress, revision: int, *, touch: bool = True,
+    ) -> ShoppingSection | None:
+        """Читает раздел проверенной ревизии, при touch=False сохраняя порядок реестра."""
         key = app_user_id, address
         with self._lock:
             section = self._opened.get(key)
             if section is None or section.revision != revision:
                 return None
-            self._opened.move_to_end(key)
+            if touch:
+                self._opened.move_to_end(key)
             return section
 
     def close(self, app_user_id: int, address: ReplyAddress) -> None:
@@ -180,19 +178,19 @@ def shopping_notice(change: ItemChange, position: int) -> str | None:
     return None
 
 
-def selection_page_size(layout: ActionLayoutLimits, *, text_page_size: int = _SELECTION_PAGE_SIZE) -> int:
+def selection_page_size(layout: ActionLayoutLimits) -> int:
     """Определяет размер выбора после резерва навигации, сохраняя текстовый путь.
 
     Args:
         layout: Вместимость клавиатуры, известная до построения текста.
-        text_page_size: Размер страницы при недоступной клавиатуре.
 
     Returns:
         Количество позиций на странице выбора.
     """
-    capacity = layout.selection_capacity(reserved_rows=_SELECTION_RESERVED_ROWS,
+    reserved_rows = _SELECTION_RESERVED_ROWS + (layout.max_columns == 1)
+    capacity = layout.selection_capacity(reserved_rows=reserved_rows,
                                          reserved_buttons=_SELECTION_RESERVED_BUTTONS)
-    return min(_SELECTION_PAGE_SIZE, capacity) if capacity else text_page_size
+    return min(_SELECTION_PAGE_SIZE, capacity) if capacity else _SELECTION_PAGE_SIZE
 
 
 def choice_page_for_list(ordinary_page: int, page_size: int) -> int:
@@ -249,22 +247,23 @@ def shopping_section_actions(section: ShoppingSection) -> tuple[ReplyAction, ...
         чтобы определить страницу товаров с учётом вместимости клавиатуры.
     """
     page = section.ordinary_page
-    actions = [ReplyAction("Добавить", ADD_COMMAND, scope=ActionScope.SECTION)]
+    command = f"{SHOPPING_COMMAND} section {section.action_key}"
+    actions = [ReplyAction("Добавить", f"{command} add", scope=ActionScope.SECTION)]
     if section.needed_visible:
         for label, selection in (("Купить", ShoppingSelection.BUY), ("Удалить", ShoppingSelection.DELETE)):
             actions.append(ReplyAction(
-                label, f"{SHOPPING_COMMAND} choose {selection} {page}", scope=ActionScope.SECTION,
+                label, f"{command} choose {selection} {page}", scope=ActionScope.SECTION,
                 purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination(f"shopping-{selection}"),
             ))
     if section.bought_visible:
-        actions.append(ReplyAction("Очистить купленное", CLEAR_BOUGHT_COMMAND, scope=ActionScope.SECTION))
+        actions.append(ReplyAction("Очистить купленное", f"{command} clear", scope=ActionScope.SECTION))
     for label, destination in _shopping_page_links(page, section.ordinary_last_page):
         actions.append(ReplyAction(
-            label, f"{SHOPPING_COMMAND} page {destination}", scope=ActionScope.SECTION,
+            label, f"{command} page {destination}", scope=ActionScope.SECTION,
             purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("shopping-list", destination),
         ))
     actions.append(ReplyAction(
-        "Назад", f"{SHOPPING_COMMAND} home", scope=ActionScope.SECTION,
+        "Назад", f"{command} home", scope=ActionScope.SECTION,
         purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("family-home"),
     ))
     return tuple(actions)
@@ -279,29 +278,29 @@ def _shopping_page_links(page: int, last_page: int) -> tuple[tuple[str, int], ..
 
 
 def shopping_list(
-    items: tuple[ShoppingItem, ...], section: ShoppingSection, page: int = 1, *,
+    items: tuple[ShoppingItem, ...], section: ShoppingSection, *,
     update: bool = False, selection: ShoppingSelection | None = None,
     selection_page: ShoppingPage | None = None, choice: ShoppingChoice | None = None,
-    notice: str | None = None,
+    notice: str | None = None, layout: ActionLayoutLimits = ActionLayoutLimits(),
 ) -> IncomingResponse:
     """Показывает страницу по группам статусов и кнопки переходов.
 
     Args:
         items: Текущий снимок списка с постоянными номерами.
         section: Открытый раздел, которому принадлежит сообщение со списком.
-        page: Запрошенная страница, начиная с единицы.
         update: Когда True, обновляет уже доставленное сообщение.
         selection: Действие, для которого показаны кнопки товаров.
         selection_page: Тот же срез, из которого сформированы номера ожидаемого ввода.
         choice: Снимок видимых номеров, доступный после доставки.
         notice: Пояснение при отказе изменить выбранный товар.
+        layout: Вместимость кнопок и подписей в сообщении выбора.
 
     Returns:
         Ответ со списком и действиями. Длинный текст товара доступен
         отдельной обычной командой, а последняя страница может занять несколько сообщений.
     """
     groups = _SHOPPING_GROUPS[:1] if selection is not None else _SHOPPING_GROUPS
-    snapshot = selection_page if selection_page is not None else shopping_page(items, page)
+    snapshot = selection_page if selection_page is not None else shopping_page(items, section.ordinary_page)
     page, last_page, visible = snapshot.number, snapshot.last, snapshot.visible
     empty_list = not items and selection is None
     parts: list[str | TextSpan] = ["Список покупок пуст." if empty_list else "Список покупок"]
@@ -325,68 +324,56 @@ def shopping_list(
                 else:
                     parts.append(f"\n{position}. {title}")
 
-    actions: list[ReplyAction] = []
-    if selection is not None:
+    if selection is None:
+        actions = shopping_section_actions(section)
+    else:
         instruction = "Выбери, что купил" if selection is ShoppingSelection.BUY else "Выбери, что удалить"
         if visible:
             parts.append(f"\n\n{instruction}, или пришли номер товара. На выбор 10 минут.")
-        for row, (position, item) in enumerate(visible):
-            label = f"{position}. {item.name}"
-            if len(label) > _BUTTON_LABEL_LIMIT:
-                label = label[:_BUTTON_LABEL_LIMIT - 1] + "…"
-            actions.append(_shopping_button(
-                section, label, f"pick {page} {selection} {position} {item.number}",
-                row=row if section.vk_menu else None,
-            ))
-        for label, destination in _shopping_page_links(page, last_page):
-            actions.append(_shopping_button(
-                section, label, f"show {destination} {selection}",
-                row=len(visible) if section.vk_menu else None,
-            ))
-        actions.append(_shopping_button(
-            section, "Назад", f"show {section.ordinary_page} page",
-            row=len(visible) + 1 if section.vk_menu else None,
-        ))
-    elif not section.vk_menu:
-        actions.extend(_legacy_inline_list_actions(section.ordinary_view(items, page)))
+        actions = _selection_actions(section, snapshot, selection, layout)
     if notice:
         parts.extend(("\n\n", notice))
-    if section.vk_menu and selection is None:
-        return IncomingResponse(compose_content(*parts), close_managed_views=True)
     unavailable = compose_content("Не удалось обновить список. Открой его снова через ", code_span(SHOPPING_COMMAND), ".")
     return IncomingResponse(
-        compose_content(*parts), suggested_actions=tuple(actions),
-        command_menu_delivery="preserve" if section.vk_menu else None,
+        compose_content(*parts), suggested_actions=actions,
+        command_menu_delivery=SectionMenuDelivery.PRESERVE if selection is not None else SectionMenuDelivery.RECONCILE,
         view=ResponseView(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
             on_delivered=choice.delivered.set if choice is not None else None,
             cleanup_previous=True,
             allow_multiple_messages=selection is None,
+            action_scope=ActionScope.SCREEN if selection is not None else ActionScope.SECTION,
         ),
     )
 
 
-def _shopping_button(section: ShoppingSection, label: str, action: str, *, row: int | None = None) -> ReplyAction:
-    return ReplyAction(label, f"{SHOPPING_COMMAND} click {section.action_key} {action}", row=row)
-
-
-def _legacy_inline_list_actions(section: ShoppingSection) -> tuple[ReplyAction, ...]:
-    # До подключения общего запроса список сохраняет текущий путь исполнения кнопок.
-    page = section.ordinary_page
+def _selection_actions(
+    section: ShoppingSection, page: ShoppingPage, selection: ShoppingSelection, layout: ActionLayoutLimits,
+) -> tuple[ReplyAction, ...]:
+    command = f"{SHOPPING_COMMAND} click {section.action_key}"
+    label_limit = layout.max_label_length or _TITLE_PREVIEW
     actions = []
-    for action in shopping_section_actions(section):
-        match action.command.split():
-            case ["/add"] if section.inline_commands:
-                command = f"add {page}"
-            case ["/family_clear_bought"]:
-                command = f"clear {page}"
-            case [_, "choose", selection, _] if section.inline_commands:
-                command = f"choose {page} {selection}"
-            case [_, "page", destination]:
-                command = f"show {destination} page"
-            case [_, "home"]:
-                command = "home"
-            case _:
-                continue
-        actions.append(_shopping_button(section, action.label, command))
+    for row, (position, item) in enumerate(page.visible):
+        label = f"{position}. {item.name}"
+        if len(label) > label_limit:
+            label = label[:label_limit - 1] + "…"
+        actions.append(ReplyAction(
+            label, f"{command} pick {page.number} {selection} {position} {item.number}", row=row,
+            purpose=ActionPurpose.SELECTION,
+        ))
+    links = _shopping_page_links(page.number, page.last)
+    row = len(page.visible)
+    for label, destination in links:
+        actions.append(ReplyAction(
+            label, f"{command} show {destination} {selection}", row=row,
+            purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination(f"shopping-{selection}", destination),
+        ))
+        if layout.max_columns == 1:
+            row += 1
+    if links and layout.max_columns != 1:
+        row += 1
+    actions.append(ReplyAction(
+        "Назад", f"{command} show {section.ordinary_page} page", row=row,
+        purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("shopping-list", section.ordinary_page),
+    ))
     return tuple(actions)

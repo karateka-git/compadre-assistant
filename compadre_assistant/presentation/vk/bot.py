@@ -286,6 +286,7 @@ class VkApiClient:
         self._token = token
         self._api_version = api_version
         self._inline_messages: OrderedDict[tuple[int, int], str] = OrderedDict()
+        self._managed_without_inline: OrderedDict[tuple[int, int], None] = OrderedDict()
         self._inline_lock = Lock()
 
     def get_long_poll_server(self, *, group_id: int) -> LongPollServer:
@@ -356,15 +357,16 @@ class VkApiClient:
         return result
 
     def send_editable_message(
-        self, *, peer_id: int, text: str, random_id: int, keyboard: str | None,
+        self, *, peer_id: int, text: str, random_id: int, keyboard: str | None, format_data: str | None = None,
     ) -> int:
         """Публикует обычный текст и получает ID сообщения внутри одного диалога.
 
         Args:
             peer_id: ID диалога-получателя.
-            text: Готовый текст одного сообщения без format_data.
+            text: Готовый текст одного сообщения.
             random_id: Стабильный ID retry-серии.
             keyboard: Необязательная клавиатура сообщения.
+            format_data: Форматирование сообщения с нижним меню или без клавиатуры.
 
         Returns:
             Положительный conversation_message_id из результата для этого peer.
@@ -373,7 +375,16 @@ class VkApiClient:
             VkBotError: VK не подтвердил отправку или не вернул ID диалога и сообщения.
         """
         # Форма peer_ids возвращает cmid, используемый и в callback, и в messages.edit.
-        result = self._send_message({"peer_ids": str(peer_id)}, text=text, random_id=random_id, keyboard=keyboard)
+        params = {"peer_ids": str(peer_id)}
+        if format_data is not None:
+            params["format_data"] = format_data
+        without_inline = keyboard is None
+        if keyboard is not None:
+            try:
+                without_inline = json.loads(keyboard).get("inline") is False
+            except (ValueError, AttributeError):
+                pass
+        result = self._send_message(params, text=text, random_id=random_id, keyboard=keyboard)
         item = result[0] if isinstance(result, list) and len(result) == 1 else None
         if isinstance(item, dict) and type(item.get("peer_id")) is int and item["peer_id"] == peer_id:
             if item.get("error") is not None:
@@ -384,6 +395,11 @@ class VkApiClient:
                 raise VkBotError("VK did not send editable message to its recipient")
             cmid = item.get("conversation_message_id")
             if type(cmid) is int and cmid > 0:
+                if without_inline:
+                    with self._inline_lock:
+                        self._managed_without_inline[peer_id, cmid] = None
+                        if len(self._managed_without_inline) > 4096:
+                            self._managed_without_inline.popitem(last=False)
                 return cmid
         raise VkBotError("VK send returned no confirmed conversation message ID")
 
@@ -417,6 +433,9 @@ class VkApiClient:
         }).get("response")
         if type(result) is not int or result != 1:
             raise VkBotError("VK did not confirm message edit")
+        if keyboard is not None:
+            with self._inline_lock:
+                self._managed_without_inline.pop((peer_id, conversation_message_id), None)
 
     def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
         """Подтверждает нажатие callback-кнопки до обработки действия.
@@ -443,6 +462,13 @@ class VkApiClient:
         Raises:
             VkBotError: API отклонил получение текста или снятие клавиатуры.
         """
+        if managed:
+            # Ответы с нижним меню и без клавиатуры не требуют снятия inline-кнопок.
+            with self._inline_lock:
+                key = peer_id, conversation_message_id
+                if key in self._managed_without_inline:
+                    del self._managed_without_inline[key]
+                    return
         result = self._api_call("messages.getByConversationMessageId", {
             "peer_id": str(peer_id),
             "conversation_message_ids": str(conversation_message_id),
@@ -869,7 +895,8 @@ def _send_vk_view(
             multipart = len(chunks) > 1
             finish_replacement = delivery.finish_replacement
             if finish_replacement is not None and (
-                delivery.allow_multiple_messages if multipart else delivery.target_has_multiple_messages
+                delivery.allow_multiple_messages if multipart else
+                delivery.target_has_multiple_messages or (target is not None and delivery.section_transition)
             ):
                 finish = lambda message_id: finish_replacement(message_id, multipart)
                 confirmed_id, menu_delivered = _send_vk_view_replacement(
@@ -884,8 +911,10 @@ def _send_vk_view(
                 def publish() -> None:
                     nonlocal confirmed_id, menu_delivered
                     attached_menu = keyboard is None and menu_keyboard is not None
+                    formatting = {"format_data": chunks[0].format_data} if keyboard is None and chunks[0].format_data else {}
                     cmid = client.send_editable_message(
                         peer_id=peer_id, text=text, keyboard=menu_keyboard if attached_menu else keyboard, random_id=random_id,
+                        **formatting,
                     )
                     if type(cmid) is not int or cmid <= 0:
                         raise VkBotError("VK send returned no confirmed conversation message ID")
@@ -955,8 +984,10 @@ def _send_vk_view_replacement(
 
         def publish() -> None:
             nonlocal confirmed_id
+            formatting = {"format_data": chunk.format_data} if keyboard is None and chunk.format_data else {}
             cmid = client.send_editable_message(
                 peer_id=peer_id, text=chunk.text, keyboard=chunk_keyboard, random_id=random_id,
+                **formatting,
             )
             if type(cmid) is not int or cmid <= 0:
                 raise VkBotError("VK send returned no confirmed conversation message ID")

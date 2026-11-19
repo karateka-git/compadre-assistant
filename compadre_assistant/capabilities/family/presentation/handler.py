@@ -26,14 +26,15 @@ from compadre_assistant.capabilities.family.presentation.shopping import (
     selection_page_size, shopping_list, shopping_notice, shopping_page, shopping_section_actions,
 )
 from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope, SectionMenuDelivery
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult,
-    CommandParameter, CommandSuggestion, ConfirmationQueryResult, ContextualCommandMenuPort,
+    CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult,
+    CommandParameter, ConfirmationQueryResult,
     ContextualCommandQueryPort, HandlerContext, HelpSection,
     IncomingCapabilityPort, IncomingResponse, PendingConfirmationQueryPort, PendingInputContinuationPort,
-    PendingInputOutcome, PendingInputResult, ReplyAction, ReplyActionRecoveryPort, ResponseView,
+    PendingInputOutcome, PendingInputResult, ReplyAction, ReplyActionRecoveryPort, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import code_span, compose_content, text_content
 
@@ -43,21 +44,21 @@ _JOIN = "/family_join"
 _INVITE = "/family_invite"
 _MEMBER_ACTIONS = (LEAVE_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, CLOSE_COMMAND)
 _SHOPPING_ACTIONS = (ADD_COMMAND, BUY_COMMAND, DELETE_COMMAND, CLEAR_BOUGHT_COMMAND)
-_VK_NO_FAMILY_MENU = (
-    CommandSuggestion(_CREATE, "создать семью", "Создать семью"),
-    CommandSuggestion(_JOIN, "вступить по коду приглашения", "Вступить по коду"),
+_NO_FAMILY_SECTION_ACTIONS = (
+    ReplyAction("Создать семью", _CREATE, scope=ActionScope.SECTION),
+    ReplyAction("Вступить по коду", _JOIN, scope=ActionScope.SECTION),
 )
-_VK_FAMILY_MENU = (
-    CommandSuggestion(SHOPPING_COMMAND, "открыть покупки", "Покупки"),
-    CommandSuggestion(MEMBERS_COMMAND, "посмотреть участников", "Участники"),
-    CommandSuggestion(_INVITE, "пригласить в семью", "Пригласить"),
-    CommandSuggestion("/help", "показать справку о покупках", "Помощь"),
-    CommandSuggestion("/exit", "выйти из режима семьи", "Выйти из режима"),
+_FAMILY_SECTION_ACTIONS = (
+    ReplyAction("Покупки", SHOPPING_COMMAND, scope=ActionScope.SECTION),
+    ReplyAction("Участники", MEMBERS_COMMAND, scope=ActionScope.SECTION),
+    ReplyAction("Пригласить", _INVITE, scope=ActionScope.SECTION),
+    ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),
+    ReplyAction("Выйти из режима", "/exit", scope=ActionScope.SECTION),
 )
 
 
 class FamilyCapability(
-    IncomingCapabilityPort, ContextualCommandQueryPort, ContextualCommandMenuPort,
+    IncomingCapabilityPort, ContextualCommandQueryPort, SectionActionsQueryPort,
     PendingInputContinuationPort, PendingConfirmationQueryPort, ReplyActionRecoveryPort,
 ):
     """Открывает семейный режим и обрабатывает команды зарегистрированного профиля."""
@@ -190,7 +191,7 @@ class FamilyCapability(
             except FamilyAccessEnded:
                 return frozenset((_CREATE, _JOIN))
             actor = next(member for member in members if member.app_user_id == app_user.id)
-            current = self._shopping_sections.current(app_user.id, address, mode_revision)
+            current = self._shopping_sections.current(app_user.id, address, mode_revision, touch=False)
             if current is not None and current.matches(family.id, actor.joined_at):
                 return frozenset((SHOPPING_COMMAND, *_SHOPPING_ACTIONS))
             sections = self._member_commands(actor, len(members)) | {SHOPPING_COMMAND}
@@ -199,43 +200,38 @@ class FamilyCapability(
                 return sections | set(_SHOPPING_ACTIONS)
             return sections
 
-    def contextual_command_menu(
+    def section_actions(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
-    ) -> tuple[CommandSuggestion, ...] | None:
-        """Проецирует подписанные кнопки VK для текущего раздела и ввода."""
-        if address.channel != "vk":
-            return None
-        if pending is not None:
-            if pending.owner_id != self.descriptor.capability_id:
-                return None
-            if pending.cancel_only_menu:
-                return (CommandSuggestion("/cancel", "отменить ввод", "Отмена"),)
+    ) -> tuple[ReplyAction, ...]:
+        """Читает доступные действия открытого раздела или меню семьи.
+
+        Args:
+            app_user: Профиль с проверенным доступом к семейному режиму.
+            address: Личный чат, в котором открыт режим.
+            mode_revision: Ревизия режима в текущем чате.
+            pending: Действующее ожидание, которое уже проверило ядро.
+
+        Returns:
+            Действия текущего раздела без изменения семьи, вида или ожидания.
+        """
+        if pending is not None and pending.cancel_only_menu:
+            return (CANCEL_SECTION_ACTION,)
         app_user_id = app_user.id
         with self._open_scenarios() as (families, _, _):
             family = families.find_for_member(app_user_id)
-            section = self._shopping_sections.current(app_user_id, address, mode_revision)
             if family is None:
-                return _VK_NO_FAMILY_MENU
+                return _NO_FAMILY_SECTION_ACTIONS
+            section = self._shopping_sections.current(app_user_id, address, mode_revision, touch=False)
             if section is None:
-                return _VK_FAMILY_MENU
+                return _FAMILY_SECTION_ACTIONS
             try:
                 actor = next(member for member in families.list_members(app_user_id, family.id)
                              if member.app_user_id == app_user_id)
             except FamilyAccessEnded:
-                return _VK_NO_FAMILY_MENU
+                return _NO_FAMILY_SECTION_ACTIONS
             if not section.matches(family.id, actor.joined_at):
-                return _VK_FAMILY_MENU
-        # Прежнее нижнее меню открывает выбор даже при пустой группе и начинает с первой страницы.
-        items = []
-        for action in shopping_section_actions(replace(section, needed_visible=True)):
-            command = action.command
-            match command.split():
-                case [_, "choose", selection, _]:
-                    command = f"/{selection}"
-                case [_, "home"]:
-                    command = f"{SHOPPING_COMMAND} up"
-            items.append(CommandSuggestion(command, action.label, action.label))
-        return tuple(items)
+                return _FAMILY_SECTION_ACTIONS
+        return shopping_section_actions(section)
 
     def reply_action_recovery_command(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
@@ -513,10 +509,7 @@ class FamilyCapability(
             actor = next(member for member in families.list_members(app_user_id, family.id)
                          if member.app_user_id == app_user_id)
             if command == SHOPPING_COMMAND and (not parts or parts == ["open", str(family.id)]):
-                section = ShoppingSection(
-                    revision, family.id, actor.joined_at, inline_commands=event.channel == "telegram",
-                    vk_menu=event.channel == "vk",
-                )
+                section = ShoppingSection(revision, family.id, actor.joined_at)
                 items = shopping.list_items(app_user_id, family.id, actor_joined_at=section.joined_at)
                 section = section.ordinary_view(items, 1)
                 self._shopping_sections.open(app_user_id, address, section)
@@ -528,21 +521,22 @@ class FamilyCapability(
                 return self._open_shopping_hint()
             if command in _SHOPPING_ACTIONS:
                 return self._shopping_action(context, event, shopping, current, command, arguments)
-            if len(parts) >= 2 and parts[0] == "click":
-                if event.callback_message_id is None:
+            if len(parts) >= 2 and parts[0] in ("click", "section"):
+                if parts[0] == "click" and event.callback_message_id is None:
                     return self._open_shopping_hint()
                 if parts[1] != current.action_key:
                     return IncomingResponse(compose_content(
                         "Эта кнопка устарела. Открой список командой ", code_span(SHOPPING_COMMAND), ".",
                     ))
-                if parts[2:] == ["home"]:
-                    self._shopping_sections.close(app_user_id, address)
-                    return self._home(family, channel=event.channel)
-                return self._shopping_click(context, address, shopping, current, parts[2:])
-            if parts == ["home"] or (parts == ["up"] and not current.selection_open):
+                if parts[0] == "click":
+                    return self._shopping_click(context, address, shopping, current, parts[2:])
+                if parts[2:] != ["home"]:
+                    return self._shopping_section_action(context, event, shopping, current, parts[2:])
+                parts = ["home"]
+            if parts == ["home"]:
                 self._shopping_sections.close(app_user_id, address)
-                return self._home(family, channel=event.channel)
-            if parts in (["back"], ["up"]):
+                return replace(self._home(family, channel=event.channel), command_menu_delivery=SectionMenuDelivery.RECONCILE)
+            if parts == ["back"]:
                 items = shopping.list_items(app_user_id, family.id, actor_joined_at=current.joined_at)
                 return self._show_shopping_list(context, address, current, items, current.ordinary_page, update=True)
             if len(parts) != 2 or parts[0] not in ("page", "item", *ShoppingSelection):
@@ -562,6 +556,31 @@ class FamilyCapability(
             return IncomingResponse(text_content(f"№{number} нет в списке."))
         return IncomingResponse(text_content(f"{item.number}. {item.name}"))
 
+    def _shopping_section_action(
+        self, context: HandlerContext, event: IncomingEvent, shopping: ManageShopping, section: ShoppingSection,
+        action: list[str],
+    ) -> IncomingResponse:
+        app_user_id = context.app_user.id
+        address = event.reply_address
+        family_id = section.family_id
+        joined_at = section.joined_at
+        update = event.callback_message_id is not None
+        match action:
+            case ["add"]:
+                return self._begin_shopping_add(context, address, section)
+            case ["clear"]:
+                items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=joined_at)
+                return self._show_shopping_list(context, address, section, items, section.ordinary_page, update=update)
+            case ["choose", "buy" | "delete" as view, origin] if origin == str(section.ordinary_page):
+                items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
+                page = choice_page_for_list(section.ordinary_page, selection_page_size(context.action_layout))
+                return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), page)
+            case ["page", value] if (page := parse_item_number(value)) is not None:
+                items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
+                return self._show_shopping_list(context, address, section, items, page, update=update)
+            case _:
+                return self._open_shopping_hint()
+
     def _shopping_click(
         self, context: HandlerContext, address: ReplyAddress, shopping: ManageShopping, section: ShoppingSection,
         action: list[str],
@@ -574,15 +593,6 @@ class FamilyCapability(
         family_id = section.family_id
         joined_at = section.joined_at
         match action:
-            case ["add", _]:
-                return self._begin_shopping_add(context, address, section)
-            case ["clear", _]:
-                items = shopping.clear_bought(app_user_id, family_id, actor_joined_at=joined_at)
-                return self._show_shopping_list(context, address, section, items, page, update=True)
-            case ["choose", _, "buy" | "delete" as view]:
-                items = shopping.list_items(app_user_id, family_id, actor_joined_at=joined_at)
-                choice_page = choice_page_for_list(page, selection_page_size(context.action_layout))
-                return self._begin_shopping_choice(context, address, section, items, ShoppingSelection(view), choice_page)
             case ["pick", _, "buy" | "delete" as view, position_text, value]:
                 number = parse_item_number(value)
                 position = parse_item_number(position_text)
@@ -636,9 +646,8 @@ class FamilyCapability(
         self, context: HandlerContext, address: ReplyAddress, section: ShoppingSection, items: tuple[ShoppingItem, ...],
         selection: ShoppingSelection, page: int, *, notice: str | None = None,
     ) -> IncomingResponse:
-        page_size = selection_page_size(context.action_layout, text_page_size=4 if section.vk_menu else 5)
+        page_size = selection_page_size(context.action_layout)
         snapshot = shopping_page(items, page, selection_size=page_size)
-        update = not section.vk_menu or section.selection_open
         pending_inputs = context.pending_inputs
         if pending_inputs is None:
             return self._open_shopping_hint()
@@ -657,14 +666,14 @@ class FamilyCapability(
                 )
                 choice = ShoppingChoice(pending.request_id, selection, snapshot.number,
                                         tuple((position, item.number) for position, item in snapshot.visible))
-            selection_view = replace(section, choice=choice, selection_open=True)
+            selection_view = replace(section, choice=choice, add_request_id=None)
             if not self._shopping_sections.replace(app_user_id, address, section, selection_view):
                 if choice is not None:
                     pending_inputs.clear(address, choice.request_id)
                 return self._open_shopping_hint()
         return shopping_list(
-            items, selection_view, update=update, selection=selection, selection_page=snapshot, choice=choice,
-            notice=notice,
+            items, selection_view, update=True, selection=selection, selection_page=snapshot, choice=choice,
+            notice=notice, layout=context.action_layout,
         )
 
     def _show_shopping_list(
@@ -674,7 +683,7 @@ class FamilyCapability(
         ordinary = section.ordinary_view(items, page)
         if not self._shopping_sections.replace(context.app_user.id, address, section, ordinary):
             return self._open_shopping_hint()
-        return shopping_list(items, ordinary, page, update=update)
+        return shopping_list(items, ordinary, update=update)
 
     def _continue_shopping_choice(
         self, context: HandlerContext, pending: PendingInput, event: IncomingEvent,
@@ -735,14 +744,17 @@ class FamilyCapability(
                 cancel_only_menu=True, cancel_return_command=SHOPPING_COMMAND,
             )
             self._shopping_sections.replace(
-                app_user_id, address, current, replace(current, add_request_id=pending.request_id),
+                app_user_id, address, current,
+                replace(current, add_request_id=pending.request_id, choice=None),
             )
-        return IncomingResponse(text_content(
-            "Напиши, что купить, по одному товару на строку. На ввод 10 минут.",
-        ), suggested_actions=(ReplyAction("Отмена", "/cancel"),) if section.inline_commands else (),
-            view=ResponseView(f"shopping-add:{section.action_key}", cleanup_previous=True)
-            if section.inline_commands else None,
-            close_managed_views=not section.inline_commands,
+        prompt = "Напиши, что купить, по одному товару на строку. На ввод 10 минут."
+        content = text_content(prompt) if context.action_layout.max_buttons else compose_content(
+            prompt, " Чтобы отменить ввод, отправь ", code_span("/cancel"), ".",
+        )
+        return IncomingResponse(
+            content, suggested_actions=(CANCEL_SECTION_ACTION,),
+            view=ResponseView(f"shopping-add:{section.action_key}", cleanup_previous=True),
+            command_menu_delivery=SectionMenuDelivery.RECONCILE,
         )
 
     def _continue_shopping_add(

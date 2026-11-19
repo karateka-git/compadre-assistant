@@ -282,7 +282,7 @@ class FamilyChannelsTest(unittest.TestCase):
         with self._runtime("family") as processor:
             self._joined_family(processor)
             self._seed_shopping("Хлеб")
-            self.assertIsNone(self._send(processor, self.guest, "/family_shopping").view_delivery)
+            self.assertIsNone(self._send(processor, self.guest, "/family_shopping").view_delivery.target_message_id)
             selecting = self._send(processor, self.guest, "/buy")
             self.assertIsNone(selecting.view_delivery.target_message_id)
             self.assertTrue(selecting.view_delivery.start())

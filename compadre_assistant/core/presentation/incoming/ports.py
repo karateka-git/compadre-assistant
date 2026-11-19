@@ -123,6 +123,10 @@ class ReplyAction:
             raise ValueError("an addressed selection must belong to its screen")
 
 
+# Закрывает ожидание, когда доступна только отмена ввода.
+CANCEL_SECTION_ACTION = ReplyAction("Отмена", "/cancel", scope=ActionScope.SECTION, purpose=ActionPurpose.CANCEL)
+
+
 @dataclass(frozen=True, slots=True)
 class ConfirmationAction:
     """Описывает адресное действие; конкретный сценарий определяет его команду."""
@@ -187,6 +191,8 @@ class ResponseView:
             представлений этой возможности в исходном чате.
         allow_multiple_messages: Разрешает адаптеру опубликовать представление
             несколькими сообщениями с кнопками на последнем.
+        action_scope: Основная область действий представления. Канал с отдельным
+            меню может публиковать новый ответ при переходе между областями.
     """
 
     key: str
@@ -195,6 +201,7 @@ class ResponseView:
     on_delivered: Callable[[], None] | None = field(default=None, repr=False, compare=False)
     cleanup_previous: bool = False
     allow_multiple_messages: bool = False
+    action_scope: ActionScope | None = None
 
     def __post_init__(self) -> None:
         """Требует устойчивое имя и подсказку для недоступного обновления."""
@@ -223,6 +230,7 @@ class ResponseViewDelivery:
         finish_replacement: Подтверждает ID последнего нового сообщения после
             успешной доставки всех частей и принимает признак нескольких частей.
             При сбое принимает None, сохраняя прежнюю подтверждённую доставку.
+        section_transition: Действия переходят между разделом и экраном.
     """
 
     target_message_id: str | None
@@ -234,6 +242,7 @@ class ResponseViewDelivery:
     finish_replacement: Callable[[str | None, bool], tuple[str, ...]] | None = field(
         default=None, repr=False, compare=False,
     )
+    section_transition: bool = False
 
 
 @dataclass(frozen=True, slots=True)

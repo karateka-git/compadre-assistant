@@ -401,6 +401,7 @@ class ChannelMessageProcessor:
 
     def _read_menu_snapshot(
         self, event: IncomingEvent, *, allow_unknown: bool, expired_input: PendingInput | None = None,
+        read_only: bool = False,
     ) -> tuple[CommandMenuUpdate, bool, int | None] | None:
         """Читает меню и владельца без доставки и без обновления identity."""
         address = event.reply_address
@@ -417,7 +418,7 @@ class ChannelMessageProcessor:
                     event = replace(event, external_user_id=current.external_user_id)
                 elif event.external_user_id != current.external_user_id:
                     return None
-            elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
+            elif read_only or not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
                 return None
             else:
                 self._unregistered_menu_events[address] = event
@@ -434,9 +435,14 @@ class ChannelMessageProcessor:
                 return None
             menu, complete = dispatcher.command_menu_snapshot(
                 event, known_user=owner, preserve_expired=address.channel == "vk",
+                cleanup_pending=not read_only,
             )
             if known is not None and not service.owns_known_private_chat(*known):
                 return None
+        if address.channel == "vk" and menu.section_actions is not None:
+            # В нижнем меню публикуются действия раздела; справка и подтверждения не меняют его снимок.
+            menu = replace(menu, items=(), pending_input_label=None)
+            complete = True
         return CommandMenuUpdate(address, menu), complete, owner.id if owner is not None else None
 
     def deliver_response_menu(
@@ -479,7 +485,7 @@ class ChannelMessageProcessor:
             владельца нового контракта. Ошибка источника передаётся вызывающему.
         """
         with self._menu_lock:
-            snapshot = self._read_menu_snapshot(event, allow_unknown=True)
+            snapshot = self._read_menu_snapshot(event, allow_unknown=True, read_only=True)
         return snapshot[0].menu.section_actions if snapshot is not None else None
 
     def __call__(self, incoming_message: IncomingEvent,
