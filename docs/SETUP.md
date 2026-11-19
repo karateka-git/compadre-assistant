@@ -54,6 +54,7 @@ Obsidian — [`capabilities/obsidian/data/configuration/config.py`](../compadre_
 | `ENABLED_CHANNELS` | `telegram`, `vk` или `telegram,vk` (по умолчанию оба). Выбирает сервисы для scripts и проверки общего healthcheck. Явный флаг бота/`--channels` выбирает канал текущей команды. |
 | `APP_DEBUG` | Необязателен, по умолчанию `false`. |
 | `TELEGRAM_BOT_TOKEN` | Токен от BotFather; обязателен только для выбранного Telegram. Startup и healthcheck проверяют его форму. |
+| `TELEGRAM_BOT_USERNAME` | Публичное имя именно этого бота из BotFather для кнопки перехода из VK. Например, `example_chat_bot`. При пустом значении остаётся ручной ввод кода в диалоге с ботом. |
 | `TELEGRAM_PROXY_URL` | Необязательный URL SOCKS5/SOCKS4/HTTP-прокси для запросов Telegram Bot API, например `socks5://10.77.77.1:1080`. Пустое значение сохраняет прямой доступ; VK, GitHub и AI Gateway эту настройку не используют. Если прокси требует пароль, храните URL только в `.env`, вне Git. |
 | `VK_BOT_TOKEN`, `VK_GROUP_ID` | Токен сообщества и положительный ID группы для VK. Для бота нужно настроить сообщения сообщества и Bots Long Poll. |
 | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `OPENAI_MODEL` | LLM Obsidian: заполнить все три для анализа/review или оставить все пустыми. Пустая группа разрешает общие команды; Obsidian сообщает о ненастроенном LLM. Частичная группа — ошибка startup. При выключенном Obsidian не читается. |

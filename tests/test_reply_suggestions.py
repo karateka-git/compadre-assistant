@@ -1,43 +1,45 @@
 """Проверяет небольшие следующие действия и их ручной текстовый путь."""
 
 import unittest
-from types import SimpleNamespace
+from dataclasses import replace
 from unittest.mock import Mock
 
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
-from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultConfirmationAction
 from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.ports import HandlerContext, ReplyAction
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
 from tests.response_assertions import content_text
 from tests.test_contextual_help import ContextualHelpTest
-from tests.test_incoming_boundary import _event
-from tests.test_process_incoming_message import _test_vault
+from tests.test_incoming_boundary import _private_event as _event
+from tests.test_process_incoming_message import FakeVaultSelectionManager, _test_vault
 
 
 class ReplySuggestionsTest(unittest.TestCase):
     """Проверяет сценарии ядра, Ask и Obsidian без копирования меню."""
 
-    def test_registration_and_mode_exit_offer_only_help(self) -> None:
-        """Оба перехода дают исполнимую справку с видимой командой."""
+    def test_registration_and_mode_exit_offer_accessible_entries_and_help(self) -> None:
+        """Оба перехода показывают те же доступные входы и справку."""
         fixture = ContextualHelpTest()
         fixture.setUp()
         user = AppUser(23, "Имя")
         fixture.identity.resolve.side_effect = [None, None, user, user, user]
         fixture.identity.register_with_name.return_value = user
 
-        fixture.dispatcher.execute(_event("/register"))
-        registered = fixture.dispatcher.execute(_event("Имя"))
-        self.assertEqual(registered.suggested_actions, (ReplyAction("Посмотреть команды", "/help"),))
+        event = replace(_event("/register", "123"), external_user_id="123")
+        fixture.dispatcher.execute(event)
+        registered = fixture.dispatcher.execute(replace(event, text="Имя"))
+        self.assertEqual({action.command for action in registered.suggested_actions},
+                         {"/obsidian", "/ai", "/other", "/settings", "/help"})
         self._assert_command_visible_in_channels(registered, "/help")
 
         fixture.identity.resolve.side_effect = None
         fixture.identity.resolve.return_value = user
-        exited = fixture.dispatcher.execute(_event("/exit"))
-        self.assertEqual(exited.suggested_actions, (ReplyAction("Посмотреть команды", "/help"),))
+        exited = fixture.dispatcher.execute(replace(event, text="/exit"))
+        self.assertEqual(exited.suggested_actions, registered.suggested_actions)
         self._assert_command_visible_in_channels(exited, "/help")
         self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
 
@@ -48,7 +50,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         ask = AiCapability(question, Mock())
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
-        self.assertEqual(response.suggested_actions, (ReplyAction("Ввести вопрос заново", "/ask"),))
+        self.assertEqual(response.suggested_actions,
+                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION),))
         self.assertIn("вызови /ask", content_text(response.content))
         self._assert_command_visible_in_channels(response, "/ask")
         model.answer.assert_not_called()
@@ -73,36 +76,29 @@ class ReplySuggestionsTest(unittest.TestCase):
         self.assertNotIn("вызови /ask", content_text(response.content))
         model.answer.assert_not_called()
 
-    def test_obsidian_vault_offers_status_only_when_available(self) -> None:
-        """Подключённый vault предлагает одну работающую команду состояния."""
-        selection = Mock()
-        selection.get_selected.return_value = _test_vault(23)
-        selection.get_pending.return_value = None
-        handler = ObsidianMessageHandler(article_url_use_case=Mock(),
-            vault_selection_manager=selection, vault_sync_manager=Mock())
-        context = HandlerContext(AppUser(23, "Имя"))
-        response = handler.enter(context, _event("/obsidian"), "").response
-        self.assertEqual(response.suggested_actions,
-                         (ReplyAction("Проверить состояние vault", "/vault_status"),))
-        self._assert_command_visible_in_channels(response, "/vault_status")
-        self.assertEqual(response.actions, ())
-
-        handler = ObsidianMessageHandler(article_url_use_case=Mock(),
-            vault_selection_manager=selection)
-        self.assertEqual(handler.enter(context, _event("/obsidian"), "").response.suggested_actions, ())
-        selection.get_selected.return_value = None
-        handler = ObsidianMessageHandler(article_url_use_case=Mock(),
-            vault_selection_manager=selection, vault_sync_manager=Mock())
-        self.assertEqual(handler.enter(context, _event("/obsidian"), "").response.suggested_actions, ())
-
-        selection.get_selected.return_value = _test_vault(23)
-        selection.get_pending.return_value = SimpleNamespace(
-            action=VaultConfirmationAction.DISCONNECT, id=7, version=2)
-        pending = handler.enter(context, _event("/obsidian"), "").response
-        self.assertEqual(pending.suggested_actions, ())
-        self.assertEqual(tuple(action.command for action in pending.actions),
-                         ("/confirm obsidian disconnect 7 2 yes",
-                          "/confirm obsidian disconnect 7 2 no"))
+    def test_obsidian_vault_offers_only_available_section_actions(self) -> None:
+        """Экран входа и отдельный запрос возвращают действия выбранного хранилища."""
+        user = AppUser(23, "Имя")
+        selection = FakeVaultSelectionManager(selected=_test_vault(23))
+        event = _event("/obsidian")
+        context = HandlerContext(user)
+        for sync, selected, commands in (
+            (Mock(), selection, ("/vault_status", "/vault_sync", "/vault_disconnect", "/exit")),
+            (None, selection, ("/vault_disconnect", "/exit")),
+            (Mock(), FakeVaultSelectionManager(), ("/exit",)),
+            (None, None, ("/exit",)),
+        ):
+            with self.subTest(commands=commands):
+                handler = ObsidianMessageHandler(article_url_use_case=Mock(), vault_selection_manager=selected,
+                                                 vault_sync_manager=sync)
+                response = handler.enter(context, event, "").response
+                self.assertEqual(tuple(action.command for action in response.suggested_actions), commands)
+                self.assertEqual(response.suggested_actions, handler.section_actions(user, event.reply_address, 1, None))
+                self.assertTrue(all(action.scope == ActionScope.SECTION for action in response.suggested_actions))
+                if "/vault_status" in commands:
+                    self._assert_command_visible_in_channels(response, "/vault_status")
+                self._assert_command_visible_in_channels(response, "/help")
+                self.assertEqual(response.actions, ())
 
     def test_confirmation_actions_stay_separate_from_suggestions(self) -> None:
         """Адресные решения не превращаются в общие следующие шаги."""

@@ -643,7 +643,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
         )
         asyncio.run(aiogram.dispatcher.included_router.callback_handler(callback))
         event, token, completion, menu = processor.selected
-        self.assertEqual(order, ["ack", "select", "edit", "send"])
+        self.assertEqual(order, ["ack", "select", "send", "edit"])
         self.assertEqual((event.channel, event.chat_id, event.message_id, event.external_user_id),
                          ("telegram", "42", "callback-7", "99"))
         self.assertEqual((event.username, event.display_name, event.text),

@@ -102,7 +102,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             analysis_use_case_factory=lambda _connection: self.analysis,
         ) as processor:
             registered = processor._registry.by_id("obsidian")
-            for command in ("/help", "/settings", "/status", "/name Имя", "/link_code"):
+            for command in ("/help", "/settings", "/status", "/name Имя", "/connect"):
                 processor(self.event(command))
             self.assertEqual(connections, [])
             self.assertIn("Режим Obsidian", response_text(processor(self.event("/obsidian"))))
@@ -391,8 +391,11 @@ class ObsidianEntryStateTest(unittest.TestCase):
             IncomingEvent("telegram", "chat", "1", "/obsidian"),
             "",
         ).response
-        self.assertIn("да", response_text(response))
-        self.assertIn("нет", response_text(response))
+        self.assertIn("Ожидаю решения по предложению", response_text(response))
+        self.assertIn("/confirm", response_text(response))
+        self.assertEqual(tuple(action.command for action in response.actions), (
+            "/confirm obsidian proposal 1 1 yes", "/confirm obsidian proposal 1 1 no",
+        ))
         self.assertEqual(confirmation.confirm_calls, 0)
         self.assertEqual(confirmation.cancel_calls, 0)
 

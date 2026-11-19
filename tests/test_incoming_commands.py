@@ -43,9 +43,10 @@ class IncomingCommandsTest(unittest.TestCase):
     def test_parser_does_not_confuse_commands_with_common_prefix(self) -> None:
         """`/link_code` не распознаётся как `/link`, а неизвестный prefix отвергается."""
         self.assertEqual(
-            ParsedChatCommand.parse("/link_code").command,
-            ChatCommand.LINK_CODE,
+            ParsedChatCommand.parse("/connect vk").command,
+            ChatCommand.CONNECT,
         )
+        self.assertIsNone(ParsedChatCommand.parse("/link_code"))
         self.assertIsNone(ParsedChatCommand.parse("/link_extra ABC123"))
         self.assertIsNone(ParsedChatCommand.parse("/github_connect"))
         self.assertIsNone(

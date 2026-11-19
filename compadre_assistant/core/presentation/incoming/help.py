@@ -17,6 +17,7 @@ def format_contextual_help(
     confirmation: IncomingResponse,
     *,
     active_help: CapabilityHelp | None = None,
+    allow_link: bool = True,
 ) -> IncomingResponse:
     """Формирует справку только по допущенным командам и актуальным ожиданиям.
 
@@ -27,6 +28,7 @@ def format_contextual_help(
         snapshot: Результат опроса применимых источников подтверждений.
         confirmation: Готовое представление адресных действий этого снимка.
         active_help: Отобранная справка активной возможности либо None для её каталога.
+        allow_link: Предлагать ввод кода в проверенном личном чате.
 
     Returns:
         Справку с отдельным блоком точных адресных действий.
@@ -50,8 +52,9 @@ def format_contextual_help(
     elif personal is None:
         line("Доступные действия:")
         command("/register", "создать профиль")
-        command("/link", "ввести код привязки к существующему профилю")
-        parts.append(compose_content("\nЕсли код уже есть, можно сразу отправить ", code_span("/link <code>"), "."))
+        if allow_link:
+            command("/link", "ввести код привязки к существующему профилю")
+            parts.append(compose_content("\nЕсли код уже есть, можно сразу отправить ", code_span("/link <code>"), "."))
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:
@@ -86,6 +89,7 @@ def format_contextual_help(
             line("Возможности:" if available else "Сейчас нет доступных возможностей.")
             for item in available:
                 entry(item.descriptor.entry, one_shot=not item.descriptor.persistent_mode)
+            command("/help", ChatCommand.HELP.description)
     if pending is not None and not registration:
         label = pending.value_label
         if pending.owner_id == "core":

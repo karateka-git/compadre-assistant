@@ -24,6 +24,25 @@ class ConfigError(ValueError):
     """Сообщает об отсутствующей или некорректной настройке приложения."""
 
 
+def load_messenger_dialogs() -> dict[str, str | None]:
+    """Читает публичные диалоги включённых сервисов всей установки.
+
+    Каждый процесс обслуживает один адаптер, но показывает пользователю
+    диалоги установки из ENABLED_CHANNELS. Отсутствие публичного имени
+    оставляет ручной путь привязки на действующей конфигурации.
+    """
+    dialogs = {}
+    for channel in parse_channels(os.getenv("ENABLED_CHANNELS", "telegram,vk")):
+        if channel == "telegram":
+            username = os.getenv("TELEGRAM_BOT_USERNAME", "").strip().removeprefix("@")
+            valid = re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,28}[Bb][Oo][Tt]", username)
+            dialogs[channel] = f"https://t.me/{username}" if valid else None
+        else:
+            group = os.getenv("VK_GROUP_ID", "").strip()
+            dialogs[channel] = f"https://vk.com/write-{group}" if re.fullmatch(r"[1-9][0-9]*", group) else None
+    return dialogs
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Содержит настройки приложения, подготовленные для composition root."""

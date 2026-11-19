@@ -11,7 +11,7 @@ from compadre_assistant.core.domain.users.ports import (
     IdentityLifecycleRepository,
 )
 from compadre_assistant.core.domain.users.entities import (
-    AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, is_private_chat_address,
+    AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, PROFILE_MESSENGERS, is_private_chat_address,
 )
 from compadre_assistant.core.domain.users.identity import (
     IdentityAlreadyBoundError, InvalidLinkCodeError, SourceProfileInUseError,
@@ -114,6 +114,13 @@ class SQLiteAppUserRepository(AppUserRepository):
 
 class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
     """Хранит связи пользователей приложения с внешними каналами."""
+
+    def linked_channels(self, app_user_id: int) -> frozenset[str]:
+        """Возвращает каналы владельца независимо от последнего адреса доставки."""
+        rows = self._connection.execute(
+            "SELECT DISTINCT channel FROM external_identities WHERE app_user_id = ?", (app_user_id,)
+        )
+        return frozenset(row["channel"] for row in rows)
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self._connection = connection
@@ -300,6 +307,15 @@ class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
             _touch_identity(self._connection, dto)
 
 
+# Старый ключ — чистый SHA-256. Новый содержит канал и тот же digest.
+# При подтверждении digest берётся из ожидания, канал — из проверенной identity.
+_AVAILABLE_LINK_TARGET = """(token_hash = :digest OR (token_hash = :channel || ':' || :digest AND NOT EXISTS (
+    SELECT 1 FROM external_identities AS linked
+    WHERE linked.app_user_id = identity_link_tokens.app_user_id
+      AND linked.channel = :channel
+)))"""
+
+
 class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
     """Хранит одноразовые коды привязки каналов в SQLite."""
 
@@ -311,44 +327,52 @@ class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
         *,
         app_user_id: int,
         token_hash: str,
+        target_channel: str | None = None,
         expires_at: datetime,
     ) -> None:
         """Сохраняет одноразовый код привязки."""
+        if target_channel is not None and target_channel not in PROFILE_MESSENGERS:
+            raise ValueError("unknown link target channel")
+        stored_key = token_hash if target_channel is None else f"{target_channel}:{token_hash}"
+        keys = (token_hash, *(f"{channel}:{token_hash}" for channel in PROFILE_MESSENGERS))
+        placeholders = ", ".join("?" for _ in keys)
         with self._connection:
-            self._connection.execute(
-                """
-                INSERT INTO identity_link_tokens (
-                    app_user_id,
-                    token_hash,
-                    expires_at
-                )
-                VALUES (?, ?, ?)
-                """,
-                (app_user_id, token_hash, _format_timestamp(expires_at)),
+            self._connection.execute("BEGIN IMMEDIATE")
+            if self._connection.execute(
+                f"SELECT 1 FROM identity_link_tokens WHERE token_hash IN ({placeholders})", keys,
+            ).fetchone():
+                raise sqlite3.IntegrityError("Duplicate link code digest")
+            inserted = self._connection.execute(
+                """INSERT INTO identity_link_tokens (app_user_id, token_hash, expires_at)
+                SELECT ?, ?, ? WHERE NOT EXISTS (
+                    SELECT 1 FROM external_identities WHERE app_user_id = ? AND channel = ?)""",
+                (app_user_id, stored_key, _format_timestamp(expires_at), app_user_id, target_channel),
             )
+            if inserted.rowcount != 1:
+                raise IdentityAlreadyBoundError("Target messenger already linked")
 
-    def find_active(self, *, token_hash: str, now: datetime) -> int | None:
+    def find_active(self, *, token_hash: str, channel: str | None = None, now: datetime) -> int | None:
         """Возвращает ID пользователя для действующего кода без погашения."""
-        row = self._find_active_dto(token_hash=token_hash, now=now)
+        row = self._find_active_dto(token_hash=token_hash, channel=channel, now=now)
         return link_token_owner_from_dto(row) if row is not None else None
 
     def _find_active_dto(
         self,
         *,
         token_hash: str,
+        channel: str | None,
         now: datetime,
     ) -> IdentityLinkTokenDto | None:
         row = self._connection.execute(
-            """
+            f"""
             SELECT id, app_user_id
             FROM identity_link_tokens
-            WHERE token_hash = ?
-                AND used_at IS NULL
-                AND expires_at > ?
+            WHERE used_at IS NULL AND expires_at > :now
+                AND {_AVAILABLE_LINK_TARGET}
             ORDER BY id DESC
             LIMIT 1
             """,
-            (token_hash, _format_timestamp(now)),
+            {"digest": token_hash, "channel": channel, "now": _format_timestamp(now)},
         ).fetchone()
         return IdentityLinkTokenDto(**dict(row)) if row is not None else None
 
@@ -433,10 +457,11 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
                 if existing is not None:
                     raise IdentityAlreadyBoundError("External identity is already bound")
                 token = self._connection.execute(
-                    """UPDATE identity_link_tokens SET used_at = ?
-                    WHERE token_hash = ? AND used_at IS NULL AND expires_at > ?
+                    f"""UPDATE identity_link_tokens SET used_at = :now
+                    WHERE used_at IS NULL AND expires_at > :now
+                    AND {_AVAILABLE_LINK_TARGET}
                     RETURNING app_user_id""",
-                    (_format_timestamp(now), token_hash, _format_timestamp(now)),
+                    {"now": _format_timestamp(now), "digest": token_hash, "channel": dto.channel},
                 ).fetchone()
                 if token is None:
                     return None
@@ -614,14 +639,10 @@ class SQLiteIdentityRebindConfirmationRepository(IdentityRebindConfirmationRepos
             if not approve:
                 return confirmation.source_app_user_id
             token = self._connection.execute(
-                """UPDATE identity_link_tokens SET used_at = ? WHERE token_hash = ? AND app_user_id = ?
-                AND used_at IS NULL AND expires_at > ?""",
-                (
-                    _format_timestamp(now),
-                    confirmation.token_hash,
-                    confirmation.target_app_user_id,
-                    _format_timestamp(now),
-                ),
+                f"""UPDATE identity_link_tokens SET used_at = :now WHERE app_user_id = :owner
+                AND used_at IS NULL AND expires_at > :now AND {_AVAILABLE_LINK_TARGET}""",
+                {"now": _format_timestamp(now), "digest": confirmation.token_hash,
+                 "owner": confirmation.target_app_user_id, "channel": identity.channel},
             )
             if token.rowcount != 1:
                 # Непригодный код завершает именно эту запись; новую запись он не затрагивает.

@@ -21,6 +21,7 @@ from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.family.bootstrap import create_family_capability
 from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
+from compadre_assistant.core.data.config import load_messenger_dialogs
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -32,6 +33,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     IncomingResponse,
     BackgroundReply,
     PendingInputExpiryHandler,
+    ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import (
     IncomingMessageDispatcher,
@@ -108,6 +110,7 @@ def create_incoming_message_dispatcher(
     capability_preference_repository: UserCapabilityPreferenceRepository,
     disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
     profile_access: Mapping[str, Callable[[int], bool]] | None = None,
+    messenger_dialogs: Mapping[str, str | None] | None = None,
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
 
@@ -118,6 +121,7 @@ def create_incoming_message_dispatcher(
         capability_preference_repository: Хранилище личного выбора AppUser.
         disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
         profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
+        messenger_dialogs: Публичные диалоги включённых каналов установки.
 
     Returns:
         Диспетчер с проверенным реестром точек входа.
@@ -127,7 +131,8 @@ def create_incoming_message_dispatcher(
     """
     return IncomingMessageDispatcher(
         registry=CapabilityRegistry(
-            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+            (*capabilities, SettingsCapability(messenger_dialogs, lambda user_id: user_identity_service.linked_channels(user_id))),
+            disabled_capabilities, profile_access=profile_access,
         ),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
@@ -178,7 +183,8 @@ class ChannelMessageProcessor:
     def __init__(self, *, database_path: Path,
                  capabilities: tuple[IncomingCapabilityPort, ...],
                  disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
-                 profile_access: Mapping[str, Callable[[int], bool]] | None = None) -> None:
+                 profile_access: Mapping[str, Callable[[int], bool]] | None = None,
+                 messenger_dialogs: Mapping[str, str | None] | None = None) -> None:
         """Регистрирует обработчики при запуске без соединения с SQLite.
 
         Args:
@@ -186,6 +192,7 @@ class ChannelMessageProcessor:
             capabilities: Уже собранные входы включённых возможностей.
             disabled_capabilities: Метаданные отключённых входов.
             profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
+            messenger_dialogs: Публичные диалоги включённых каналов установки.
 
         Raises:
             ValueError: Повторный ID или команда входа в реестре.
@@ -196,7 +203,8 @@ class ChannelMessageProcessor:
         self._deferred_menu_closed = Event()
         self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(
-            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+            (*capabilities, SettingsCapability(messenger_dialogs, self._linked_channels)),
+            disabled_capabilities, profile_access=profile_access,
         )
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
@@ -204,6 +212,10 @@ class ChannelMessageProcessor:
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
         self._expiry_attempts: dict[ReplyAddress, tuple[str, CommandMenuUpdate]] = {}
+
+    def _linked_channels(self, app_user_id: int) -> frozenset[str]:
+        with connect_database(self._database_path) as connection:
+            return create_user_identity_service(connection).linked_channels(app_user_id)
 
     def close_deferred_actions(self) -> None:
         """Останавливает отложенные действия до закрытия зависимостей возможностей."""
@@ -362,7 +374,7 @@ class ChannelMessageProcessor:
             if not complete:
                 # Скрываем /confirm, пока источник подтверждений недоступен.
                 self._menu_failures.setdefault(address, INCOMPLETE_MENU_SNAPSHOT)
-            if (self._published_menus.get(address) == update
+            if (self._same_menu_projection(self._published_menus.get(address), update)
                     and self._menu_failures.get(address) in (None, INCOMPLETE_MENU_SNAPSHOT)):
                 if complete:
                     self._acknowledge_menu(update)
@@ -372,18 +384,39 @@ class ChannelMessageProcessor:
                 self._menu_failures[address] = "Не удалось доставить меню с ответом"
                 return
             if sent is None:
-                if send is not None and self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+                if send is not None and not self._same_menu_snapshot(
+                    self._read_menu_snapshot(event, allow_unknown=allow_unknown), snapshot,
+                ):
                     self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                     return
                 if handler(update) is False:
                     return
-            if self._read_menu_snapshot(event, allow_unknown=allow_unknown) != snapshot:
+            if not self._same_menu_snapshot(self._read_menu_snapshot(event, allow_unknown=allow_unknown), snapshot):
                 self._menu_failures[address] = "Состояние меню изменилось во время доставки"
                 return
             self._record_menu_delivery(update, complete)
         except Exception as error:
             self._menu_failures[address] = str(error)
             LOGGER.exception("Could not deliver reconciled command menu")
+
+    @staticmethod
+    def _same_menu_projection(published: CommandMenuUpdate | None, current: CommandMenuUpdate) -> bool:
+        if published is None or published.address != current.address:
+            return False
+        old_actions, actions = published.menu.section_actions, current.menu.section_actions
+        if current.address.channel == "vk":
+            # Подпись передаётся без команды; актуальная цель проверяется при нажатии.
+            return tuple((action.label, action.url) for action in (old_actions or ())) == tuple(
+                (action.label, action.url) for action in (actions or ())
+            )
+        return published == current
+
+    @classmethod
+    def _same_menu_snapshot(
+        cls, previous: tuple[CommandMenuUpdate, bool, int | None] | None,
+        current: tuple[CommandMenuUpdate, bool, int | None],
+    ) -> bool:
+        return previous is not None and previous[1:] == current[1:] and cls._same_menu_projection(previous[0], current[0])
 
     def _record_menu_delivery(self, update: CommandMenuUpdate, complete: bool) -> None:
         if complete:
@@ -400,6 +433,7 @@ class ChannelMessageProcessor:
 
     def _read_menu_snapshot(
         self, event: IncomingEvent, *, allow_unknown: bool, expired_input: PendingInput | None = None,
+        read_only: bool = False,
     ) -> tuple[CommandMenuUpdate, bool, int | None] | None:
         """Читает меню и владельца без доставки и без обновления identity."""
         address = event.reply_address
@@ -418,7 +452,7 @@ class ChannelMessageProcessor:
                     return None
             elif not allow_unknown or service.has_known_chat_address(address.channel, address.chat_id):
                 return None
-            else:
+            elif not read_only:
                 self._unregistered_menu_events[address] = event
             dispatcher = IncomingMessageDispatcher(
                 registry=self._registry, pending_inputs=self._pending_inputs,
@@ -433,9 +467,14 @@ class ChannelMessageProcessor:
                 return None
             menu, complete = dispatcher.command_menu_snapshot(
                 event, known_user=owner, preserve_expired=address.channel == "vk",
+                cleanup_pending=not read_only,
             )
             if known is not None and not service.owns_known_private_chat(*known):
                 return None
+        if address.channel == "vk" and menu.section_actions is not None:
+            # В нижнем меню публикуются действия раздела; справка и подтверждения не меняют его снимок.
+            menu = replace(menu, items=(), pending_input_label=None)
+            complete = True
         return CommandMenuUpdate(address, menu), complete, owner.id if owner is not None else None
 
     def deliver_response_menu(
@@ -466,6 +505,20 @@ class ChannelMessageProcessor:
             if not self._deferred_menu_closed.is_set():
                 self._reconcile_menu_event(event, handler, allow_unknown=True, send=send_with_menu)
         return send(None)[0] if delivered is None else delivered
+
+    def section_actions(self, event: IncomingEvent) -> tuple[ReplyAction, ...] | None:
+        """Читает действия раздела через проверенный снимок без исполнения команд.
+
+        Args:
+            event: Адрес и явный автор запроса; текст игнорируется.
+
+        Returns:
+            Действия раздела, включая пустой набор, либо None при отсутствии
+            проекции раздела. Ошибка источника передаётся вызывающему.
+        """
+        with self._menu_lock:
+            snapshot = self._read_menu_snapshot(event, allow_unknown=True, read_only=True)
+        return snapshot[0].menu.section_actions if snapshot is not None else None
 
     def __call__(self, incoming_message: IncomingEvent,
                  completion_handler: ChannelCompletionHandler | None = None,
@@ -515,7 +568,7 @@ class ChannelMessageProcessor:
         menu_updates: list[CommandMenuUpdate] = []
         origin = IncomingEvent(
             incoming_message.channel, incoming_message.chat_id, incoming_message.message_id,
-            "ответ", incoming_message.external_user_id,
+            "ответ", incoming_message.external_user_id, action_layout=incoming_message.action_layout,
         )
 
         def refresh_deferred_menu(address: ReplyAddress) -> None:
@@ -558,10 +611,13 @@ class ChannelMessageProcessor:
                             )
                             if background_dispatcher.action_context(origin) == original_context:
                                 response = background_dispatcher.bind_response_actions(
-                                    origin, response, action_store,
+                                    origin, response, action_store, view_origin=original_context,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
+                response = replace(response, suggested_actions=tuple(
+                    action for action in response.suggested_actions if action.url is None
+                ))
                 completion_handler(BackgroundReply(reply.address, response))
 
             completion = deliver if completion_handler is not None else None
@@ -621,6 +677,7 @@ def create_channel_message_processor(
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
     ai_config: AiConfig | None = None,
+    messenger_dialogs: Mapping[str, str | None] | None = None,
 ) -> Iterator[ChannelMessageProcessor]:
     """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
 
@@ -632,6 +689,7 @@ def create_channel_message_processor(
         analysis_use_case_factory: Подменная фабрика анализа для тестов.
         enabled_capabilities: Явно включённые ID.
         ai_config: Профиль ИИ либо None для чтения ASK_* при включении.
+        messenger_dialogs: Публичные диалоги либо None для чтения настроек установки.
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
@@ -689,6 +747,7 @@ def create_channel_message_processor(
                 disabled += (FamilyCapability.descriptor,)
             processor = ChannelMessageProcessor(
                 database_path=database_path,
+                messenger_dialogs=load_messenger_dialogs() if messenger_dialogs is None else messenger_dialogs,
                 capabilities=capabilities,
                 disabled_capabilities=disabled,
                 profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,

@@ -526,7 +526,7 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("читать и записывать", reply)
         self.assertIn("Contents: read and write", reply)
 
-    def test_format_vault_replacement_requests_yes_or_no(self) -> None:
+    def test_format_vault_replacement_explains_scope_and_expiration(self) -> None:
         """Предложение замены явно предупреждает об удалении локальных данных."""
         reply = content_text(format_obsidian_message_result(
             ObsidianMessageResult(
@@ -548,8 +548,8 @@ class TelegramResponsesTest(unittest.TestCase):
         ))
 
         self.assertIn("текущее подключение и его локальные данные будут заменены", reply)
-        self.assertIn("да", reply)
-        self.assertIn("нет", reply)
+        self.assertIn("Ожидание действует 10 минут", reply)
+        self.assertNotIn("ответь «да»", reply)
 
     def test_format_vault_disconnect_explains_scope_and_confirmation(self) -> None:
         """Отключение предупреждает об очистке локальных, но не пользовательских данных."""
@@ -576,8 +576,8 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertIn("octocat/notes", reply)
         self.assertIn("Repository на GitHub не изменится", reply)
         self.assertIn("статьи и анализы сохранятся", reply)
-        self.assertIn("да", reply)
-        self.assertIn("нет", reply)
+        self.assertIn("Ожидание действует 10 минут", reply)
+        self.assertNotIn("ответь «да»", reply)
 
     def test_format_sync_failure_keeps_article_result_and_warns_about_fallback(
         self,

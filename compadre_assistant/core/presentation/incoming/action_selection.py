@@ -8,9 +8,10 @@ from secrets import token_urlsafe
 from threading import RLock
 from time import monotonic
 
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BoundReplyAction, ConfirmationAction, PendingConfirmation, ResponseView, ResponseViewDelivery,
+    BoundReplyAction, ConfirmationAction, PendingConfirmation, ReplyAction, ResponseView, ResponseViewDelivery,
 )
 
 
@@ -77,6 +78,8 @@ class _ViewSlot:
     delivered_generation: int | None = None
     delivered_message_id: str | None = None
     delivered_in_parts: bool = False
+    delivered_action_scope: ActionScope | None = None
+    action_scope: ActionScope | None = None
     started: bool = False
     sending: bool = False
     cleanup_previous: bool = False
@@ -135,7 +138,11 @@ class ResponseActionStore:
             target = None
             if view.update:
                 target = slot.delivered_message_id if slot is not None and slot.delivered_generation is not None else None
-                if target is None or event.callback_message_id not in (None, target):
+                # Переход от раздела может начаться вручную до подтверждения его списка.
+                opening_screen = view.action_scope == ActionScope.SCREEN and (
+                    slot is None or (slot.delivered_message_id is None and slot.action_scope == ActionScope.SECTION)
+                )
+                if event.callback_message_id not in (None, target) or (target is None and not opening_screen):
                     return None
             if slot is None:
                 if len(self._views) >= self._limit:
@@ -148,12 +155,15 @@ class ResponseActionStore:
             slot.expires_at = self._clock() + self._ttl
             slot.started = False
             slot.cleanup_previous = view.cleanup_previous
+            slot.action_scope = view.action_scope
             target_has_parts = target is not None and slot.delivered_in_parts
+            section_transition = (target is not None and slot.delivered_action_scope is not None
+                                  and view.action_scope is not None and slot.delivered_action_scope != view.action_scope)
         finish_replacement = (
             lambda message_id, multipart: self._finish_view(
                 scope, generation, target, message_id, view.on_delivered, replacement=True, multipart=multipart,
             )
-        ) if view.allow_multiple_messages or target_has_parts else None
+        ) if view.allow_multiple_messages or target_has_parts or section_transition else None
         delivery = ResponseViewDelivery(
             target, view.unavailable,
             lambda: self._start_view(scope, generation),
@@ -161,6 +171,7 @@ class ResponseActionStore:
             allow_multiple_messages=view.allow_multiple_messages,
             target_has_multiple_messages=target_has_parts,
             finish_replacement=finish_replacement,
+            section_transition=section_transition,
         )
         return PreparedResponseView(scope, generation, delivery)
 
@@ -196,6 +207,7 @@ class ResponseActionStore:
                 slot.delivered_generation = generation
                 slot.delivered_message_id = message_id
                 slot.delivered_in_parts = multipart
+                slot.delivered_action_scope = slot.action_scope
                 if slot.cleanup_previous:
                     retired = self._retire_views(scope.owner, generation)
                     if previous_id is not None and previous_id != message_id:
@@ -272,18 +284,16 @@ class ResponseActionStore:
             )
 
     def register(self, event: IncomingEvent, context: ActionContext,
-                 actions: tuple[tuple[str, str, PendingConfirmation | None, ConfirmationAction | None], ...],
+                 actions: tuple[tuple[ReplyAction, PendingConfirmation | None, ConfirmationAction | None], ...],
                  *, view: PreparedResponseView | None = None,
-                 rows: dict[str, int] | None = None,
                  ) -> tuple[BoundReplyAction, ...]:
         """Связывает действия одного ответа с непрозрачными случайными токенами.
 
         Args:
             event: Проверенный исходный адрес с явным отправителем.
             context: Снимок допуска именно этого ответа.
-            actions: Подпись, точная команда и необязательное адресное ожидание.
+            actions: Проверенные описания действий и необязательные адресные ожидания.
             view: Поколение управляемого ответа, требующее подтверждения доставки.
-            rows: Явные ряды кнопок по их точным командам.
 
         Returns:
             Контракт сериализации адаптером; команда в callback не передаётся.
@@ -296,13 +306,17 @@ class ResponseActionStore:
                 del self._entries[next(iter(self._entries))]
             response_id = token_urlsafe(16)
             result = []
-            for label, command, confirmation, action in actions:
-                token = token_urlsafe(24)
-                self._entries[token] = RegisteredAction(
-                    response_id, event.reply_address, event.external_user_id, context,
-                    command, self._clock() + self._ttl, confirmation, action, view,
-                )
-                result.append(BoundReplyAction(label, token, response_id, rows.get(command) if rows else None))
+            for description, confirmation, action in actions:
+                token = "" if description.url is not None else token_urlsafe(24)
+                if token:
+                    self._entries[token] = RegisteredAction(
+                        response_id, event.reply_address, event.external_user_id, context,
+                        description.command, self._clock() + self._ttl, confirmation, action, view,
+                    )
+                result.append(BoundReplyAction(
+                    description.label, token, response_id, description.row,
+                    description.scope, description.purpose, description.destination, description.url,
+                ))
             return tuple(result)
 
     def claim(

@@ -19,7 +19,7 @@ from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMes
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityResult, CapabilityMode, IncomingResponse, PendingInputContinuationPort,
-    PendingInputOutcome, PendingInputResult,
+    PendingInputOutcome, PendingInputResult, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from compadre_assistant.core.presentation.message_content import text_content
@@ -267,7 +267,7 @@ class DeferredInputTest(unittest.TestCase):
     def test_waits_for_receipt_rejects_busy_commands_and_does_not_claim_button(self):
         origin = self.event('значение')
         callbacks = ResponseActionStore()
-        button, = callbacks.register(origin, ActionContext(23, None, 0, (), None), (('X', '/mode', None, None),))
+        button, = callbacks.register(origin, ActionContext(23, None, 0, (), None), ((ReplyAction('X', '/mode'), None, None),))
         receipt = self.begin()
         self.assertIsNone(self.store.get(origin.reply_address))
         self.owner.work.assert_not_called()

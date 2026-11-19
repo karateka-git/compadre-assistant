@@ -1,15 +1,34 @@
 """Проекция публичного каталога в меню без зависимости от канала доставки."""
 
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion, ConfirmationQueryResult,
+    CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion,
+    ConfirmationQueryResult, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
 
 
 # Пока принятое действие занимает чат, только отмена может изменить его состояние.
-BUSY_COMMAND_MENU = CommandMenu((CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),))
+BUSY_COMMAND_MENU = CommandMenu(
+    (CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),),
+    section_actions=(CANCEL_SECTION_ACTION,),
+)
+
+
+def main_actions(personal: PersonalCapabilityRegistry | None, pending: PendingInput | None) -> tuple[ReplyAction, ...]:
+    """Возвращает действия первого входа, ожидания или главного меню по допуску профиля."""
+    if pending is not None:
+        return (CANCEL_SECTION_ACTION,)
+    if personal is None:
+        return (ReplyAction("Создать профиль", "/register", scope=ActionScope.SECTION),
+                ReplyAction("У меня есть код", "/link", scope=ActionScope.SECTION))
+    return tuple(
+        ReplyAction(access.descriptor.display_name or access.descriptor.entry.name,
+                    access.descriptor.entry.name, scope=ActionScope.SECTION)
+        for access in personal.access if access.effective
+    ) + (ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),)
 
 
 def build_command_menu(
@@ -19,6 +38,7 @@ def build_command_menu(
     snapshot: ConfirmationQueryResult,
     *,
     active_help: CapabilityHelp | None = None,
+    allow_link: bool = True,
 ) -> CommandMenu:
     """Собирает выбираемые команды по проверенному состоянию текущего чата.
 
@@ -28,6 +48,7 @@ def build_command_menu(
         pending: Уже проверенное по сроку, профилю и доступу ожидание ввода.
         snapshot: Снимок всех применимых источников подтверждений.
         active_help: Отобранная справка активной возможности либо None для её каталога.
+        allow_link: Предлагать привязку до регистрации в проверенном личном чате.
 
     Returns:
         Меню с точными командами, запускающими действие или пошаговый ввод.
@@ -51,7 +72,8 @@ def build_command_menu(
         pass  # Ввод имени заменяет базовое меню единственной отменой ниже.
     elif personal is None:
         common(ChatCommand.REGISTER)
-        common(ChatCommand.LINK)
+        if allow_link:
+            common(ChatCommand.LINK)
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:
@@ -60,8 +82,7 @@ def build_command_menu(
                 if not section.menu_help_only:
                     for command in section.commands:
                         capability(command)
-            if any(section.menu_help_only for section in catalog.sections):
-                common(ChatCommand.HELP)
+            common(ChatCommand.HELP)
             common(ChatCommand.EXIT)
             for access in personal.access:
                 if access.effective and not access.descriptor.persistent_mode:

@@ -6,19 +6,25 @@ from compadre_assistant.capabilities.admin.domain.cost_report import (
     CostReportRow, CostReportStatus, GatewayCostReport, GetGatewayCostReport,
     InvalidReportTimezone, ReportPeriod,
 )
-from compadre_assistant.core.domain.users.entities import is_private_chat_address
+from compadre_assistant.core.domain.users.entities import AppUser, is_private_chat_address
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult, CommandParameter,
     ConfirmationQueryResult, HandlerContext, HelpSection, IncomingCapabilityPort, IncomingResponse,
-    PendingConfirmationQueryPort, ReplyAction,
+    PendingConfirmationQueryPort, PendingInput, ReplyAction, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import TextSpan, TextStyle, code_span, compose_content, text_content
 
 
 _ENTRY = "/admin"
 _COSTS = "/llm_costs"
-_COSTS_ACTION = ReplyAction("Показать расходы ИИ", _COSTS)
+_COSTS_ACTION = ReplyAction("Показать расходы ИИ", _COSTS, scope=ActionScope.SECTION)
+_ADMIN_ACTIONS = (
+    _COSTS_ACTION,
+    ReplyAction("Выйти из режима", "/exit", scope=ActionScope.SECTION,
+                purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("main")),
+)
 _PRIVATE_CHAT_HINT = "Открой личный чат с ботом, чтобы получить отчёт."
 _PERIOD_LABELS = {
     ReportPeriod.DAY: "Сегодня",
@@ -32,7 +38,7 @@ _STATUS_MESSAGES = {
 }
 
 
-class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
+class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, SectionActionsQueryPort):
     """Подключает команды доверенного режима и их представление в чате."""
 
     descriptor = CapabilityDescriptor(
@@ -73,7 +79,23 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
         return CapabilityResult(IncomingResponse(compose_content(
             "Режим администрирования включён. Чтобы получить отчёт, вызови ",
             code_span(_COSTS), ". Для выхода вызови ", code_span("/exit"), ".",
-        ), suggested_actions=(_COSTS_ACTION,)))
+        ), suggested_actions=_ADMIN_ACTIONS))
+
+    def section_actions(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
+    ) -> tuple[ReplyAction, ...]:
+        """Возвращает действия Admin в личном чате после проверки допуска ядром.
+
+        Args:
+            app_user: Допущенный доверенный профиль.
+            address: Личный чат с активным режимом Admin.
+            mode_revision: Проверенная ревизия режима.
+            pending: Проверенное ожидание, если оно действует.
+
+        Returns:
+            Действия раздела Admin. Режим не запрашивает пошаговый ввод.
+        """
+        return _ADMIN_ACTIONS
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Показывает отчёт в исходном личном чате с сохранением режима.
@@ -100,30 +122,44 @@ class AdminCapability(IncomingCapabilityPort, PendingConfirmationQueryPort):
             return CapabilityResult(IncomingResponse(compose_content(
                 "Укажи период DAY, MONTH или YEAR, затем при необходимости часовой пояс. Например, ",
                 code_span(f"{_COSTS} DAY Europe/Moscow"), ".",
-            )))
+            ), suggested_actions=(_COSTS_ACTION,)))
         try:
             report = self._cost_report.execute(arguments[0] if arguments else None, period=period)
         except InvalidReportTimezone:
             return CapabilityResult(IncomingResponse(compose_content(
                 "Часовой пояс не найден. Используй название IANA, например ",
                 code_span(f"{_COSTS} Europe/Moscow"), ".",
-            )))
-        return CapabilityResult(_report_response(report))
+            ), suggested_actions=(_COSTS_ACTION,)))
+        return CapabilityResult(_report_response(report, period))
 
     def list_pending_confirmations(self, context: HandlerContext, origin: ReplyAddress) -> ConfirmationQueryResult:
         """Возвращает полный пустой список, поскольку режим не создаёт подтверждений."""
         return ConfirmationQueryResult("complete")
 
 
-def _report_response(report: GatewayCostReport) -> IncomingResponse:
+def _report_response(report: GatewayCostReport, period: ReportPeriod | None) -> IncomingResponse:
+    """Добавляет выбор периода с поясом именно этого отчёта."""
     if report.currency is None:
         return IncomingResponse(text_content(_STATUS_MESSAGES[CostReportStatus.SOURCE_UNCONFIGURED]))
+    actions = tuple(
+        ReplyAction(label, f"{_COSTS} {option.value} {report.timezone}")
+        for option, label in _PERIOD_LABELS.items() if option is not period
+    )
+    summary_command = f"{_COSTS} {report.timezone}"
+    summary_hint = ()
+    if period is not None:
+        actions += (ReplyAction("Сводка", summary_command, purpose=ActionPurpose.NAVIGATION,
+                                destination=ScreenDestination("admin_cost_summary")),)
+        summary_hint = (" Чтобы открыть сводку, введи ", code_span(summary_command), ".")
     return IncomingResponse(compose_content(
         TextSpan("Расходы ИИ по статистике Timeweb", TextStyle.EMPHASIS),
         "\nЧасовой пояс ", code_span(report.timezone),
         "\nВалюта ", report.currency, ". Суммы до списания бонусов.\n\n",
         "\n".join(_report_line(row, report.currency) for row in report.rows),
-    ))
+        "\n\nЧтобы выбрать период, введи ", code_span(f"{_COSTS} DAY {report.timezone}"),
+        ". Вместо DAY можно указать MONTH или YEAR.",
+        *summary_hint,
+    ), suggested_actions=actions)
 
 
 def _report_line(row: CostReportRow, currency: str) -> str:

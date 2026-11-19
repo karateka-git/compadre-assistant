@@ -93,8 +93,8 @@ from compadre_assistant.capabilities.settings.presentation.handler import Settin
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from sqlite_helpers import ensure_app_user
 
-TG = PendingOrigin("telegram", "tg-chat")
-VK = PendingOrigin("vk", "vk-chat")
+TG = PendingOrigin("telegram", "101")
+VK = PendingOrigin("vk", "202")
 
 
 class OperationScopesTest(unittest.TestCase):
@@ -112,7 +112,7 @@ class OperationScopesTest(unittest.TestCase):
             ensure_app_user(connection, app_user_id=2)
             connection.executescript("""
                 INSERT INTO external_identities (app_user_id, channel, external_user_id, external_chat_id)
-                VALUES (1, 'telegram', 'tg-user', 'tg-chat'), (1, 'vk', 'vk-user', 'vk-chat');
+                VALUES (1, 'telegram', '101', '101'), (1, 'vk', '202', '202');
                 INSERT INTO github_accounts (app_user_id, github_user_id, login) VALUES (1, 100, 'owner');
                 INSERT INTO github_installations (app_user_id, installation_id) VALUES (1, 200);
                 INSERT INTO obsidian_vaults (id, app_user_id, installation_id, repository_id, owner,
@@ -173,7 +173,7 @@ class OperationScopesTest(unittest.TestCase):
 
     def process(self, text, origin=TG):
         """Имитирует отдельное соединение worker для каждого события канала."""
-        user = "tg-user" if origin.channel == "telegram" else "vk-user"
+        user = "101" if origin.channel == "telegram" else "202"
         with connect_database(self.path) as connection:
             return self.dispatcher(connection).execute(
                 IncomingEvent(
@@ -197,7 +197,7 @@ class OperationScopesTest(unittest.TestCase):
         """Три чата одного владельца независимо проходят полный article flow."""
         self.prepare(origin=TG)
         self.prepare("https://example.com/b", VK)
-        other = PendingOrigin("telegram", "other-tg-chat")
+        other = PendingOrigin("telegram", "other-101")
         self.prepare("https://example.com/c", other)
         self.assertEqual([len(self.pending(origin)) for origin in (TG, VK, other)], [1, 1, 1])
         local = self.process("/obsidian", VK)
@@ -307,7 +307,7 @@ class OperationScopesTest(unittest.TestCase):
                         TG.chat_id,
                         "first",
                         "/obsidian https://example.com/a",
-                        "tg-user",
+                        "101",
                     )
                 )
 
@@ -596,27 +596,27 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare()
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            target = service.register_with_name(IncomingIdentity("telegram", "target-user", "target-chat"), display_name="Анатолий")
-            code = service.create_link_code(target.id)
+            target = service.register_with_name(IncomingIdentity("vk", "target-user", "target-chat"), display_name="Анатолий")
+            code = service.create_link_code(target.id, target_channel="telegram")
             pending = service.request_rebind_confirmation(
-                code=code.code, identity=IncomingIdentity("telegram", "tg-user", TG.chat_id)
+                code=code.code, identity=IncomingIdentity("telegram", "101", TG.chat_id)
             )
         self.process("да")
         self.assertEqual(self.gateway.commits, 1)
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
             self.assertIsNotNone(
-                service.get_pending_rebind(IncomingIdentity("telegram", "tg-user", TG.chat_id))
+                service.get_pending_rebind(IncomingIdentity("telegram", "101", TG.chat_id))
             )
             with self.assertRaises(InvalidLinkCodeError):
                 service.confirm_rebind(
-                    IncomingIdentity("telegram", "tg-user", "other"),
+                    IncomingIdentity("telegram", "101", "other"),
                     confirmation_id=pending.id,
                     version=pending.version,
                 )
             with self.assertRaises(InvalidLinkCodeError):
                 service.confirm_rebind(
-                    IncomingIdentity("telegram", "tg-user", TG.chat_id),
+                    IncomingIdentity("telegram", "101", TG.chat_id),
                     confirmation_id=pending.id,
                     version=999,
                 )
@@ -624,7 +624,7 @@ class OperationScopesTest(unittest.TestCase):
         self.assertIn("перепривязал", response_text(response))
         with connect_database(self.path) as connection:
             user = create_user_identity_service(connection).resolve(
-                IncomingIdentity("telegram", "tg-user", TG.chat_id)
+                IncomingIdentity("telegram", "101", TG.chat_id)
             )
             self.assertEqual(user.id, target.id)
         repeated = self.process(f"/confirm core identity {pending.id} {pending.version} yes")
@@ -632,10 +632,10 @@ class OperationScopesTest(unittest.TestCase):
 
     def test_superseded_identity_operation_never_confirms_new_request(self):
         """Новое ожидание identity имеет новый ID; команда старого ID не переносит профиль."""
-        identity = IncomingIdentity("telegram", "tg-user", TG.chat_id)
+        identity = IncomingIdentity("telegram", "101", TG.chat_id)
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            code = service.create_link_code(2)
+            code = service.create_link_code(2, target_channel="telegram")
             previous = service.request_rebind_confirmation(code=code.code, identity=identity)
             current = service.request_rebind_confirmation(code=code.code, identity=identity)
             self.assertNotEqual(current.id, previous.id)
@@ -647,7 +647,7 @@ class OperationScopesTest(unittest.TestCase):
             self.assertEqual(service.get_pending_rebind(identity).id, current.id)
             with self.assertRaises(IdentityAlreadyBoundError):
                 service.request_rebind_confirmation(
-                    code=code.code, identity=IncomingIdentity("telegram", "tg-user", "other-chat")
+                    code=code.code, identity=IncomingIdentity("telegram", "101", "other-chat")
                 )
             self.assertEqual(service.get_pending_rebind(identity).id, current.id)
             self.assertEqual(

@@ -1,4 +1,5 @@
 from tests.response_assertions import content_text, response_text
+from tests.test_incoming_boundary import _private_event
 """Тесты общего application-flow входящих сообщений."""
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
@@ -932,6 +933,11 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         self.assertEqual(result.type, ObsidianResultType.GITHUB_CONNECT_STARTED)
         self.assertEqual(result.github_connection.authorization.user_code, "ABCD-EFGH")
         self.assertEqual(starter.app_user_ids, [42])
+        response = use_case.dispatcher.execute(_telegram_message("https://github.com/octocat/notes"))
+        self.assertIn("ABCD-EFGH", response_text(response))
+        self.assertIn("https://github.com/login/device", response_text(response))
+        self.assertEqual(tuple(action.url for action in response.suggested_actions),
+                         ("https://github.com/login/device",))
 
     def test_execute_reports_unconfigured_github_connector(self) -> None:
         """Repository URL сообщает об отключённой GitHub App конфигурации."""
@@ -1278,8 +1284,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        use_case.dispatcher.execute(_telegram_message("/settings"))
-        result = use_case.dispatcher.execute(_telegram_message("/link ABC123"))
+        use_case.dispatcher.execute(_private_event("/settings"))
+        result = use_case.dispatcher.execute(_private_event("/link ABC123"))
 
         self.assertIn("адресной командой", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
@@ -1294,7 +1300,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/confirm core identity 1 1 yes"))
+        result = use_case.execute(_private_event("/confirm core identity 1 1 yes"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBOUND)
         self.assertEqual(result.app_user.id, 99)
@@ -1309,7 +1315,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/confirm core identity 1 1 no"))
+        result = use_case.execute(_private_event("/confirm core identity 1 1 no"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBIND_CANCELLED)
         self.assertTrue(identity_service.rebind_cancelled)

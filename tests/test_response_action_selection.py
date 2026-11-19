@@ -92,17 +92,20 @@ class ResponseActionSelectionTest(unittest.TestCase):
         """Кнопка выбора выполняет точную команду и не действует повторно."""
         disable = self.processor(replace(self.event, text="/disable"))
         self.assertEqual(tuple(action.command for action in disable.suggested_actions),
-                         ("/disable selected",))
-        self.assertEqual(len(disable.bound_actions), 1)
+                         ("/disable selected", "/cancel"))
+        self.assertTrue(disable.view_delivery.start())
+        disable.view_delivery.finish("42")
+        press = replace(self.event, callback_message_id="42")
         button = disable.bound_actions[0]
-        self.processor.select_action(self.event, button.token)
-        self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
+        self.processor.select_action(press, button.token)
+        self.assertIn("больше недоступна", response_text(self.processor.select_action(press, button.token)))
 
         enable = self.processor(replace(self.event, text="/enable"))
         self.assertEqual(tuple(action.command for action in enable.suggested_actions),
-                         ("/enable selected",))
-        self.assertEqual(len(enable.bound_actions), 1)
-        self.processor.select_action(self.event, enable.bound_actions[0].token)
+                         ("/enable selected", "/cancel"))
+        self.assertTrue(enable.view_delivery.start())
+        enable.view_delivery.finish("43")
+        self.processor.select_action(replace(self.event, callback_message_id="43"), enable.bound_actions[0].token)
         self.processor(replace(self.event, text="/exit"))
         self.assertIn("/selected", response_text(self.processor(replace(self.event, text="/help"))))
 

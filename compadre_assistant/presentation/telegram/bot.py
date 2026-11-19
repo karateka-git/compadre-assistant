@@ -11,7 +11,9 @@ from concurrent.futures import Future, InvalidStateError
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from io import BytesIO
 from typing import Any
+from urllib.parse import urlsplit
 
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits
 from compadre_assistant.core.presentation.incoming.events import (
     ImageAttachment, ImageLoadError, IncomingEvent, ReplyAddress,
 )
@@ -39,6 +41,10 @@ _PHOTO_MAX_BYTES = 10 * 1024 * 1024
 _PHOTO_TIMEOUT_SECONDS = 15
 # Кнопки разрешены вместе с зарегистрированным ниже callback-handler.
 TELEGRAM_INLINE_ACTIONS_ENABLED = True
+# Общий бюджет клавиатуры и компактных подписей; ряд Telegram содержит до 8 кнопок.
+TELEGRAM_ACTION_LAYOUT = ActionLayoutLimits(
+    max_buttons=100, max_rows=100, max_columns=8, max_label_length=64,
+)
 IncomingMessageProcessor = Callable[
     [IncomingEvent, ChannelCompletionHandler | None, CommandMenuUpdateHandler | None],
     IncomingResponse,
@@ -119,9 +125,10 @@ async def _run_telegram_bot(
         bot, loop=asyncio.get_running_loop(), aiogram=aiogram, logger=logger,
     )
 
-    def menu_update_handler(update: CommandMenuUpdate) -> None:
-        if not reconciliation_stop.is_set():
-            publish_menu(update)
+    def menu_update_handler(update: CommandMenuUpdate) -> bool | None:
+        if reconciliation_stop.is_set():
+            return False
+        return publish_menu(update)
 
     _register_handlers(
         dispatcher,
@@ -358,6 +365,7 @@ def _register_handlers(
             display_name=(getattr(author, "full_name", None)
                           or getattr(author, "first_name", None)),
             callback_message_id=source_id,
+            action_layout=TELEGRAM_ACTION_LAYOUT if TELEGRAM_INLINE_ACTIONS_ENABLED else ActionLayoutLimits(),
         )
         target = _TelegramReplyTarget(callback.bot, event.chat_id)
         completion_handler = _create_telegram_completion_handler(
@@ -369,13 +377,10 @@ def _register_handlers(
         if result.error is not None:
             logger.error("Telegram callback processing failed: %s", result.error)
         managed_target = result.view_delivery.target_message_id if result.view_delivery is not None else None
-        if source_id is not None and not result.preserve_source_actions and source_id != managed_target:
-            try:
-                await _clear_telegram_inline_keyboard(target, source_id, logger)
-            except asyncio.CancelledError:
-                await _notify_telegram_delivery(result, False)
-                raise
-        await safe_send_telegram_reply(target, result, logger=logger)
+        delivered = await safe_send_telegram_reply(target, result, logger=logger)
+        if (delivered and source_id is not None and not result.preserve_source_actions
+                and source_id != managed_target):
+            await _clear_telegram_inline_keyboard(target, source_id, logger)
 
     dispatcher.include_router(router)
 
@@ -428,18 +433,18 @@ def _create_telegram_menu_update_handler(
     в механизм повторной сверки, не блокируя сам event loop.
     """
 
-    def publish(update: CommandMenuUpdate) -> None:
+    def publish(update: CommandMenuUpdate) -> bool:
         """Публикует команды только для положительного числового Telegram ID."""
         if update.address.channel != "telegram":
-            return
+            return False
         try:
             chat_id = int(update.address.chat_id)
         except (TypeError, ValueError):
             logger.warning("Skipping Telegram menu with non-numeric chat ID")
-            return
+            return False
         if chat_id <= 0:
             logger.warning("Skipping Telegram menu for a non-private chat")
-            return
+            return False
 
         commands = []
         if len(update.menu.items) > 100:
@@ -465,6 +470,7 @@ def _create_telegram_menu_update_handler(
         except FutureTimeoutError:
             future.cancel()
             raise TimeoutError("Telegram menu API call timed out")
+        return True
 
     return publish
 
@@ -669,6 +675,7 @@ def _incoming_message_from_telegram(
         ),
         display_name=display_name,
         images=images,
+        action_layout=TELEGRAM_ACTION_LAYOUT if TELEGRAM_INLINE_ACTIONS_ENABLED else ActionLayoutLimits(),
     )
 
 
@@ -707,8 +714,8 @@ async def safe_send_telegram_reply(
     logger: logging.Logger,
     limit: int = TELEGRAM_SAFE_MESSAGE_LIMIT,
     sleeper: Callable[[float], Awaitable[None]] = asyncio.sleep,
-    include_bound_actions: bool = TELEGRAM_INLINE_ACTIONS_ENABLED,
-) -> None:
+    include_bound_actions: bool | None = None,
+) -> bool:
     """Доставляет Telegram-ответ и подтверждает управляемое представление.
 
     Args:
@@ -718,10 +725,18 @@ async def safe_send_telegram_reply(
         limit: Безопасный предел длины одного сообщения.
         sleeper: Асинхронное ожидание между тестируемыми retry-попытками.
         include_bound_actions: Показывать ли inline-кнопки общего ответа.
+            None использует тот же флаг канала, что и расчёт вместимости входа.
+
+    Returns:
+        Успех доставки всех частей. Управляемое обновление требует
+        подтверждённый ID; текстовый fallback без кнопок не активирует
+        представление. Только после успеха можно снять исходные кнопки.
 
     Raises:
         ValueError: Лимит не вмещает даже один символ с оформлением.
     """
+    if include_bound_actions is None:
+        include_bound_actions = TELEGRAM_INLINE_ACTIONS_ENABLED
     delivered = False
     try:
         send = _send_telegram_view if response.view_delivery is not None else _send_telegram_reply
@@ -734,6 +749,7 @@ async def safe_send_telegram_reply(
                 await _clear_telegram_inline_keyboard(message, message_id, logger)
     finally:
         await _notify_telegram_delivery(response, delivered)
+    return delivered
 
 
 async def _clear_telegram_inline_keyboard(message: Any, message_id: str, logger: logging.Logger) -> None:
@@ -807,7 +823,7 @@ async def _send_telegram_view(
                     retry_delay_resolver=_telegram_retry_delay, sleeper=sleeper,
                 )
                 if confirmed_id is not None or target is None:
-                    return sent
+                    return sent and confirmed_id is not None
             elif target is None:
                 # Разбитый на части ответ сохраняет ручной путь, но не получает цель редактирования.
                 return await _send_telegram_reply(
@@ -922,22 +938,44 @@ def _serialize_telegram_inline_keyboard(response: IncomingResponse, aiogram: Any
     actions = response.bound_actions
     if not actions:
         return None
-    if len(actions) > 100:
+    limits = TELEGRAM_ACTION_LAYOUT
+    if len(actions) > limits.max_buttons:
         raise ValueError("Telegram inline keyboard supports at most 100 buttons")
     if len({action.response_id for action in actions}) != 1:
         raise ValueError("Telegram inline buttons must belong to one response")
     rows = []
     seen_tokens: set[str] = set()
+    seen_rows: set[int] = set()
+    previous_row = None
     for action in actions:
         token = action.token
-        if not token or len(token.encode("utf-8")) > 64:
-            raise ValueError("Telegram callback_data must contain 1-64 bytes")
-        if token in seen_tokens:
-            raise ValueError("Telegram callback_data tokens must be unique")
-        seen_tokens.add(token)
-        if not action.label or len(action.label) > 64:
+        if action.url is not None:
+            parsed = urlsplit(action.url)
+            if token or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("Telegram URL button requires an HTTP(S) URL without callback_data")
+            button = aiogram.types.InlineKeyboardButton(text=action.label, url=action.url)
+        else:
+            if not token or len(token.encode("utf-8")) > 64:
+                raise ValueError("Telegram callback_data must contain 1-64 bytes")
+            if token in seen_tokens:
+                raise ValueError("Telegram callback_data tokens must be unique")
+            seen_tokens.add(token)
+            button = aiogram.types.InlineKeyboardButton(text=action.label, callback_data=token)
+        if not action.label or len(action.label) > limits.max_label_length:
             raise ValueError("Telegram inline button text must contain 1-64 characters")
-        rows.append([aiogram.types.InlineKeyboardButton(text=action.label, callback_data=token)])
+        if action.row is not None and (type(action.row) is not int or action.row < 0):
+            raise ValueError("Telegram action row must be a nonnegative integer")
+        if action.row is not None and action.row == previous_row:
+            rows[-1].append(button)
+        else:
+            if action.row is not None and action.row in seen_rows:
+                raise ValueError("Telegram actions in the same row must be consecutive")
+            rows.append([button])
+        if action.row is not None:
+            seen_rows.add(action.row)
+        previous_row = action.row
+        if len(rows) > limits.max_rows or len(rows[-1]) > limits.max_columns:
+            raise ValueError("Telegram inline keyboard exceeds row or column limit")
     return aiogram.types.InlineKeyboardMarkup(inline_keyboard=rows)
 
 

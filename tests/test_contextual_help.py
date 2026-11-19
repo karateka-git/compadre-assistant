@@ -9,7 +9,7 @@ from compadre_assistant.capabilities.obsidian.presentation.commands import obsid
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey
-from compadre_assistant.core.domain.users.entities import AppUser, IdentityRebindConfirmation
+from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity, IdentityRebindConfirmation
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.ports import ConfirmationQueryResult
@@ -17,7 +17,7 @@ from compadre_assistant.core.presentation.incoming.registry import CapabilityReg
 from tests.capability_preference_helpers import MemoryCapabilityPreferences
 from tests.test_confirmation_snapshot import QueryCapability
 from tests.test_pending_input import InputCapability
-from tests.test_incoming_boundary import FakeCapability, MemoryChatModes, _event
+from tests.test_incoming_boundary import FakeCapability, MemoryChatModes, _private_event as _event
 from tests.response_assertions import response_text
 
 
@@ -35,6 +35,11 @@ class ContextualHelpTest(unittest.TestCase):
         self.identity = Mock()
         self.identity.resolve.return_value = AppUser(23, "Имя")
         self.identity.get_pending_rebind.return_value = None
+        self.identity.find_known_private_chat.side_effect = lambda channel, chat: (
+            (self.identity.resolve.return_value, IncomingIdentity(channel, chat, chat))
+            if self.identity.resolve.return_value is not None else None
+        )
+        self.identity.has_known_chat_address.return_value = False
         self.identity.list_known_private_chats.return_value = ()
         self.obsidian = HelpCapability()
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
@@ -43,7 +48,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.settings = SettingsCapability()
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
-        self.key = ChatModeKey(23, "telegram", "chat-1")
+        self.key = ChatModeKey(23, "telegram", "101")
         self.registry = CapabilityRegistry((self.obsidian, self.ask, self.other, self.settings))
         self.dispatcher = self.build()
 
@@ -53,14 +58,14 @@ class ContextualHelpTest(unittest.TestCase):
             chat_mode_repository=self.modes, capability_preference_repository=self.preferences,
             pending_inputs=self.store)
 
-    def send(self, command="/help", chat="chat-1", channel="telegram"):
+    def send(self, command="/help", chat="101", channel="telegram"):
         """Возвращает текст результата настоящего маршрута."""
         return response_text(self.dispatcher.execute(_event(command, chat, channel)))
 
     def rebind(self):
         """Задаёт актуальное адресное действие ядра в исходном чате."""
         self.identity.get_pending_rebind.return_value = IdentityRebindConfirmation(
-            4, 23, 24, "telegram", "chat-1", "chat-1", "hash", self.now + timedelta(minutes=10))
+            4, 23, 24, "telegram", "101", "101", "hash", self.now + timedelta(minutes=10))
 
     def test_unknown_and_registration_overlay(self):
         """До профиля доступны два действия, а регистрация заменяет их вводом имени."""
@@ -86,7 +91,7 @@ class ContextualHelpTest(unittest.TestCase):
         text = self.send()
         for command in ("/settings", "/obsidian", "/ai", "/other"):
             self.assertIn(command, text)
-        for command in ("/name", "/capabilities", "/link_code", "/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
+        for command in ("/name", "/capabilities", "/connect", "/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
         self.assertFalse(self.other.entries)
 
@@ -96,7 +101,7 @@ class ContextualHelpTest(unittest.TestCase):
         text = self.send()
         for command in ("/vault_sync", "/reanalyze", "/exit", "/help"):
             self.assertIn(command, text)
-        for command in ("/status", "/capabilities", "/link_code", "/ask", "/name", "/enable", "/other", "/confirm", "/cancel"):
+        for command in ("/status", "/capabilities", "/connect", "/ask", "/name", "/enable", "/other", "/confirm", "/cancel"):
             self.assertNotIn(command, text)
         self.assertIn("/other", self.send(chat="other"))
         self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")

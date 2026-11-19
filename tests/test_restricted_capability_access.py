@@ -64,7 +64,7 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
             service = create_user_identity_service(connection)
             owner = service.register_with_name(IncomingIdentity("telegram", "1001", "1001"), display_name="Владелец")
             user = service.register_with_name(IncomingIdentity("telegram", "2002", "2002"), display_name="Другой")
-            code = service.create_link_code(owner.id)
+            code = service.create_link_code(owner.id, target_channel="vk")
             service.link(code=code.code, identity=IncomingIdentity("vk", "3003", "3003"))
         self.owner_id = owner.id
         self.other_id = user.id
@@ -160,11 +160,11 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
         """Код и перенос профиля не выдаются в группу или по адресу без автора."""
         for event in (replace(self.owner, chat_id="-5005"), replace(self.owner, external_user_id=None)):
             self.send("/settings", event)
-            for command in ("/link_code", "/link", "/link abc", "/confirm core identity 1 1 yes"):
+            for command in ("/connect vk", "/link", "/link abc", "/confirm core identity 1 1 yes"):
                 self.assertIn("открой личный чат", self.send(command, event))
             self.assertIsNone(self.processor._pending_inputs.get(event.reply_address))
         self.send("/settings")
-        self.assertIn("/link ", self.send("/link_code"))
+        self.assertIn("уже привязан", self.send("/connect vk"))
 
     def test_missing_policy_and_disabled_descriptors_deny_by_default(self) -> None:
         """Ограничение сохраняется в отключённом каталоге и без настроенного правила."""

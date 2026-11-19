@@ -20,10 +20,15 @@ from compadre_assistant.bootstrap import (
 )
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.shopping import ManageShopping, ShoppingItem, ShoppingItemStatus
-from compadre_assistant.capabilities.family.presentation.shopping import ShoppingSection, shopping_list
+from compadre_assistant.capabilities.family.presentation.shopping import (
+    ShoppingSection, choice_page_for_list, selection_page_size, shopping_list, shopping_page, shopping_section_actions,
+)
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.action_contracts import (
+    ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination,
+)
 from compadre_assistant.core.presentation.incoming.action_selection import ResponseActionStore
 from compadre_assistant.presentation.telegram.bot import (
     _create_telegram_menu_update_handler, _register_handlers, safe_send_telegram_reply,
@@ -82,49 +87,94 @@ class ShoppingPageTest(unittest.TestCase):
         variants = ((5, 8, (5,)), (10, 3, (10,)), (13, 8, (10, 3)), (20, 4, (10, 10)),
                     (23, 0, (10, 10, 3)), (0, 6, (0,)), (0, 0, (0,)))
         now = datetime.now(UTC)
-        for channel in ("telegram", "vk"):
-            section = ShoppingSection(1, 1, now, inline_commands=channel == "telegram", vk_menu=channel == "vk")
-            for needed, bought, counts in variants:
-                with self.subTest(channel=channel, needed=needed, bought=bought):
-                    items = tuple(
-                        ShoppingItem(number, f"{prefix}{number:02d}", status, 1, now, None, None)
-                        for first, end, prefix, status in (
-                            (1, needed + 1, "Нужный-", ShoppingItemStatus.NEEDED),
-                            (needed + 1, needed + bought + 1, "Купленный-", ShoppingItemStatus.BOUGHT),
-                        )
-                        for number in range(first, end)
+        section = ShoppingSection(1, 1, now)
+        for needed, bought, counts in variants:
+            with self.subTest(needed=needed, bought=bought):
+                items = tuple(
+                    ShoppingItem(number, f"{prefix}{number:02d}", status, 1, now, None, None)
+                    for first, end, prefix, status in (
+                        (1, needed + 1, "Нужный-", ShoppingItemStatus.NEEDED),
+                        (needed + 1, needed + bought + 1, "Купленный-", ShoppingItemStatus.BOUGHT),
                     )
-                    for page, count_items in enumerate(counts, 1):
-                        content = response_text(shopping_list(items, section, page))
-                        self.assertEqual(content.count(". Нужный-"), count_items)
-                        if count_items:
-                            first = (page - 1) * 10 + 1
-                            self.assertIn(f"{first}. Нужный-{first:02d}", content)
-                        if len(counts) == 1:
-                            self.assertNotIn(" · 1/", content)
-                        else:
-                            self.assertIn(f" · {page}/{len(counts)}", content)
-                        if bought and page == len(counts):
-                            self.assertIn(f"Куплено\n1. Купленный-{needed + 1:02d}", content)
-                            self.assertEqual(content.count(". Купленный-"), bought)
-                        else:
-                            self.assertNotIn("Куплено", content)
-                        self.assertNotIn("Смотри другие страницы", content)
-                        if not needed:
-                            self.assertIn("Нужно купить\nСписок пуст." if bought else "Список покупок пуст.", content)
+                    for number in range(first, end)
+                )
+                for page, count_items in enumerate(counts, 1):
+                    content = response_text(shopping_list(items, section.ordinary_view(items, page)))
+                    self.assertEqual(content.count(". Нужный-"), count_items)
+                    if count_items:
+                        first = (page - 1) * 10 + 1
+                        self.assertIn(f"{first}. Нужный-{first:02d}", content)
+                    if len(counts) == 1:
+                        self.assertNotIn(" · 1/", content)
+                    else:
+                        self.assertIn(f" · {page}/{len(counts)}", content)
+                    if bought and page == len(counts):
+                        self.assertIn(f"Куплено\n1. Купленный-{needed + 1:02d}", content)
+                        self.assertEqual(content.count(". Купленный-"), bought)
+                    else:
+                        self.assertNotIn("Куплено", content)
+                    self.assertNotIn("Смотри другие страницы", content)
+                    if not needed:
+                        self.assertIn("Нужно купить\nСписок пуст." if bought else "Список покупок пуст.", content)
 
     def test_unknown_items_keep_separate_numbering_on_last_page(self) -> None:
         """Неизвестный статус сохраняет собственную группу и не занимает место покупок."""
         now = datetime.now(UTC)
-        section = ShoppingSection(1, 1, now, inline_commands=True)
+        section = ShoppingSection(1, 1, now)
         items = tuple(
             ShoppingItem(number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
             for number in range(1, 12)
         ) + (ShoppingItem(12, "Другой товар", ShoppingItemStatus.UNKNOWN, 1, now, None, None),)
-        self.assertNotIn("с неизвестным состоянием", response_text(shopping_list(items, section, 1)))
-        final = response_text(shopping_list(items, section, 2))
+        self.assertNotIn("с неизвестным состоянием", response_text(shopping_list(items, section.ordinary_view(items, 1))))
+        final = response_text(shopping_list(items, section.ordinary_view(items, 2)))
         self.assertIn("11. Товар 11\n\nПокупки с неизвестным состоянием\n1. Другой товар", final)
         self.assertNotIn("Куплено", final)
+
+    def test_section_actions_describe_availability_and_navigation(self) -> None:
+        """Обычный список описывает доступные действия по статусам и фактической странице."""
+        now = datetime.now(UTC)
+        section = ShoppingSection(1, 1, now)
+        empty = shopping_section_actions(section.ordinary_view((), 1))
+        self.assertEqual([action.label for action in empty], ["Добавить", "Назад"])
+        self.assertEqual(empty[-1].destination, ScreenDestination("family-home"))
+        bought = ShoppingItem(22, "Куплено", ShoppingItemStatus.BOUGHT, 1, now, None, None)
+        bought_only = shopping_section_actions(section.ordinary_view((bought,), 1))
+        self.assertEqual([action.label for action in bought_only], ["Добавить", "Очистить купленное", "Назад"])
+        needed = tuple(
+            ShoppingItem(number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
+            for number in range(1, 22)
+        )
+        actions = shopping_section_actions(section.ordinary_view(needed + (bought,), 2))
+        self.assertTrue(all(action.scope is ActionScope.SECTION for action in actions))
+        self.assertEqual([action.label for action in actions], [
+            "Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Следующая страница", "Назад",
+        ])
+        self.assertEqual(actions[1].command, f"/family_shopping section {section.action_key} choose buy 2")
+        self.assertIs(actions[1].purpose, ActionPurpose.NAVIGATION)
+        self.assertEqual(actions[4].destination, ScreenDestination("shopping-list", 1))
+        self.assertEqual(actions[5].destination, ScreenDestination("shopping-list", 3))
+
+    def test_selection_capacity_preserves_positions_and_text_fallback(self) -> None:
+        """Размер зависит от обоих ограничений, а отсутствие кнопок допускает ручной номер."""
+        now = datetime.now(UTC)
+        items = tuple(
+            ShoppingItem(2 * number, f"Товар {number}", ShoppingItemStatus.NEEDED, 1, now, None, None)
+            for number in range(1, 14)
+        )
+        variants = (
+            (ActionLayoutLimits(100, 100, 8, 64), 5, 3, (11, 12, 13)),
+            (ActionLayoutLimits(30, 6, 5, 40), 4, 3, (9, 10, 11, 12)),
+            (ActionLayoutLimits(6, 6, 5, 40), 3, 4, (10, 11, 12)),
+            (ActionLayoutLimits(), 5, 3, (11, 12, 13)),
+        )
+        for layout, expected_size, expected_page, numbers in variants:
+            with self.subTest(layout=layout):
+                size = selection_page_size(layout)
+                self.assertEqual(size, expected_size)
+                page = shopping_page(items, choice_page_for_list(2, size), selection_size=size)
+                self.assertEqual(page.number, expected_page)
+                self.assertEqual(tuple((position, item.number) for position, item in page.visible),
+                                 tuple((number, 2 * number) for number in numbers))
 
 
 class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
@@ -395,8 +445,13 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
         """Список и ручные операции доступны при отключённых inline-кнопках."""
-        with patch("compadre_assistant.presentation.telegram.bot._optional_telegram_inline_keyboard", return_value=None):
+        with patch("compadre_assistant.presentation.telegram.bot.TELEGRAM_INLINE_ACTIONS_ENABLED", False):
             await self._open()
+            await self._send("/add")
+            self.assertIn("/cancel", self.bot.send_message.await_args.kwargs["text"])
+            self.assertNotIn("reply_markup", self.bot.send_message.await_args.kwargs)
+            await self._send("/cancel")
+            self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
             await self._send("/add Хлеб\nМолоко")
             self.assertNotIn("reply_markup", self.bot.send_message.await_args.kwargs)
             await self._send("/buy")
@@ -502,6 +557,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.calls: list[tuple[str, dict[str, str]]] = []
         self.last_cmid = 0
         self.sent_messages: dict[int, dict[str, str | int]] = {}
+        self.delivered_menu: dict[str, str | None] | None = None
         self.reject_edits: set[int] = set()
         self.confirm_sends = True
         self.enterContext(patch("compadre_assistant.presentation.vk.bot.urlopen", side_effect=self._fake_api))
@@ -513,6 +569,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         if method == "messages.send":
             if not self.confirm_sends:
                 return BytesIO(b'{"response":null}')
+            if (serialized := params.get("keyboard")) and not (keyboard := json.loads(serialized))["inline"]:
+                self.delivered_menu = {button["action"]["label"]: button["action"].get("payload")
+                                       for row in keyboard["buttons"] for button in row}
             self.last_cmid = next(self.messages)
             message_id = 9000 + self.last_cmid
             self.sent_messages[self.last_cmid] = {"id": message_id, "text": params["message"]}
@@ -555,13 +614,9 @@ class VkFamilyShoppingTest(unittest.TestCase):
         return next(params for method, params in reversed(self.calls) if method == "messages.edit")
 
     def _visible_menu(self) -> dict[str, str | None]:
-        for method, params in reversed(self.calls):
-            if method == "messages.send" and (serialized := params.get("keyboard")):
-                keyboard = json.loads(serialized)
-                if not keyboard["inline"]:
-                    return {button["action"]["label"]: button["action"].get("payload")
-                            for row in keyboard["buttons"] for button in row}
-        self.fail("Нижнее меню VK не было опубликовано")
+        if self.delivered_menu is None:
+            self.fail("Нижнее меню VK не было опубликовано")
+        return self.delivered_menu
 
     def _menu_press(self, label: str) -> None:
         self._send(label, payload=self._visible_menu()[label])
@@ -643,15 +698,14 @@ class VkFamilyShoppingTest(unittest.TestCase):
                            labels=["Добавить", "Купить", "Удалить", "Предыдущая страница", "Назад"])
 
         menu_before_selection = self._visible_menu()
-        first = self._single_reply(lambda: self._menu_press("Купить"), "1/3")
+        first = self._single_reply(lambda: self._menu_press("Купить"), "3/3")
         cmid = self.last_cmid
         buttons = self._actions(first)
         self.assertEqual(self._visible_menu(), menu_before_selection)
-        self.assertIn("Следующая страница", buttons)
-        self.assertNotIn("Предыдущая страница", buttons)
-        self.assertTrue(next(label for label in buttons if label.startswith("1. ")).endswith("…"))
-        self.assertIn("/family_shopping item 1", first["message"])
-        self._press(buttons["Следующая страница"], cmid)
+        self.assertNotIn("Следующая страница", buttons)
+        self.assertIn("Предыдущая страница", buttons)
+        self.assertIn("11. Товар 11", buttons)
+        self._press(buttons["Предыдущая страница"], cmid)
         second = self._latest_edit()
         self.assertIn("2/3", second["message"])
         self.assertIn("пришли номер товара", second["message"])
@@ -661,7 +715,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         navigation = ["Предыдущая страница", "Следующая страница"]
         self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [navigation, ["Назад"]])
         before = len(self.calls)
-        self._single_reply(lambda: self._press(buttons["2. Товар 2"], cmid), "Открой /family_shopping")
+        self._single_reply(lambda: self._press(buttons["11. Товар 11"], cmid), "Открой /family_shopping")
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
         self._send("8")
         bought = self._latest_edit()
@@ -678,12 +732,14 @@ class VkFamilyShoppingTest(unittest.TestCase):
         delete = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
         delete_cmid = self.last_cmid
         self.assertNotEqual(delete_cmid, cmid)
-        self._press(self._actions(delete)["Следующая страница"], delete_cmid)
+        self._press(self._actions(delete)["Предыдущая страница"], delete_cmid)
         delete_page = self._latest_edit()
         delete_rows = json.loads(delete_page["keyboard"])["buttons"]
         self.assertEqual([button["action"]["label"] for button in delete_rows[-2]], navigation)
         self._press(self._actions(delete_page)["Предыдущая страница"], delete_cmid)
         delete = self._latest_edit()
+        self.assertTrue(next(label for label in self._actions(delete) if label.startswith("1. ")).endswith("…"))
+        self.assertIn("/family_shopping item 1", delete["message"])
         before = len(self.calls)
         self._press(self._actions(delete)["2. Товар 2"], delete_cmid)
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.edit"])
@@ -693,15 +749,67 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._send("/delete")
         self._send("3")
         self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
+        self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»")
         published = self._single_reply(lambda: self._send("/family_shopping"), "Список покупок")
         self.assertIn("3. Товар 5", published["message"])
         self.assertNotIn("Товар 4", published["message"])
 
+    def test_all_back_paths_return_to_origin_before_leaving_shopping(self) -> None:
+        """Нижнее и экранное «Назад» и ручной back возвращают на исходную страницу."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Покупки")
+        self._send("/add " + "\n".join(f"Товар {number}" for number in range(1, 13)))
+        self._menu_press("Следующая страница")
+        original_menu = self._visible_menu()
+
+        for path in ("lower", "inline", "text"):
+            with self.subTest(path=path):
+                selection = self._single_reply(lambda: self._menu_press("Купить"), "3/3")
+                cmid = self.last_cmid
+                self.assertEqual(self._visible_menu(), original_menu)
+                help_reply = self._single_reply(lambda: self._send("/help"), "/family_shopping back")
+                self.assertNotIn("keyboard", help_reply)
+                if path == "lower":
+                    action = lambda: self._menu_press("Назад")
+                elif path == "inline":
+                    action = lambda: self._press(self._actions(selection)["Назад"], cmid)
+                else:
+                    action = lambda: self._send("/family_shopping back")
+                ordinary = self._single_reply(action, "Список покупок · 2/2")
+                self.assertIn("11. Товар 11", ordinary["message"])
+                self.assertNotIn("keyboard", ordinary)
+                self.assertEqual(self._visible_menu(), original_menu)
+
+        self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»",
+                           labels=["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"])
+
+    def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
+        """VK сохраняет отдельное меню и подтверждает текстовый выбор по номеру."""
+        with patch("compadre_assistant.presentation.vk.bot.VK_INLINE_ACTIONS_ENABLED", False):
+            self._send("/family")
+            self._send("/family_create")
+            self._send("Дом")
+            self._menu_press("Покупки")
+            self._single_reply(lambda: self._send("/add"), "/cancel", labels=["Отмена"])
+            self._single_reply(lambda: self._send("/cancel"), "Ввод отменён", labels=["Добавить", "Назад"])
+            self._single_reply(lambda: self._send("/add Хлеб\nМолоко"), "1. Хлеб\n2. Молоко")
+            previous_menu = self._visible_menu()
+            choosing = self._single_reply(lambda: self._send("/buy"), "пришли номер товара")
+            self.assertNotIn("keyboard", choosing)
+            self._send("1")
+            self.assertIn("1. Молоко", self._latest_edit()["message"])
+            self.assertEqual(self._visible_menu(), previous_menu)
+            ordinary = self._single_reply(lambda: self._send("/family_shopping back"), "Куплено\n1. Хлеб")
+            self.assertFalse(json.loads(ordinary["keyboard"])["inline"])
+            self.assertIn("Очистить купленное", self._visible_menu())
+
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
-        no_family = ["Создать семью", "Вступить по коду"]
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
         home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
-        shopping = ["Добавить", "Купить", "Удалить", "Назад"]
+        shopping = ["Добавить", "Назад"]
         self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
         self._single_reply(lambda: self._menu_press("Создать семью"), "Пришли название семьи", labels=["Отмена"])
         self._single_reply(lambda: self._send("Дом"), "Семья «Дом»", labels=home)
@@ -711,10 +819,10 @@ class VkFamilyShoppingTest(unittest.TestCase):
         invitation = self._single_reply(lambda: self._menu_press("Пригласить"), "Приглашение в семью «Дом»")
         self.assertEqual(list(self._actions(invitation)), ["Создать код", "Назад"])
         self._single_reply(lambda: self._menu_press("Покупки"), "Список покупок пуст", labels=shopping)
-        empty = self._single_reply(lambda: self._menu_press("Купить"), "В «Нужно купить» пока ничего нет.")
+        empty = self._single_reply(lambda: self._send("/buy"), "В «Нужно купить» пока ничего нет.")
         self.assertNotIn("/add", empty["message"])
         self.assertEqual(list(self._actions(empty)), ["Назад"])
-        self._single_reply(lambda: self._menu_press("Назад"), "Список покупок")
+        self._single_reply(lambda: self._press(self._actions(empty)["Назад"], self.last_cmid), "Список покупок")
         self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
         self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=shopping)
         self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»", labels=home)
@@ -723,6 +831,44 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._single_reply(lambda: self._press(self._actions(confirmation)["Отменить"], self.last_cmid), "Действие отменено")
         self._single_reply(lambda: self._menu_press("Выйти из режима"), "Режим этого чата завершён")
         self._single_reply(lambda: self._send("/family"), "Семья «Дом»", labels=home)
+
+    def test_shopping_to_invitation_and_members_keeps_inline_actions_with_new_bottom_menu(self) -> None:
+        """VK возвращает нижнее меню семьи вместе с подтверждёнными кнопками нового экрана."""
+        home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        for command, title, inline_labels in (
+            ("/family_invite", "Приглашение в семью «Дом»", ["Создать код", "Назад"]),
+            ("/family_members", "Участники семьи «Дом»", ["1. Лена", "Закрыть семью", "Назад"]),
+        ):
+            with self.subTest(command=command):
+                self._menu_press("Покупки")
+                self.assertEqual(list(self._visible_menu()), ["Добавить", "Назад"])
+                previous = len(self.calls)
+                self._send(command)
+                sent = [params for method, params in self.calls[previous:] if method == "messages.send"]
+                self.assertEqual(len(sent), 2)
+                self.assertIn(title, sent[0]["message"])
+                actions = self._actions(sent[0])
+                self.assertEqual(list(actions), inline_labels)
+                self.assertIn("/help", sent[1]["message"])
+                self.assertEqual(list(self._visible_menu()), home)
+                source = next(cmid for cmid, message in reversed(self.sent_messages.items()) if title in message["text"])
+                if command == "/family_invite":
+                    self._single_reply(lambda: self._press(actions["Создать код"], source), "Код:")
+                else:
+                    self._single_reply(lambda: self._press(actions["1. Лена"], source), "Владелец семьи «Дом».")
+
+    def test_join_retry_and_cancel_keep_the_same_waiting_input_path(self) -> None:
+        """Отмена по кнопке VK завершает ввод кода и возвращает начальное меню семьи."""
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
+        self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
+        self._single_reply(lambda: self._menu_press("Вступить по коду"), "/cancel", labels=["Отмена"])
+        self._single_reply(lambda: self._send("недействительный код"), "/cancel")
+        self.assertEqual(list(self._visible_menu()), ["Отмена"])
+        self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=no_family)
+        self._single_reply(lambda: self._send("другой текст"), "Семья")
 
     def test_family_menu_help_and_typed_help_preserve_shopping_context(self) -> None:
         """Кнопка VK открывает справку из семьи, а ручная команда не отменяет выбор."""
@@ -813,9 +959,10 @@ class VkFamilyShoppingTest(unittest.TestCase):
         delete = self._actions(second)["1. Хлеб"]
         self.confirm_sends = False
         before = len(self.calls)
-        prompt = self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
+        menu_before = self._visible_menu()
+        self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить")
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.send"])
-        self.assertNotIn("peer_ids", prompt)
+        self.assertEqual(self._visible_menu(), menu_before)
         self.confirm_sends = True
         # Чат уже ждёт добавления. Ручное открытие списка отменяет ввод и снова
         # подтверждает доставку замены, после которой можно снять старую клавиатуру.
