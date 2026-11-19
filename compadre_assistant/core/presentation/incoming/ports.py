@@ -4,7 +4,11 @@ from dataclasses import dataclass, field
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
+from urllib.parse import urlsplit
 
+from compadre_assistant.core.presentation.incoming.action_contracts import (
+    ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
+)
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
@@ -79,16 +83,42 @@ CommandMenuUpdateHandler = Callable[[CommandMenuUpdate], bool | None]
 
 @dataclass(frozen=True, slots=True)
 class ReplyAction:
-    """Предлагает следующий шаг ответа с точной командой для ручного ввода.
+    """Описывает один доступный шаг экрана или раздела для обоих каналов.
 
-    Подпись предназначена для отображения, а command — для выполнения через
-    обычный вход с повторной проверкой доступа. Адресные подтверждения
-    передаются только через ConfirmationAction, без дублирования здесь.
+    command выполняется через обычный вход с повторной проверкой доступа.
+    url открывает внешнюю страницу и не исполняет команду. Владелец возвращает
+    только доступные действия; адаптер выбирает место показа по scope.
+    Адресные подтверждения остаются ConfirmationAction с проверкой ожидания.
+    purpose и destination описывают смысл, но не заменяют предметную проверку.
     """
 
     label: str
-    command: str
+    command: str = ""
     row: int | None = None  # Номер ряда, если ответу нужна явная раскладка.
+    scope: ActionScope = ActionScope.SCREEN
+    purpose: ActionPurpose = ActionPurpose.ACTION
+    destination: ScreenDestination | None = None
+    url: str | None = None
+
+    def __post_init__(self) -> None:
+        """Проверяет единственность цели и явный контекст нового перехода.
+
+        Raises:
+            ValueError: Цель отсутствует, ссылка неоднозначна или не является HTTP(S), либо
+                контекст перехода противоречит назначению действия.
+        """
+        if self.url is None and not self.command.strip():
+            raise ValueError("action must have a command or URL target")
+        if self.url is not None:
+            parsed = urlsplit(self.url)
+            if self.command or parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise ValueError("link action must have an HTTP(S) URL and no command")
+        if self.purpose == ActionPurpose.NAVIGATION and self.destination is None:
+            raise ValueError("navigation action must name its screen destination")
+        if self.destination is not None and self.purpose != ActionPurpose.NAVIGATION:
+            raise ValueError("screen destination is only valid for navigation")
+        if self.purpose == ActionPurpose.SELECTION and self.scope != ActionScope.SCREEN:
+            raise ValueError("an addressed selection must belong to its screen")
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,7 +251,7 @@ class IncomingResponse:
     view_delivery: ResponseViewDelivery | None = field(default=None, repr=False, compare=False)
     # Для канала с одной клавиатурой «prefer» доставляет меню вместе с ответом,
     # а «preserve» оставляет нижнее меню и размещает действия под ответом.
-    command_menu_delivery: Literal["prefer", "preserve"] | None = None
+    command_menu_delivery: SectionMenuDelivery | Literal["prefer", "preserve"] | None = None
     close_managed_views: bool = False  # Ответ заменяет отслеживаемый экран без редактирования.
     retire_views_after_delivery: Callable[[], tuple[str, ...]] | None = field(default=None, repr=False, compare=False)
 
@@ -258,6 +288,32 @@ class HandlerContext:
     profile_operation: Callable[[ChatCommand, str], IncomingResponse] | None = None
     # Ревизия режима владельца, уже выбранного в этом чате. При входе её ещё нет.
     mode_revision: int | None = None
+    action_layout: ActionLayoutLimits = ActionLayoutLimits()
+
+
+@runtime_checkable
+class SectionActionsQueryPort(Protocol):
+    """Читает действия раздела из того же описания, что использует его экран."""
+
+    def section_actions(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
+        pending: PendingInput | None,
+    ) -> tuple[ReplyAction, ...]:
+        """Возвращает актуальные действия без отправки ответа и исполнения команд.
+
+        Args:
+            app_user: Профиль с проверенным действующим доступом.
+            address: Исходный чат с активным режимом.
+            mode_revision: Текущая ревизия этого режима.
+            pending: Проверенное ожидание ввода, если оно существует.
+
+        Returns:
+            Действия с областью SECTION. Пустой кортеж означает отсутствие
+            действий, а не просьбу сохранить прежнее меню. Для сохранения
+            используется SectionMenuDelivery.PRESERVE у ответа. Ошибка чтения
+            не должна превращаться в достоверный пустой набор.
+        """
+        ...
 
 
 @runtime_checkable
