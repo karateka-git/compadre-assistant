@@ -330,7 +330,8 @@ class AdminChannelsTest(unittest.TestCase):
         """Главная в обоих каналах показывает доверенному профилю входы."""
         self.configure(str(self.owner_id))
         with create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
-            self.assert_channel_menus(processor, {"/admin", "/settings"})
+            self.assert_channel_menus(processor, {"/admin", "/settings", "/help"},
+                                      {"/admin", "Настройки", "Помощь"})
             for text in (self.telegram(processor, "/help")[0], self.vk(processor, "/help").messages[-1][1]):
                 self.assertIn("/admin", text)
                 self.assertIn("/settings", text)
@@ -353,7 +354,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.vk(processor, "/llm_costs DAY", client=vk_client, publish=publish)
             periods = _vk_buttons(vk_client.keyboards[-1], inline=True)
             payload = periods["Текущий месяц"]["payload"]
-            self.assert_channel_menus(processor, {"/llm_costs", "/exit"},
+            self.assert_channel_menus(processor, {"/llm_costs", "/help", "/exit"},
                                       {"Показать расходы ИИ", "Выйти из режима"}, vk_client=vk_client)
             # Активность в группе не должна скрывать ранее сохранённый личный чат
             # от фоновой сверки меню нового процесса.
@@ -363,7 +364,7 @@ class AdminChannelsTest(unittest.TestCase):
         self.configure("")
         with patch.object(GetGatewayCostReport, "execute", autospec=True) as execute, \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as restarted:
-            self.assert_channel_menus(restarted, {"/settings"})
+            self.assert_channel_menus(restarted, {"/settings", "/help"}, {"Настройки", "Помощь"})
             self.assertIn("больше недоступна", self.select_vk(restarted, vk_client, payload))
             rejected = self.vk(restarted, "Показать расходы ИИ", payload=lower["Показать расходы ИИ"]["payload"])
             self.assertIn("кнопка меню устарела", rejected.messages[-1][1])

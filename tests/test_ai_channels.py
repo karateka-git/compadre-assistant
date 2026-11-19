@@ -64,6 +64,7 @@ class AiChannelsTest(unittest.TestCase):
         receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
         progress = ("Вопрос принят. Готовлю ответ… Для отмены введи /cancel.", receipt)
         finished = threading.Event()
+        self.response_message_id = None
 
         def process(event, completion):
             def complete(reply):
@@ -82,6 +83,9 @@ class AiChannelsTest(unittest.TestCase):
                 await original_answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
                 if on_delivery:
                     on_delivery(text)
+                self.response_message_id = 100 + len(message.answers)
+                return SimpleNamespace(message_id=self.response_message_id)
+
             message.answer = answer
             async def send_message(*, chat_id, text, parse_mode, reply_markup=None):
                 await answer(text, parse_mode=parse_mode, reply_markup=reply_markup)
@@ -111,12 +115,20 @@ class AiChannelsTest(unittest.TestCase):
             return "\n".join(text for text in message.answers if text not in progress)
         client = FakeVkClient()
         original_send = client.send_message
+        original_send_editable = client.send_editable_message
+
+        def send_editable_message(**kwargs):
+            message_id = original_send_editable(**kwargs)
+            self.response_message_id = message_id
+            return message_id
+
         def send_message(**kwargs):
             result = original_send(**kwargs)
             if on_delivery:
                 on_delivery(kwargs["text"])
             return result
         client.send_message = send_message
+        client.send_editable_message = send_editable_message
         attachments = [{"type": "photo", "photo": {"sizes": [{
             "url": f"https://sun1.userapi.com/{file_id}", "width": 30, "height": 30,
         }]}} for file_id in images]
@@ -132,10 +144,12 @@ class AiChannelsTest(unittest.TestCase):
 
             with patch("compadre_assistant.presentation.vk.photos._download", side_effect=download):
                 handle_update()
+                self.assertTrue(client.messages)
                 if client.messages[0][1] in progress:
                     self.assertTrue(finished.wait(5))
         else:
             handle_update()
+            self.assertTrue(client.messages)
             if client.messages[0][1] in progress:
                 self.assertTrue(finished.wait(5))
         self.delivered = [item[1] for item in client.messages]
@@ -214,11 +228,12 @@ class AiChannelsTest(unittest.TestCase):
 
         with create_channel_message_processor(
             database_path=self.path, enabled_capabilities=("ai",), ai_config=self.config,
+            messenger_dialogs={"telegram": None, "vk": None},
         ) as processor:
             self.send("telegram", processor, "/register", chat_id=7)
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
-            link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
+            link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
             code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
             send(processor, code.group(0))
@@ -464,8 +479,10 @@ class AiChannelsTest(unittest.TestCase):
                                          "Возможность «Режим ИИ» лично выключена. "
                                          "Включить: /settings, затем /enable ai.")
                         self.assertIn("«Режим ИИ» — /enable ai", send("/enable"))
+                        self.assertIsNotNone(self.response_message_id)
                         self.assertEqual(
-                            self.press_action(channel, processor, self.keyboard, "Включить «Режим ИИ»"),
+                            self.press_action(channel, processor, self.keyboard, "Включить «Режим ИИ»",
+                                              message_id=self.response_message_id),
                             "Личный доступ к возможности «Режим ИИ» включён. "
                             "Выбор действует во всех привязанных каналах.",
                         )
@@ -540,7 +557,9 @@ class AiChannelsTest(unittest.TestCase):
                         SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                             UserCapabilityPreference(owner, "obsidian", True)
                         )
-                    self.assertIn("да", self.send(channel, processor, "/obsidian"))
+                    opened = self.send(channel, processor, "/obsidian")
+                    self.assertIn("/confirm", opened)
+                    self.assertNotIn("Ответь да", opened)
                     self.assertIn("/ai", self.send(channel, processor, "/ask вопрос"))
                     model.answer.assert_not_called()
                     self.send(channel, processor, "/ai")
@@ -598,7 +617,7 @@ class AiChannelsTest(unittest.TestCase):
                 loader.assert_called_once_with()
                 model_type.return_value.close.assert_called_once_with()
 
-    def press_action(self, channel, processor, keyboard, label, chat_id=7):
+    def press_action(self, channel, processor, keyboard, label, chat_id=7, *, message_id=1):
         """Передаёт нажатие кнопки оригинальному callback handler канала."""
         if channel == "telegram":
             aiogram = FakeAiogram()
@@ -614,7 +633,7 @@ class AiChannelsTest(unittest.TestCase):
             callback = SimpleNamespace(
                 answer=acknowledge, id="action-callback", data=button.callback_data,
                 from_user=SimpleNamespace(id=7), bot=message,
-                message=SimpleNamespace(chat=SimpleNamespace(id=chat_id), message_id=1, photo=[object()]),
+                message=SimpleNamespace(chat=SimpleNamespace(id=chat_id), message_id=message_id, photo=[object()]),
             )
             asyncio.run(aiogram.dispatcher.included_router.callback_handler(callback))
             return message.answers[-1]
@@ -623,7 +642,7 @@ class AiChannelsTest(unittest.TestCase):
         button = next(button["action"] for row in json.loads(keyboard)["buttons"] for button in row
                       if button["action"]["label"] == label)
         _handle_update({"type": "message_event", "object": {
-            "peer_id": chat_id, "user_id": 7, "event_id": "action-callback", "conversation_message_id": 1,
+            "peer_id": chat_id, "user_id": 7, "event_id": "action-callback", "conversation_message_id": message_id,
             "payload": button["payload"], "attachments": [{"type": "photo", "photo": {}}],
         }}, incoming_message_processor=processor, client=client, logger=self.logger)
         return client.messages[-1][1]
@@ -825,7 +844,7 @@ class AiChannelsTest(unittest.TestCase):
                         await send("пошаговый" if channel == "telegram" else "/ask прямой")
                         self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                         self.assertIn("Вопрос принят", sent[-1])
-                        self.assertEqual(commands(), ("/cancel",))
+                        self.assertEqual(commands(), ("/cancel",) if channel == "telegram" else ("Отмена",))
                         await send("/cancel")
                         self.assertIn("Обработка отменена", sent[-1])
                         self.assertEqual(commands(), normal)
@@ -925,6 +944,7 @@ class AiChannelsTest(unittest.TestCase):
                 keyboards_by_reply = []
 
                 ask_label = "/ask" if channel == "telegram" else "Задать вопрос"
+                cancel_label = "/cancel" if channel == "telegram" else "Отмена"
 
                 def record_menu(chat, commands):
                     menu_calls.append((chat, commands))
@@ -980,21 +1000,22 @@ class AiChannelsTest(unittest.TestCase):
                         await send("", photo="undelivered", fail_receipt=True)
                         self.assertEqual(stages, [])
                         if channel == "telegram":
-                            self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
+                            self.assertEqual(menu_calls[-2:], [(7, (cancel_label,)), normal])
                         else:
                             self.assertEqual(len(messages), message_count)
                             self.assertEqual(menu_calls[-1], (7, ("Отмена",)))
                             await send("/help")
                             self.assertEqual(menu_calls[-1], normal)
                             self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
-                        await send(command)
+                        waiting_keyboard = await send(command)
                         self.assertIn("Пришли одно фото", messages[-1][1])
+                        waiting_menu_count = len(menu_calls)
                         await send("/exit", photo="first")
                         self.assertTrue(await asyncio.to_thread(entered_download.wait, 5))
                         self.assertEqual(stages, ["receipt", "download:first"])
-                        self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                        self.assertEqual(menu_calls[-1], (7, (cancel_label,)))
                         if channel == "vk":
-                            self.assertEqual(keyboards_by_reply[-1], (receipt, ("/cancel",)))
+                            self.assertEqual(len(menu_calls), waiting_menu_count)
                         call_count = len(menu_calls)
                         await asyncio.to_thread(processor.reconcile_menus, publish)
                         for text, photo in (("/exit", None), ("/disable ai", None), ("текст", None),
@@ -1006,7 +1027,12 @@ class AiChannelsTest(unittest.TestCase):
                         self.assertEqual(len(menu_calls), call_count)
                         await send("/ai", chat=43)
                         self.assertIn("Режим ИИ включён", messages[-1][1])
-                        await send("/cancel")
+                        if channel == "vk":
+                            await send("Отмена")
+                            self.assertIn("Обработка уже идёт", messages[-1][1])
+                            await choose(waiting_keyboard, cancel_label)
+                        else:
+                            await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
                         self.assertEqual(menu_calls[-1], normal)
                         if channel == "vk":
@@ -1019,7 +1045,7 @@ class AiChannelsTest(unittest.TestCase):
                         self.assertTrue(await asyncio.to_thread(first_finished.wait, 5))
                         await asyncio.to_thread(processor.reconcile_menus, publish)
                         self.assertEqual(len(menu_calls), call_count)
-                        self.assertEqual(menu_calls[-1], (7, ("/cancel",)))
+                        self.assertEqual(menu_calls[-1], (7, (cancel_label,)))
                         self.assertEqual([commands for chat, commands in menu_calls if chat == 43][-1], normal[1])
                         await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
@@ -1032,7 +1058,7 @@ class AiChannelsTest(unittest.TestCase):
                             await send("", photo=photo)
                             self.assertTrue(await asyncio.to_thread(restored.wait, 5))
                             self.assertTrue(await asyncio.to_thread(result_delivered.wait, 5))
-                            self.assertEqual(menu_calls[-2:], [(7, ("/cancel",)), normal])
+                            self.assertEqual(menu_calls[-2:], [(7, (cancel_label,)), normal])
                             self.assertIn(expected, messages[-1][1])
                             if channel == "vk" and photo == "fast":
                                 self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
@@ -1161,9 +1187,9 @@ class AiChannelsTest(unittest.TestCase):
                             }}})
                             return client.keyboards[-1]
 
-                        async def choose(keyboard):
+                        async def choose(keyboard, label="Извлечь текст с фото"):
                             button = next(button["action"] for row in json.loads(keyboard)["buttons"] for button in row
-                                          if button["action"]["label"] == "Извлечь текст с фото")
+                                          if button["action"]["label"] == label)
                             await submit(7, {"type": "message_new", "object": {"message": {
                                 "id": 1, "peer_id": 7, "from_id": 7, "text": button["label"],
                                 "payload": button["payload"],
@@ -1212,11 +1238,12 @@ class AiChannelsTest(unittest.TestCase):
 
         with patch("compadre_assistant.capabilities.ai.bootstrap.OpenAIModel") as model_type, \
                 create_channel_message_processor(database_path=self.path, enabled_capabilities=("ai",),
-                                                 ai_config=self.config) as processor:
+                                                 ai_config=self.config,
+                                                 messenger_dialogs={"telegram": None, "vk": None}) as processor:
             self.send("telegram", processor, "/register", chat_id=7)
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
-            link_reply = self.send("telegram", processor, "/link_code", chat_id=7)
+            link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
             code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
             self.assertIn("привязал", self.send("vk", processor, code.group(0), chat_id=7))

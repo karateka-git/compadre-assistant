@@ -11,9 +11,10 @@ from urllib.error import URLError
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
-    BackgroundReply, BoundReplyAction, CommandMenu, CommandMenuUpdate, CommandSuggestion,
+    BackgroundReply, BoundReplyAction, CommandMenu, CommandMenuUpdate, ReplyAction,
     ConfirmationAction, IncomingResponse,
 )
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.presentation.vk.bot import (
     LongPollServer,
@@ -59,11 +60,16 @@ class FakeVkClient:
         self.formats.append(format_data)
         self.keyboards.append(keyboard)
 
+    def send_editable_message(self, **kwargs) -> int:
+        """Запоминает управляемое сообщение и выдаёт подтверждённый cmid."""
+        self.send_message(**kwargs)
+        return 100 + len(self.messages)
+
     def answer_message_event(self, *, event_id: str, user_id: int, peer_id: int) -> None:
         """Запоминает подтверждение VK callback."""
         self.acks.append((event_id, user_id, peer_id))
 
-    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int) -> None:
+    def clear_inline_keyboard(self, *, peer_id: int, conversation_message_id: int, managed: bool = False) -> None:
         """Запоминает очистку исходного сообщения."""
         self.cleared.append((peer_id, conversation_message_id))
 
@@ -634,11 +640,12 @@ class VkBotTest(unittest.TestCase):
         self.assertIn(b"message=hello", request.data)
         self.assertIn(b"access_token=token", request.data)
 
-    def test_persistent_text_keyboard_uses_exact_commands(self) -> None:
-        """Меню содержит текстовые команды, включая явный режим очистки."""
+    def test_persistent_text_keyboard_uses_section_labels_and_marked_payload(self) -> None:
+        """Меню передаёт подписи раздела, оставляя точные команды на сервере."""
         address = ReplyAddress("vk", "22")
-        update = CommandMenuUpdate(address, CommandMenu((
-            CommandSuggestion("/help", "Помощь"), CommandSuggestion("/cancel", "Отмена"),
+        update = CommandMenuUpdate(address, CommandMenu(section_actions=(
+            ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),
+            ReplyAction("Отмена", "/cancel", scope=ActionScope.SECTION),
         )))
 
         keyboard = json.loads(_serialize_vk_command_menu(update))
@@ -646,15 +653,16 @@ class VkBotTest(unittest.TestCase):
         self.assertFalse(keyboard["one_time"])
         self.assertEqual(
             [button["action"] for row in keyboard["buttons"] for button in row],
-            [{"type": "text", "label": "/help"}, {"type": "text", "label": "/cancel"}],
+            [{"type": "text", "label": label, "payload": '{"menu":true}'} for label in ("Помощь", "Отмена")],
         )
         self.assertEqual(json.loads(_serialize_vk_command_menu(CommandMenuUpdate(address, CommandMenu())))["buttons"], [])
 
-    def test_persistent_keyboard_preserves_full_main_command_list_with_vk_row_limits(self) -> None:
-        """Полный набор основных команд помещается в допустимые строки без потерь."""
+    def test_persistent_keyboard_preserves_section_actions_with_vk_row_limits(self) -> None:
+        """Действия раздела помещаются в допустимые строки без потерь."""
         commands = [command.value for command in ChatCommand if not command.arguments_hint]
         address = ReplyAddress("vk", "22")
-        menu = CommandMenu(tuple(CommandSuggestion(command, command) for command in commands))
+        menu = CommandMenu(section_actions=tuple(ReplyAction(command, command, scope=ActionScope.SECTION)
+                                                 for command in commands))
         keyboard = json.loads(_serialize_vk_command_menu(CommandMenuUpdate(address, menu)))
         self.assertLessEqual(len(keyboard["buttons"]), 10)
         self.assertTrue(all(len(row) <= 2 for row in keyboard["buttons"]))
@@ -663,15 +671,15 @@ class VkBotTest(unittest.TestCase):
             commands,
         )
 
-        many_commands = CommandMenu(tuple(
-            CommandSuggestion(f"/command_{index}", f"Команда {index}") for index in range(50)
+        many_commands = CommandMenu(section_actions=tuple(
+            ReplyAction(f"Команда {index}", f"/command_{index}", scope=ActionScope.SECTION) for index in range(50)
         ))
         many_keyboard = json.loads(_serialize_vk_command_menu(CommandMenuUpdate(address, many_commands)))
         self.assertEqual(len(many_keyboard["buttons"]), 10)
         self.assertTrue(all(len(row) == 5 for row in many_keyboard["buttons"]))
 
-        oversized = CommandMenu(tuple(
-            CommandSuggestion(f"/c{index}", f"Команда {index}") for index in range(51)
+        oversized = CommandMenu(section_actions=tuple(
+            ReplyAction(f"Команда {index}", f"/c{index}", scope=ActionScope.SECTION) for index in range(51)
         ))
         with self.assertRaisesRegex(ValueError, "at most 50"):
             _serialize_vk_command_menu(CommandMenuUpdate(address, oversized))

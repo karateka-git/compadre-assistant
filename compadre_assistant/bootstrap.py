@@ -404,10 +404,10 @@ class ChannelMessageProcessor:
         if published is None or published.address != current.address:
             return False
         old_actions, actions = published.menu.section_actions, current.menu.section_actions
-        if current.address.channel == "vk" and old_actions is not None and actions is not None:
+        if current.address.channel == "vk":
             # Подпись передаётся без команды; актуальная цель проверяется при нажатии.
-            return tuple((action.label, action.url) for action in old_actions) == tuple(
-                (action.label, action.url) for action in actions
+            return tuple((action.label, action.url) for action in (old_actions or ())) == tuple(
+                (action.label, action.url) for action in (actions or ())
             )
         return published == current
 
@@ -514,7 +514,7 @@ class ChannelMessageProcessor:
 
         Returns:
             Действия раздела, включая пустой набор, либо None при отсутствии
-            владельца нового контракта. Ошибка источника передаётся вызывающему.
+            проекции раздела. Ошибка источника передаётся вызывающему.
         """
         with self._menu_lock:
             snapshot = self._read_menu_snapshot(event, allow_unknown=True, read_only=True)

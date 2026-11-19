@@ -53,7 +53,7 @@ class ScreenActionContractsTest(unittest.TestCase):
         response = IncomingResponse(text_content("Раздел закрыт."),
                                     command_menu_delivery=SectionMenuDelivery.RECONCILE)
         self.assertEqual(response.suggested_actions, ())
-        self.assertEqual(response.command_menu_delivery, "reconcile")
+        self.assertIs(response.command_menu_delivery, SectionMenuDelivery.RECONCILE)
 
     def test_link_target_is_not_an_executable_command(self):
         """Ссылка открывает диалог, не конкурируя с командной целью."""

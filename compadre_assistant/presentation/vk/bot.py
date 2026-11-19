@@ -16,7 +16,9 @@ from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
-from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits, ActionPurpose, ActionScope
+from compadre_assistant.core.presentation.incoming.action_contracts import (
+    ActionLayoutLimits, ActionPurpose, ActionScope, SectionMenuDelivery,
+)
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
     CommandMenuUpdateHandler, IncomingResponse,
@@ -713,9 +715,8 @@ def _menu_delivery_for_event(deliver: _DeliverMenu | None, event: IncomingEvent)
 
 
 def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
-    """Проецирует проверенные действия раздела либо каталог старого владельца."""
-    modern = update.menu.section_actions is not None
-    items = update.menu.section_actions if modern else update.menu.items
+    """Строит нижнюю клавиатуру из проверенных действий текущего раздела."""
+    items = update.menu.section_actions or ()
     if len(items) > 50:
         raise ValueError("VK keyboard supports at most 50 buttons")
     # Сохраняем два столбца, пока это укладывается в предел 10 рядов VK.
@@ -725,20 +726,18 @@ def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
     for start in range(0, len(items), columns):
         row: list[dict[str, object]] = []
         for item in items[start:start + columns]:
-            if modern and item.scope != ActionScope.SECTION:
+            if item.scope != ActionScope.SECTION:
                 raise ValueError("VK bottom keyboard requires section actions")
-            label = item.label if item.label is not None else item.command
+            label = item.label
             if not label or len(label) > 40:
                 raise ValueError("VK text button label must contain 1-40 characters")
             if label in labels:
                 raise ValueError("VK bottom keyboard labels must be unique")
             labels.add(label)
-            if modern and item.url is not None:
+            if item.url is not None:
                 row.append({"action": _vk_link_action(label, item.url)})
             else:
-                action = {"type": "text", "label": label}
-                if item.label is not None:
-                    action["payload"] = '{"menu":true}'
+                action = {"type": "text", "label": label, "payload": '{"menu":true}'}
                 row.append({"action": action, "color": "secondary"})
         rows.append(row)
     return json.dumps(
@@ -858,8 +857,8 @@ def _safe_send_vk_message(
         )
 
     try:
-        delivered = (deliver_menu(send) if deliver_menu is not None and response.command_menu_delivery != "preserve"
-                     else send(None)[0])
+        reconcile_menu = deliver_menu is not None and response.command_menu_delivery is SectionMenuDelivery.RECONCILE
+        delivered = deliver_menu(send) if reconcile_menu else send(None)[0]
         if replacement_confirmed and response.retire_views_after_delivery is not None:
             _clear_vk_managed_keyboards(client, peer_id, response.retire_views_after_delivery(), logger)
     finally:
@@ -1008,9 +1007,7 @@ def _send_vk_message(
 ) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
     chunks = render_vk_content(response.content, response.actions, limit=limit)
-    keyboard = None if menu_keyboard is not None and response.command_menu_delivery == "prefer" else (
-        _optional_vk_inline_keyboard(response, logger, include_bound_actions)
-    )
+    keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
     # VK принимает одну клавиатуру на сообщение. У короткого ответа
     # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.
     reply_chunk_count = len(chunks)

@@ -82,7 +82,7 @@ class MenuLifecycleTest(unittest.TestCase):
 
         self.send(self.telegram, "/selected")
         self.assertEqual(tuple(item.command for item in self.menu(self.telegram).items),
-                         ("/exit",))
+                         ("/help", "/exit"))
         self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assert_menu_matches_help(self.telegram)
 

@@ -11,7 +11,10 @@ from compadre_assistant.core.presentation.incoming.registry import PersonalCapab
 
 
 # Пока принятое действие занимает чат, только отмена может изменить его состояние.
-BUSY_COMMAND_MENU = CommandMenu((CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),))
+BUSY_COMMAND_MENU = CommandMenu(
+    (CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),),
+    section_actions=(CANCEL_SECTION_ACTION,),
+)
 
 
 def main_actions(personal: PersonalCapabilityRegistry | None, pending: PendingInput | None) -> tuple[ReplyAction, ...]:
@@ -79,8 +82,7 @@ def build_command_menu(
                 if not section.menu_help_only:
                     for command in section.commands:
                         capability(command)
-            if any(section.menu_help_only for section in catalog.sections):
-                common(ChatCommand.HELP)
+            common(ChatCommand.HELP)
             common(ChatCommand.EXIT)
             for access in personal.access:
                 if access.effective and not access.descriptor.persistent_mode:

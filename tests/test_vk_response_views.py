@@ -15,8 +15,9 @@ from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_id
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
-from compadre_assistant.core.presentation.incoming.ports import ContextualCommandQueryPort
+from compadre_assistant.core.presentation.incoming.ports import ReplyAction, SectionActionsQueryPort
 from compadre_assistant.core.presentation.message_content import TextSpan, TextStyle, compose_content
 from compadre_assistant.presentation.vk.bot import (
     VkApiClient, VkBotError, _create_vk_menu_update_handler, _handle_update, _safe_send_vk_message,
@@ -24,7 +25,7 @@ from compadre_assistant.presentation.vk.bot import (
 from tests.test_response_views import RECOVERY, EditableCapability
 
 
-class VkEditableCapability(EditableCapability, ContextualCommandQueryPort):
+class VkEditableCapability(EditableCapability, SectionActionsQueryPort):
     """Нейтральный сценарий меняет контекстное меню после первого выбора."""
 
     def handle(self, context, event):
@@ -36,12 +37,15 @@ class VkEditableCapability(EditableCapability, ContextualCommandQueryPort):
         )
         return replace(result, response=replace(result.response, content=content))
 
-    def visible_mode_commands(self, app_user, address, mode_revision):
-        """Убирает команду обновления после первого выбора."""
-        commands = {"/show_view", "/clear_view"}
-        if not self.choices:
-            commands.add("/adjust_view")
-        return frozenset(commands)
+    def section_actions(self, app_user, address, mode_revision, pending):
+        """Возвращает действия раздела, которые меняются при первом выборе."""
+        actions = (
+            ReplyAction("Открыть вид", "/show_view", scope=ActionScope.SECTION),
+            ReplyAction("Очистить выбор", "/clear_view", scope=ActionScope.SECTION),
+        )
+        if self.choices:
+            return actions
+        return (*actions, ReplyAction("Изменить вид", "/adjust_view", scope=ActionScope.SECTION))
 
 
 class VkResponseViewsTest(unittest.TestCase):
@@ -128,8 +132,8 @@ class VkResponseViewsTest(unittest.TestCase):
             for row in keyboard["buttons"] for button in row
         ]
 
-    def bottom_commands(self, params: dict[str, str]) -> set[str]:
-        """Извлекает команды нижней клавиатуры."""
+    def bottom_labels(self, params: dict[str, str]) -> set[str]:
+        """Извлекает подписи нижней клавиатуры."""
         keyboard = json.loads(params["keyboard"])
         self.assertFalse(keyboard["inline"])
         return {button["action"]["label"] for row in keyboard["buttons"] for button in row}
@@ -180,17 +184,17 @@ class VkResponseViewsTest(unittest.TestCase):
         """Сверка публикует нижнюю клавиатуру один раз на новый снимок."""
         first, *_ = self.open_view(with_menu=True)
         _, first_menu = self.requests("messages.send")
-        self.assertIn("/adjust_view", self.bottom_commands(first_menu))
+        self.assertIn("Изменить вид", self.bottom_labels(first_menu))
 
         self.press(first, with_menu=True)
         edit, = self.requests("messages.edit")
         self.assertTrue(self.inline_actions(edit))
         updated_menu = self.requests("messages.send")[-1]
         self.assertIn("Действия раздела:", updated_menu["message"])
-        self.assertIn("/show_view", updated_menu["message"])
+        self.assertIn("Открыть вид", updated_menu["message"])
         self.assertIn("/help", updated_menu["message"])
-        self.assertNotIn("/adjust_view", self.bottom_commands(updated_menu))
-        self.assertIn("/clear_view", self.bottom_commands(updated_menu))
+        self.assertNotIn("Изменить вид", self.bottom_labels(updated_menu))
+        self.assertIn("Очистить выбор", self.bottom_labels(updated_menu))
         self.assertEqual([method for method, _ in self.calls[-3:]],
                          ["messages.sendMessageEventAnswer", "messages.edit", "messages.send"])
 
@@ -208,7 +212,7 @@ class VkResponseViewsTest(unittest.TestCase):
         self.assertEqual(len(self.requests("messages.edit")), 1)
         recovery = self.requests("messages.send")[-1]
         self.assertEqual(recovery["message"], RECOVERY)
-        self.assertNotIn("/adjust_view", self.bottom_commands(recovery))
+        self.assertNotIn("Изменить вид", self.bottom_labels(recovery))
         self.send("/adjust_view", with_menu=True)
         self.press(first, with_menu=True)
         self.assertEqual(self.capability.choices, ["A"])
@@ -226,7 +230,7 @@ class VkResponseViewsTest(unittest.TestCase):
         self.press(token, with_menu=True)
         self.assertEqual(self.capability.choices, ["A", "B"])
         self.assertEqual(len(self.requests("messages.edit")), 2)
-        self.assertIn("/clear_view", self.bottom_commands(self.requests("messages.send")[-1]))
+        self.assertIn("Очистить выбор", self.bottom_labels(self.requests("messages.send")[-1]))
 
     def test_unverified_send_cmid_does_not_enable_actions(self) -> None:
         """Одиночный message_id, чужой peer и нулевой cmid не становятся целью."""

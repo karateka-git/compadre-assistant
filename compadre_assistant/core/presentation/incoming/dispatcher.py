@@ -19,7 +19,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
-    CapabilityHelp, CommandSuggestion, ContextualCommandMenuPort, ContextualCommandQueryPort,
+    CapabilityHelp, CommandSuggestion, ContextualCommandQueryPort,
     ReplyActionRecoveryPort, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
@@ -483,7 +483,7 @@ class IncomingMessageDispatcher:
         # Пока операция активна, не вызываем даже чтение меню с обновлением identity.
         if self._deferred_actions is not None:
             with self._pending_inputs.lock(event.reply_address):
-                busy = self._busy_response(event, allow_cancel=not event.menu_choice)
+                busy = self._busy_response(event)
             if busy is not None:
                 if busy is _DEFERRED_CANCELLED_REPLY and menu_update_handler is not None:
                     self._update_current_menu(event, menu_update_handler, BUSY_COMMAND_MENU)
@@ -637,8 +637,7 @@ class IncomingMessageDispatcher:
         except Exception:
             LOGGER.exception("Could not resolve command menu choice")
             return None
-        choices = menu.section_actions if menu.section_actions is not None else menu.items
-        matches = tuple(item for item in choices if item.label == event.text)
+        matches = tuple(action for action in (menu.section_actions or ()) if action.label == event.text)
         return matches[0].command if len(matches) == 1 and matches[0].command else None
 
     def _busy_response(self, event: IncomingEvent, *, allow_cancel: bool = True) -> IncomingResponse | None:
@@ -649,7 +648,13 @@ class IncomingMessageDispatcher:
         action = actions.get(event.reply_address)
         if action is None:
             return None
-        parsed = ParsedChatCommand.parse(event.text.strip()) if allow_cancel else None
+        text = event.text.strip()
+        if allow_cancel and event.menu_choice:
+            if (event.text != CANCEL_SECTION_ACTION.label
+                    or not is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):
+                return self.busy_reply()
+            text = CANCEL_SECTION_ACTION.command
+        parsed = ParsedChatCommand.parse(text) if allow_cancel else None
         if parsed is not None and parsed.command is ChatCommand.CANCEL:
             if parsed.arguments:
                 return IncomingResponse(compose_content("Используй ", code_span("/cancel"), " без аргументов."))
@@ -1396,7 +1401,7 @@ class IncomingMessageDispatcher:
         """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
         from compadre_assistant.core.presentation.incoming.help import format_contextual_help
 
-        personal, mode_id, pending, snapshot, active_help, _, _ = self._command_context(event)
+        personal, mode_id, pending, snapshot, active_help, _ = self._command_context(event)
         return format_contextual_help(
             personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
             active_help=active_help, allow_link=self._profile_link_allowed(event),
@@ -1491,9 +1496,7 @@ class IncomingMessageDispatcher:
         # Работа может быть принята во время чтения источников подтверждений.
         if actions is not None and actions.get(event.reply_address) is not None:
             return BUSY_COMMAND_MENU, True
-        personal, mode_id, pending, snapshot, active_help, menu_items, section_actions = context
-        if menu_items is not None:
-            return CommandMenu(menu_items), True
+        personal, mode_id, pending, snapshot, active_help, section_actions = context
         complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
         menu = build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help,
                                   allow_link=self._profile_link_allowed(event))
@@ -1507,7 +1510,7 @@ class IncomingMessageDispatcher:
         known_user: AppUser | None = None, preserve_expired: bool = False, include_menu: bool = False,
     ) -> tuple[
         PersonalCapabilityRegistry | None, str | None, PendingInput | None, ConfirmationQueryResult,
-        CapabilityHelp | None, tuple[CommandSuggestion, ...] | None, tuple[ReplyAction, ...] | None,
+        CapabilityHelp | None, tuple[ReplyAction, ...] | None,
     ]:
         """Проверяет единый контекст справки и меню без продления ожиданий."""
         user = known_user or self._user_identity_service.resolve(_incoming_identity_from_event(event))
@@ -1545,16 +1548,6 @@ class IncomingMessageDispatcher:
             section_actions = self._section_actions_for_context(
                 event, user, active, mode.capability_id, mode.revision, valid_pending,
             )
-        if (include_menu and user is not None and mode is not None
-                and isinstance(active, ContextualCommandMenuPort)
-                and not isinstance(active, SectionActionsQueryPort)
-                and is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):
-            try:
-                menu_items = active.contextual_command_menu(user, event.reply_address, mode.revision, valid_pending)
-                if menu_items is not None:
-                    return personal, mode_id, pending, ConfirmationQueryResult("complete"), None, menu_items, None
-            except Exception:
-                LOGGER.exception("Could not read contextual command menu")
         snapshot = self._confirmation_snapshot(event, user, active, mode_revision=mode.revision if mode else None)
         active_help = (
             self._project_command_help(active, user, event.reply_address, mode.revision)
@@ -1566,7 +1559,7 @@ class IncomingMessageDispatcher:
                              if (commands := tuple(item for item in section.commands
                                                    if item.name not in {"/connect", "/link"})))
             active_help = replace(catalog, sections=sections)
-        return personal, mode_id, pending, snapshot, active_help, None, section_actions
+        return personal, mode_id, pending, snapshot, active_help, section_actions
 
     def _project_command_help(
         self, capability: IncomingCapabilityPort, user: AppUser, address: ReplyAddress, mode_revision: int,

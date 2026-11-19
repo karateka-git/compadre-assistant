@@ -123,14 +123,14 @@ class CommandMenuTest(unittest.TestCase):
         fixture.dispatcher = fixture.build()
         self.assertNotIn("/ai", self.commands())
 
-    def test_active_mode_is_subject_commands_and_exit(self):
-        """Меню режима не копирует общие указатели справки или другие входы."""
+    def test_active_mode_menu_contains_commands_help_and_exit(self):
+        """Каталог режима предлагает справку и выход вместе с командами режима."""
         fixture = self.fixture
         fixture.modes.save(ChatMode(fixture.key, "obsidian"))
-        self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/exit"))
+        self.assertEqual(self.commands(), ("/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/help", "/exit"))
         self.assertEqual(fixture.modes.get(fixture.key).capability_id, "obsidian")
         fixture.send("/ai")
-        self.assertEqual(self.commands(), ("/ask", "/get_text_from_image", "/exit"))
+        self.assertEqual(self.commands(), ("/ask", "/get_text_from_image", "/help", "/exit"))
         fixture.send("/ask")
         self.assertIn("/cancel", self.commands())
         self.assertEqual(self.menu().pending_input_label, "вопрос для модели")
@@ -247,18 +247,18 @@ class ContextualCommandProjectionTest(unittest.TestCase):
             fixture.send("/section", chat=chat)
         fixture.send("/open_section", chat="101")
         first_revision = fixture.modes.get_state(fixture.key).revision
-        self.assert_catalog("101", ("/open_section", "/inspect", "/exit"))
-        self.assert_catalog("chat-2", ("/open_section", "/exit"))
+        self.assert_catalog("101", ("/open_section", "/inspect", "/help", "/exit"))
+        self.assert_catalog("chat-2", ("/open_section", "/help", "/exit"))
         self.assertIn("заглянуть в раздел", fixture.send())
         self.assertIn((23, _event("x").reply_address, first_revision), self.capability.reads)
         fixture.send("/open_section", chat="chat-2")
         fixture.send("/section", chat="101")
         self.assertEqual(self.capability.enter_revisions, [None, None, None])
         self.assertGreater(fixture.modes.get_state(fixture.key).revision, first_revision)
-        self.assert_catalog("101", ("/open_section", "/exit"))
-        self.assert_catalog("chat-2", ("/open_section", "/inspect", "/exit"))
+        self.assert_catalog("101", ("/open_section", "/help", "/exit"))
+        self.assert_catalog("chat-2", ("/open_section", "/inspect", "/help", "/exit"))
         self.install(SectionCapability())
-        self.assert_catalog("chat-2", ("/open_section", "/exit"))
+        self.assert_catalog("chat-2", ("/open_section", "/help", "/exit"))
 
     def test_query_only_runs_for_an_effective_active_mode(self):
         """Выключение и смена режима прекращают чтение контекстного каталога."""
@@ -270,7 +270,7 @@ class ContextualCommandProjectionTest(unittest.TestCase):
         self.assert_catalog("101", ("/exit", "/ai", "/help"))
         fixture.preferences.rows[(23, "section")] = True
         fixture.send("/ai")
-        self.assert_catalog("101", ("/ask", "/get_text_from_image", "/exit"))
+        self.assert_catalog("101", ("/ask", "/get_text_from_image", "/help", "/exit"))
         self.assertEqual(self.capability.reads, [])
 
     def test_query_error_preserves_exit_and_addressed_confirmation(self):
@@ -280,7 +280,7 @@ class ContextualCommandProjectionTest(unittest.TestCase):
         fixture.rebind()
         self.capability.read_error = RuntimeError("снимок недоступен")
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
-            self.assert_catalog("101", ("/exit", "/confirm"))
+            self.assert_catalog("101", ("/help", "/exit", "/confirm"))
         response = fixture.dispatcher.execute(_event("/confirm"))
         self.assertIn("/confirm core identity 4 1 yes", [action.command for action in response.actions])
 
