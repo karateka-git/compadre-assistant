@@ -160,6 +160,18 @@ class RuntimeConfigurationTest(unittest.TestCase):
                         self.assertNotIn("llm-secret", diagnostic)
                         self.assertNotIn("embedding-secret", diagnostic)
 
+    def test_healthcheck_verifies_telegram_dialog_in_both_containers(self) -> None:
+        """Оба сервиса сверяют реальную ссылку с именем, переданным Compose."""
+        for channel in ("telegram", "vk"):
+            env = self.env(channel, False, "absent") | {"ENABLED_CHANNELS": "telegram,vk"}
+            for expected, actual, status in (
+                ("@Example_bot", "Example_bot", 0), ("Example_bot", "", 1),
+                ("Example_bot", "Stale_bot", 1), ("bad/name", "bad/name", 1), ("", "", 0),
+            ):
+                with self.subTest(channel=channel, expected=expected, actual=actual):
+                    args = ["--healthcheck", "--channels", channel, f"--expected-telegram-username={expected}"]
+                    self.assertEqual(self.run_cli(args, env | {"TELEGRAM_BOT_USERNAME": actual})[0], status)
+
     def test_admin_startup_and_healthcheck_validate_profile_only_when_enabled(self) -> None:
         """Оба канала независимо запускают admin без Ask и закрывают невалидное состояние."""
         for channel in ("telegram", "vk"):

@@ -33,6 +33,7 @@ from compadre_assistant.core.data.config import (
     ConfigError,
     load_config,
     load_database_path,
+    load_messenger_dialogs,
     parse_channels,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
@@ -106,7 +107,13 @@ def parse_args() -> argparse.Namespace:
         "--database-path", type=Path,
         help="SQLite file for --migrate; overrides DATABASE_PATH without reading .env.",
     )
+    parser.add_argument(
+        "--expected-telegram-username",
+        help="Verify the configured Telegram dialog in the running container during healthcheck.",
+    )
     args = parser.parse_args()
+    if args.expected_telegram_username is not None and not args.healthcheck:
+        parser.error("--expected-telegram-username applies only to --healthcheck")
     if args.database_path is not None and not args.migrate:
         parser.error("--database-path applies only to --migrate")
     if args.channels is not None and any((
@@ -162,7 +169,8 @@ def main() -> int:
         return 1
 
     if args.healthcheck:
-        return run_healthcheck(config, logger, obsidian_config=obsidian_config)
+        return run_healthcheck(config, logger, obsidian_config=obsidian_config,
+                               expected_telegram_username=args.expected_telegram_username)
 
     if not args.process_url and not check_runtime_configuration(config, logger, obsidian_config=obsidian_config):
         return 2
@@ -245,6 +253,7 @@ TELEGRAM_TOKEN_PATTERN = re.compile(r"^\d+:[A-Za-z0-9_-]{20,}$")
 def run_healthcheck(
     config: AppConfig, logger: logging.Logger, *,
     obsidian_config: ObsidianConfig | None = None,
+    expected_telegram_username: str | None = None,
 ) -> int:
     """Проверяет runtime-конфигурацию, каталог данных и SQLite.
 
@@ -252,6 +261,8 @@ def run_healthcheck(
         config: Загруженная конфигурация приложения.
         logger: Logger для диагностических сообщений.
         obsidian_config: Профиль включённой возможности.
+        expected_telegram_username: Публичное имя из конфигурации Compose в момент
+            создания контейнера. При пустом значении ссылка необязательна.
 
     Returns:
         Ноль при успехе, иначе единицу.
@@ -270,6 +281,16 @@ def run_healthcheck(
     # Выполняем независимые проверки целиком, чтобы первый сбой не скрывал другие.
     configuration_ready = check_runtime_configuration(config, logger, obsidian_config=obsidian_config)
     database_ready = check_database(config.database_path, logger)
+    if expected_telegram_username and expected_telegram_username.strip():
+        username = expected_telegram_username.strip().removeprefix("@")
+        try:
+            dialogs = load_messenger_dialogs()
+        except (ConfigError, ValueError):
+            logger.error("Health check failed: invalid messenger configuration")
+            return 1
+        if dialogs.get("telegram") != f"https://t.me/{username}":
+            logger.error("Health check failed: Telegram dialog differs from the configured public username")
+            return 1
     if not configuration_ready or not database_ready:
         return 1
 

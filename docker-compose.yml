@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "compadre_assistant", "--telegram-bot"]
     healthcheck:
-      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "telegram"]
+      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "telegram", "--expected-telegram-username=${TELEGRAM_BOT_USERNAME:-}"]
       interval: 30s
       timeout: 30s
       retries: 3
@@ -28,7 +28,7 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "compadre_assistant", "--vk-bot"]
     healthcheck:
-      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "vk"]
+      test: ["CMD", "python", "-m", "compadre_assistant", "--healthcheck", "--channels", "vk", "--expected-telegram-username=${TELEGRAM_BOT_USERNAME:-}"]
       interval: 30s
       timeout: 30s
       retries: 3
