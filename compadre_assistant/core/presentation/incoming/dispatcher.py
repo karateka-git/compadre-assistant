@@ -608,8 +608,8 @@ class IncomingMessageDispatcher:
             LOGGER.exception("Could not resolve command menu choice")
             return None
         choices = menu.section_actions if menu.section_actions is not None else menu.items
-        commands = tuple(item.command for item in choices if item.label == event.text and item.command)
-        return commands[0] if len(commands) == 1 else None
+        matches = tuple(item for item in choices if item.label == event.text)
+        return matches[0].command if len(matches) == 1 and matches[0].command else None
 
     def _busy_response(self, event: IncomingEvent, *, allow_cancel: bool = True) -> IncomingResponse | None:
         """Ограничивает занятый чат, не меняя состояние и не запуская обычный маршрут."""

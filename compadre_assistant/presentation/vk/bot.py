@@ -12,17 +12,18 @@ from random import randint
 from threading import Condition, Event, Lock, Thread
 from typing import Any, TypeVar
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits, ActionPurpose, ActionScope
 from compadre_assistant.core.presentation.incoming.ports import (
     BackgroundReply, ChannelCompletionHandler, CommandMenuUpdate,
     CommandMenuUpdateHandler, IncomingResponse,
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.vk.photos import vk_photo_attachments
-from compadre_assistant.presentation.vk.rendering import render_vk_content
+from compadre_assistant.presentation.vk.rendering import VkChunk, render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
     safe_send,
@@ -40,6 +41,8 @@ VK_LONG_POLL_RETRY_JITTER_RATIO = 0.2
 VK_UPDATE_WORKER_COUNT = 4
 VK_UPDATE_QUEUE_SIZE = 128
 VK_INLINE_ACTIONS_ENABLED = True
+# Вместимость inline-выбора передаётся владельцу до построения текста и номеров.
+VK_ACTION_LAYOUT = ActionLayoutLimits(max_buttons=30, max_rows=6, max_columns=5, max_label_length=40)
 # Пустая inline-клавиатура удаляет кнопки редактируемого сообщения.
 VK_EMPTY_INLINE_KEYBOARD = '{"inline":true,"buttons":[]}'
 # При большей степени базовая задержка уже превышает ограничение в 30 секунд.
@@ -361,7 +364,7 @@ class VkApiClient:
             peer_id: ID диалога-получателя.
             text: Готовый текст одного сообщения без format_data.
             random_id: Стабильный ID retry-серии.
-            keyboard: Необязательная inline-клавиатура.
+            keyboard: Необязательная клавиатура сообщения.
 
         Returns:
             Положительный conversation_message_id из результата для этого peer.
@@ -559,6 +562,7 @@ def _handle_update(
         external_user_id=str(from_id),
         images=images,
         menu_choice=not images and _is_vk_menu_choice(message.get("payload")),
+        action_layout=VK_ACTION_LAYOUT if VK_INLINE_ACTIONS_ENABLED else ActionLayoutLimits(),
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(
@@ -639,6 +643,7 @@ def _handle_message_event(
     event = IncomingEvent(
         channel="vk", chat_id=str(peer_id), message_id=event_id,
         text=token, external_user_id=str(user_id), callback_message_id=source_id,
+        action_layout=VK_ACTION_LAYOUT if VK_INLINE_ACTIONS_ENABLED else ActionLayoutLimits(),
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
     completion_handler = _create_vk_completion_handler(client, logger=logger, origin=event, deliver_menu=deliver_menu)
@@ -651,13 +656,13 @@ def _handle_message_event(
     if result.error is not None:
         logger.error("VK action selection failed: %s", result.error)
     managed_target = result.view_delivery.target_message_id if result.view_delivery is not None else None
-    if source_id is not None and not result.preserve_source_actions and source_id != managed_target:
+    delivered = _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger,
+                                     deliver_menu=_menu_delivery_for_event(deliver_menu, event))
+    if delivered and source_id is not None and not result.preserve_source_actions and source_id != managed_target:
         try:
             client.clear_inline_keyboard(peer_id=peer_id, conversation_message_id=int(source_id))
         except VkBotError as error:
             logger.warning("VK inline keyboard cleanup failed: %s", error)
-    _safe_send_vk_message(client, peer_id=peer_id, response=result, logger=logger,
-                          deliver_menu=_menu_delivery_for_event(deliver_menu, event))
 
 
 _SendWithMenu = Callable[[CommandMenuUpdate | None], tuple[bool, bool | None]]
@@ -682,22 +687,33 @@ def _menu_delivery_for_event(deliver: _DeliverMenu | None, event: IncomingEvent)
 
 
 def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
-    items = update.menu.items
+    """Проецирует проверенные действия раздела либо каталог старого владельца."""
+    modern = update.menu.section_actions is not None
+    items = update.menu.section_actions if modern else update.menu.items
     if len(items) > 50:
         raise ValueError("VK keyboard supports at most 50 buttons")
     # Сохраняем два столбца, пока это укладывается в предел 10 рядов VK.
     columns = max(2, (len(items) + 9) // 10)
     rows: list[list[dict[str, object]]] = []
+    labels = set()
     for start in range(0, len(items), columns):
         row: list[dict[str, object]] = []
         for item in items[start:start + columns]:
+            if modern and item.scope != ActionScope.SECTION:
+                raise ValueError("VK bottom keyboard requires section actions")
             label = item.label if item.label is not None else item.command
             if not label or len(label) > 40:
                 raise ValueError("VK text button label must contain 1-40 characters")
-            action = {"type": "text", "label": label}
-            if item.label is not None:
-                action["payload"] = '{"menu":true}'
-            row.append({"action": action, "color": "secondary"})
+            if label in labels:
+                raise ValueError("VK bottom keyboard labels must be unique")
+            labels.add(label)
+            if modern and item.url is not None:
+                row.append({"action": _vk_link_action(label, item.url)})
+            else:
+                action = {"type": "text", "label": label}
+                if item.label is not None:
+                    action["payload"] = '{"menu":true}'
+                row.append({"action": action, "color": "secondary"})
         rows.append(row)
     return json.dumps(
         {"one_time": False, "inline": False, "buttons": rows},
@@ -792,8 +808,8 @@ def _safe_send_vk_message(
     limit: int = VK_SAFE_MESSAGE_LIMIT,
     include_bound_actions: bool | None = None,
     deliver_menu: Callable[[_SendWithMenu], bool] | None = None,
-) -> None:
-    """Доставляет VK-ответ, учитывая отдельное подтверждение нижнего меню."""
+) -> bool:
+    """Доставляет VK-ответ и возвращает успех независимо от публикации меню."""
     delivered = False
     replacement_confirmed = False
 
@@ -823,6 +839,7 @@ def _safe_send_vk_message(
     finally:
         if response.after_delivery is not None:
             response.after_delivery(delivered)
+    return delivered
 
 
 def _clear_vk_managed_keyboards(client: Any, peer_id: int, message_ids: tuple[str, ...], logger: logging.Logger) -> None:
@@ -844,20 +861,37 @@ def _send_vk_view(
     assert delivery is not None
     target = delivery.target_message_id
     confirmed_id = None
+    menu_delivered = None
+    finish = delivery.finish
     if delivery.start():
         try:
             chunks = render_vk_content(response.content, response.actions, limit=limit)
-            if len(chunks) == 1:
+            multipart = len(chunks) > 1
+            finish_replacement = delivery.finish_replacement
+            if finish_replacement is not None and (
+                delivery.allow_multiple_messages if multipart else delivery.target_has_multiple_messages
+            ):
+                finish = lambda message_id: finish_replacement(message_id, multipart)
+                confirmed_id, menu_delivered = _send_vk_view_replacement(
+                    client, peer_id=peer_id, chunks=chunks, response=response, logger=logger,
+                    sleeper=sleeper, include_bound_actions=include_bound_actions, menu_keyboard=menu_keyboard,
+                )
+            elif len(chunks) == 1:
                 text = chunks[0].text
                 keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
                 random_id = randint(1, 2_147_483_647)
 
                 def publish() -> None:
-                    nonlocal confirmed_id
+                    nonlocal confirmed_id, menu_delivered
+                    attached_menu = keyboard is None and menu_keyboard is not None
                     cmid = client.send_editable_message(
-                        peer_id=peer_id, text=text, keyboard=keyboard, random_id=random_id,
+                        peer_id=peer_id, text=text, keyboard=menu_keyboard if attached_menu else keyboard, random_id=random_id,
                     )
+                    if type(cmid) is not int or cmid <= 0:
+                        raise VkBotError("VK send returned no confirmed conversation message ID")
                     confirmed_id = str(cmid)
+                    if attached_menu:
+                        menu_delivered = True
 
                 def edit() -> None:
                     nonlocal confirmed_id
@@ -879,13 +913,17 @@ def _send_vk_view(
                     plain=True,
                 )
         finally:
-            _clear_vk_managed_keyboards(client, peer_id, delivery.finish(confirmed_id), logger)
+            _clear_vk_managed_keyboards(client, peer_id, finish(confirmed_id), logger)
 
     if confirmed_id is not None:
-        if menu_keyboard is None:
-            return True, None
-        # Одна клавиатура на сообщение VK: нижнее меню сопровождает следующую команду.
-        followup = IncomingResponse(text_content("Что сделать дальше?"))
+        if menu_keyboard is None or menu_delivered is True:
+            return True, menu_delivered
+        # При edit одна клавиатура занята выбором. Отдельное сообщение называет
+        # доступные следующие шаги, поэтому доставка меню не отрывается от смысла.
+        labels = [button["action"]["label"] for row in json.loads(menu_keyboard)["buttons"] for button in row]
+        menu_text = ("Действия раздела:\n" + "\n".join(f"• {label}" for label in labels) + "\nВсе команды: /help."
+                     if labels else "Меню раздела закрыто. Доступные команды: /help.")
+        followup = IncomingResponse(text_content(menu_text))
         _, menu_delivered = _send_vk_message(
             client, peer_id=peer_id, response=followup, logger=logger, sleeper=sleeper,
             limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
@@ -897,7 +935,39 @@ def _send_vk_view(
             sleeper=sleeper, limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
         )
         return False, menu_delivered
-    return False, None
+    return False, menu_delivered
+
+
+def _send_vk_view_replacement(
+    client: Any, *, peer_id: int, chunks: tuple[VkChunk, ...], response: IncomingResponse,
+    logger: logging.Logger, sleeper: Callable[[float], None], include_bound_actions: bool | None,
+    menu_keyboard: str | None,
+) -> tuple[str | None, bool | None]:
+    """Публикует части с кнопками на последней и подтверждает финальный cmid."""
+    keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
+    menu_index = len(chunks) - (2 if keyboard is not None else 1)
+    menu_delivered = False if menu_keyboard is not None and menu_index >= 0 else None
+    confirmed_id = None
+    for index, chunk in enumerate(chunks):
+        random_id = randint(1, 2_147_483_647)
+        attached_menu = menu_keyboard is not None and index == menu_index
+        chunk_keyboard = menu_keyboard if attached_menu else keyboard if index == len(chunks) - 1 else None
+
+        def publish() -> None:
+            nonlocal confirmed_id
+            cmid = client.send_editable_message(
+                peer_id=peer_id, text=chunk.text, keyboard=chunk_keyboard, random_id=random_id,
+            )
+            if type(cmid) is not int or cmid <= 0:
+                raise VkBotError("VK send returned no confirmed conversation message ID")
+            confirmed_id = str(cmid)
+
+        if not safe_send(publish, logger=logger, channel="VK", target_id=str(peer_id),
+                         retry_delay_resolver=_vk_retry_delay, sleeper=sleeper):
+            return None, menu_delivered
+        if attached_menu:
+            menu_delivered = True
+    return confirmed_id, menu_delivered
 
 
 def _send_vk_message(
@@ -998,7 +1068,7 @@ def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
         ValueError: Если действия нарушают ограничения VK или относятся к
             разным ответам.
     """
-    actions = response.bound_actions
+    actions = tuple(action for action in response.bound_actions if action.scope == ActionScope.SCREEN)
     if not actions:
         return None
     # Для inline VK поддерживает до 6 строк и 5 кнопок в строке.
@@ -1007,35 +1077,65 @@ def _serialize_vk_inline_keyboard(response: IncomingResponse) -> str | None:
     if len({action.response_id for action in actions}) != 1:
         raise ValueError("VK inline buttons must belong to one response")
     seen_tokens: set[str] = set()
-    rows: dict[int, list[dict[str, object]]] = {}
+    rows: list[list[dict[str, object]]] = []
     explicit_rows = any(action.row is not None for action in actions)
-    for index, action in enumerate(actions):
-        row_number = action.row if explicit_rows else index // 5
-        if row_number is None or not 0 <= row_number < 6:
+    seen_rows: set[int] = set()
+    previous_row = None
+    previous_purpose = None
+    for action in actions:
+        if action.row is not None and (type(action.row) is not int or not 0 <= action.row < VK_ACTION_LAYOUT.max_rows):
             raise ValueError("VK inline keyboard row must be between 0 and 5")
-        row = rows.setdefault(row_number, [])
-        if len(row) >= 5:
+        if explicit_rows:
+            new_row = action.row is None or action.row != previous_row
+            if new_row and action.row is not None and action.row in seen_rows:
+                raise ValueError("VK actions in the same row must be consecutive")
+        else:
+            # Адресный выбор занимает собственный ряд, как в расчёте вместимости.
+            new_row = (not rows or len(rows[-1]) == VK_ACTION_LAYOUT.max_columns
+                       or action.purpose == ActionPurpose.SELECTION or previous_purpose == ActionPurpose.SELECTION)
+        if new_row:
+            rows.append([])
+        if len(rows) > VK_ACTION_LAYOUT.max_rows:
+            raise ValueError("VK inline keyboard supports at most 6 rows")
+        if action.row is not None:
+            seen_rows.add(action.row)
+        previous_row, previous_purpose = action.row, action.purpose
+        row = rows[-1]
+        if len(row) >= VK_ACTION_LAYOUT.max_columns:
             raise ValueError("VK inline keyboard supports at most 5 buttons per row")
         token = action.token
-        if not token:
-            raise ValueError("VK callback token must not be empty")
-        if token in seen_tokens:
-            raise ValueError("VK callback tokens must be unique")
-        seen_tokens.add(token)
         if not action.label or len(action.label) > 40:
             raise ValueError("VK callback label must contain 1-40 characters")
-        payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
-        if len(payload.encode("utf-8")) > 255:
-            raise ValueError("VK callback payload must contain at most 255 bytes")
-        row.append({
-            "action": {"type": "callback", "label": action.label, "payload": payload},
-            "color": "secondary",
-        })
+        if action.url is not None:
+            if token:
+                raise ValueError("VK URL action must not have a callback token")
+            row.append({"action": _vk_link_action(action.label, action.url)})
+        else:
+            if not token:
+                raise ValueError("VK callback token must not be empty")
+            if token in seen_tokens:
+                raise ValueError("VK callback tokens must be unique")
+            seen_tokens.add(token)
+            payload = json.dumps({"token": token}, ensure_ascii=False, separators=(",", ":"))
+            if len(payload.encode("utf-8")) > 255:
+                raise ValueError("VK callback payload must contain at most 255 bytes")
+            row.append({
+                "action": {"type": "callback", "label": action.label, "payload": payload},
+                "color": "secondary",
+            })
     return json.dumps(
-        {"one_time": False, "inline": True, "buttons": [rows[index] for index in sorted(rows)]},
+        {"one_time": False, "inline": True, "buttons": rows},
         ensure_ascii=False,
         separators=(",", ":"),
     )
+
+
+def _vk_link_action(label: str, url: str) -> dict[str, str]:
+    """Возвращает открытие HTTP(S)-ссылки без исполняемой команды или payload."""
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("VK link button requires an HTTP(S) URL")
+    return {"type": "open_link", "label": label, "link": url}
 
 
 def _vk_retry_delay(error: Exception, failed_attempt: int) -> float | None:
