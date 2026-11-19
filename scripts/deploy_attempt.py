@@ -91,17 +91,28 @@ def _workflow(api, key, status):
         raise prod.DeployError("Не подтверждён владелец запуска production-release")
 
 
-def _base(host, api, attempt):
-    base = attempt.baseline
-    expected = records.baseline_receipt(api, base)
+def _base(host, expected):
     state = prep.read_state(host.state_dir, host.checkout) or {}
     if state.get("stage") == "rolled_back":
         fresh = _rolled_back(host, state, expected)
     else:
-        fresh = InstallationReceipt(**acceptance._verify_locked(host, base.version, base.sha))
+        fresh = InstallationReceipt(**acceptance._verify_locked(host, expected.version, expected.sha))
     if replace(fresh, runtime_id=expected.runtime_id) != expected:
         raise prod.DeployError("Фактическая приёмка VPS расходится с D17")
     return fresh
+
+
+def _current_base(api, expected):
+    latest = records._latest_production(api)
+    if records._v1(latest[0]):
+        baseline = compare_readers(api, latest)
+        if baseline != expected:
+            raise prod.DeployError("Текущая принятая база не совпадает с тегом выпуска")
+        return records.baseline_receipt(api, baseline)
+    baseline, receipt = records._resolve_observed_baseline(api, latest)
+    if baseline != expected:
+        raise prod.DeployError("Текущая принятая база не совпадает с тегом выпуска")
+    return receipt
 
 
 def _rolled_back(host, state, expected):
@@ -137,16 +148,12 @@ def _reserve(host, api, version, sha, key, snapshot):
     base = getattr(selected.compatibility, "baseline", None)
     if selected.sha != sha or selected.kind != "ordinary" or not isinstance(base, records.AcceptedBaseline):
         raise prod.DeployError("Release и аннотация не подтвердили обычный выпуск и D17")
-    raw, _ = records._latest_production(api)
-    actual = compare_readers(api) if records._v1(raw) else records.resolve_accepted_baseline(api)
-    if base != actual:
-        raise prod.DeployError("Тег не подтвердил текущую принятую базу")
+    base_receipt = _current_base(api, base)
     attempt = records.DeploymentAttempt(2, key, version, sha, selected.kind, selected.release_id,
                                         selected.run_id, selected.run_attempt, base)
-    records._check_attempt_release(api, attempt)
     if prod._version(version) <= prod._version(base.version) or sha == base.sha:
         raise prod.DeployError("Нет допуска к повторной установке или понижению версии")
-    fresh = _base(host, api, attempt)
+    fresh = _base(host, base_receipt)
     journal = {"protocol": 2, "attempt": asdict(attempt), "owner": key, "snapshot": snapshot,
                "base_receipt": asdict(fresh), "claims": [], "deployment_id": None,
                "started": False, "closed": False}
@@ -154,7 +161,7 @@ def _reserve(host, api, version, sha, key, snapshot):
     return journal
 
 
-def _complete(host, api, attempt, journal, status, *, recover):
+def _complete(host, attempt, journal, status, base_receipt, *, recover):
     """Классифицирует durable этап; повторно проверяет результат перед закрытием."""
     state = prod._read_recovery_state(host)
     if not journal["started"]:
@@ -201,7 +208,7 @@ def _complete(host, api, attempt, journal, status, *, recover):
     else:
         if status.state is records.DeploymentState.SUCCESS:
             raise prod.DeployError("Фактический runtime противоречит success")
-        receipt = asdict(_base(host, api, attempt))
+        receipt = asdict(_base(host, base_receipt))
         if not owned and receipt != journal["base_receipt"]:
             raise prod.DeployError("Исходный runtime изменился вне попытки")
         outcome = "restored"
@@ -214,15 +221,31 @@ def _complete(host, api, attempt, journal, status, *, recover):
     return result
 
 
-def require_current(host):
-    """Под удерживаемым lock повторно подтверждает GitHub D18 перед переключением."""
+def _require_in_progress(status, attempt):
+    if (status.state is not records.DeploymentState.IN_PROGRESS
+            or status.description != f"v1 attempt={attempt.attempt_key}"):
+        raise prod.DeployError("D18 больше не разрешает продолжение установки")
+
+
+def require_current(host) -> records.AcceptedBaseline | None:
+    """Под удерживаемым lock повторно подтверждает D18 перед переключением.
+
+    Args:
+        host: Контроллер с текущим владением попыткой, если оно требуется.
+
+    Returns:
+        Подтверждённый вместе с D18 D17, если процесс выполняет попытку v2.
+
+    Raises:
+        DeployError: Текущий статус больше не разрешает продолжать установку.
+    """
     ownership = getattr(host, "locked_attempt", None)
     if ownership is not None:
         attempt, deployment_id = ownership
-        status = writer.current_attempt(host.release_api(), attempt, deployment_id)
-        if (status.state is not records.DeploymentState.IN_PROGRESS
-                or status.description != f"v1 attempt={attempt.attempt_key}"):
-            raise prod.DeployError("D18 больше не разрешает установку")
+        status, _ = writer.current_attempt(host.release_api(), attempt, deployment_id)
+        _require_in_progress(status, attempt)
+        return attempt.baseline
+    return None
 
 
 def reconcile_post(host, version: str, sha: str, key: str, snapshot: str, action: str) -> None:
@@ -256,15 +279,18 @@ def reconcile_post(host, version: str, sha: str, key: str, snapshot: str, action
         elif action not in ("create", "in_progress", "finish") or not claims or claims[-1] != action:
             raise prod.DeployError("Последнее сохранённое намерение не совпало")
         if action in ("create", "cancel"):
-            raw, _ = records._latest_production(api)
+            latest = records._latest_production(api)
+            raw, _ = latest
             if (journal["deployment_id"] is not None or journal["started"]
-                    or not records._v1(raw) and records._attempt(raw).attempt_key == key
-                    or records.resolve_accepted_baseline(api) != attempt.baseline):
+                    or not records._v1(raw) and records._attempt(raw).attempt_key == key):
                 raise prod.DeployError("Отсутствие D18 и исходная база не подтверждены")
-            if asdict(_base(host, api, attempt)) != journal["base_receipt"]:
+            baseline, base_receipt = records._resolve_observed_baseline(api, latest)
+            if baseline != attempt.baseline:
+                raise prod.DeployError("Отсутствие D18 и исходная база не подтверждены")
+            if asdict(_base(host, base_receipt)) != journal["base_receipt"]:
                 raise prod.DeployError("Изменился исходный runtime")
         else:
-            status = writer.current_attempt(api, attempt, journal["deployment_id"])
+            status, _ = writer.current_attempt(api, attempt, journal["deployment_id"])
             expected = records.DeploymentState.MISSING if action == "in_progress" else records.DeploymentState.IN_PROGRESS
             if (status.state is not expected or action == "in_progress" and journal["started"]
                     or action == "finish" and status.description != f"v1 attempt={key}"):
@@ -332,7 +358,7 @@ def execute(host, version: str, action: str, sha: str, key: str, owner: str, sna
         DeployError: Проверка владельца, этапа, базы или snapshot завершилась отказом.
     """
     prod._version(version)
-    if (action not in {"reserve", "resume", "create", "in_progress", "finish", "install", "base", "complete", "close"}
+    if (action not in {"reserve", "resume", "create", "in_progress", "finish", "install", "complete", "close"}
             or not _KEY.fullmatch(key) or not _KEY.fullmatch(owner)
             or not prep.SHA_PATTERN.fullmatch(sha) or not prep.SHA_PATTERN.fullmatch(snapshot)
             or not re.fullmatch(r"0|[1-9][0-9]{0,19}", number)):
@@ -360,7 +386,7 @@ def execute(host, version: str, action: str, sha: str, key: str, owner: str, sna
         deployment_id = int(number)
         bound = journal["deployment_id"]
         if deployment_id and (bound is None or bound == deployment_id):
-            status = writer.current_attempt(api, attempt, deployment_id)
+            status, base_receipt = writer.current_attempt(api, attempt, deployment_id)
             if bound is None:
                 if "create" not in journal["claims"]:
                     raise prod.DeployError("Не было намерения создать этот D18")
@@ -375,29 +401,33 @@ def execute(host, version: str, action: str, sha: str, key: str, owner: str, sna
                 raise prod.DeployError("Неподходящий ID для записи")
             if action in journal["claims"]:
                 return {"granted": False}
+            proof = {}
             if action == "create":
-                raw, _ = records._latest_production(api)
-                base = compare_readers(api) if records._v1(raw) else records.resolve_accepted_baseline(api)
-                if base != attempt.baseline:
-                    raise prod.DeployError("База изменилась перед созданием D18")
-            elif action == "finish" and "in_progress" not in journal["claims"]:
-                raise prod.DeployError("Отсутствует выданное право in_progress")
-            elif action == "finish" and "result" not in journal:
-                raise prod.DeployError("VPS ещё не подтвердил итоговый runtime")
-            if action in {"create", "in_progress"}:
-                if asdict(_base(host, api, attempt)) != journal["base_receipt"]:
+                base_receipt = _current_base(api, attempt.baseline)
+            if action == "finish":
+                _require_in_progress(status, attempt)
+                if "in_progress" not in journal["claims"] or "result" not in journal:
+                    raise prod.DeployError("VPS ещё не подтвердил итоговый runtime")
+                result = _complete(host, attempt, journal, status, base_receipt, recover=False)
+                proof["receipt"] = result["receipt"]
+            else:
+                if action == "in_progress" and (status.state is not records.DeploymentState.MISSING or journal["started"]):
+                    raise prod.DeployError("Текущий статус запрещает запись in_progress")
+                receipt = asdict(_base(host, base_receipt))
+                if receipt != journal["base_receipt"]:
                     raise prod.DeployError("Изменился runtime принятой базы")
+                if action == "in_progress":
+                    proof["receipt"] = receipt
             journal["claims"].append(action)
             _save(host, journal)
-            return {"granted": True}
+            return {"granted": True, **proof}
         if not deployment_id:
             raise prod.DeployError("Требуется точный D18")
-        if action == "base":
-            return asdict(_base(host, api, attempt))
         host.locked_attempt = (attempt, deployment_id)
         try:
             if action in {"complete", "close"}:
-                result = _complete(host, api, attempt, journal, status, recover=action == "complete" and not journal["closed"])
+                result = _complete(host, attempt, journal, status, base_receipt,
+                                   recover=action == "complete" and not journal["closed"])
                 if action == "close":
                     base = attempt.baseline
                     receipt = result["receipt"]
@@ -409,9 +439,9 @@ def execute(host, version: str, action: str, sha: str, key: str, owner: str, sna
                     journal["closed"] = True
                     _save(host, journal)
                 return result
-            require_current(host)
+            _require_in_progress(status, attempt)
             if ("in_progress" not in journal["claims"] or journal["started"]
-                    or asdict(_base(host, api, attempt)) != journal["base_receipt"]):
+                    or asdict(_base(host, base_receipt)) != journal["base_receipt"]):
                 raise prod.DeployError("Установка уже начата или runtime изменился")
             journal["started"] = True
             _save(host, journal)

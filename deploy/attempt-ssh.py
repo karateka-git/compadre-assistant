@@ -22,7 +22,7 @@ def command(original: str) -> list[str]:
         raise ValueError("Недопустимая команда")
     version, action, sha, key, owner, snapshot, number = parts[3], *parts[5:]
     if (not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version)
-            or action not in {"reserve", "resume", "create", "in_progress", "finish", "install", "base", "complete", "close"}
+            or action not in {"reserve", "resume", "create", "in_progress", "finish", "install", "complete", "close"}
             or not all(re.fullmatch(r"[0-9a-f]{40}", value) for value in (sha, snapshot))
             or not all(re.fullmatch(r"[1-9][0-9]{0,19}:[1-9][0-9]{0,9}", value) for value in (key, owner))
             or not re.fullmatch(r"0|[1-9][0-9]{0,19}", number)):

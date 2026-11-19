@@ -24,7 +24,9 @@ def _description(generation: str, migration: str) -> str:
     return value
 
 
-def current_attempt(api: GitHub, attempt: DeploymentAttempt, deployment_id: int) -> DeploymentRecord:
+def current_attempt(
+    api: GitHub, attempt: DeploymentAttempt, deployment_id: int,
+) -> tuple[DeploymentRecord, InstallationReceipt]:
     """Проверяет владельца и payload самой свежей попытки production.
 
     Args:
@@ -33,7 +35,7 @@ def current_attempt(api: GitHub, attempt: DeploymentAttempt, deployment_id: int)
         deployment_id: Точный ID D18, выданный GitHub.
 
     Returns:
-        Текущий доверенный статус этой попытки.
+        Текущий доверенный статус этой попытки и подтверждённая приёмка D17.
 
     Raises:
         DeploymentPublishError: Другая попытка получила владение.
@@ -42,8 +44,7 @@ def current_attempt(api: GitHub, attempt: DeploymentAttempt, deployment_id: int)
     if status.deployment_id != deployment_id or records._attempt(raw) != attempt:
         raise DeploymentPublishError("Production принадлежит другой попытке")
     records._check_attempt_release(api, attempt)
-    records.baseline_receipt(api, attempt.baseline)
-    return status
+    return status, records.baseline_receipt(api, attempt.baseline)
 
 
 def _post_once(api, path, body, claim, action, read):
@@ -84,8 +85,7 @@ def create_attempt(api: PublishingGitHub, attempt: DeploymentAttempt,
     records._check_attempt_release(api, attempt)
     _description("0" * 32, expected_migration_at(api, attempt.sha))
 
-    def observe(expected_id):
-        raw, status = records._latest_production(api)
+    def verify_created(raw, status, expected_id):
         if (records._v1(raw) or records._attempt(raw) != attempt
                 or expected_id is not None and status.deployment_id != expected_id):
             raise DeploymentPublishError("Создание точной попытки не подтверждено")
@@ -94,17 +94,24 @@ def create_attempt(api: PublishingGitHub, attempt: DeploymentAttempt,
 
     raw, status = records._latest_production(api)
     if not records._v1(raw) and records._attempt(raw).attempt_key == attempt.attempt_key:
-        return observe(status.deployment_id)
-    if records.resolve_accepted_baseline(api) != attempt.baseline:
+        return verify_created(raw, status, status.deployment_id)
+    baseline, _ = records._resolve_observed_baseline(api, (raw, status))
+    if baseline != attempt.baseline:
         raise DeploymentPublishError("Перед созданием попытки изменилась принятая база")
     body = {"ref": attempt.sha, "task": records.TASK, "auto_merge": False, "required_contexts": [],
             "payload": asdict(attempt), "environment": records.ENVIRONMENT,
             "transient_environment": False, "production_environment": True}
+
+    def observe(expected_id):
+        raw, status = records._latest_production(api)
+        return verify_created(raw, status, expected_id)
+
     return _post_once(api, "/deployments", body, claim, "create", observe)
 
 
 def write_status(api: PublishingGitHub, attempt: DeploymentAttempt, deployment_id: int, state: DeploymentState,
-                 claim: Callable[[str], bool], read_fresh: Callable[[], InstallationReceipt]) -> DeploymentRecord:
+                 claim: Callable[[str], InstallationReceipt | None],
+                 completed: InstallationReceipt | None = None) -> DeploymentRecord:
     """Записывает переход D18 после сверки свежей приёмки VPS.
 
     Args:
@@ -112,9 +119,10 @@ def write_status(api: PublishingGitHub, attempt: DeploymentAttempt, deployment_i
         attempt: Сохранённые реквизиты исходной попытки.
         deployment_id: Точный ID D18.
         state: in_progress, success или failure после подтверждённого возврата.
-        claim: Однократное долговечное право POST статуса для этой попытки.
-        read_fresh: При success подтверждает завершённую очистку и runtime кандидата,
-            иначе возвращает свежую приёмку прежнего поколения под владением попытки.
+        claim: Выдаёт долговечное право POST вместе со свежей приёмкой под lock.
+            Возвращает None, если это право уже выдавалось.
+        completed: Приёмка кандидата после очистки либо доказанного возврата.
+            Требуется для терминального статуса.
 
     Returns:
         Перечитанный статус GitHub.
@@ -123,22 +131,23 @@ def write_status(api: PublishingGitHub, attempt: DeploymentAttempt, deployment_i
         DeploymentPublishError: Переход, результат или его запись не подтверждены.
     """
     _require_trusted_author(api)
-    before = current_attempt(api, attempt, deployment_id)
-    receipt = read_fresh()
-    records._schema_evidence(receipt)
-    if state is DeploymentState.SUCCESS:
-        if ((receipt.version, receipt.sha, receipt.kind, receipt.release_id, receipt.run_id, receipt.run_attempt) !=
+    before, base_receipt = current_attempt(api, attempt, deployment_id)
+    if completed is not None:
+        records._schema_evidence(completed)
+    if state is DeploymentState.IN_PROGRESS:
+        description = f"v1 attempt={attempt.attempt_key}"
+    elif state is DeploymentState.SUCCESS and completed is not None:
+        if ((completed.version, completed.sha, completed.kind, completed.release_id,
+             completed.run_id, completed.run_attempt) !=
                 (attempt.version, attempt.sha, attempt.kind, attempt.release_id, attempt.run_id, attempt.run_attempt)
-                or receipt.migration != expected_migration_at(api, attempt.sha)):
+                or completed.migration != expected_migration_at(api, attempt.sha)):
             raise DeploymentPublishError("Приёмка VPS расходится с кандидатом")
-        description = _description(receipt.generation_id, receipt.migration)
-    elif state in (DeploymentState.IN_PROGRESS, DeploymentState.FAILURE):
+        description = _description(completed.generation_id, completed.migration)
+    elif state is DeploymentState.FAILURE and completed is not None:
         base = attempt.baseline
-        expected = records.baseline_receipt(api, base)
-        if replace(receipt, runtime_id=expected.runtime_id) != expected:
+        if replace(completed, runtime_id=base_receipt.runtime_id) != base_receipt:
             raise DeploymentPublishError("VPS не подтвердил прежнюю принятую установку")
-        description = (f"v1 restored={base.deployment_id}/{base.status_id}"
-                       if state is DeploymentState.FAILURE else f"v1 attempt={attempt.attempt_key}")
+        description = f"v1 restored={base.deployment_id}/{base.status_id}"
     else:
         raise DeploymentPublishError("Недопустимый переход статуса")
     if before.state is state and before.description == description:
@@ -149,8 +158,20 @@ def write_status(api: PublishingGitHub, attempt: DeploymentAttempt, deployment_i
     if source is DeploymentState.IN_PROGRESS and before.description != f"v1 attempt={attempt.attempt_key}":
         raise DeploymentPublishError("Статус in_progress не подтвердил исходный ключ")
 
+    def authorize(action):
+        receipt = claim(action)
+        if receipt is None:
+            return False
+        if state is DeploymentState.IN_PROGRESS:
+            records._schema_evidence(receipt)
+            if replace(receipt, runtime_id=base_receipt.runtime_id) != base_receipt:
+                raise DeploymentPublishError("VPS не подтвердил прежнюю принятую установку")
+        elif receipt != completed:
+            raise DeploymentPublishError("Runtime VPS изменился после проверки")
+        return True
+
     def observe(expected_id):
-        observed = current_attempt(api, attempt, deployment_id)
+        observed, _ = current_attempt(api, attempt, deployment_id)
         if (observed.state is not state or observed.description != description
                 or expected_id is not None and observed.status_id != expected_id):
             raise DeploymentPublishError("Точный статус после POST не подтверждён")
@@ -160,4 +181,4 @@ def write_status(api: PublishingGitHub, attempt: DeploymentAttempt, deployment_i
             "auto_inactive": False, "description": description}
     # При потере ответа success и failure делят одно право завершения D18.
     action = "finish" if source is DeploymentState.IN_PROGRESS else "in_progress"
-    return _post_once(api, f"/deployments/{deployment_id}/statuses", body, claim, action, observe)
+    return _post_once(api, f"/deployments/{deployment_id}/statuses", body, authorize, action, observe)

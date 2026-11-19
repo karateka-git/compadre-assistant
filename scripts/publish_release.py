@@ -34,6 +34,7 @@ class _ImmutableReleaseReads:
 
     parents: dict[str, tuple[str, str]] = field(default_factory=dict)
     migrations: dict[str, str] = field(default_factory=dict)
+    archives: dict[tuple[int, str], bytes] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -198,13 +199,14 @@ def _policy_pin(api: GitHub) -> str:
     return _sha(variable.get("value"), name)
 
 
-def _compatibility(api: GitHub, admission: Admission) -> DeploymentReleaseTagEvidence:
+def _compatibility(api: GitHub, admission: Admission, reads: _ImmutableReleaseReads) -> DeploymentReleaseTagEvidence:
     """Берёт данные аннотации только из полного доказательства точной попытки CI."""
     from scripts.deployment_acceptance import AcceptedBaseline
 
     pin = _policy_pin(api)
     with check("SAFE_PUBLICATION_EVIDENCE"):
-        result = verify_evidence(EvidenceAPI(api.repository, api.token), admission, pin, None)
+        result = verify_evidence(EvidenceAPI(api.repository, api.token), admission, pin, None,
+                                 verified_archives=reads.archives)
         baseline = AcceptedBaseline(**result["baseline"])
         return DeploymentReleaseTagEvidence(baseline.sha, result["policy_sha"], admission.run_id,
                                             admission.run_attempt, result["schema_fingerprint"], baseline)
@@ -278,7 +280,7 @@ def _prepare(api: GitHub, version: str, sha: str, change: str, notes: str, *,
         admission = select_successful_run(api, api.repository, MAIN_WORKFLOW, sha, "main")
     if admission is None:
         raise PublishError("Нет успешного полного CI для точного SHA")
-    compatibility = _compatibility(api, admission)
+    compatibility = _compatibility(api, admission, reads)
     try:
         if sha not in reads.migrations:
             reads.migrations[sha] = expected_migration_at(api, sha)

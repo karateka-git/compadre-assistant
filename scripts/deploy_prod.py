@@ -24,7 +24,8 @@ from scripts import deploy_database_switch as database_switch
 from scripts import deploy_metrics as metrics
 from scripts import predeploy_compatibility as compatibility
 from scripts.create_release_branch import EXPECTED_REPOSITORY
-from scripts.full_ci_controller import GitHub, HttpLocation, HttpPhase, http_phase
+from scripts.deployment_acceptance import AcceptedBaseline
+from scripts.full_ci_controller import GitHub, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.ci_repository_compatibility import ReleaseTagEvidence
 from scripts.select_deploy_release import SelectedRelease, select_emergency_release, select_release
 
@@ -514,11 +515,12 @@ class Host:
         except Exception as error:
             raise DeployError("SQLite protocol v2: rollout закрыт; инфраструктура не подтверждена") from error
 
-    def require_switch_candidate(self, state: dict) -> None:
+    def require_switch_candidate(self, state: dict, *, observed_base: AcceptedBaseline | None = None) -> None:
         """Сверяет допуск непосредственно перед marker и остановкой writers.
 
         Args:
             state: Подготовленный переход с результатом миграции online-копии.
+            observed_base: D17, проверенный вместе с D18 в этой секции под lock.
 
         Raises:
             DeployError: Release, evidence, controller либо image изменились.
@@ -546,7 +548,8 @@ class Host:
             evidence = compatibility.tag_evidence_record(self.checkout, selected, policy, state["old_sha"])
             if "baseline" in evidence:
                 compatibility.verify_deployment_base(self.release_api(), evidence["baseline"], state["old_sha"],
-                                                     frozen=getattr(self, "locked_attempt", None) is not None)
+                                                     frozen=getattr(self, "locked_attempt", None) is not None,
+                                                     observed=observed_base)
         else:
             token = compatibility.private_text(self.state_dir / "github-read-token")
             evidence = compatibility.verify_evidence(
@@ -1654,8 +1657,8 @@ def deploy(host: Host, version: str, *, emergency: bool = False,
                 with metrics.stage("v2.admission_recheck"), http_phase(HttpPhase.VPS_RECHECK):
                     from scripts.deploy_attempt import require_current
 
-                    require_current(host)
-                    host.require_switch_candidate(state)
+                    observed_base = require_current(host)
+                    host.require_switch_candidate(state, observed_base=observed_base)
                 _state(host, state, "ready")
             critical = True
             host.marker(True)
@@ -1879,7 +1882,7 @@ def main() -> None:
         elif args.attempt is not None:
             from scripts import deploy_attempt
 
-            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT):
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT), immutable_git_reads():
                 result = deploy_attempt.execute(host, args.version, *args.attempt)
                 print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
         elif args.verify_pinned:

@@ -23,7 +23,7 @@ from scripts.deploy_database_switch import OLD_CLEANUP_VERSION
 from scripts.deploy_prepare import PreparationError, parse_state_object
 from scripts.deployment_acceptance import DeploymentAcceptanceError, DeploymentRecord
 from scripts.full_ci_admission import AdmissionError, SHA_PATTERN
-from scripts.full_ci_controller import ControllerError, HttpLocation, HttpPhase, http_phase
+from scripts.full_ci_controller import ControllerError, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.publish_installation_tag import InstallationReceipt, InstallationTagError, _receipt, run_vps_command
 from scripts.select_deploy_release import DeploySelectionError, SelectedRelease, select_release
@@ -130,20 +130,23 @@ def _run_attempt(api, selected, route, resume, remote):
             or type(reserved.get("started")) is not bool):
         raise ProductionReleaseError("Резервация VPS расходится с проверенным Release")
 
-    def claim(action):
+    def claim_creation(action):
         return call(action).get("granted") is True
+
+    def claim_status(action):
+        grant = call(action)
+        return InstallationReceipt(**grant["receipt"]) if grant.get("granted") is True else None
 
     bound = reserved["deployment_id"]
     with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
         if bound is None:
-            record = writer.create_attempt(api, attempt, claim)
+            record = writer.create_attempt(api, attempt, claim_creation)
             deployment_id = record.deployment_id
         else:
             deployment_id = records._positive(bound, "D18")
-            record = writer.current_attempt(api, attempt, deployment_id)
+            record, _ = writer.current_attempt(api, attempt, deployment_id)
         if record.state is records.DeploymentState.MISSING:
-            record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS,
-                                         claim, lambda: InstallationReceipt(**call("base")))
+            record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS, claim_status)
     if record.state is records.DeploymentState.IN_PROGRESS:
         if record.description != f"v1 attempt={key}":
             raise ProductionReleaseError("D18 не подтвердил исходный ключ")
@@ -160,12 +163,8 @@ def _run_attempt(api, selected, route, resume, remote):
         raise ProductionReleaseError("Не подтверждены установка или возврат")
     target = records.DeploymentState.SUCCESS if result["outcome"] == "success" else records.DeploymentState.FAILURE
     receipt = InstallationReceipt(**result["receipt"])
-    def fresh():
-        if call("complete") != result:
-            raise ProductionReleaseError("Runtime VPS изменился после проверки")
-        return receipt
     with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
-        record = writer.write_status(api, attempt, deployment_id, target, claim, fresh)
+        record = writer.write_status(api, attempt, deployment_id, target, claim_status, receipt)
     if call("close") != result:
         raise ProductionReleaseError("Закрытие попытки не подтверждено для проверенного runtime")
     if record.state is records.DeploymentState.FAILURE:
@@ -274,7 +273,8 @@ def main() -> None:
 
     operation = metrics.HttpOperation.RELEASE if args.release else metrics.HttpOperation.RESUME
     try:
-        with metrics.github_http_report(HttpLocation.RUNNER, operation):
+        v2 = os.environ.get("COMPADRE_DEPLOYMENT_WRITER") in ("v2", "resume-only")
+        with metrics.github_http_report(HttpLocation.RUNNER, operation), immutable_git_reads(enabled=v2):
             if repository_from_origin() != EXPECTED_REPOSITORY:
                 raise ProductionReleaseError("Origin не совпадает с репозиторием проекта")
             api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))

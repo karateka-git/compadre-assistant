@@ -16,6 +16,7 @@ import re
 import sqlite3
 import stat
 import subprocess
+from typing import TYPE_CHECKING
 from urllib.request import HTTPRedirectHandler, Request
 import zipfile
 
@@ -34,6 +35,9 @@ from scripts.repository_compatibility_contract import (
     verify_behavior_tests, verify_report,
 )
 from compadre_assistant.core.data.sqlite.runtime_schema import schema_fingerprint
+
+if TYPE_CHECKING:
+    from scripts.deployment_acceptance import AcceptedBaseline
 
 
 # Лимиты защищают контроллер от чрезмерного artifact и распаковки ZIP.
@@ -201,7 +205,7 @@ def tag_evidence_record(checkout: Path, selected, policy_sha: str, previous_sha:
 
 
 def verify_deployment_base(api: GitHub, baseline: dict, previous_sha: str | None, *,
-                           frozen: bool = False) -> dict:
+                           frozen: bool = False, observed: AcceptedBaseline | None = None) -> dict:
     """Сверяет реквизиты принятого выпуска с GitHub Deployments.
 
     Args:
@@ -209,6 +213,8 @@ def verify_deployment_base(api: GitHub, baseline: dict, previous_sha: str | None
         baseline: Данные базы из аннотации или артефакта точной попытки CI.
         previous_sha: Ожидаемый SHA установленного выпуска, если он известен.
         frozen: Проверить именно сохранённую запись при recovery.
+        observed: D17, уже подтверждённый тем же процессом под lock перед
+            сверкой аннотации.
 
     Returns:
         Сверенные реквизиты той же базы.
@@ -222,8 +228,10 @@ def verify_deployment_base(api: GitHub, baseline: dict, previous_sha: str | None
 
     with check("SAFE_BASELINE_DEPLOYMENT"):
         claimed = AcceptedBaseline(**baseline)
-        actual = (verify_accepted_baseline(api, claimed.deployment_id, claimed.status_id)
-                  if frozen else resolve_accepted_baseline(api))
+        actual = observed
+        if actual is None:
+            actual = (verify_accepted_baseline(api, claimed.deployment_id, claimed.status_id)
+                      if frozen else resolve_accepted_baseline(api))
         if actual != claimed:
             raise PredeployError("SAFE_BASELINE_DEPLOYMENT")
     if previous_sha is not None and actual.sha != previous_sha:
@@ -295,7 +303,7 @@ def _files(payload: bytes) -> dict[str, bytes]:
 
 
 def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: str | None, *,
-                    frozen: bool = False) -> dict:
+                    frozen: bool = False, verified_archives: dict[tuple[int, str], bytes] | None = None) -> dict:
     """Проверяет происхождение, bytes policy/workflows и полноту результатов CI.
 
     Args:
@@ -306,6 +314,8 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
         previous_sha: SHA last_good на VPS. Публикация передаёт None и требует
             действующую базу из Deployments.
         frozen: Проверить базу из артефакта для ранее начатого восстановления.
+        verified_archives: Проверенные ZIP этой публикации по ID и digest.
+            Метаданные артефакта сверяются при каждом вызове.
 
     Returns:
         Безопасные идентификаторы artifact и fingerprint candidate-схемы.
@@ -388,7 +398,10 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
             or identity.get("id") != selected.run_id or identity.get("head_sha") != selected.sha
             or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)):
         raise PredeployError("SAFE_ARTIFACT_METADATA")
-    payload = api.download(artifact["id"])
+    archive_key = artifact["id"], digest
+    payload = None if verified_archives is None else verified_archives.get(archive_key)
+    if payload is None:
+        payload = api.download(artifact["id"])
     if "sha256:" + hashlib.sha256(payload).hexdigest() != digest:
         raise PredeployError("SAFE_ARTIFACT_DIGEST")
     with check("SAFE_ARTIFACT_FORMAT"):
@@ -423,6 +436,8 @@ def verify_evidence(api: EvidenceAPI, selected, policy_sha: str, previous_sha: s
             "schema_fingerprint": report["candidate_migrations_data_integrity"]["fresh_fingerprint"]}
     if dynamic:
         record["baseline"] = baseline
+    if verified_archives is not None:
+        verified_archives[archive_key] = payload
     return record
 
 

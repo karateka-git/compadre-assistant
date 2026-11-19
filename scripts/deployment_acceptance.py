@@ -408,12 +408,14 @@ def _v2_receipt(api: GitHub, attempt: DeploymentAttempt, record: DeploymentRecor
     return result
 
 
-def _selected(api: GitHub, raw: dict, record: DeploymentRecord) -> AcceptedBaseline:
+def _selected(api: GitHub, raw: dict, record: DeploymentRecord) -> tuple[AcceptedBaseline, InstallationReceipt]:
     """Подтверждает success указанной записи без следования по ссылкам."""
     if _v1(raw):
-        return _accepted_baseline(api, _baseline_claim(raw, raw["sha"]), record)
+        receipt = _baseline_claim(raw, raw["sha"])
+        return _accepted_baseline(api, receipt, record), receipt
     receipt = _v2_receipt(api, _attempt(raw), record)
-    return AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
+    baseline = AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
+    return baseline, receipt
 
 
 @http_phase(HttpPhase.DEPLOYMENT_BASE)
@@ -431,12 +433,7 @@ def baseline_receipt(api: GitHub, baseline: AcceptedBaseline) -> InstallationRec
         DeploymentAcceptanceError: Текущий статус или реквизиты базы изменились.
     """
     raw, status = _exact_production(api, baseline.deployment_id)
-    if _v1(raw):
-        receipt = _baseline_claim(raw, raw["sha"])
-        actual = _accepted_baseline(api, receipt, status)
-    else:
-        receipt = _v2_receipt(api, _attempt(raw), status)
-        actual = AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, status.deployment_id, status.status_id)
+    actual, receipt = _selected(api, raw, status)
     if actual != baseline:
         raise DeploymentAcceptanceError("Точная принятая база изменилась")
     return receipt
@@ -469,9 +466,17 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
     """
     if api.repository != EXPECTED_REPOSITORY:
         raise DeploymentAcceptanceError("Репозиторий Deployment не совпадает с проектом")
-    bounded = _reader_v2()
-    if bounded:
-        raw, record = _latest_production(api)
+    latest = _latest_production(api) if _reader_v2() else None
+    return _resolve_observed_baseline(api, latest)[0]
+
+
+@http_phase(HttpPhase.DEPLOYMENT_BASE)
+def _resolve_observed_baseline(
+    api: GitHub, latest: tuple[dict, DeploymentRecord] | None,
+) -> tuple[AcceptedBaseline, InstallationReceipt]:
+    """Выбирает базу и её приёмку с уже прочитанной свежей записью v2."""
+    if latest is not None:
+        raw, record = latest
         if not _v1(raw):
             if record.state is not DeploymentState.FAILURE:
                 return _selected(api, raw, record)
@@ -483,9 +488,12 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
             previous, status = _exact_production(api, base.deployment_id)
             if (_timestamp(previous.get("created_at")) >= _timestamp(raw.get("created_at"))
                     or (not _v1(previous) and _attempt(previous).baseline.deployment_id == record.deployment_id)
-                    or status.status_id != base.status_id or _selected(api, previous, status) != base):
+                    or status.status_id != base.status_id):
                 raise DeploymentAcceptanceError("Возврат не соответствует принятой базе")
-            return base
+            actual, receipt = _selected(api, previous, status)
+            if actual != base:
+                raise DeploymentAcceptanceError("Возврат не соответствует принятой базе")
+            return base, receipt
     ids: set[int] = set()
     shas: set[str] = set()
     accepted = []
@@ -496,7 +504,7 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
         ids.add(deployment_id)
         shas.add(sha)
         receipt = _baseline_claim(raw, sha)
-        record = _exact_status(api, raw) if bounded else _current_status(api, deployment_id)
+        record = _exact_status(api, raw) if latest is not None else _current_status(api, deployment_id)
         if record.state is DeploymentState.UNKNOWN:
             raise DeploymentAcceptanceError("Неизвестный текущий статус Deployment")
         if record.state is DeploymentState.SUCCESS:
@@ -510,7 +518,7 @@ def resolve_accepted_baseline(api: GitHub) -> AcceptedBaseline:
     if len(latest) != 1:
         raise DeploymentAcceptanceError("Неоднозначная последняя принятая база в GitHub Deployments")
     receipt, record = latest[0]
-    return _accepted_baseline(api, receipt, record)
+    return _accepted_baseline(api, receipt, record), receipt
 
 
 @http_phase(HttpPhase.DEPLOYMENT_BASE)
@@ -537,7 +545,7 @@ def verify_accepted_baseline(api: GitHub, deployment_id: int, status_id: int) ->
         raw, record = _exact_production(api, deployment_id)
         if record.status_id != status_id:
             raise DeploymentAcceptanceError("Текущий статус выбранной базы изменился")
-        return _selected(api, raw, record)
+        return _selected(api, raw, record)[0]
     raw = api.get(f"/deployments/{deployment_id}")
     actual_id, sha = _deployment(api, raw)
     if actual_id != deployment_id:

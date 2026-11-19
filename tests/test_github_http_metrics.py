@@ -14,7 +14,9 @@ from urllib.request import AbstractHTTPHandler, Request
 from urllib.response import addinfourl
 
 from scripts.deploy_metrics import HttpOperation, github_http_report, relay_vps_http_report
-from scripts.full_ci_controller import ControllerError, GitHub, HttpLocation, HttpPhase, collect_http_metrics, http_phase
+from scripts.full_ci_controller import (
+    ControllerError, GitHub, HttpLocation, HttpPhase, collect_http_metrics, http_phase, immutable_git_reads,
+)
 from scripts.github_publishing import PublishingGitHub
 from scripts.predeploy_compatibility import EvidenceAPI, PredeployError
 
@@ -117,6 +119,31 @@ class GitHubHttpMetricsTests(unittest.TestCase):
         report = json.loads(runner.getvalue().removeprefix("deploy-http-metrics "))
         self.assertEqual([(row["target"], row["method"], row["attempts"]) for row in report["http"]],
                          [("github_api", "POST", 1), ("github_graphql_query", "POST", 1)])
+
+    def test_immutable_git_cache_keeps_refs_and_other_tokens_fresh(self) -> None:
+        """Проверяет область кэша SHA, свежие refs и независимый контекст контроллера."""
+        reads = count(1)
+
+        def route(connection, request, **kwargs):
+            return _response(request, json.dumps({"read": next(reads)}).encode())
+
+        sha = "a" * 40
+        tag = f"/git/tags/{sha}"
+        ref = "/git/ref/tags/v1.0.0"
+        contents = "/contents/test.txt"
+        controller = GitHub(self.api.repository, "FIXTURE_VPS")
+        with patch.object(AbstractHTTPHandler, "do_open", side_effect=route), immutable_git_reads():
+            tag_object = self.api.get(tag)
+            tag_object["read"] = 99
+            self.assertEqual(self.api.get(tag), {"read": 1})
+            self.assertEqual(self.api.get(contents, ref=sha), {"read": 2})
+            self.assertEqual(self.api.get(contents, ref=sha), {"read": 2})
+            self.assertNotEqual(self.api.get(ref), self.api.get(ref))
+            self.assertNotEqual(self.api.get(contents, ref="main"), self.api.get(contents, ref="main"))
+            self.assertEqual(controller.get(tag), {"read": 7})
+            with immutable_git_reads():
+                self.assertEqual(self.api.get(tag), {"read": 8})
+            self.assertEqual(self.api.get(tag), {"read": 1})
 
     def test_measures_artifact_redirect_and_storage_without_sending_authorization(self) -> None:
         signed = "https://artifact-storage.example/archive?sig=SIGNED_SENTINEL"

@@ -118,7 +118,18 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
     Raises:
         HotfixError: Ссылки или целевые ветки неполны.
     """
-    current = pull(api, number)
+    return _linked_group(api, pull(api, number))
+
+
+def _linked_group(api: GitHub, current: dict) -> tuple[dict | None, str | None, tuple[dict, ...]]:
+    number = current["number"]
+    pulls = {number: current}
+
+    def read(number: int) -> dict:
+        if number not in pulls:
+            pulls[number] = pull(api, number)
+        return pulls[number]
+
     commit = body_main_commit(current)
     if current["base"].get("ref") == "main":
         if commit is not None:
@@ -127,7 +138,7 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
     elif commit is not None:
         main = None
     else:
-        linked = [pull(api, item) for item in body_links(current)]
+        linked = [read(item) for item in body_links(current)]
         candidates = [pr for pr in linked if pr["base"].get("ref") == "main"]
         if len(candidates) != 1:
             raise HotfixError("В описании release PR нужна одна ссылка на main PR")
@@ -136,11 +147,11 @@ def linked_group(api: GitHub, number: int) -> tuple[dict | None, str | None, tup
         if main["base"].get("ref") != "main" or body_main_commit(main) is not None:
             raise HotfixError("Ссылка не указывает на PR в main")
         selected = body_links(main)
-        releases = tuple(pull(api, item) for item in selected)
+        releases = tuple(read(item) for item in selected)
         members = {main["number"], *selected}
     else:
         selected = body_links(current, optional=True)
-        releases = (current, *(pull(api, item) for item in selected))
+        releases = (current, *(read(item) for item in selected))
         members = {pr["number"] for pr in releases}
     branches = []
     for release in releases:
@@ -210,13 +221,17 @@ def check_pr(api: GitHub, number: int, expected_branch: str) -> tuple[int | None
 
 def merge_pull(api: GitHub, sha: str, branch: str) -> dict:
     """Находит единственный слитый PR для merge commit заданной ветки."""
+    return pull(api, _merge_pull_number(api, sha, branch))
+
+
+def _merge_pull_number(api: GitHub, sha: str, branch: str) -> int:
     matches = [pr for pr in api.pages(f"/commits/{sha}/pulls")
                if isinstance(pr, dict) and pr.get("merged_at")
                and pr.get("merge_commit_sha") == sha
                and isinstance(pr.get("base"), dict) and pr["base"].get("ref") == branch]
-    if len(matches) != 1:
+    if len(matches) != 1 or type(matches[0].get("number")) is not int or matches[0]["number"] <= 0:
         raise HotfixError(f"Для {sha} нет единственного слитого PR в {branch}")
-    return pull(api, matches[0]["number"])
+    return matches[0]["number"]
 
 
 def _branch_tip(api: GitHub, branch: str) -> str:
@@ -250,7 +265,7 @@ def _merged_reachable(api: GitHub, pr: dict, branch: str) -> str:
     if (pr.get("merged_at") is None or not isinstance(sha, str) or
             not SHA_PATTERN.fullmatch(sha) or pr["base"].get("ref") != branch):
         raise HotfixError(f"PR #{pr['number']} ещё не слит в {branch}")
-    if merge_pull(api, sha, branch)["number"] != pr["number"] or not reachable(api, sha, branch):
+    if _merge_pull_number(api, sha, branch) != pr["number"] or not reachable(api, sha, branch):
         raise HotfixError(f"Merge PR #{pr['number']} не подтверждён в {branch}")
     return sha
 
@@ -294,9 +309,10 @@ def _check_release_pairs(api: GitHub, branch: str,
     result = []
     for sha in merges:
         release = merge_pull(api, sha, branch)
-        if release.get("merge_commit_sha") != sha or not release.get("merged_at"):
+        if (release["base"].get("ref") != branch or release.get("merge_commit_sha") != sha
+                or not release.get("merged_at")):
             raise HotfixError(f"Данные слияния PR #{release['number']} изменились")
-        main, commit, selected = linked_group(api, release["number"])
+        main, commit, selected = _linked_group(api, release)
         if release["number"] not in [item["number"] for item in selected]:
             raise HotfixError("PR release не совпал с парой")
         if main is not None:

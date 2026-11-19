@@ -853,6 +853,8 @@ class PatchHttpBaselineTests(unittest.TestCase):
         for result in (short, long, first, ready, lost_reply):
             self.assertEqual(result["status_writes"], ["in_progress", "success"])
             self.assertEqual(result["posts"].count("/deployments"), 1)
+        self.assertEqual(short["ssh"], ["reserve", "create", "in_progress", "install", "complete", "finish", "close"])
+        self.assertEqual(_summary(short)["runner"]["storage"], 1)
         self.assertEqual(interrupted["status_writes"], ["in_progress"])
         self.assertEqual(resume["status_writes"], ["success"])
         self.assertNotIn("/deployments", resume["posts"])

@@ -104,7 +104,7 @@ class ControllerTests(unittest.TestCase):
         attempt = self.cmd("reserve")["attempt"]
         self.cmd("create")
         self.api.deployments.append(self.api.latest | {"sha": SHA, "ref": SHA, "payload": attempt})
-        self.cmd("in_progress", number="11")
+        self.assertEqual(self.cmd("in_progress", number="11"), {"granted": True, "receipt": asdict(RECEIPT)})
         self.api.records[11] = self.api.status | {"state": "in_progress", "description": f"v1 attempt={KEY}"}
         def lose_connection(host, version):
             self.assertTrue(self.locked)
@@ -263,7 +263,12 @@ class ControllerTests(unittest.TestCase):
             with self.assertRaises(DeployError):
                 self.cmd("complete", number="11")
         self.assertEqual(self.cmd("complete", number="11")["outcome"], "restored")
-        self.assertTrue(self.cmd("finish", number="11")["granted"])
+        with patch.dict(self.api.records[11], state="pending"), self.assertRaises(DeployError):
+            self.cmd("finish", number="11")
+        with patch.object(controller.acceptance, "_verify_locked",
+                          return_value=asdict(RECEIPT) | {"runtime_id": "8" * 64}), self.assertRaises(DeployError):
+            self.cmd("finish", number="11")
+        self.assertEqual(self.cmd("finish", number="11"), {"granted": True, "receipt": asdict(RECEIPT)})
         self.api.records[11].update(state="failure", description="v1 restored=7/9")
         with self.assertRaises(DeployError):
             self.cmd("close", number="11")

@@ -96,7 +96,10 @@ class WriterTests(unittest.TestCase):
 
     def status(self, state, receipt=RECEIPT):
         """Запрашивает переход с заданной приёмкой VPS."""
-        return writer.write_status(self.api, ATTEMPT, 11, state, self.claim, lambda: receipt)
+        def authorize(action):
+            return receipt if self.claim(action) else None
+        completed = None if state is State.IN_PROGRESS else receipt
+        return writer.write_status(self.api, ATTEMPT, 11, state, authorize, completed)
 
     def test_lost_responses_reread_same_objects(self):
         """Каждый ответ теряется после записи, повтор видит тот же D18 и статус."""
@@ -145,5 +148,14 @@ class WriterTests(unittest.TestCase):
             self.create()
         with self.assertRaises(DeploymentPublishError):
             writer.current_attempt(self.api, newer, 11)
-        self.assertEqual(writer.current_attempt(self.api, newer, 15).state, State.MISSING)
+        self.assertEqual(writer.current_attempt(self.api, newer, 15)[0].state, State.MISSING)
         self.assertEqual(len(self.api.posts), 1)
+
+    def test_status_requires_receipt_from_grant(self):
+        """Неверная свежая приёмка от контроллера оставляет POST неподтверждённым."""
+        self.create()
+        self.status(State.IN_PROGRESS)
+        changed = replace(RECEIPT, runtime_id="f" * 64)
+        with self.assertRaisesRegex(DeploymentPublishError, "Runtime VPS изменился"):
+            writer.write_status(self.api, ATTEMPT, 11, State.SUCCESS, lambda action: changed, RECEIPT)
+        self.assertEqual(self.api.posts, ["/deployments", "/deployments/11/statuses"])

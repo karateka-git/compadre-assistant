@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
+from copy import deepcopy
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 import json
@@ -97,6 +98,24 @@ class HttpMetrics:
 
 _active_metrics: ContextVar[HttpMetrics | None] = ContextVar("github_http_metrics", default=None)
 _active_phase: ContextVar[HttpPhase] = ContextVar("github_http_phase", default=HttpPhase.OTHER)
+_immutable_reads: ContextVar[dict[tuple[str, str], object] | None] = ContextVar("immutable_git_reads", default=None)
+
+
+@contextmanager
+def immutable_git_reads(*, enabled: bool = True) -> Iterator[None]:
+    """Переиспользует ответы по точному SHA внутри одной команды выпуска.
+
+    Args:
+        enabled: Разрешить кэш неизменяемого Git-содержимого для этой команды.
+
+    Yields:
+        Управление без общего кэша между независимыми командами.
+    """
+    token = _immutable_reads.set({} if enabled else None)
+    try:
+        yield
+    finally:
+        _immutable_reads.reset(token)
 
 
 @contextmanager
@@ -273,7 +292,16 @@ class GitHub:
         url = self.root + path
         if parameters:
             url += "?" + urlencode(parameters)
-        return self._json(url, path, page="page" in parameters)
+        cache = _immutable_reads.get()
+        immutable = (not parameters and re.fullmatch(r"/git/tags/[0-9a-f]{40}", path)
+                     or path.startswith("/contents/") and parameters.keys() == {"ref"}
+                     and SHA_PATTERN.fullmatch(str(parameters["ref"])))
+        if cache is None or not immutable:
+            return self._json(url, path, page="page" in parameters)
+        key = self.token, url
+        if key not in cache:
+            cache[key] = self._json(url, path)
+        return deepcopy(cache[key])
 
     def graphql(self, query: str, **variables: str) -> dict:
         """Выполняет запрос чтения и отклоняет частичный ответ GraphQL.
