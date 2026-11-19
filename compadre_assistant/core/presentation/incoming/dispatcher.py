@@ -38,6 +38,7 @@ from compadre_assistant.core.domain.users.identity import (
     UserIdentityService,
 )
 from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
+from compadre_assistant.core.domain.users.entities import IdentityRebindConfirmation
 from compadre_assistant.core.domain.chat_modes import ChatModeKey, ChatModeRepository
 from compadre_assistant.core.domain.users.entities import is_private_chat_address
 from compadre_assistant.core.presentation.incoming.action_selection import ActionContext, ResponseActionStore
@@ -48,6 +49,14 @@ _TEXT_INPUT_HINT = "Пришли текстовое сообщение или в
 _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля открой личный чат с ботом."
 # Только успешная отмена требует пересчитать меню из проекции занятого чата.
 _DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
+
+
+def _rebind_actions(pending: IdentityRebindConfirmation) -> tuple[ConfirmationAction, ...]:
+    """Формирует одни адресные решения для запроса переноса, справки и /confirm."""
+    return tuple(ConfirmationAction(
+        f"core:identity:{pending.id}:{pending.version}:{decision}", label,
+        f"/confirm core identity {pending.id} {pending.version} {decision}",
+    ) for decision, label in (("yes", "Перенести аккаунт"), ("no", "Отменить перенос")))
 
 
 def _capability_label(descriptor: CapabilityDescriptor) -> str:
@@ -156,8 +165,9 @@ class IncomingMessageDispatcher:
             private_chat=is_private_chat_address(event.channel, event.external_user_id, event.chat_id),
         )
 
-    def _profile_link_allowed(self, event: IncomingEvent) -> bool:
-        return not self._registry.requires_private_profile_link or is_private_chat_address(
+    @staticmethod
+    def _profile_link_allowed(event: IncomingEvent) -> bool:
+        return is_private_chat_address(
             event.channel, event.external_user_id, event.chat_id,
         )
 
@@ -511,9 +521,13 @@ class IncomingMessageDispatcher:
                 suggested_actions=suggested_actions,
                 command_menu_delivery=SectionMenuDelivery.RECONCILE,
             )
-        if (pending_before is not None and pending_before.owner_id == "core"
-                and not response.suggested_actions and not response.actions
-                and (not event.text.lstrip().startswith("/") or event.text.strip() == "/cancel" or event.menu_choice)
+        finished_transfer = isinstance(result, ProcessIncomingMessageResult) and result.type in {
+            IncomingMessageResultType.LINK_REBOUND, IncomingMessageResultType.LINK_REBIND_CANCELLED,
+        }
+        continued_profile_input = (pending_before is not None and pending_before.owner_id == "core"
+                                   and (not event.text.lstrip().startswith("/") or event.text.strip() == "/cancel"
+                                        or event.menu_choice))
+        if ((finished_transfer or continued_profile_input) and not response.suggested_actions and not response.actions
                 and is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):
             try:
                 menu, _ = self._command_menu_snapshot(event, cleanup_pending=False)
@@ -949,17 +963,9 @@ class IncomingMessageDispatcher:
                 pending = self._user_identity_service.request_rebind_confirmation(
                     code=code, identity=identity
                 )
-                actions = tuple(
-                    ConfirmationAction(
-                        f"core:identity:{pending.id}:{pending.version}:{decision}",
-                        label,
-                        f"/confirm core identity {pending.id} {pending.version} {decision}",
-                    )
-                    for decision, label in (("yes", "Перенести identity"), ("no", "Отменить"))
-                )
                 return IncomingResponse(
                     compose_content('Канал уже привязан к другому профилю. Подтверди перенос адресной командой.'),
-                    actions=actions,
+                    actions=_rebind_actions(pending),
                 )
             except IdentityAlreadyBoundError:
                 return ProcessIncomingMessageResult(
@@ -970,11 +976,13 @@ class IncomingMessageDispatcher:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINK_CODE_INVALID,
                     error=rebind_error,
+                    capability_reply=f"/connect {identity.channel}",
                 )
         except InvalidLinkCodeError as error:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_INVALID,
                 error=error,
+                capability_reply=f"/connect {identity.channel}",
             )
 
     def _continue_input(
@@ -1122,7 +1130,7 @@ class IncomingMessageDispatcher:
                 if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
                     return IncomingResponse(text_content(
                         "Код привязки не принят. Отправь исправленный код ещё раз до истечения ожидания; отмена: /cancel. "
-                        "Если код истёк, в уже привязанном канале открой /settings и вызови /connect <messenger>."
+                        f"Если код истёк, в уже привязанном канале открой /settings и вызови /connect {event.channel}."
                     ), result.error)
             elif pending.input_kind == "profile_name" and user is not None:
                 result = self._save_name(event.text, user)
@@ -1391,7 +1399,7 @@ class IncomingMessageDispatcher:
         personal, mode_id, pending, snapshot, active_help, _, _ = self._command_context(event)
         return format_contextual_help(
             personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
-            active_help=active_help,
+            active_help=active_help, allow_link=self._profile_link_allowed(event),
         )
 
     def command_menu(self, event: IncomingEvent) -> CommandMenu:
@@ -1487,7 +1495,8 @@ class IncomingMessageDispatcher:
         if menu_items is not None:
             return CommandMenu(menu_items), True
         complete = (pending is not None and pending.cancel_only_menu) or snapshot.status == "complete"
-        menu = build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help)
+        menu = build_command_menu(personal, mode_id, pending, snapshot, active_help=active_help,
+                                  allow_link=self._profile_link_allowed(event))
         if (pending is None and section_actions is not None and any(action.command == "/help" for action in section_actions)
                 and not any(item.command == "/help" for item in menu.items)):
             menu = replace(menu, items=(*menu.items, CommandSuggestion("/help", ChatCommand.HELP.description)))
@@ -1551,6 +1560,12 @@ class IncomingMessageDispatcher:
             self._project_command_help(active, user, event.reply_address, mode.revision)
             if active is not None and user is not None and mode is not None else None
         )
+        if active is not None and active.descriptor.profile_commands and not self._profile_link_allowed(event):
+            catalog = active_help or active.descriptor.help
+            sections = tuple(replace(section, commands=commands) for section in catalog.sections
+                             if (commands := tuple(item for item in section.commands
+                                                   if item.name not in {"/connect", "/link"})))
+            active_help = replace(catalog, sections=sections)
         return personal, mode_id, pending, snapshot, active_help, None, section_actions
 
     def _project_command_help(
@@ -1627,10 +1642,7 @@ class IncomingMessageDispatcher:
             if (pending is not None and pending.channel == identity.channel
                     and pending.chat_id == identity.external_chat_id
                     and pending.external_user_id == identity.external_user_id):
-                actions = tuple(ConfirmationAction(
-                    f"core:identity:{pending.id}:{pending.version}:{decision}", label,
-                    f"/confirm core identity {pending.id} {pending.version} {decision}",
-                ) for decision, label in (("yes", "Перенести identity"), ("no", "Отменить перенос identity")))
+                actions = _rebind_actions(pending)
                 confirmations.append(PendingConfirmation(
                     "core", "identity", pending.id, pending.version, event.reply_address, actions,
                 ))

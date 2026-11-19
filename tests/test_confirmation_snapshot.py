@@ -20,7 +20,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from tests.capability_preference_helpers import MemoryCapabilityPreferences
 from tests.response_assertions import response_text
-from tests.test_incoming_boundary import FakeCapability, MemoryChatModes, _event
+from tests.test_incoming_boundary import FakeCapability, MemoryChatModes, _event, _private_event
 from tests.test_process_incoming_message import FakeArticleUrlUseCase, FakeVaultSelectionManager, _proposal as incoming_proposal
 from tests.test_obsidian_proposal_repository import _database, _proposal
 from tests.test_user_identity_repository import _service as identity_service
@@ -50,7 +50,7 @@ class ConfirmationSnapshotTest(unittest.TestCase):
         self.identity.get_pending_rebind.return_value = None
         self.capability = QueryCapability()
         self.modes = MemoryChatModes()
-        self.key = ChatModeKey(23, "telegram", "chat-1")
+        self.key = ChatModeKey(23, "telegram", "101")
         self.modes.save(ChatMode(self.key, "selected"))
         self.preferences = MemoryCapabilityPreferences()
         self.dispatcher = self.make_dispatcher()
@@ -66,21 +66,21 @@ class ConfirmationSnapshotTest(unittest.TestCase):
     def rebind(self):
         """Создаёт результат сервиса identity для текущего исходного чата."""
         return IdentityRebindConfirmation(
-            4, 23, 24, "telegram", "chat-1", "chat-1", "hash",
+            4, 23, 24, "telegram", "101", "101", "hash",
             datetime.now(UTC) + timedelta(minutes=10),
         )
 
     def pending(self, origin=None, owner="selected"):
         """Создаёт нейтральное адресное действие тестовой возможности."""
         return PendingConfirmation(owner, "operation", 7, 2,
-            origin or _event("x").reply_address, tuple(
+            origin or _private_event("x").reply_address, tuple(
                 ConfirmationAction(f"{owner}:{decision}", decision,
                     f"/confirm {owner} operation 7 2 {decision}")
                 for decision in ("yes", "no")))
 
     def send(self, command="/confirm", **kwargs):
         """Выполняет команду через публичный вход адаптеров."""
-        return self.dispatcher.execute(_event(command, **kwargs))
+        return self.dispatcher.execute(_private_event(command, **kwargs))
 
     def test_complete_multiple_is_read_only_and_contains_both_choices(self):
         """Полный просмотр объединяет решения, не исполняя ни одного."""
@@ -139,7 +139,7 @@ class ConfirmationSnapshotTest(unittest.TestCase):
     def test_foreign_channel_chat_and_owner_are_never_shown(self):
         """Ядро повторно фильтрует адрес и владельца публичных записей."""
         records = tuple(self.pending(origin) for origin in (
-            ReplyAddress("telegram", "other"), ReplyAddress("vk", "chat-1"),
+            ReplyAddress("telegram", "other"), ReplyAddress("vk", "101"),
         )) + (self.pending(owner="other"), self.pending())
         self.capability.query.return_value = ConfirmationQueryResult("complete", records)
         self.assertEqual(len(self.send().actions), 2)
@@ -323,7 +323,7 @@ class ConfirmationSnapshotSQLiteTest(unittest.TestCase):
         for completed in (False, True):
             with self.subTest(completed=completed), _database() as connection:
                 service = identity_service(connection)
-                source = IncomingIdentity("telegram", "sender", "chat-1")
+                source = IncomingIdentity("telegram", "101", "101")
                 target = IncomingIdentity("vk", "target", "target-chat")
                 service.register_with_name(source, display_name="Источник")
                 target_user = service.register_with_name(target, display_name="Цель")
@@ -332,7 +332,7 @@ class ConfirmationSnapshotSQLiteTest(unittest.TestCase):
                 dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry(),
                     user_identity_service=service, chat_mode_repository=MemoryChatModes(),
                     capability_preference_repository=MemoryCapabilityPreferences())
-                event = replace(_event("/confirm"), external_user_id="sender")
+                event = _private_event("/confirm")
                 for foreign in (replace(event, chat_id="other"),
                                 replace(event, channel="vk"),
                                 replace(event, external_user_id="other")):
@@ -342,8 +342,8 @@ class ConfirmationSnapshotSQLiteTest(unittest.TestCase):
                 for foreign in (replace(event, chat_id="other"),
                                 replace(event, channel="vk"),
                                 replace(event, external_user_id="other")):
-                    self.assertIsNotNone(dispatcher.execute(replace(foreign,
-                        text=response.actions[0].command)).error)
+                    dispatcher.execute(replace(foreign, text=response.actions[0].command))
+                    self.assertEqual(service.get_pending_rebind(source).id, pending.id)
                 self.assertIsNotNone(dispatcher.execute(replace(event,
                     text=f"/confirm core identity {pending.id} 999 yes")).error)
                 if completed:

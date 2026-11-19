@@ -11,7 +11,7 @@ from compadre_assistant.core.domain.users.ports import (
     IdentityLifecycleRepository,
 )
 from compadre_assistant.core.domain.users.entities import (
-    AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, is_private_chat_address,
+    AppUser, ExternalIdentity, IncomingIdentity, IdentityRebindConfirmation, PROFILE_MESSENGERS, is_private_chat_address,
 )
 from compadre_assistant.core.domain.users.identity import (
     IdentityAlreadyBoundError, InvalidLinkCodeError, SourceProfileInUseError,
@@ -331,14 +331,15 @@ class SQLiteIdentityLinkTokenRepository(IdentityLinkTokenRepository):
         expires_at: datetime,
     ) -> None:
         """Сохраняет одноразовый код привязки."""
-        if target_channel is not None and target_channel not in {"telegram", "vk"}:
+        if target_channel is not None and target_channel not in PROFILE_MESSENGERS:
             raise ValueError("unknown link target channel")
         stored_key = token_hash if target_channel is None else f"{target_channel}:{token_hash}"
+        keys = (token_hash, *(f"{channel}:{token_hash}" for channel in PROFILE_MESSENGERS))
+        placeholders = ", ".join("?" for _ in keys)
         with self._connection:
             self._connection.execute("BEGIN IMMEDIATE")
             if self._connection.execute(
-                "SELECT 1 FROM identity_link_tokens WHERE token_hash IN (?, 'vk:' || ?, 'telegram:' || ?)",
-                (token_hash, token_hash, token_hash),
+                f"SELECT 1 FROM identity_link_tokens WHERE token_hash IN ({placeholders})", keys,
             ).fetchone():
                 raise sqlite3.IntegrityError("Duplicate link code digest")
             inserted = self._connection.execute(

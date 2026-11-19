@@ -21,7 +21,7 @@ from compadre_assistant.core.presentation.incoming.registry import CapabilityReg
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.message_content import text_content
 from tests import test_contextual_help as help_tests
-from tests.test_incoming_boundary import FakeCapability, _event
+from tests.test_incoming_boundary import FakeCapability, _private_event as _event
 from tests.response_assertions import response_text
 
 
@@ -75,7 +75,7 @@ class CommandMenuTest(unittest.TestCase):
         self.fixture = help_tests.ContextualHelpTest()
         self.fixture.setUp()
 
-    def menu(self, chat="chat-1", channel="telegram"):
+    def menu(self, chat="101", channel="telegram"):
         """Читает меню без исполнения текста события."""
         return self.fixture.dispatcher.command_menu(_event("/exit", chat, channel))
 
@@ -100,7 +100,7 @@ class CommandMenuTest(unittest.TestCase):
         """Параметры не становятся заполнителями, недоступные входы скрыты."""
         fixture = self.fixture
         commands = self.commands()
-        self.assertEqual(set(commands), {"/settings", "/ai", "/obsidian", "/other"})
+        self.assertEqual(set(commands), {"/settings", "/ai", "/obsidian", "/other", "/help"})
         self.assertNotIn("/ask", commands)
         self.assertNotIn("/reanalyze", commands)
         self.assertNotIn("/confirm", commands)
@@ -110,7 +110,7 @@ class CommandMenuTest(unittest.TestCase):
         fixture.preferences.rows[(23, "other")] = False
         fixture.send("/settings")
         self.assertEqual(set(self.commands()), {
-            "/status", "/name", "/connect", "/link", "/capabilities", "/enable", "/disable", "/exit",
+            "/status", "/name", "/connect", "/link", "/capabilities", "/enable", "/disable", "/exit", "/help",
         })
         for command, kind in (("/name", "profile_name"), ("/enable", "enable"), ("/disable", "disable"), ("/link", "link_code")):
             self.assertIn(command, self.commands())
@@ -150,7 +150,7 @@ class CommandMenuTest(unittest.TestCase):
                 fixture.preferences.rows[(23, "obsidian")] = False
                 fixture.preferences.rows[(23, "ai")] = mode != "ai"
                 expected = ("/exit", "/other", "/settings") if mode == "ai" else ("/exit", "/ai", "/other", "/settings")
-                self.assertEqual(self.commands(), expected)
+                self.assertEqual(self.commands(), (*expected, "/help"))
 
     def test_pending_expiration_and_context_validation_match_help(self):
         """Чтение меню не продлевает ввод, неверный контекст удаляет отмену."""
@@ -243,19 +243,19 @@ class ContextualCommandProjectionTest(unittest.TestCase):
     def test_projection_is_scoped_by_chat_and_reset_by_new_mode_revision(self):
         """Раздел одного чата не меняет другой и не переходит в новый вход."""
         fixture = self.fixture
-        for chat in ("chat-1", "chat-2"):
+        for chat in ("101", "chat-2"):
             fixture.send("/section", chat=chat)
-        fixture.send("/open_section", chat="chat-1")
+        fixture.send("/open_section", chat="101")
         first_revision = fixture.modes.get_state(fixture.key).revision
-        self.assert_catalog("chat-1", ("/open_section", "/inspect", "/exit"))
+        self.assert_catalog("101", ("/open_section", "/inspect", "/exit"))
         self.assert_catalog("chat-2", ("/open_section", "/exit"))
         self.assertIn("заглянуть в раздел", fixture.send())
         self.assertIn((23, _event("x").reply_address, first_revision), self.capability.reads)
         fixture.send("/open_section", chat="chat-2")
-        fixture.send("/section", chat="chat-1")
+        fixture.send("/section", chat="101")
         self.assertEqual(self.capability.enter_revisions, [None, None, None])
         self.assertGreater(fixture.modes.get_state(fixture.key).revision, first_revision)
-        self.assert_catalog("chat-1", ("/open_section", "/exit"))
+        self.assert_catalog("101", ("/open_section", "/exit"))
         self.assert_catalog("chat-2", ("/open_section", "/inspect", "/exit"))
         self.install(SectionCapability())
         self.assert_catalog("chat-2", ("/open_section", "/exit"))
@@ -267,10 +267,10 @@ class ContextualCommandProjectionTest(unittest.TestCase):
         fixture.send("/open_section")
         self.capability.reads.clear()
         fixture.preferences.rows[(23, "section")] = False
-        self.assert_catalog("chat-1", ("/exit", "/ai"))
+        self.assert_catalog("101", ("/exit", "/ai", "/help"))
         fixture.preferences.rows[(23, "section")] = True
         fixture.send("/ai")
-        self.assert_catalog("chat-1", ("/ask", "/get_text_from_image", "/exit"))
+        self.assert_catalog("101", ("/ask", "/get_text_from_image", "/exit"))
         self.assertEqual(self.capability.reads, [])
 
     def test_query_error_preserves_exit_and_addressed_confirmation(self):
@@ -280,7 +280,7 @@ class ContextualCommandProjectionTest(unittest.TestCase):
         fixture.rebind()
         self.capability.read_error = RuntimeError("снимок недоступен")
         with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
-            self.assert_catalog("chat-1", ("/exit", "/confirm"))
+            self.assert_catalog("101", ("/exit", "/confirm"))
         response = fixture.dispatcher.execute(_event("/confirm"))
         self.assertIn("/confirm core identity 4 1 yes", [action.command for action in response.actions])
 
@@ -294,7 +294,7 @@ class CommandMenuUpdateTest(unittest.TestCase):
         self.fixture.setUp()
         self.updates = []
 
-    def send(self, text, chat="chat-1", channel="telegram", handler=None):
+    def send(self, text, chat="101", channel="telegram", handler=None):
         """Исполняет сообщение с наблюдаемым каналовым callback меню."""
         return self.fixture.dispatcher.execute(_event(text, chat, channel),
             menu_update_handler=handler or self.updates.append)

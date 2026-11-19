@@ -15,7 +15,7 @@ from compadre_assistant.presentation.telegram.rendering import render_telegram_c
 from compadre_assistant.presentation.vk.rendering import render_vk_content
 from tests.response_assertions import content_text
 from tests.test_contextual_help import ContextualHelpTest
-from tests.test_incoming_boundary import _event
+from tests.test_incoming_boundary import _private_event as _event
 from tests.test_process_incoming_message import _test_vault
 
 

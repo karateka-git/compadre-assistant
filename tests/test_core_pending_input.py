@@ -16,7 +16,7 @@ from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMes
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInputStore
 from compadre_assistant.core.presentation.incoming.registry import CapabilityRegistry
 from tests.capability_preference_helpers import MemoryCapabilityPreferences
-from tests.test_incoming_boundary import FakeCapability, FakeIdentity, MemoryChatModes, _event
+from tests.test_incoming_boundary import FakeCapability, FakeIdentity, MemoryChatModes, _private_event as _event
 from tests.response_assertions import response_text
 
 
@@ -34,7 +34,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.capability = FakeCapability()
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
-        self.key = ChatModeKey(23, "telegram", "chat-1")
+        self.key = ChatModeKey(23, "telegram", "101")
         self.modes.save(ChatMode(self.key, "settings"))
         self.dispatcher = IncomingMessageDispatcher(
             registry=CapabilityRegistry((self.capability, SettingsCapability())), user_identity_service=self.identity,
@@ -42,11 +42,11 @@ class CorePendingInputTest(unittest.TestCase):
             pending_inputs=self.store,
         )
 
-    def send(self, text, chat="chat-1"):
+    def send(self, text, chat="101"):
         """Отправляет событие и возвращает текст ответа."""
         return response_text(self.dispatcher.execute(_event(text, chat)))
 
-    def pending(self, chat="chat-1"):
+    def pending(self, chat="101"):
         """Возвращает текущее ожидание выбранного чата."""
         return self.store.get(_event("x", chat).reply_address)
 

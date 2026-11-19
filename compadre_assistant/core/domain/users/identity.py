@@ -15,6 +15,7 @@ from compadre_assistant.core.domain.users.ports import (
 )
 from compadre_assistant.core.domain.users.entities import (
     MAX_DISPLAY_NAME_LENGTH,
+    PROFILE_MESSENGERS,
     AppUser,
     IdentityRebindConfirmation,
     IncomingIdentity,
@@ -231,7 +232,7 @@ class UserIdentityService:
             raise ValueError("app_user_id must be positive")
 
         code = self._token_factory()
-        if target_channel not in {"telegram", "vk"}:
+        if target_channel not in PROFILE_MESSENGERS:
             raise ValueError("unknown link target channel")
         expires_at = self._clock() + self._token_ttl
         self._link_token_repository.create(

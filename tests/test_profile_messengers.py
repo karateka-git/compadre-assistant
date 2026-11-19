@@ -106,6 +106,48 @@ class ProfileMessengersTest(unittest.TestCase):
         self.assertEqual(service.linked_channels(owner.id), {"telegram"})
         self.assertIsNone(self.db.execute("SELECT used_at FROM identity_link_tokens").fetchone()[0])
 
+    def test_registration_or_transfer_buttons_preserve_manual_recovery_in_both_directions(self):
+        """Проводит ввод и адресное решение через настоящие публичные команды и токены."""
+        apply_migrations(self.db)
+        processor = ChannelMessageProcessor(database_path=self.path, capabilities=())
+        service = create_user_identity_service(self.db)
+        for index, (source, target) in enumerate((("telegram", "vk"), ("vk", "telegram")), 1):
+            with self.subTest(target=target):
+                source_id, target_id = str(10 + index), str(20 + index)
+                origin = IncomingEvent(source, source_id, "1", "/settings", source_id)
+                client = IncomingEvent(target, target_id, "2", "/start", target_id)
+                owner = service.register_with_name(IncomingIdentity(source, source_id, source_id), display_name="Цель")
+                processor(origin)
+                issued = processor(replace(origin, text=f"/connect {target}"))
+                code = re.search(r"/link (\S+)", response_text(issued)).group(1)
+                welcome = processor(client)
+                submit = next(action for action in welcome.bound_actions if action.label == "У меня есть код")
+                self.assertIn("следующим сообщением", response_text(processor.select_action(client, submit.token)))
+                wrong = processor(replace(client, text="ошибка"))
+                self.assertIn(f"/connect {target}", response_text(wrong))
+                cancel = next(action for action in wrong.bound_actions if action.label == "Отмена")
+                processor.select_action(client, cancel.token)
+                self.assertEqual([a.label for a in processor.section_actions(client)], ["Создать профиль", "У меня есть код"])
+                identity = IncomingIdentity(target, target_id, target_id)
+                previous = service.register_with_name(identity, display_name="Источник")
+                processor(replace(client, text="/settings"))
+                screen = processor(replace(client, text="/connect"))
+                name = "VK" if target == "vk" else "Telegram"
+                transfer = next(a for a in screen.bound_actions if a.label == f"Привязать {name} к другому профилю")
+                processor.select_action(client, transfer.token)
+                request = processor(replace(client, text=code))
+                self.assertEqual([a.label for a in request.actions], ["Перенести аккаунт", "Отменить перенос"])
+                processor(replace(client, chat_id="-77", text=request.actions[0].command))
+                processor(replace(client, text="да"))
+                self.assertEqual(service.resolve_without_touch(identity), previous)
+                processor(replace(client, text=request.actions[1].command))
+                self.assertEqual(service.resolve_without_touch(identity), previous)
+                second = processor(replace(client, text=f"/link {code}"))
+                approve = next(a for a in second.bound_actions if a.label == "Перенести аккаунт")
+                self.assertIn("перепривязал", response_text(processor.select_action(client, approve.token)))
+                self.assertEqual(service.resolve_without_touch(identity), owner)
+                self.assertIn("недоступна", response_text(processor.select_action(client, approve.token)))
+
     def test_upgrade_keeps_old_token_and_pending_confirmation(self):
         """Проверяет после обновления прежнюю выдачу и сохранённое перед ним подтверждение."""
         apply_migrations(self.db)

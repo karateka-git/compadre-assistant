@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
 
 MAX_DISPLAY_NAME_LENGTH = 80
+# Каналы, для которых профиль может выдать и погасить адресованный код.
+PROFILE_MESSENGERS = ("telegram", "vk")
 
 
 class IdentityRebindStatus(StrEnum):
@@ -29,7 +32,7 @@ def is_private_chat_address(channel: str, external_user_id: str | None, external
         True только при совпадении положительных числовых ID отправителя и чата.
         Групповые и нераспознанные адреса исключаются консервативно.
     """
-    return (channel in ("telegram", "vk") and external_user_id is not None
+    return (channel in PROFILE_MESSENGERS and external_user_id is not None
             and external_user_id == external_chat_id
             and external_chat_id.isascii() and external_chat_id.isdecimal()
             and external_chat_id[0] != "0")

@@ -8,7 +8,7 @@ from tests.capability_preference_helpers import MemoryCapabilityPreferences
 
 from compadre_assistant.bootstrap import create_incoming_message_dispatcher
 from compadre_assistant.core.domain.chat_modes import ChatMode, ChatModeKey, ChatModeRepository, ChatModeState
-from compadre_assistant.core.domain.users.entities import AppUser
+from compadre_assistant.core.domain.users.entities import AppUser, IncomingIdentity
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand,
@@ -120,6 +120,14 @@ class FakeIdentity:
         """Возвращает идентифицированного пользователя."""
         return self.user
 
+    def find_known_private_chat(self, channel, chat):
+        """Связывает личный тестовый адрес с текущим пользователем."""
+        return (self.user, IncomingIdentity(channel, chat, chat)) if self.user else None
+
+    def has_known_chat_address(self, channel, chat):
+        """Проверяет, занят ли адрес известным тестовым профилем."""
+        return self.user is not None
+
 
     def get_pending_rebind(self, _identity):
         """Сообщает об отсутствии адресного ожидания в базовом fixture."""
@@ -138,6 +146,11 @@ class FakeIdentity:
 def _event(text: str, chat: str = "chat-1", channel: str = "telegram") -> IncomingEvent:
     """Создаёт нейтральное событие для проверок маршрутизации."""
     return IncomingEvent(channel=channel, chat_id=chat, message_id="msg-1", text=text)
+
+
+def _private_event(text: str, chat: str = "101", channel: str = "telegram") -> IncomingEvent:
+    """Создаёт личное событие с явным автором для операций профиля."""
+    return IncomingEvent(channel, chat, "msg-1", text, external_user_id=chat)
 
 
 class IncomingBoundaryTest(unittest.TestCase):
@@ -517,16 +530,16 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_general_commands_and_entry_precede_pending_rebind(self) -> None:
         """Общие команды доступны во время прежнего текстового rebind."""
         self.identity.pending = True
-        self.dispatcher.execute(_event("/settings"))
-        self.assertIn("Профиль", response_text(self.dispatcher.execute(_event("/status"))))
-        self.dispatcher.execute(_event("/selected"))
+        self.dispatcher.execute(_private_event("/settings"))
+        self.assertIn("Профиль", response_text(self.dispatcher.execute(_private_event("/status"))))
+        self.dispatcher.execute(_private_event("/selected"))
         self.assertTrue(self.capability.entries)
-        self.dispatcher.execute(_event("/exit"))
-        self.assertIsNone(self.repository.get(self.key))
+        self.dispatcher.execute(_private_event("/exit"))
+        self.assertIsNone(self.repository.get(ChatModeKey(23, "telegram", "101")))
         self.assertTrue(self.identity.pending)
-        self.dispatcher.execute(_event("да"))
+        self.dispatcher.execute(_private_event("да"))
         self.assertTrue(self.identity.pending)
-        self.dispatcher.execute(_event("/confirm core identity 1 1 yes"))
+        self.dispatcher.execute(_private_event("/confirm core identity 1 1 yes"))
         self.assertFalse(self.identity.pending)
         self.assertFalse(self.capability.calls)
 

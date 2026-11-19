@@ -87,11 +87,6 @@ class CapabilityRegistry:
             raise ValueError("Проверка профиля задана для возможности без ограничения доступа")
         self._restricted_ids = restricted
 
-    @property
-    def requires_private_profile_link(self) -> bool:
-        """Возвращает необходимость личного чата для операций передачи доступа к профилю."""
-        return bool(self._restricted_ids)
-
     def requires_profile_access(self, capability_id: str) -> bool:
         """Определяет, требует ли известная возможность доверенного профиля."""
         return capability_id in self._restricted_ids

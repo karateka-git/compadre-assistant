@@ -35,6 +35,7 @@ def build_command_menu(
     snapshot: ConfirmationQueryResult,
     *,
     active_help: CapabilityHelp | None = None,
+    allow_link: bool = True,
 ) -> CommandMenu:
     """Собирает выбираемые команды по проверенному состоянию текущего чата.
 
@@ -44,6 +45,7 @@ def build_command_menu(
         pending: Уже проверенное по сроку, профилю и доступу ожидание ввода.
         snapshot: Снимок всех применимых источников подтверждений.
         active_help: Отобранная справка активной возможности либо None для её каталога.
+        allow_link: Предлагать привязку до регистрации в проверенном личном чате.
 
     Returns:
         Меню с точными командами, запускающими действие или пошаговый ввод.
@@ -67,7 +69,8 @@ def build_command_menu(
         pass  # Ввод имени заменяет базовое меню единственной отменой ниже.
     elif personal is None:
         common(ChatCommand.REGISTER)
-        common(ChatCommand.LINK)
+        if allow_link:
+            common(ChatCommand.LINK)
     else:
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:

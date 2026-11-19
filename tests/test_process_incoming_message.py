@@ -1,4 +1,5 @@
 from tests.response_assertions import content_text, response_text
+from tests.test_incoming_boundary import _private_event
 """Тесты общего application-flow входящих сообщений."""
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.domain.vaults.entities import VaultActionConfirmation, VaultConfirmationAction
@@ -1278,8 +1279,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        use_case.dispatcher.execute(_telegram_message("/settings"))
-        result = use_case.dispatcher.execute(_telegram_message("/link ABC123"))
+        use_case.dispatcher.execute(_private_event("/settings"))
+        result = use_case.dispatcher.execute(_private_event("/link ABC123"))
 
         self.assertIn("адресной командой", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
@@ -1294,7 +1295,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/confirm core identity 1 1 yes"))
+        result = use_case.execute(_private_event("/confirm core identity 1 1 yes"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBOUND)
         self.assertEqual(result.app_user.id, 99)
@@ -1309,7 +1310,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
             user_identity_service=identity_service,
         )
 
-        result = use_case.execute(_telegram_message("/confirm core identity 1 1 no"))
+        result = use_case.execute(_private_event("/confirm core identity 1 1 no"))
 
         self.assertEqual(result.type, IncomingMessageResultType.LINK_REBIND_CANCELLED)
         self.assertTrue(identity_service.rebind_cancelled)
