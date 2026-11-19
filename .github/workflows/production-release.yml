@@ -16,6 +16,9 @@ on:
         description: Full 40-character SHA of the release
         required: true
         type: string
+      source_attempt:
+        description: Original installation run_id:run_attempt (required for v2 resume)
+        type: string
       change:
         description: Required in release mode (initial, major, minor, patch)
         type: string
@@ -60,6 +63,9 @@ jobs:
           RELEASE_MODE: ${{ inputs.mode }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.sha }}
+          RELEASE_SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+          COMPADRE_DEPLOYMENT_WRITER: ${{ vars.PRODUCTION_DEPLOYMENT_WRITER || 'v1' }}
+          COMPADRE_CONTROLLER_SHA: ${{ vars.PRODUCTION_CONTROLLER_SHA }}
           RELEASE_CHANGE: ${{ inputs.change }}
           RELEASE_NOTES: ${{ inputs.notes }}
         run: |

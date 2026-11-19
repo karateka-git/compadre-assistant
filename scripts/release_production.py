@@ -15,6 +15,8 @@ from urllib.parse import quote
 from scripts import deploy_metrics as metrics
 from scripts import publish_deployment_acceptance as deployments
 from scripts import publish_release as releases
+from scripts import deployment_writer as writer
+from scripts import deployment_acceptance as records
 from scripts.check_hotfix_pairs import HotfixError
 from scripts.create_release_branch import EXPECTED_REPOSITORY, ReleaseBranchError, repository_from_origin
 from scripts.deploy_database_switch import OLD_CLEANUP_VERSION
@@ -89,6 +91,88 @@ def _require_cleanup(output: str, receipt: InstallationReceipt) -> None:
         raise ProductionReleaseError("Очистка VPS не подтверждена для принятого поколения SQLite")
 
 
+def _v2_route(resume):
+    """Проверяет включение писателя и исходную попытку до любой публикации."""
+    mode = os.environ.get("COMPADRE_DEPLOYMENT_WRITER", "v1")
+    source = os.environ.get("RELEASE_SOURCE_ATTEMPT", "")
+    if mode == "v1" and not source:
+        return None
+    if mode not in ("v2", "resume-only") or mode == "resume-only" and not resume or not records._reader_v2():
+        raise ProductionReleaseError("Настройки писателя не разрешают эту команду")
+    owner = f"{os.environ.get('GITHUB_RUN_ID', '')}:{os.environ.get('GITHUB_RUN_ATTEMPT', '')}"
+    key = source if resume else owner
+    snapshot = os.environ.get("COMPADRE_CONTROLLER_SHA", "")
+    if (not all(re.fullmatch(r"[1-9][0-9]{0,19}:[1-9][0-9]{0,9}", item) for item in (owner, key))
+            or bool(source) != resume or not SHA_PATTERN.fullmatch(snapshot)):
+        raise ProductionReleaseError("Требуются ключ исходной попытки и проверенный snapshot")
+    return key, owner, snapshot
+
+
+def _run_attempt(api, selected, route, resume, remote):
+    """Завершает одну установку по исходному ключу и перечитывает её итог."""
+    key, owner, snapshot = route
+    deployment_id = 0
+
+    def call(action):
+        raw = remote(metrics.HttpOperation.ATTEMPT, "--attempt", action, selected.sha, key, owner, snapshot,
+                     str(deployment_id), timeout=3600 if action in ("install", "complete") else 300)
+        # Контроллер заканчивает вывод одной JSON-строкой, установка до неё пишет этапы.
+        lines = raw.stdout.splitlines()
+        if not lines or len(lines[-1]) > 8192:
+            raise ProductionReleaseError("Отсутствует квитанция команды Deployment")
+        return parse_state_object(lines[-1])
+
+    reserved = call("resume" if resume else "reserve")
+    attempt = records._attempt({"id": 0, "sha": selected.sha, "payload": reserved["attempt"]})
+    if ((attempt.attempt_key, attempt.version, attempt.kind, attempt.release_id, attempt.run_id,
+         attempt.run_attempt, attempt.baseline) != (key, selected.version, selected.kind, selected.release_id,
+         selected.run_id, selected.run_attempt, getattr(selected.compatibility, "baseline", None))
+            or type(reserved.get("started")) is not bool):
+        raise ProductionReleaseError("Резервация VPS расходится с проверенным Release")
+
+    def claim(action):
+        return call(action).get("granted") is True
+
+    bound = reserved["deployment_id"]
+    with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
+        if bound is None:
+            record = writer.create_attempt(api, attempt, claim)
+            deployment_id = record.deployment_id
+        else:
+            deployment_id = records._positive(bound, "D18")
+            record = writer.current_attempt(api, attempt, deployment_id)
+        if record.state is records.DeploymentState.MISSING:
+            record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS,
+                                         claim, lambda: InstallationReceipt(**call("base")))
+    if record.state is records.DeploymentState.IN_PROGRESS:
+        if record.description != f"v1 attempt={key}":
+            raise ProductionReleaseError("D18 не подтвердил исходный ключ")
+        if not reserved["started"]:
+            try:
+                call("install")
+            except InstallationTagError:
+                # Ответ SSH мог потеряться в любой момент; разрешена только сверка.
+                print("Установка не подтверждена по SSH. Сверка сохранённого этапа", flush=True)
+    elif record.state not in (records.DeploymentState.SUCCESS, records.DeploymentState.FAILURE):
+        raise ProductionReleaseError("Текущий статус D18 не допускает продолжения")
+    result = call("complete")
+    if result["outcome"] not in ("success", "restored"):
+        raise ProductionReleaseError("Не подтверждены установка или возврат")
+    target = records.DeploymentState.SUCCESS if result["outcome"] == "success" else records.DeploymentState.FAILURE
+    receipt = InstallationReceipt(**result["receipt"])
+    def fresh():
+        if call("complete") != result:
+            raise ProductionReleaseError("Runtime VPS изменился после проверки")
+        return receipt
+    with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
+        record = writer.write_status(api, attempt, deployment_id, target, claim, fresh)
+    if call("close") != result:
+        raise ProductionReleaseError("Закрытие попытки не подтверждено для проверенного runtime")
+    if record.state is records.DeploymentState.FAILURE:
+        raise ProductionReleaseError(f"Deployment {deployment_id} завершён возвратом на {attempt.baseline.version}")
+    return record
+
+
 def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str | None, notes: str | None,
                  ssh_host: str, known_hosts: Path, identity: Path | None) -> DeploymentRecord:
     """Проводит выпуск через GitHub и контроллер с повторными сверками VPS."""
@@ -96,6 +180,7 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     deployments._require_deployment_version(version)
     if not SHA_PATTERN.fullmatch(sha):
         raise ProductionReleaseError("Требуется полный 40-символьный SHA")
+    route = _v2_route(change is None)
     with http_phase(HttpPhase.AUTHOR):
         deployments._require_trusted_author(api)
     print("Проверка GitHub Release", flush=True)
@@ -116,6 +201,9 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
             raise
         metrics.relay_vps_http_report(result.stderr, operation)
         return result
+
+    if route is not None:
+        return _run_attempt(api, selected, route, change is None, remote)
 
     def read_fresh() -> InstallationReceipt:
         """Удостоверяет точную приёмку и сохраняет runtime на весь сеанс."""

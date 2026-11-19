@@ -104,6 +104,7 @@ class ControllerTests(unittest.TestCase):
         attempt = self.cmd("reserve")["attempt"]
         self.cmd("create")
         self.api.deployments.append(self.api.latest | {"sha": SHA, "ref": SHA, "payload": attempt})
+        self.cmd("in_progress", number="11")
         self.api.records[11] = self.api.status | {"state": "in_progress", "description": f"v1 attempt={KEY}"}
         def lose_connection(host, version):
             self.assertTrue(self.locked)
@@ -132,3 +133,124 @@ class ControllerTests(unittest.TestCase):
                       safe.replace("sudo -n", "sudo  -n"), "sudo -n /bin/sh"):
             with self.subTest(other=other), self.assertRaises(ValueError):
                 command(other)
+
+    def test_reconcile_needs_completed_owner_and_matching_unapplied_post(self):
+        """Оператор снимает только последнее отклонённое намерение завершённого owner."""
+        self.cmd("reserve")
+        self.cmd("create")
+        def reconcile(action):
+            controller.reconcile_post(self.host, VERSION, SHA, KEY, SNAPSHOT, action)
+        with self.assertRaises(DeployError):
+            reconcile("create")
+        self.states[KEY] = "completed"
+        with self.assertRaises(DeployError):
+            reconcile("cancel")
+        reconcile("create")
+        reconcile("cancel")
+        self.assertTrue(controller._read(self.host)["closed"])
+
+    def test_runner_resumes_lost_cleanup_response_with_new_workflow_id(self):
+        """Оба протокола проходят два сеанса с одной установкой и одной очисткой."""
+        from dataclasses import replace
+        import json
+        from scripts import release_production as runner
+        from scripts.publish_installation_tag import InstallationTagError
+
+        selected = self.host.select(VERSION)
+        receipt = replace(RECEIPT, version=VERSION, sha=SHA, release_id=42, run_id=108, run_attempt=1,
+                          generation_id="9" * 32, runtime_id="8" * 64)
+        self.enterContext(patch.object(controller.acceptance, "_verify_locked",
+                                      side_effect=lambda host, ver, sha: asdict(receipt if ver == VERSION else RECEIPT)))
+        self.enterContext(patch.object(controller.cleanup, "_snapshot"))
+        self.enterContext(patch.object(runner, "_select_or_publish", return_value=selected))
+        old_post = self.api.post
+        def post(path, body):
+            result = old_post(path, body)
+            if path == "/deployments":
+                self.api.deployments[-1].update(sha=SHA, ref=SHA)
+            return result
+        self.api.post = post
+        original_get = self.api.get
+        self.api.get = lambda path, **kwargs: original_get(path, **({"ref": BASE.sha} if
+            path.startswith("/contents/") and kwargs.get("ref") == SHA else kwargs))
+        def install(host, version):
+            attempt, number = host.locked_attempt
+            self.assertEqual(self.api.records[number]["state"], "in_progress")
+            controller.prep.write_state(host.state_dir, host.checkout, {
+                "stage": "success", "last_good": {"version": version, "sha": SHA},
+                "deployment_attempt": [attempt.attempt_key, number], "candidate": {"sha": SHA},
+                "transition_id": "a" * 32, "old": {"device": 1, "inode": 10, "host_path": "/data/app-old.db",
+                "generation_id": RECEIPT.generation_id}, "new": {"generation_id": receipt.generation_id}})
+            return SHA
+        def clean(host, version, sha, runtime):
+            state = controller.prep.read_state(host.state_dir, host.checkout)
+            state["old_generation_cleanup"] = controller.prod.database_switch.old_cleanup_record(state)
+            controller.prep.write_state(host.state_dir, host.checkout, state)
+        installs = self.enterContext(patch.object(controller.prod, "deploy", side_effect=install))
+        cleans = self.enterContext(patch.object(controller.cleanup, "cleanup_old", side_effect=clean))
+        lost = True
+        def ssh(argv, **kwargs):
+            nonlocal lost
+            _, _, _, version, _, action, *arguments = argv
+            result = controller.execute(self.host, version, action, *arguments)
+            if action == "complete" and lost:
+                lost = False
+                raise InstallationTagError("Потерян ответ SSH после очистки")
+            return SimpleNamespace(stdout=json.dumps(result), stderr="")
+        self.enterContext(patch.object(runner, "run_vps_command", side_effect=ssh))
+        settings = {"COMPADRE_CONTROLLER_SHA": SNAPSHOT, "COMPADRE_DEPLOYMENT_WRITER": "v2",
+                    "GITHUB_RUN_ID": KEY.split(":")[0], "GITHUB_RUN_ATTEMPT": "1", "RELEASE_SOURCE_ATTEMPT": ""}
+        with patch.dict(os.environ, settings):
+            with self.assertRaisesRegex(InstallationTagError, "очистки"):
+                runner._run_release(self.api, VERSION, SHA, change="patch", notes="patch",
+                                    ssh_host="vps", known_hosts=Path("hosts"), identity=None)
+        self.states[KEY] = "completed"
+        settings.update(GITHUB_RUN_ID=RESUME.split(":")[0], RELEASE_SOURCE_ATTEMPT=KEY,
+                        COMPADRE_DEPLOYMENT_WRITER="resume-only")
+        with patch.dict(os.environ, settings):
+            for _ in range(2):
+                result = runner._run_release(self.api, VERSION, SHA, change=None, notes=None,
+                                             ssh_host="vps", known_hosts=Path("hosts"), identity=None)
+                self.assertEqual(result.state.value, "success")
+        self.assertEqual(self.api.posts, ["/deployments", "/deployments/11/statuses", "/deployments/11/statuses"])
+        installs.assert_called_once()
+        cleans.assert_called_once()
+        self.assertTrue(controller._read(self.host)["closed"])
+
+    def test_refuses_unknown_state_and_closes_only_proven_return(self):
+        """Прерванная установка завершается failure только с подтверждённой базой."""
+        attempt = self.cmd("reserve")["attempt"]
+        self.cmd("create")
+        self.api.deployments.append(self.api.latest | {"sha": SHA, "ref": SHA, "payload": attempt})
+        self.cmd("in_progress", number="11")
+        self.api.records[11] = self.api.status | {"state": "in_progress", "description": f"v1 attempt={KEY}"}
+        with patch.object(controller.prod, "deploy", side_effect=ConnectionError), self.assertRaises(ConnectionError):
+            self.cmd("install", number="11")
+        with self.assertRaises(DeployError):
+            self.cmd("complete", number="11")
+        controller.prep.write_state(self.host.state_dir, self.host.checkout, {"stage": "success",
+                                    "last_good": {"version": BASE.version, "sha": BASE.sha}})
+        with patch.object(controller.acceptance, "_verify_locked", return_value=asdict(RECEIPT) | {"generation_id": "8"*32}):
+            with self.assertRaises(DeployError):
+                self.cmd("complete", number="11")
+        self.assertEqual(self.cmd("complete", number="11")["outcome"], "restored")
+        self.assertTrue(self.cmd("finish", number="11")["granted"])
+        self.api.records[11].update(state="failure", description="v1 restored=7/9")
+        with self.assertRaises(DeployError):
+            self.cmd("close", number="11")
+        self.api.records[11]["description"] = "v1 restored=7/8"
+        self.assertEqual(self.cmd("close", number="11")["outcome"], "restored")
+
+    def test_wrong_resume_arguments_stop_before_publication(self):
+        """Запрет новых попыток и чужой ключ проверяются ещё до подготовки тега."""
+        from scripts import release_production as runner
+        cases = (("resume-only", "patch", ""), ("v2", None, ""), ("v2", "patch", KEY),
+                 ("v2", None, "0001:02"), ("v1", None, KEY))
+        for mode, change, source in cases:
+            with self.subTest(mode=mode, change=change, source=source), patch.dict(
+                    os.environ, COMPADRE_DEPLOYMENT_WRITER=mode, RELEASE_SOURCE_ATTEMPT=source,
+                    COMPADRE_CONTROLLER_SHA=SNAPSHOT, GITHUB_RUN_ID="13002", GITHUB_RUN_ATTEMPT="1"):
+                with patch.object(runner, "_select_or_publish") as publish, self.assertRaises(runner.ProductionReleaseError):
+                    runner._run_release(self.api, VERSION, SHA, change=change, notes=None,
+                                        ssh_host="vps", known_hosts=Path("hosts"), identity=None)
+                publish.assert_not_called()

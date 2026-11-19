@@ -1159,6 +1159,9 @@ class Host:
 def _state(host: Host, value: dict[str, Any], stage: str, **changes: Any) -> None:
     """Записывает стадию атомарно и печатает только безопасное событие журнала."""
     value.update(changes)
+    ownership = getattr(host, "locked_attempt", None)
+    if ownership is not None:
+        value["deployment_attempt"] = [ownership[0].attempt_key, ownership[1]]
     value["stage"] = stage
     prep.write_state(host.state_dir, host.checkout, value)
     metrics.update(stage=stage)
@@ -1850,17 +1853,30 @@ def main() -> None:
                       help="удалить прежнюю SQLite для технически принятого выпуска")
     mode.add_argument("--attempt", nargs=6, metavar=("ACTION", "SHA", "KEY", "OWNER", "SNAPSHOT", "D18"),
                       help="выполнить команду протокола владения Deployment v2")
+    mode.add_argument("--reconcile-rejected-post", nargs=4, metavar=("SHA", "KEY", "SNAPSHOT", "ACTION"),
+                      help="сверить подтверждённо неисполненный POST после завершения runner")
+    mode.add_argument("--recover-attempt-forward", nargs=3, metavar=("SHA", "KEY", "SNAPSHOT"),
+                      help="продолжить штатный forward recovery открытой попытки владельцем VPS")
     args = parser.parse_args()
     try:
         if os.name != "posix" or os.geteuid() != 0:
             raise DeployError("Контроллер рассчитан на запуск через sudo на Linux VPS")
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
-        separate_mode = args.verify_pinned or args.verify_installed is not None or args.cleanup_old is not None or args.attempt is not None
+        separate_mode = (args.verify_pinned or args.verify_installed or args.cleanup_old
+                         or args.attempt or args.reconcile_rejected_post or args.recover_attempt_forward)
         if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
-        if args.attempt is not None:
+        if args.recover_attempt_forward is not None:
+            from scripts import deploy_attempt
+
+            deploy_attempt.recover_forward(host, args.version, *args.recover_attempt_forward)
+        elif args.reconcile_rejected_post is not None:
+            from scripts import deploy_attempt
+
+            deploy_attempt.reconcile_post(host, args.version, *args.reconcile_rejected_post)
+        elif args.attempt is not None:
             from scripts import deploy_attempt
 
             with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT):
