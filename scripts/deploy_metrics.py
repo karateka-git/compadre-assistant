@@ -84,8 +84,9 @@ def github_http_report(location: HttpLocation, operation: HttpOperation) -> Iter
 def _valid_http_row(row: object) -> bool:
     return (isinstance(row, dict) and row.keys() == _HTTP_ROW_KEYS
             and row["location"] == HttpLocation.VPS and row["phase"] in _HTTP_PHASES
-            and row["target"] in ("github_api", "artifact_storage")
+            and row["target"] in ("github_api", "github_graphql_query", "artifact_storage")
             and row["method"] in ("GET", "POST", "OTHER")
+            and (row["target"] != "github_graphql_query" or row["method"] == "POST")
             and all(type(row[key]) is int and row[key] >= 0 for key in _HTTP_COUNTS)
             and row["attempts"] >= max(1, row["pages"], row["errors"]))
 

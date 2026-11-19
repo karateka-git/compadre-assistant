@@ -65,6 +65,7 @@ class HttpPhase(StrEnum):
 
 class _Target(StrEnum):
     GITHUB = "github_api"
+    GRAPHQL_QUERY = "github_graphql_query"  # Чтение GitHub с HTTP-методом POST.
     STORAGE = "artifact_storage"  # Запрос после redirect от API скачивания ZIP.
 
 
@@ -167,17 +168,19 @@ class _MeasuredResponse:
 
 
 class _MeasuredHandler(HTTPHandler, HTTPSHandler):
-    def __init__(self, metrics: HttpMetrics, original: Request, *, artifact: bool, page: bool) -> None:
+    def __init__(self, metrics: HttpMetrics, original: Request, *,
+                 target: _Target, artifact: bool, page: bool) -> None:
         super().__init__()
         self._metrics = metrics
         self._original = original
+        self._target = target
         self._artifact = artifact
         self._page = page
         self.last_attempt: _Attempt | None = None
 
     def _open(self, request: Request, operation):
         original = request is self._original
-        target = _Target.STORAGE if self._artifact and not original else _Target.GITHUB
+        target = _Target.STORAGE if self._artifact and not original else self._target
         method = request.get_method()
         key = (_active_phase.get(), target, method if method in {"GET", "POST"} else "OTHER")
         totals = self._metrics._totals.setdefault(key, _Totals())
@@ -197,7 +200,8 @@ class _MeasuredHandler(HTTPHandler, HTTPSHandler):
 
 
 def open_http(request: Request, *, timeout: int, fallback=urlopen,
-              artifact_redirect: HTTPRedirectHandler | None = None, page: bool = False):
+              artifact_redirect: HTTPRedirectHandler | None = None, page: bool = False,
+              graphql_query: bool = False):
     """Открывает запрос и при активном замере считает каждый HTTP-переход.
 
     Args:
@@ -207,6 +211,7 @@ def open_http(request: Request, *, timeout: int, fallback=urlopen,
         artifact_redirect: Политика редиректов ZIP; последующие запросы
             учитываются как обращения к хранилищу.
         page: Первый запрос получает страницу списка с явным номером.
+        graphql_query: Операция чтения GraphQL через HTTP POST.
 
     Returns:
         HTTP-ответ, поддерживающий контекстный менеджер и чтение тела.
@@ -221,7 +226,8 @@ def open_http(request: Request, *, timeout: int, fallback=urlopen,
         return opener(request, timeout=timeout)
 
     # urllib вызывает этот handler заново после каждого HTTP redirect.
-    measured = _MeasuredHandler(metrics, request, artifact=artifact_redirect is not None, page=page)
+    target = _Target.GRAPHQL_QUERY if graphql_query else _Target.GITHUB
+    measured = _MeasuredHandler(metrics, request, target=target, artifact=artifact_redirect is not None, page=page)
     try:
         return build_opener(measured, *handlers).open(request, timeout=timeout)
     except Exception:
@@ -283,12 +289,13 @@ class GitHub:
             ControllerError: GitHub не подтвердил выполнение запроса целиком.
         """
         body = json.dumps({"query": query, "variables": variables}).encode()
-        result = self._json("https://api.github.com/graphql", "graphql", body=body)
+        result = self._json("https://api.github.com/graphql", "graphql", body=body, graphql_query=True)
         if not isinstance(result, dict) or "errors" in result or not isinstance(result.get("data"), dict):
             raise ControllerError("Получен неполный ответ GitHub GraphQL")
         return result["data"]
 
-    def _json(self, url: str, path: str, *, page: bool = False, body: bytes | None = None) -> object:
+    def _json(self, url: str, path: str, *, page: bool = False, body: bytes | None = None,
+              graphql_query: bool = False) -> object:
         """Отправляет измеряемый запрос и читает JSON."""
         headers = {
             "Accept": "application/vnd.github+json",
@@ -301,7 +308,7 @@ class GitHub:
             headers["Content-Type"] = "application/json"
         request = Request(url, headers=headers, data=body)
         try:
-            with open_http(request, timeout=20, fallback=urlopen, page=page) as response:
+            with open_http(request, timeout=20, fallback=urlopen, page=page, graphql_query=graphql_query) as response:
                 return json.load(response)
         except Exception as error:
             raise ControllerError(f"GitHub API недоступен: {path}: {error}") from error

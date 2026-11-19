@@ -416,6 +416,7 @@ def _selected(api: GitHub, raw: dict, record: DeploymentRecord) -> AcceptedBasel
     return AcceptedBaseline(receipt.sha, receipt.version, receipt.release_id, record.deployment_id, record.status_id)
 
 
+@http_phase(HttpPhase.DEPLOYMENT_BASE)
 def baseline_receipt(api: GitHub, baseline: AcceptedBaseline) -> InstallationReceipt:
     """Читает поколение, миграцию и CI точной уже принятой установки.
 

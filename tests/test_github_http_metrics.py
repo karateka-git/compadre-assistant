@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 from email.message import Message
 import io
 from itertools import count
@@ -12,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import AbstractHTTPHandler, Request
 from urllib.response import addinfourl
 
+from scripts.deploy_metrics import HttpOperation, github_http_report, relay_vps_http_report
 from scripts.full_ci_controller import ControllerError, GitHub, HttpLocation, HttpPhase, collect_http_metrics, http_phase
 from scripts.github_publishing import PublishingGitHub
 from scripts.predeploy_compatibility import EvidenceAPI, PredeployError
@@ -95,6 +97,26 @@ class GitHubHttpMetricsTests(unittest.TestCase):
             {"location": "runner", "phase": "other", "target": "github_api", "method": "GET",
              "attempts": 3, "pages": 0, "errors": 3, "elapsed_ns": 20},
         ])
+
+    def test_relays_read_only_graphql_separately_from_rest_writes(self) -> None:
+        """Сохраняет POST чтения GraphQL при передаче агрегата контроллера."""
+        def route(connection, request, **kwargs):
+            self.assertEqual(request.get_method(), "POST")
+            if request.full_url == "https://api.github.com/graphql":
+                return _response(request, b'{"data":{"node":{"id":"D_fixture"}}}')
+            return _response(request, b'{"id":17}', code=201)
+
+        publisher = PublishingGitHub(self.api.repository, self.api.token)
+        controller, runner = io.StringIO(), io.StringIO()
+        with patch.object(AbstractHTTPHandler, "do_open", side_effect=route):
+            with redirect_stderr(controller), github_http_report(HttpLocation.VPS, HttpOperation.ATTEMPT):
+                self.assertEqual(self.api.graphql("query { node { id } }"), {"node": {"id": "D_fixture"}})
+                self.assertEqual(publisher.post("/deployments", {}), {"id": 17})
+        with redirect_stderr(runner):
+            relay_vps_http_report(controller.getvalue(), HttpOperation.ATTEMPT)
+        report = json.loads(runner.getvalue().removeprefix("deploy-http-metrics "))
+        self.assertEqual([(row["target"], row["method"], row["attempts"]) for row in report["http"]],
+                         [("github_api", "POST", 1), ("github_graphql_query", "POST", 1)])
 
     def test_measures_artifact_redirect_and_storage_without_sending_authorization(self) -> None:
         signed = "https://artifact-storage.example/archive?sig=SIGNED_SENTINEL"
