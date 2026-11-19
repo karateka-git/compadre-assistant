@@ -212,16 +212,32 @@ class UserIdentityService:
             app_user_id=app_user_id, display_name=_normalize_display_name(display_name),
         )
 
-    def create_link_code(self, app_user_id: int) -> CreatedLinkCode:
-        """Создает одноразовый код для привязки нового канала к пользователю."""
+    def linked_channels(self, app_user_id: int) -> frozenset[str]:
+        """Перечисляет мессенджеры, аккаунты которых уже связаны с профилем."""
+        return self._external_identity_repository.linked_channels(app_user_id)
+
+    def create_link_code(self, app_user_id: int, *, target_channel: str) -> CreatedLinkCode:
+        """Выдаёт одноразовый код для свободного мессенджера профиля.
+
+        Args:
+            app_user_id: Владелец нового кода.
+            target_channel: Мессенджер, в котором нужно применить код.
+
+        Raises:
+            IdentityAlreadyBoundError: Этот мессенджер уже связан с профилем.
+            ValueError: Неверный ID профиля или неизвестный мессенджер.
+        """
         if app_user_id <= 0:
             raise ValueError("app_user_id must be positive")
 
         code = self._token_factory()
+        if target_channel not in {"telegram", "vk"}:
+            raise ValueError("unknown link target channel")
         expires_at = self._clock() + self._token_ttl
         self._link_token_repository.create(
             app_user_id=app_user_id,
             token_hash=_hash_code(code),
+            target_channel=target_channel,
             expires_at=expires_at,
         )
         return CreatedLinkCode(code=code, expires_at=expires_at)
@@ -263,6 +279,7 @@ class UserIdentityService:
         token_hash = _hash_code(code.strip())
         target_app_user_id = self._link_token_repository.find_active(
             token_hash=token_hash,
+            channel=identity.channel,
             now=self._clock(),
         )
         if target_app_user_id is None:

@@ -21,6 +21,7 @@ from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.family.bootstrap import create_family_capability
 from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
+from compadre_assistant.core.data.config import load_messenger_dialogs
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
@@ -109,6 +110,7 @@ def create_incoming_message_dispatcher(
     capability_preference_repository: UserCapabilityPreferenceRepository,
     disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
     profile_access: Mapping[str, Callable[[int], bool]] | None = None,
+    messenger_dialogs: Mapping[str, str | None] | None = None,
 ) -> IncomingMessageDispatcher:
     """Явно регистрирует собранные возможности и общий сценарий профиля.
 
@@ -119,6 +121,7 @@ def create_incoming_message_dispatcher(
         capability_preference_repository: Хранилище личного выбора AppUser.
         disabled_capabilities: Метаданные отключённых входов без внешних зависимостей.
         profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
+        messenger_dialogs: Публичные диалоги включённых каналов установки.
 
     Returns:
         Диспетчер с проверенным реестром точек входа.
@@ -128,7 +131,8 @@ def create_incoming_message_dispatcher(
     """
     return IncomingMessageDispatcher(
         registry=CapabilityRegistry(
-            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+            (*capabilities, SettingsCapability(messenger_dialogs, lambda user_id: user_identity_service.linked_channels(user_id))),
+            disabled_capabilities, profile_access=profile_access,
         ),
         user_identity_service=user_identity_service,
         chat_mode_repository=chat_mode_repository,
@@ -179,7 +183,8 @@ class ChannelMessageProcessor:
     def __init__(self, *, database_path: Path,
                  capabilities: tuple[IncomingCapabilityPort, ...],
                  disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
-                 profile_access: Mapping[str, Callable[[int], bool]] | None = None) -> None:
+                 profile_access: Mapping[str, Callable[[int], bool]] | None = None,
+                 messenger_dialogs: Mapping[str, str | None] | None = None) -> None:
         """Регистрирует обработчики при запуске без соединения с SQLite.
 
         Args:
@@ -187,6 +192,7 @@ class ChannelMessageProcessor:
             capabilities: Уже собранные входы включённых возможностей.
             disabled_capabilities: Метаданные отключённых входов.
             profile_access: Проверки допуска к ограниченным возможностям по ID профиля.
+            messenger_dialogs: Публичные диалоги включённых каналов установки.
 
         Raises:
             ValueError: Повторный ID или команда входа в реестре.
@@ -197,7 +203,8 @@ class ChannelMessageProcessor:
         self._deferred_menu_closed = Event()
         self._response_actions = ResponseActionStore()
         self._registry = CapabilityRegistry(
-            (*capabilities, SettingsCapability()), disabled_capabilities, profile_access=profile_access,
+            (*capabilities, SettingsCapability(messenger_dialogs, self._linked_channels)),
+            disabled_capabilities, profile_access=profile_access,
         )
         # Одна блокировка сохраняет порядок публикаций при параллельных событиях.
         self._menu_lock = RLock()
@@ -205,6 +212,10 @@ class ChannelMessageProcessor:
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
         self._expiry_attempts: dict[ReplyAddress, tuple[str, CommandMenuUpdate]] = {}
+
+    def _linked_channels(self, app_user_id: int) -> frozenset[str]:
+        with connect_database(self._database_path) as connection:
+            return create_user_identity_service(connection).linked_channels(app_user_id)
 
     def close_deferred_actions(self) -> None:
         """Останавливает отложенные действия до закрытия зависимостей возможностей."""
@@ -666,6 +677,7 @@ def create_channel_message_processor(
     analysis_use_case_factory: AnalyzeArticleUseCaseFactory | None = None,
     enabled_capabilities: tuple[str, ...] = ("obsidian",),
     ai_config: AiConfig | None = None,
+    messenger_dialogs: Mapping[str, str | None] | None = None,
 ) -> Iterator[ChannelMessageProcessor]:
     """Создаёт процессные входы и закрывает принадлежащие им клиенты при выходе.
 
@@ -677,6 +689,7 @@ def create_channel_message_processor(
         analysis_use_case_factory: Подменная фабрика анализа для тестов.
         enabled_capabilities: Явно включённые ID.
         ai_config: Профиль ИИ либо None для чтения ASK_* при включении.
+        messenger_dialogs: Публичные диалоги либо None для чтения настроек установки.
 
     Yields:
         Обработчик всех сообщений процесса с одним реестром.
@@ -734,6 +747,7 @@ def create_channel_message_processor(
                 disabled += (FamilyCapability.descriptor,)
             processor = ChannelMessageProcessor(
                 database_path=database_path,
+                messenger_dialogs=load_messenger_dialogs() if messenger_dialogs is None else messenger_dialogs,
                 capabilities=capabilities,
                 disabled_capabilities=disabled,
                 profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,

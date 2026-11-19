@@ -1,6 +1,7 @@
 """Проверки меню связанных чатов на настоящих identity и SQLite."""
 
 from dataclasses import replace
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -32,12 +33,20 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.foreign = IncomingIdentity("telegram", "303", "303")
         self.user = self.service.register_with_name(self.tg, display_name="Первый")
         self.other = self.service.register_with_name(self.foreign, display_name="Второй")
-        self.service.link(code=self.service.create_link_code(self.user.id).code, identity=self.vk)
+        self.service.link(code=self.service.create_link_code(self.user.id, target_channel="vk").code, identity=self.vk)
         self.fixture = help_tests.ContextualHelpTest()
         self.fixture.setUp()
         self.fixture.identity = self.service
         self.dispatcher = self.fixture.build()
         self.updates = []
+
+    def previous_code(self, owner):
+        """Восстанавливает прежний общий код для нескольких identities одного канала."""
+        code = "old-code"
+        with self.connection as db:
+            db.execute("INSERT INTO identity_link_tokens (app_user_id, token_hash, expires_at) VALUES (?, ?, ?)",
+                       (owner, sha256(code.encode()).hexdigest(), "2999-01-01"))
+        return code
 
     def event(self, text, identity=None):
         """Создаёт событие конкретного сохранённого адреса."""
@@ -82,13 +91,13 @@ class LinkedChatMenusTest(unittest.TestCase):
     def test_link_and_rebind_refresh_both_owners_without_leaking_preferences(self):
         """Перенесённый чат получает новый профиль, оставшиеся — своего владельца."""
         fresh = IncomingIdentity("vk", "404", "404")
-        self.send("/link " + self.service.create_link_code(self.user.id).code, fresh)
+        self.send("/link " + self.previous_code(self.user.id), fresh)
         self.assertEqual(set(self.menus()), {"101", "202", "404"})
         self.send("/settings", self.foreign)
         self.send("/disable ai", self.foreign)
         self.send("/exit", self.foreign)
         confirmation = self.service.request_rebind_confirmation(
-            code=self.service.create_link_code(self.other.id).code, identity=self.vk)
+            code=self.service.create_link_code(self.other.id, target_channel="vk").code, identity=self.vk)
         self.updates.clear()
         self.send(f"/confirm core identity {confirmation.id} {confirmation.version} yes", self.vk)
         menus = self.menus()
@@ -127,7 +136,7 @@ class LinkedChatMenusTest(unittest.TestCase):
             ).lastrowid
             db.execute("INSERT INTO family_members VALUES (?, ?, 'fixture')", (family, self.other.id))
         pending = self.service.request_rebind_confirmation(
-            code=self.service.create_link_code(self.user.id).code, identity=self.foreign,
+            code=self.previous_code(self.user.id), identity=self.foreign,
         )
         approve = f"/confirm core identity {pending.id} {pending.version} yes"
 

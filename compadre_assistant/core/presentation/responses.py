@@ -97,7 +97,7 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             return compose_content(
                 'Код привязки не принят. Повтори ', code_span('/link <code>'), ' с действующим кодом. '
                 'Если код истёк, в уже привязанном канале открой ', code_span('/settings'),
-                ' и вызови ', code_span('/link_code'), '.',
+                ' и вызови ', code_span('/connect <messenger>'), '.',
             )
         case IncomingMessageResultType.LINK_REBOUND:
             if result.app_user is None:

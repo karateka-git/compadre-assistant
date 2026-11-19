@@ -192,7 +192,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 service = _service(connection)
 
                 user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
-                link_code = service.create_link_code(user.id)
+                link_code = service.create_link_code(user.id, target_channel="vk")
                 linked = service.link(
                     code=link_code.code,
                     identity=_identity("vk", "vk-1", "chat-2"),
@@ -211,7 +211,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
 
                 old_user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 new_user = service.register_with_name(_identity("vk", "vk-1", "chat-2"), display_name="Анатолий")
-                link_code = service.create_link_code(new_user.id)
+                link_code = service.create_link_code(new_user.id, target_channel="telegram")
                 target_user = service.request_rebind_confirmation(
                     code=link_code.code,
                     identity=_identity("telegram", "tg-1", "chat-1"),
@@ -251,7 +251,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                     target = _identity("vk", "22", "22")
                     old_user = service.register_with_name(source, display_name="Оля")
                     new_user = service.register_with_name(target, display_name="Илья")
-                    link = service.create_link_code(new_user.id)
+                    link = service.create_link_code(new_user.id, target_channel="telegram")
                     pending = service.request_rebind_confirmation(code=link.code, identity=source)
                     with db:
                         family = db.execute(
@@ -304,7 +304,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(connection)
                 service = _service(connection)
                 user = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
-                code = service.create_link_code(user.id)
+                code = service.create_link_code(user.id, target_channel="vk")
                 _install_identity_unique_conflict(connection)
                 with self.assertRaises(sqlite3.IntegrityError):
                     service.link(code=code.code, identity=_identity("vk", "vk-1", "chat-2"))
@@ -352,7 +352,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 service = _service(first)
                 target = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
                 owner = service.register_with_name(_identity("vk", "vk-owner", "chat-2"), display_name="Анатолий")
-                code = service.create_link_code(target.id)
+                code = service.create_link_code(target.id, target_channel="vk")
                 started = Event()
                 first.execute("BEGIN IMMEDIATE")
                 first.execute(
@@ -381,7 +381,7 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                 apply_migrations(first)
                 service = _service(first)
                 target = service.register_with_name(_identity("telegram", "tg-1", "chat-1"), display_name="Анатолий")
-                code = service.create_link_code(target.id)
+                code = service.create_link_code(target.id, target_channel="vk")
                 started = Event()
                 first.execute("BEGIN IMMEDIATE")
                 with ThreadPoolExecutor(max_workers=2) as pool:

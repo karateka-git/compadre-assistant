@@ -43,7 +43,7 @@ class AdminChannelsTest(unittest.TestCase):
             apply_migrations(connection)
             service = create_user_identity_service(connection)
             owner = service.register_with_name(IncomingIdentity("telegram", "101", "101"), display_name="Владелец")
-            code = service.create_link_code(owner.id)
+            code = service.create_link_code(owner.id, target_channel="vk")
             service.link(code=code.code, identity=IncomingIdentity("vk", "202", "202"))
             service.register_with_name(IncomingIdentity("telegram", "303", "303"), display_name="Другой")
         self.owner_id = owner.id

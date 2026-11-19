@@ -40,7 +40,7 @@ class FamilyChannelsTest(unittest.TestCase):
             apply_migrations(connection)
             identities = create_user_identity_service(connection)
             owner = identities.register_with_name(self.owner_tg, display_name="Оля")
-            identities.link(code=identities.create_link_code(owner.id).code, identity=self.owner_vk)
+            identities.link(code=identities.create_link_code(owner.id, target_channel="vk").code, identity=self.owner_vk)
             identities.register_with_name(self.guest, display_name="Илья")
             identities.register_with_name(self.other, display_name="Аня")
 

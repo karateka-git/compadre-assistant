@@ -884,10 +884,13 @@ class IncomingMessageDispatcher:
             return self._start_link(
                 arguments, _incoming_identity_from_event(event), event, user=user, required_mode=mode_id,
             )
-        if command is ChatCommand.LINK_CODE:
-            if not self._profile_link_allowed(event):
+        if command is ChatCommand.CONNECT:
+            if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
                 return IncomingResponse(text_content(_PROFILE_LINK_PRIVATE_HINT))
-            link_code = self._user_identity_service.create_link_code(user.id)
+            try:
+                link_code = self._user_identity_service.create_link_code(user.id, target_channel=arguments)
+            except IdentityAlreadyBoundError:
+                return IncomingResponse(text_content("Этот мессенджер уже привязан. Открой /connect."))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
                 app_user=user,
@@ -1119,7 +1122,7 @@ class IncomingMessageDispatcher:
                 if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
                     return IncomingResponse(text_content(
                         "Код привязки не принят. Отправь исправленный код ещё раз до истечения ожидания; отмена: /cancel. "
-                        "Если код истёк, в уже привязанном канале открой /settings и вызови /link_code."
+                        "Если код истёк, в уже привязанном канале открой /settings и вызови /connect <messenger>."
                     ), result.error)
             elif pending.input_kind == "profile_name" and user is not None:
                 result = self._save_name(event.text, user)

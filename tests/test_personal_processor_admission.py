@@ -189,8 +189,8 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
                 "UPDATE external_identities SET external_user_id = ?, external_chat_id = ? "
                 "WHERE channel = ? AND external_user_id = ?",
                 (("7", "42", "telegram", "tg-user"),
-                 ("8", "43", "telegram", "other-user"),
-                 ("9", "44", "vk", "vk-user")),
+                 ("8", "8", "telegram", "other-user"),
+                 ("9", "9", "vk", "vk-user")),
             )
             connection.commit()
         telegram = ChannelMessageProcessor(database_path=self.path, capabilities=(self.capability(),))
@@ -200,7 +200,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             return self.send_adapter("telegram", telegram, text, user, chat)
 
         def send_vk(text: str) -> str:
-            return self.send_adapter("vk", vk, text, "9", "44")
+            return self.send_adapter("vk", vk, text, "9", "9")
 
         self.assertIn("/enable example", send_vk("/example"))
         tg("/settings")
@@ -209,10 +209,10 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         send_vk("/settings")
         self.assertIn("выключена", send_vk("/disable example"))
         self.assertIn("/enable example", tg("/example"))
-        self.assertIn("/enable example", tg("/example", "8", "43"))
-        tg("/settings", "8", "43")
-        self.assertIn("включена", tg("/enable example", "8", "43"))
-        code_reply = tg("/link_code", "8", "43")
+        self.assertIn("/enable example", tg("/example", "8", "8"))
+        tg("/settings", "8", "8")
+        self.assertIn("включена", tg("/enable example", "8", "8"))
+        code_reply = tg("/connect vk", "8", "8")
         code = re.search(r"Код привязки: ([^\n]+)", code_reply)
         self.assertIsNotNone(code, code_reply)
         rebind = send_vk(f"/link {code.group(1)}")
@@ -354,7 +354,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
                 "UPDATE external_identities SET external_user_id = ?, external_chat_id = ? "
                 "WHERE channel = ? AND external_user_id = ?",
                 (("7", "42", "telegram", "tg-user"),
-                 ("9", "44", "vk", "vk-user")),
+                 ("9", "9", "vk", "vk-user")),
             )
             connection.commit()
         context = multiprocessing.get_context("spawn")

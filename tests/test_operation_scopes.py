@@ -596,8 +596,8 @@ class OperationScopesTest(unittest.TestCase):
         self.prepare()
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            target = service.register_with_name(IncomingIdentity("telegram", "target-user", "target-chat"), display_name="Анатолий")
-            code = service.create_link_code(target.id)
+            target = service.register_with_name(IncomingIdentity("vk", "target-user", "target-chat"), display_name="Анатолий")
+            code = service.create_link_code(target.id, target_channel="telegram")
             pending = service.request_rebind_confirmation(
                 code=code.code, identity=IncomingIdentity("telegram", "tg-user", TG.chat_id)
             )
@@ -635,7 +635,7 @@ class OperationScopesTest(unittest.TestCase):
         identity = IncomingIdentity("telegram", "tg-user", TG.chat_id)
         with connect_database(self.path) as connection:
             service = create_user_identity_service(connection)
-            code = service.create_link_code(2)
+            code = service.create_link_code(2, target_channel="telegram")
             previous = service.request_rebind_confirmation(code=code.code, identity=identity)
             current = service.request_rebind_confirmation(code=code.code, identity=identity)
             self.assertNotEqual(current.id, previous.id)

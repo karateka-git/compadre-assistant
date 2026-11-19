@@ -75,7 +75,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         # Управляем только временем; ввод создаётся штатными командами процессора.
         self.processor._pending_inputs._clock = lambda: self.now
 
-    def send(self, text, channel="telegram", chat="chat", user="user"):
+    def send(self, text, channel="telegram", chat="101", user="101"):
         """Отправляет очередное сообщение с новым ID через штатный core scope."""
         self.sequence += 1
         return self.processor(IncomingEvent(channel, chat, str(self.sequence), text, user))
@@ -92,7 +92,7 @@ class TextCommandSequencesTest(unittest.TestCase):
     def code(self, **address):
         """Извлекает из ответа точный код для ручной привязки другого канала."""
         self.say("/settings", **address)
-        match = re.search(r"/link (\S+)", self.say("/link_code", **address))
+        match = re.search(r"/link (\S+)", self.say("/connect telegram" if address.get("channel") == "vk" else "/connect vk", **address))
         self.assertIsNotNone(match)
         return match.group(1)
 
@@ -129,7 +129,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertIn("/cancel", self.say("wrong", channel="vk"))
         self.assertIn("привязал", self.say(code, channel="vk"))
         self.say("/settings", channel="vk")
-        self.assertIn("уже привязан", self.say("/link " + self.code(), channel="vk"))
+        self.assertIn("уже привязан", self.say("/connect vk"))
         self.say("/name")
         for info in ("/help", "/status", "/capabilities", "/start"):
             self.say(info)

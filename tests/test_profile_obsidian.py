@@ -112,7 +112,7 @@ class ProfileObsidianTest(unittest.TestCase):
                 self.assertIn("Профиль: Имя", response_text(self.process("/status", **options)))
                 self.assertIn("Теперь буду обращаться", response_text(self.process("/name Новое имя", **options)))
                 expected_link_reply = "Для привязки профиля открой личный чат" if channel == "cli" else "Код привязки"
-                self.assertIn(expected_link_reply, response_text(self.process("/link_code", **options)))
+                self.assertIn(expected_link_reply, response_text(self.process("/connect telegram" if channel == "vk" else "/connect vk", **options)))
                 help_text = response_text(self.process("/help", **options))
                 self.assertIn("/name", help_text)
                 self.assertNotIn("/vault_status", help_text)
@@ -131,7 +131,7 @@ class ProfileObsidianTest(unittest.TestCase):
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager), patch.object(manager, "get_selected", side_effect=AssertionError("Профиль не читает vault")):
             self.register(runtime=runtime)
-            for command in ("/start", "/register", "/settings", "/status", "/help", "/name Новое имя", "/link_code", "/exit"):
+            for command in ("/start", "/register", "/settings", "/status", "/help", "/name Новое имя", "/connect", "/exit"):
                 self.assertIsNone(self.process(command, runtime=runtime).error)
         with connect_database(self.database_path) as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM active_chat_modes WHERE capability_id IS NOT NULL").fetchone()[0], 0)
@@ -140,7 +140,7 @@ class ProfileObsidianTest(unittest.TestCase):
         """Общая привязка Telegram/VK доступна без предметной возможности и vault."""
         self.register(enabled_capabilities=())
         with connect_database(self.database_path) as connection:
-            code = create_user_identity_service(connection).create_link_code(1)
+            code = create_user_identity_service(connection).create_link_code(1, target_channel="vk")
         reply = self.process(f"/link {code.code}", channel="vk", enabled_capabilities=())
         self.assertIn("привязал этот канал", response_text(reply))
         self.process("/settings", channel="vk", enabled_capabilities=())

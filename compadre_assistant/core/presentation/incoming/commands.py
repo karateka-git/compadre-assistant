@@ -100,11 +100,11 @@ class ChatCommand(StrEnum):
         "<id>",
         "выключить возможность для своего профиля, сохранив режим и данные",
     )
-    LINK_CODE = (
-        "/link_code",
+    CONNECT = (
+        "/connect",
         CommandSection.CHANNEL_LINKING,
-        "",
-        "создать код привязки второго канала",
+        "<messenger>",
+        "выбрать мессенджер или получить код привязки",
     )
     LINK = (
         "/link",
@@ -128,7 +128,7 @@ class ChatCommand(StrEnum):
 # Профильные операции ядра доступны владельцу назначенного режима.
 PROFILE_COMMANDS = frozenset({
     ChatCommand.NAME, ChatCommand.STATUS, ChatCommand.CAPABILITIES, ChatCommand.ENABLE,
-    ChatCommand.DISABLE, ChatCommand.LINK_CODE, ChatCommand.LINK,
+    ChatCommand.DISABLE, ChatCommand.CONNECT, ChatCommand.LINK,
 })
 
 

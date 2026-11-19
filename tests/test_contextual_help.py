@@ -86,7 +86,7 @@ class ContextualHelpTest(unittest.TestCase):
         text = self.send()
         for command in ("/settings", "/obsidian", "/ai", "/other"):
             self.assertIn(command, text)
-        for command in ("/name", "/capabilities", "/link_code", "/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
+        for command in ("/name", "/capabilities", "/connect", "/ask", "/vault_sync", "/reanalyze", "/cancel", "/confirm"):
             self.assertNotIn(command, text)
         self.assertFalse(self.other.entries)
 
@@ -96,7 +96,7 @@ class ContextualHelpTest(unittest.TestCase):
         text = self.send()
         for command in ("/vault_sync", "/reanalyze", "/exit", "/help"):
             self.assertIn(command, text)
-        for command in ("/status", "/capabilities", "/link_code", "/ask", "/name", "/enable", "/other", "/confirm", "/cancel"):
+        for command in ("/status", "/capabilities", "/connect", "/ask", "/name", "/enable", "/other", "/confirm", "/cancel"):
             self.assertNotIn(command, text)
         self.assertIn("/other", self.send(chat="other"))
         self.assertEqual(self.modes.get(self.key).capability_id, "obsidian")

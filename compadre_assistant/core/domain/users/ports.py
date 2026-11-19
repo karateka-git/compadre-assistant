@@ -30,6 +30,9 @@ class AppUserRepository(Protocol):
 class ExternalIdentityRepository(Protocol):
     """Описывает хранилище связей внутренних пользователей с внешними каналами."""
 
+    def linked_channels(self, app_user_id: int) -> frozenset[str]:
+        """Возвращает каналы всех identities профиля, включая входы из групп."""
+
     def find(self, identity: IncomingIdentity) -> ExternalIdentity | None:
         """Ищет связь по каналу и внешнему ID пользователя."""
 
@@ -80,11 +83,12 @@ class IdentityLinkTokenRepository(Protocol):
         *,
         app_user_id: int,
         token_hash: str,
+        target_channel: str | None = None,
         expires_at: datetime,
     ) -> None:
         """Сохраняет одноразовый код привязки."""
 
-    def find_active(self, *, token_hash: str, now: datetime) -> int | None:
+    def find_active(self, *, token_hash: str, channel: str | None = None, now: datetime) -> int | None:
         """Возвращает ID пользователя для действующего кода без погашения."""
 
 

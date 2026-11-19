@@ -75,7 +75,7 @@ class MenuLifecycleTest(unittest.TestCase):
         with connect_database(self.database_path) as connection:
             service = create_user_identity_service(connection)
             user = service.resolve(self.telegram)
-            code = service.create_link_code(user.id).code
+            code = service.create_link_code(user.id, target_channel="vk").code
         self.send(self.vk, "/link " + code)
         self.assertIn("/selected", tuple(item.command for item in self.menu(self.vk).section_actions))
         self.assert_menu_matches_help(self.vk)

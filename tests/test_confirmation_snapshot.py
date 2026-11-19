@@ -327,7 +327,7 @@ class ConfirmationSnapshotSQLiteTest(unittest.TestCase):
                 target = IncomingIdentity("vk", "target", "target-chat")
                 service.register_with_name(source, display_name="Источник")
                 target_user = service.register_with_name(target, display_name="Цель")
-                code = service.create_link_code(target_user.id)
+                code = service.create_link_code(target_user.id, target_channel="telegram")
                 pending = service.request_rebind_confirmation(code=code.code, identity=source)
                 dispatcher = IncomingMessageDispatcher(registry=CapabilityRegistry(),
                     user_identity_service=service, chat_mode_repository=MemoryChatModes(),
