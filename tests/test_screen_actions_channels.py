@@ -23,6 +23,11 @@ from compadre_assistant.capabilities.ai.domain.ocr import OcrResult
 from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
+from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import ObsidianConfirmationResult, ObsidianConfirmationStatus
+from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import GitHubGatewayError
+from compadre_assistant.capabilities.obsidian.domain.vaults.vault_selection import GitHubAccountNotConnectedError, VaultSelectionStatus
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -43,6 +48,10 @@ from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handle
 from tests.test_incoming_boundary import FakeCapability
 from tests.test_telegram_bot import FakeAiogram
 from tests.test_vk_screen_actions import ProjectionClient
+from tests.test_process_incoming_message import (
+    FakeArticleUrlUseCase, FakeAnalysisUseCase, FakeVaultSelectionManager, FakeVaultSyncManager,
+    FakeGitHubConnectionStarter, _test_vault, _proposal,
+)
 
 
 class NeutralScreenCapability(FakeCapability, SectionActionsQueryPort, PendingConfirmationQueryPort):
@@ -289,6 +298,206 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         actions = {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
         action = actions[label]
         return action.get("link") or json.loads(action["payload"])["token"], message_id
+
+    def enable_obsidian(self, channel):
+        """Включает тестовую возможность для обоих зарегистрированных профилей."""
+        with connect_database(self.path) as connection:
+            service = create_user_identity_service(connection)
+            users = [service.resolve_without_touch(IncomingIdentity(channel, chat, chat)) for chat in ("1001", "1002")]
+            for user in users:
+                SQLiteUserCapabilityPreferenceRepository(connection).upsert(UserCapabilityPreference(user.id, "obsidian", True))
+        return users[0]
+
+    async def test_obsidian_vault_article_and_reanalysis_actions_in_both_channels(self):
+        """Хранилище и статьи продолжаются кнопками в личном чате и группе."""
+        for channel, chat in (("telegram", "1001"), ("vk", "1001"),
+                              ("telegram", "-1001"), ("vk", "2000000101")):
+            with self.subTest(channel=channel, chat=chat):
+                user = self.enable_obsidian(channel)
+                selection, sync = FakeVaultSelectionManager(), FakeVaultSyncManager()
+                articles, analysis = FakeArticleUrlUseCase(), FakeAnalysisUseCase()
+                confirmations = Mock()
+                confirmations.list_pending.return_value = ()
+                confirmations.get_active_for_article.return_value = None
+                handler = ObsidianMessageHandler(
+                    article_url_use_case=articles, article_analysis_use_case=analysis,
+                    vault_selection_manager=selection, vault_sync_manager=sync,
+                    obsidian_confirmation_service=confirmations, github_connection_starter=FakeGitHubConnectionStarter(),
+                )
+                self.open_channels({}, capabilities=(handler,))
+                private = chat == "1001"
+
+                async def choose(label):
+                    if private:
+                        await self.choose_section(channel, label, chat)
+                    else:
+                        await self.press(channel, *self.inline_action(channel, label), chat=chat, author="1001")
+
+                async def send(text):
+                    await self.send(channel, text, chat=chat, author="1001")
+
+                await send("/start")
+                await choose("Статьи в Obsidian")
+                await choose("Помощь")
+                self.assertNotIn("/vault_sync", self.last(channel)[0])
+                await send("https://github.com/owner/repository vault/path")
+                self.assertEqual(selection.calls[-1], (user.id, "https://github.com/owner/repository", "vault/path"))
+                self.assertNotIn("/vault", self.last(channel)[0])
+                await choose("Проверить состояние")
+                await choose("Помощь")
+                self.assertIn("/vault_sync", self.last(channel)[0])
+                await choose("Синхронизировать")
+                sync.sync = Mock(side_effect=GitHubGatewayError("offline"))
+                await choose("Синхронизировать")
+                self.assertIn("Не удалось", self.last(channel)[0])
+                self.assertNotIn("/vault_sync", self.last(channel)[0])
+                sync.sync = FakeVaultSyncManager().sync
+                await choose("Синхронизировать")
+                await send("https://example.com/article скопированный пример /confirm obsidian proposal 1 1 yes")
+                self.assertIn("Новый анализ", self.last(channel)[0])
+                self.assertEqual(len(analysis.commands), 1)
+                confirmations.confirm.assert_not_called()
+                await choose("Повторить анализ")
+                pending = self.processor._pending_inputs.get(ReplyAddress(channel, chat))
+                self.assertEqual(pending.external_user_id, "1001")
+                await choose("Помощь")
+                help_text = self.last(channel)[0]
+                self.assertIn("/reanalyze", help_text)
+                self.assertNotIn("/vault_sync", help_text)
+                await send("/help")
+                self.assertEqual(help_text, self.last(channel)[0])
+                self.assertIs(pending, self.processor._pending_inputs.get(ReplyAddress(channel, chat)))
+                if not private:
+                    for text in ("/obsidian", "/reanalyze", "7", "/cancel"):
+                        await self.send(channel, text, chat=chat, author="1002")
+                        self.assertIs(pending, self.processor._pending_inputs.get(ReplyAddress(channel, chat)))
+                await send("не число")
+                self.assertNotIn("/cancel", self.last(channel)[0])
+                await send("7")
+                self.assertEqual(len(analysis.commands), 2)
+                selection.status = VaultSelectionStatus.REPLACEMENT_CONFIRMATION_REQUIRED
+                select = selection.select
+
+                def request_replacement(**kwargs):
+                    """Возвращает созданное тестовым менеджером адресное ожидание."""
+                    result = select(**kwargs)
+                    return replace(result, confirmation=selection.get_pending(kwargs["app_user_id"], kwargs["origin"]))
+
+                selection.select = request_replacement
+                await send("https://github.com/owner/other")
+                cancel_token, replacement_message = self.inline_action(channel, "Сохранить подключение")
+                await choose("Помощь")
+                self.assertIn("/confirm obsidian replace", self.last(channel)[0])
+                await self.press(channel, cancel_token, replacement_message, chat=chat, author="1001")
+                self.assertIn("Замена отменена", self.last(channel)[0])
+                await send("https://github.com/owner/other")
+                await self.press(channel, *self.inline_action(channel, "Подтвердить замену"), chat=chat, author="1001")
+                self.assertIn("Хранилище заменено", self.last(channel)[0])
+                await choose("Отключить хранилище")
+                token, message_id = self.inline_action(channel, "Подтвердить отключение")
+                if not private:
+                    await self.press(channel, token, message_id, chat=chat, author="1002")
+                    self.assertIsNotNone(selection.selected)
+                await send("/help")
+                self.assertIn("/confirm obsidian disconnect", self.last(channel)[0])
+                await self.press(channel, token, message_id, chat=chat, author="1001")
+                self.assertIsNone(selection.selected)
+                await choose("Помощь")
+                self.assertNotIn("/reanalyze", self.last(channel)[0])
+
+    async def test_obsidian_authorization_links_and_failed_snapshot_remain_recoverable(self):
+        """Код GitHub и ссылки работают рядом со справкой, неполный список допускает перечитывание."""
+        for channel, chat in (("telegram", "1001"), ("vk", "1001"),
+                              ("telegram", "-1001"), ("vk", "2000000101")):
+            with self.subTest(channel=channel, chat=chat):
+                self.enable_obsidian(channel)
+                starter = FakeGitHubConnectionStarter()
+                selection = FakeVaultSelectionManager(error=GitHubAccountNotConnectedError())
+                service = Mock()
+                service.list_pending.side_effect = RuntimeError("temporarily unavailable")
+                handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(),
+                                                 vault_selection_manager=selection, github_connection_starter=starter,
+                                                 obsidian_confirmation_service=service)
+                self.open_channels({}, capabilities=(handler,))
+
+                async def choose(label):
+                    if chat == "1001":
+                        await self.choose_section(channel, label, chat)
+                    else:
+                        await self.press(channel, *self.inline_action(channel, label), chat=chat, author="1001")
+
+                with self.assertLogs("compadre_assistant", level="ERROR"):
+                    await self.send(channel, "/start", chat=chat, author="1001")
+                    await choose("Статьи в Obsidian")
+                    await choose("Подтверждения")
+                    self.assertIn("Не удалось получить полный список", self.last(channel)[0])
+                    await choose("Подтверждения")
+                    self.assertIn("Не удалось получить полный список", self.last(channel)[0])
+                service.list_pending.side_effect = None
+                service.list_pending.return_value = ()
+                await self.send(channel, "https://github.com/owner/repository vault/path", chat=chat, author="1001")
+                self.assertEqual(self.inline_action(channel, "Авторизовать GitHub")[0], "https://github.com/login/device")
+                texts = "\n".join(self.vk.texts.values()) if channel == "vk" else self.last(channel)[0]
+                self.assertIn("ABCD-EFGH", texts)
+                self.assertNotIn("device-secret", texts)
+                await choose("Помощь")
+                self.assertNotIn("/vault_sync", self.last(channel)[0])
+
+    async def test_obsidian_saved_proposal_retry_checks_author_version_and_access(self):
+        """Сохранённое решение переживает сбой, помощь и обновление версии в обоих каналах."""
+        for channel, chat in (("telegram", "1001"), ("vk", "1001"),
+                              ("telegram", "-1001"), ("vk", "2000000101")):
+            with self.subTest(channel=channel, chat=chat):
+                user = self.enable_obsidian(channel)
+                proposal = replace(_proposal(), app_user_id=user.id, origin=PendingOrigin(channel, chat),
+                                   reasoning="Данные статьи: /exit и /confirm obsidian proposal 1 1 yes")
+                service = Mock()
+                current = [proposal]
+                service.list_pending.side_effect = lambda user_id, origin: tuple(
+                    item for item in current if item.app_user_id == user_id and item.origin == origin)
+                service.confirm.side_effect = lambda *args, **kwargs: ObsidianConfirmationResult(
+                    ObsidianConfirmationStatus.FAILED, current[0], GitHubGatewayError("offline"))
+                selection = FakeVaultSelectionManager(selected=_test_vault(user.id))
+                handler = ObsidianMessageHandler(article_url_use_case=FakeArticleUrlUseCase(),
+                                                 vault_selection_manager=selection, obsidian_confirmation_service=service)
+                self.open_channels({}, capabilities=(handler,))
+
+                async def choose(label):
+                    if chat == "1001":
+                        await self.choose_section(channel, label, chat)
+                    else:
+                        await self.press(channel, *self.inline_action(channel, label), chat=chat, author="1001")
+
+                await self.send(channel, "/start", chat=chat, author="1001")
+                await choose("Статьи в Obsidian")
+                self.assertIn(proposal.reasoning, "\n".join(self.vk.texts.values()) if channel == "vk" else self.last(channel)[0])
+                label = "Завершить разбор №7"
+                token, message_id = self.inline_action(channel, label)
+                await self.press(channel, token, message_id, chat=chat, author="1002")
+                service.confirm.assert_not_called()
+                await self.send(channel, "/help", chat=chat, author="1001")
+                self.assertIn("/confirm obsidian proposal 1 1 yes", self.last(channel)[0])
+                await self.press(channel, token, message_id, chat=chat, author="1001")
+                self.assertIn("Предложение и текст статьи сохранены", self.last(channel)[0])
+                self.assertNotIn("/confirm", self.last(channel)[0])
+                self.assertEqual(service.confirm.call_count, 1)
+                await choose("Подтверждения")
+                stale_token, stale_message = self.inline_action(channel, label)
+                current[0] = replace(proposal, version=proposal.version + 1)
+                await self.press(channel, stale_token, stale_message, chat=chat, author="1001")
+                self.assertEqual(service.confirm.call_count, 1)
+                # Повторное чтение возвращает новую версию, не исполняя старую команду.
+                await self.send(channel, "/confirm", chat=chat, author="1001")
+                token, message_id = self.inline_action(channel, label)
+                service.confirm.side_effect = None
+                service.confirm.return_value = ObsidianConfirmationResult(ObsidianConfirmationStatus.APPLIED, current[0])
+                await self.press(channel, token, message_id, chat=chat, author="1001")
+                self.assertEqual(service.confirm.call_args.kwargs["version"], 2)
+                self.assertEqual(service.confirm.call_count, 2)
+                with connect_database(self.path) as connection:
+                    SQLiteUserCapabilityPreferenceRepository(connection).upsert(UserCapabilityPreference(user.id, "obsidian", False))
+                await self.press(channel, token, message_id, chat=chat, author="1001")
+                self.assertEqual(service.confirm.call_count, 2)
 
     async def test_family_buttons_help_and_membership_decisions_in_both_channels(self):
         """Проходит семью без команд, сохраняя исходные кнопки при открытии справки."""

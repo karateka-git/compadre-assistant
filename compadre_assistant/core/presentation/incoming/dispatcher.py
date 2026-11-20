@@ -239,7 +239,7 @@ class IncomingMessageDispatcher:
     def _group_action_allowed(self, command: str) -> bool:
         """Допускает команды без аргументов, уже разрешённые в группах каталогом."""
         owner = self._registry.mode_command_owner(command)
-        return (command in {"/register", "/cancel", "/help", "/exit", "/status", "/name",
+        return (command in {"/register", "/cancel", "/help", "/exit", "/status", "/name", "/confirm",
                             "/capabilities", "/enable", "/disable"}
                 or (command.split() == [command] and (
                     self._registry.by_command(command) is not None
@@ -292,7 +292,7 @@ class IncomingMessageDispatcher:
                 return replace(response, suggested_actions=())
             if view is not None and not self._may_deliver_view(view_origin, context):
                 return unavailable(view)
-            snapshot = self._action_confirmations(event) if response.actions and private_chat else None
+            snapshot = self._action_confirmations(event) if response.actions else None
             actions = []
             for action in response.actions if snapshot is not None else ():
                 # Подпись в списке ожиданий может уточнять предмет действия.
@@ -306,7 +306,7 @@ class IncomingMessageDispatcher:
             confirmation_commands = {action.command for action in response.actions}
             for action in descriptions:
                 if not private_chat:
-                    if not self._group_action_allowed(action.command):
+                    if action.url is None and not self._group_action_allowed(action.command):
                         continue
                     action = replace(action, scope=ActionScope.SCREEN)
                 if action.url is not None:
@@ -434,10 +434,8 @@ class IncomingMessageDispatcher:
             elif (not self._suggestion_allowed(entry.command, entry.context)
                   or (not self._profile_link_allowed(event) and not self._group_action_allowed(entry.command))):
                 return rejected()
-            if entry.command.strip() == "/confirm":
-                snapshot = self._action_confirmations(event)
-                if snapshot.status != "complete" or not snapshot.confirmations:
-                    return rejected()
+            # Открытие списка — безопасное чтение даже после сбоя источника.
+            # Адресное решение выше по-прежнему требует полного актуального снимка.
         except Exception:
             LOGGER.exception("Could not validate selected response action")
             return rejected()
@@ -502,8 +500,12 @@ class IncomingMessageDispatcher:
 
     def _action_confirmations(self, event: IncomingEvent) -> ConfirmationQueryResult:
         """Читает ожидания проверенного адреса без touch исходной identity."""
-        known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
-        user = known[0] if known else None
+        if self._profile_link_allowed(event):
+            known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+            user = known[0] if known else None
+        else:
+            # Групповое решение принадлежит автору, а не общему адресу беседы.
+            user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
         state = self._chat_mode_repository.get_state(
             ChatModeKey(user.id, event.channel, event.chat_id)
         ) if user else None
@@ -1868,7 +1870,9 @@ class IncomingMessageDispatcher:
                 "В этом чате нет действий, которые нужно подтвердить."
                 if result.status == "complete" else
                 "Не удалось получить полный список действий для подтверждения. Попробуй позже."
-            ), suggested_actions=() if show_commands else (_HELP_SCREEN_ACTION,))
+            ), suggested_actions=() if show_commands else (
+                ((_CONFIRM_SCREEN_ACTION,) if result.status != "complete" else ()) + (_HELP_SCREEN_ACTION,)
+            ))
         prefix = ("Список действий неполный: часть источников подтверждений недоступна.\n"
                   if result.status != "complete" else "")
         actions = tuple(action for item in result.confirmations for action in item.actions)

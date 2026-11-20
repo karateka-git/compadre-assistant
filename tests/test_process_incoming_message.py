@@ -936,7 +936,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         response = use_case.dispatcher.execute(_telegram_message("https://github.com/octocat/notes"))
         self.assertIn("ABCD-EFGH", response_text(response))
         self.assertIn("https://github.com/login/device", response_text(response))
-        self.assertEqual(tuple(action.url for action in response.suggested_actions),
+        self.assertEqual(tuple(action.url for action in response.suggested_actions if action.url is not None),
                          ("https://github.com/login/device",))
 
     def test_execute_reports_unconfigured_github_connector(self) -> None:

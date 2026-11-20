@@ -251,7 +251,7 @@ class ProfileObsidianTest(unittest.TestCase):
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             reply = self.process("/obsidian /vault_disconnect", runtime=runtime)
-            self.assertIn("отдельным сообщением", response_text(reply))
+            self.assertIn("Сначала открой раздел Obsidian", response_text(reply))
             self.assertIsNotNone(reply.error)
             self.assertFalse(manager.disconnect_pending)
             self.assertIn("Открой раздел", response_text(self.process("/vault_disconnect", runtime=runtime)))
@@ -262,7 +262,7 @@ class ProfileObsidianTest(unittest.TestCase):
             self.process("/exit", runtime=runtime)
             for decision in (confirmation, "да"):
                 reply = self.process(f"/obsidian {decision}", runtime=runtime)
-                self.assertIn("отдельным сообщением", response_text(reply))
+                self.assertIn("Сначала открой раздел Obsidian", response_text(reply))
                 self.assertIsNotNone(reply.error)
                 self.assertTrue(manager.disconnect_pending)
                 self.assertIsNotNone(manager.selected)

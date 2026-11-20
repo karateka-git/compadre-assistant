@@ -111,9 +111,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
         case ObsidianResultType.CONFIRMATION_MISSING:
             return (
                 compose_content(
-                    'Сейчас нет ожидающего действия для подтверждения.\nЧтобы подключить другой repository, пришли его ссылку; для привязки канала введи ',
-                    code_span('/link <code>'),
-                    '.',
+                    'Сейчас нет ожидающего действия для подтверждения.\nЧтобы подключить другой repository, пришли его ссылку.',
                 )
             )
         case ObsidianResultType.GITHUB_CONNECT_STARTED:
@@ -248,7 +246,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
                 return compose_content(_format_vault_configuration_error(result.error))
             return (
                 compose_content(
-                    'Не удалось завершить синхронизацию vault с GitHub. Локальная копия не помечена как актуальная; её содержимое могло не обновиться. Повтори /vault_sync позже.',
+                    'Не удалось завершить синхронизацию vault с GitHub. Локальная копия не помечена как актуальная; её содержимое могло не обновиться. Повтори синхронизацию позже.',
                 )
             )
         case ObsidianResultType.GITHUB_VAULT_CONFIGURATION_REQUIRED:
@@ -257,7 +255,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
             return (
                 compose_content(
                     code_span(str(VAULT_CONFIGURATION_PATH)),
-                    ' нужно исправить; синхронизация не завершена. Исправь файл и вызови /vault_sync.',
+                    ' нужно исправить; синхронизация не завершена. Исправь файл и повтори синхронизацию.',
                 )
             )
         case ObsidianResultType.GITHUB_STATUS:
@@ -301,12 +299,12 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
         ):
             return (
                 compose_content(
-                    'Нет запроса на отключение vault. Вызови /vault_disconnect, чтобы запросить отключение.',
+                    'Нет запроса на отключение vault. Нажми «Отключить хранилище», чтобы запросить отключение.',
                 )
             )
         case ObsidianResultType.REANALYZE_COMMAND_INVALID:
             return compose_content(
-                'Для повторного анализа нужен числовой ID статьи. Используй /reanalyze <article_id>.',
+                'Для повторного анализа нужен числовой ID статьи. Нажми «Повторить анализ» и введи ID следующим сообщением.',
             )
         case ObsidianResultType.ARTICLE_REANALYZED:
             if result.review_result is not None:
@@ -343,19 +341,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
                 result,
             ))
         case ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING:
-            proposal = _confirmation_proposal(result)
-            target = (
-                compose_content(' для заметки ', code_span(str(proposal.target_path)))
-                if proposal is not None and proposal.target_path is not None
-                else ""
-            )
-            return (
-                compose_content(
-                    'Ожидаю решения по предложению',
-                    target,
-                    '.',
-                )
-            )
+            return compose_content('Ожидаю решения по предложению.\n', _format_obsidian_review(result))
         case ObsidianResultType.ARTICLE_REVIEW_CANCELLED:
             return (
                 compose_content(
@@ -381,7 +367,7 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
             )
             if result.error is not None:
                 response = compose_content(response, (
-                    "\n\nЗаметка записана в GitHub, но поисковый индекс ещё не обновлён. Запусти /vault_sync, чтобы обновить его."
+                    "\n\nЗаметка записана в GitHub, но поисковый индекс ещё не обновлён. Нажми «Синхронизировать», чтобы обновить его."
                 ))
             return compose_content(response)
         case ObsidianResultType.ARTICLE_REVIEW_CONFLICT:
@@ -393,13 +379,13 @@ def format_obsidian_message_result(result: ObsidianMessageResult) -> MessageCont
         case ObsidianResultType.ARTICLE_REVIEW_IN_PROGRESS:
             return (
                 compose_content(
-                    'Хранилище сейчас занято синхронизацией или записью из другого связанного канала. Предложение сохранено. После завершения операции повтори адресную команду из запроса или открой /confirm.',
+                    'Хранилище сейчас занято синхронизацией или записью из другого связанного канала. Предложение сохранено. После завершения операции открой «Подтверждения» и выбери сохранённое предложение.',
                 )
             )
         case ObsidianResultType.ARTICLE_REVIEW_APPLY_FAILED:
             return (
                 compose_content(
-                    'Не удалось записать изменение в GitHub. Предложение и текст статьи сохранены. После устранения ошибки повтори адресную команду из запроса или открой /confirm.',
+                    'Не удалось записать изменение в GitHub. Предложение и текст статьи сохранены. После устранения ошибки открой «Подтверждения» и выбери сохранённое предложение.',
                 )
             )
         case ObsidianResultType.ARTICLE_REVIEWED_RESULT:
@@ -492,9 +478,9 @@ def _with_vault_sync_warning(
 def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
     """Показывает безопасную сводку предложения без изменения GitHub."""
     review = result.review_result
-    if review is None:
+    proposal = review.proposal if review is not None else _confirmation_proposal(result)
+    if proposal is None:
         return compose_content('Предложение для Obsidian подготовлено, но сводка недоступна.')
-    proposal = review.proposal
     if (proposal.action is ObsidianProposalAction.UNKNOWN
             or proposal.status is ObsidianProposalStatus.UNKNOWN):
         return compose_content('Предложение этой статьи недоступно текущей версии. Данные не изменены.')
@@ -513,7 +499,7 @@ def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
     )
     preview_source = (
         review.markdown_diff
-        if proposal.action is ObsidianProposalAction.UPDATE
+        if review is not None and proposal.action is ObsidianProposalAction.UPDATE
         and review.markdown_diff
         else proposal.proposed_markdown or ""
     )
@@ -522,7 +508,7 @@ def _format_obsidian_review(result: ObsidianMessageResult) -> MessageContent:
         preview += "\n\n[Предпросмотр сокращён.]"
     preview_label = (
         "Предлагаемый diff"
-        if proposal.action is ObsidianProposalAction.UPDATE
+        if review is not None and proposal.action is ObsidianProposalAction.UPDATE and review.markdown_diff
         else "Предлагаемый текст заметки"
     )
     return (
@@ -595,17 +581,13 @@ def _format_vault_selection(
                     description,
                     '\n\n',
                     _format_vault_configuration_error(result.error),
-                    '\n\nПодключение сохранено. После исправления запусти ',
-                    code_span('/vault_sync'),
-                    '.',
+                    '\n\nПодключение сохранено. После исправления повтори синхронизацию.',
                 )
             )
         return (
             compose_content(
                 description,
-                '\n\nПодключение vault сохранено, но первая синхронизация не завершилась. Повтори ',
-                code_span('/vault_sync'),
-                '.',
+                '\n\nПодключение vault сохранено, но первая синхронизация не завершилась. Повтори синхронизацию.',
             )
         )
     if result.vault_sync_result is not None:
@@ -622,7 +604,7 @@ def _format_vault_sync(result: ObsidianMessageResult) -> MessageContent:
     sync = result.vault_sync_result
     if sync is None:
         return compose_content(
-            'Синхронизация vault завершилась, но подробная сводка недоступна. Вызови /vault_status, чтобы проверить состояние локальной копии.',
+            'Синхронизация vault завершилась, но подробная сводка недоступна. Нажми «Проверить состояние», чтобы проверить локальную копию.',
         )
     if sync.status is VaultSyncStatus.NO_VAULT:
         return compose_content(
@@ -630,7 +612,7 @@ def _format_vault_sync(result: ObsidianMessageResult) -> MessageContent:
         )
     if sync.status is VaultSyncStatus.IN_PROGRESS:
         return compose_content(
-            'Синхронизация vault с GitHub уже идёт. После завершения вызови /vault_status, чтобы проверить состояние локальной копии.',
+            'Синхронизация vault с GitHub уже идёт. После завершения нажми «Проверить состояние», чтобы проверить локальную копию.',
         )
     if sync.status is VaultSyncStatus.FRESH:
         reply = (
@@ -712,7 +694,7 @@ def _format_vault_configuration_error(error: VaultConfigurationError) -> Message
     return (
         compose_content(
             reason,
-            '\nСинхронизация не завершена. Создай или исправь файл вручную по примеру ниже, затем вызови /vault_sync.\n\nПример:\n',
+            '\nСинхронизация не завершена. Создай или исправь файл вручную по примеру ниже, затем повтори синхронизацию.\n\nПример:\n',
             str(load_vault_configuration_example()),
         )
     )

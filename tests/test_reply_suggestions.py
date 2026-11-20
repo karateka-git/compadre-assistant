@@ -6,7 +6,8 @@ from unittest.mock import Mock
 
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
-from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
@@ -96,13 +97,26 @@ class ReplySuggestionsTest(unittest.TestCase):
                 handler = ObsidianMessageHandler(article_url_use_case=Mock(), vault_selection_manager=selected,
                                                  vault_sync_manager=sync)
                 response = handler.enter(context, event, "").response
-                self.assertEqual(tuple(action.command for action in response.suggested_actions), commands)
+                self.assertEqual(tuple(action.command for action in response.suggested_actions),
+                                 commands[:-1] + ("/confirm", "/help", "/exit"))
                 self.assertEqual(response.suggested_actions, handler.section_actions(user, event.reply_address, 1, None))
                 self.assertTrue(all(action.scope == ActionScope.SECTION for action in response.suggested_actions))
-                if "/vault_status" in commands:
-                    self._assert_command_visible_in_channels(response, "/vault_status")
-                self._assert_command_visible_in_channels(response, "/help")
+                self.assertNotRegex(content_text(response.content), r"/(?:vault_status|help|exit)\b")
                 self.assertEqual(response.actions, ())
+
+    def test_every_obsidian_outcome_keeps_available_actions_and_help(self) -> None:
+        """Последний результат и ошибка не обрывают кнопочный путь хранилища."""
+        user, event = AppUser(23, "Имя"), _event("/obsidian")
+        service = Mock()
+        service.list_pending.return_value = ()
+        handler = ObsidianMessageHandler(article_url_use_case=Mock(), article_analysis_use_case=Mock(),
+                                         vault_selection_manager=FakeVaultSelectionManager(selected=_test_vault(23)),
+                                         vault_sync_manager=Mock(), obsidian_confirmation_service=service)
+        for result_type in ObsidianResultType:
+            with self.subTest(result=result_type):
+                response = handler._result_response(ObsidianMessageResult(type=result_type, app_user=user), event.reply_address)
+                self.assertEqual({action.command for action in response.suggested_actions},
+                                 {"/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/help", "/exit"})
 
     def test_confirmation_actions_stay_separate_from_suggestions(self) -> None:
         """Адресные решения не превращаются в общие следующие шаги."""

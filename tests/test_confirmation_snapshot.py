@@ -259,7 +259,7 @@ class ObsidianConfirmationSnapshotTest(unittest.TestCase):
         self.assertNotIn("можно ответить «да»", response_text(response))
         self.assertEqual(tuple(action.command for action in response.actions),
                          ("/confirm obsidian disconnect 1 1 yes", "/confirm obsidian disconnect 1 1 no"))
-        self.assertIn("/confirm", response_text(response))
+        self.assertIn("«Подтверждения»", response_text(response))
 
     def test_missing_or_failing_service_preserves_known_actions(self):
         """Неполный снимок сохраняет команды, но запрещает короткое решение."""
