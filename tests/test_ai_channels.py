@@ -61,8 +61,8 @@ class AiChannelsTest(unittest.TestCase):
 
     def send(self, channel, processor, text, chat_id=42, on_delivery=None, *, images=(), load=None):
         """Проводит сообщение через канал и возвращает доставленный текст."""
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
-        progress = ("Вопрос принят. Готовлю ответ… Для отмены введи /cancel.", receipt)
+        receipt = "Фото получено. Распознаю текст."
+        progress = ("Вопрос принят. Готовлю ответ…", receipt)
         finished = threading.Event()
         self.response_message_id = None
 
@@ -415,7 +415,7 @@ class AiChannelsTest(unittest.TestCase):
                     denied = self.send(channel, processor, "/ask до входа")
                     self.assertIn("Открой раздел", denied)
                     self.assertNotIn("/ai", denied)
-                    self.assertIn("/ai без аргументов", self.send(channel, processor, "/ai /ask вопрос"))
+                    self.assertIn("Открой режим ИИ", self.send(channel, processor, "/ai /ask вопрос"))
                     model.answer.assert_not_called()
                     self.assertIn("Режим ИИ включён", self.send(channel, processor, "/ai"))
                     for question in ("первый", "https://example.com/article"):
@@ -930,7 +930,7 @@ class AiChannelsTest(unittest.TestCase):
 
     def test_ocr_cancels_during_download_or_model(self) -> None:
         """VK очередь и Telegram handler принимают отмену при заблокированной сети."""
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        receipt = "Фото получено. Распознаю текст."
         marker = "Распознанный ответ"
         command = "/get_text_from_image"
         for channel in ("telegram", "vk"):
@@ -1230,7 +1230,7 @@ class AiChannelsTest(unittest.TestCase):
         """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
         release, menu_restored = threading.Event(), threading.Event()
         command = "/get_text_from_image"
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        receipt = "Фото получено. Распознаю текст."
         menus = []
 
         def publish(update):
@@ -1468,7 +1468,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.send(channel, processor, "/ai")
-                    receipt = "Вопрос принят. Готовлю ответ… Для отмены введи /cancel."
+                    receipt = "Вопрос принят. Готовлю ответ…"
                     self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == receipt else None)
                     self.assertEqual(self.delivered[0], receipt)
                     self.assertGreater(len(self.delivered), 2)

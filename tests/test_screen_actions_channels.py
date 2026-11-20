@@ -19,6 +19,8 @@ import aiogram
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
 from compadre_assistant.capabilities.family.bootstrap import create_family_capability
 from compadre_assistant.capabilities.ai.domain.errors import AiModelError
+from compadre_assistant.capabilities.ai.domain.ocr import OcrResult
+from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
@@ -29,6 +31,7 @@ from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
 )
+from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityHelp, CapabilityResult, ConfirmationQueryResult, HelpSection,
@@ -604,6 +607,139 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 await self.choose_section(channel, "Настройки", chat)
                 self.assertIn("Настройки", self.last(channel)[0])
                 self.assertEqual(self.owner.selected, [])
+
+    async def test_ai_group_question_actions_and_waiting_input_belong_to_the_author(self):
+        """В группе вопрос, помощь и отмена доступны только автору исходного действия."""
+        for channel, chat in (("telegram", "-1001"), ("vk", "2000000101")):
+            with self.subTest(channel=channel):
+                model = Mock()
+                model.answer.return_value = "Ответ на групповой вопрос"
+                self.open_channels({}, capabilities=(AiCapability(AskQuestion(model=model, max_question_chars=100), Mock()),))
+
+                async def press(label, *, author="1001"):
+                    await self.press(channel, *self.inline_action(channel, label), chat=chat, author=author)
+
+                await self.send(channel, "/start", chat=chat, author="1001")
+                await press("Режим ИИ")
+                ask_token, entry_id = self.inline_action(channel, "Задать вопрос")
+                await self.press(channel, ask_token, entry_id, chat=chat, author="1002")
+                self.assertIn("больше недоступна", self.last(channel)[0])
+                await self.press(channel, ask_token, entry_id, chat=chat, author="1001")
+                help_token, prompt_id = self.inline_action(channel, "Помощь")
+                address = ReplyAddress(channel, chat)
+                pending = self.processor._pending_inputs.get(address)
+                self.assertEqual(pending.external_user_id, "1001")
+                for text in ("/cancel", "чужой вопрос", "/ai", "/ask"):
+                    await self.send(channel, text, chat=chat, author="1002")
+                    self.assertIs(self.processor._pending_inputs.get(address), pending)
+                await self.press(channel, help_token, prompt_id, chat=chat, author="1001")
+                self.assertIn("/ask", self.last(channel)[0])
+                self.assertNotIn("/get_text_from_image", self.last(channel)[0])
+                help_text = self.last(channel)[0]
+                await self.send(channel, "/help", chat=chat, author="1001")
+                self.assertEqual(self.last(channel)[0], help_text)
+                self.assertIs(self.processor._pending_inputs.get(address), pending)
+                await self.send(channel, "Мой вопрос", chat=chat, author="1001")
+                async with asyncio.timeout(5):
+                    while "Ответ на групповой вопрос" not in self.last(channel)[0]:
+                        await asyncio.sleep(0.01)
+                self.assertIn("Извлечь текст с фото", dict(self.last(channel)[1]))
+                model.answer.assert_called_once()
+                self.assertEqual(model.answer.call_args.kwargs["question"], "Мой вопрос")
+
+    async def test_ai_photo_retry_cancellation_and_help_in_private_and_group_chats(self):
+        """Фото проходит кнопочный ввод, повтор и отмену в обоих видах чата и каналах."""
+        for channel, chat in (("telegram", "1001"), ("vk", "1001"),
+                              ("telegram", "-1001"), ("vk", "2000000101")):
+            with self.subTest(channel=channel, chat=chat):
+                entered, release = Event(), Event()
+                model = Mock()
+
+                def recognize(*, image, instruction):
+                    if image.data.endswith(b"slow"):
+                        entered.set()
+                        release.wait(5)
+                        return OcrResult("Отменённый OCR")
+                    return OcrResult("Текст фото с /ask как данными")
+
+                model.recognize_text.side_effect = recognize
+                self.open_channels({}, capabilities=(AiCapability(AskQuestion(model=Mock(), max_question_chars=100), ExtractImageText(model=model)),))
+                private = chat == "1001"
+
+                async def press(label):
+                    if private:
+                        await self.choose_section(channel, label, chat)
+                    else:
+                        await self.press(channel, *self.inline_action(channel, label), chat=chat, author="1001")
+
+                async def photo(data):
+                    if channel == "telegram":
+                        async def download(file_id, *, destination, seek):
+                            destination.write(data)
+                        self.bot.download = download
+                        async def answer(value, **kwargs):
+                            return await self.bot.send_message(chat_id=int(chat), text=value, **kwargs)
+                        await self.router.handler(SimpleNamespace(
+                            chat=SimpleNamespace(id=int(chat)), from_user=SimpleNamespace(id=1001),
+                            message_id=next(self.ids), text=None, caption="/exit", bot=self.bot, answer=answer,
+                            photo=[SimpleNamespace(file_id="photo", file_size=None, width=40, height=40)],
+                        ))
+                    else:
+                        with patch("compadre_assistant.presentation.vk.photos._download", new=AsyncMock(return_value=data)):
+                            _handle_update({"type": "message_new", "object": {"message": {
+                                "peer_id": int(chat), "from_id": 1001, "id": next(self.ids), "text": "/exit",
+                                "attachments": [{"type": "photo", "photo": {"sizes": [{
+                                    "url": "https://sun1.userapi.com/photo", "width": 40, "height": 40,
+                                }]}}],
+                            }}}, incoming_message_processor=self.processor, client=self.vk, logger=self.logger,
+                                menu_update_handler=self.vk_menu)
+                            # Дождаться чтения внутри worker, пока действует подмена загрузки.
+                            async with asyncio.timeout(5):
+                                while self.processor._deferred_actions.get(ReplyAddress(channel, chat)) is not None and not entered.is_set():
+                                    await asyncio.sleep(0.01)
+
+                async def wait_text(fragment):
+                    async with asyncio.timeout(5):
+                        while fragment not in self.last(channel)[0]:
+                            await asyncio.sleep(0.01)
+
+                try:
+                    await self.send(channel, "/start", chat=chat, author="1001")
+                    await press("Режим ИИ")
+                    await press("Извлечь текст с фото")
+                    address = ReplyAddress(channel, chat)
+                    pending = self.processor._pending_inputs.get(address)
+                    await self.send(channel, "вместо фото", chat=chat, author="1001")
+                    self.assertNotIn("/cancel", self.last(channel)[0])
+                    await press("Помощь")
+                    self.assertIn("/get_text_from_image", self.last(channel)[0])
+                    self.assertNotIn("/ask", self.last(channel)[0])
+                    self.assertIs(self.processor._pending_inputs.get(address), pending)
+                    await photo(b"invalid")
+                    await wait_text("Не удалось прочитать фото")
+                    self.assertNotIn("/get_text_from_image", self.last(channel)[0])
+                    await press("Извлечь текст с фото")
+                    await photo(b"\xff\xd8\xffslow")
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    cancel = self.inline_action(channel, "Отмена") if channel == "telegram" or not private else None
+                    if not private:
+                        await self.send(channel, "/cancel", chat=chat, author="1002")
+                        self.assertIsNotNone(self.processor._deferred_actions.get(address))
+                    if cancel is None:
+                        await press("Отмена")
+                    else:
+                        await self.press(channel, *cancel, chat=chat, author="1001")
+                    self.assertIn("Обработка отменена", self.last(channel)[0])
+                    release.set()
+                    await press("Извлечь текст с фото")
+                    entered.clear()
+                    await photo(b"\xff\xd8\xffready")
+                    await wait_text("Текст фото с /ask как данными")
+                    await press("Задать вопрос")
+                    all_texts = ([item[1]["text"] for item in self.telegram] if channel == "telegram" else self.vk.texts.values())
+                    self.assertFalse(any("Отменённый OCR" in text for text in all_texts))
+                finally:
+                    release.set()
 
     async def test_background_cancellation_help_result_and_failure_in_both_channels(self):
         """Справка, отмена и ответы фоновой работы возвращают актуальные действия."""

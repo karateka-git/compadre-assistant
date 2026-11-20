@@ -237,10 +237,14 @@ class IncomingMessageDispatcher:
         return pending if pending is not None and pending.external_user_id in (None, event.external_user_id) else None
 
     def _group_action_allowed(self, command: str) -> bool:
-        """Допускает общие действия группы без аргументов и привязки каналов."""
+        """Допускает команды без аргументов, уже разрешённые в группах каталогом."""
+        owner = self._registry.mode_command_owner(command)
         return (command in {"/register", "/cancel", "/help", "/exit", "/status", "/name",
                             "/capabilities", "/enable", "/disable"}
-                or (command.split() == [command] and self._registry.by_command(command) is not None))
+                or (command.split() == [command] and (
+                    self._registry.by_command(command) is not None
+                    or (owner is not None and owner.private_chat_hint is None)
+                )))
 
     def bind_response_actions(
         self, event: IncomingEvent, response: IncomingResponse, store: ResponseActionStore, *,
@@ -1731,7 +1735,7 @@ class IncomingMessageDispatcher:
                     section_actions = (HOME_SECTION_ACTION, *section_actions)
             elif (user is not None and mode is not None and isinstance(active, SectionActionsQueryPort)
                   and (self._profile_link_allowed(event)
-                       or (active.descriptor.profile_commands and self._group_action_address(event)))):
+                       or (active.descriptor.private_chat_hint is None and self._group_action_address(event)))):
                 section_actions = self._section_actions_for_context(
                     event, user, active, mode.capability_id, mode.revision, valid_pending,
                 )

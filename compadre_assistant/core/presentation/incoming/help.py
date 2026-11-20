@@ -1,5 +1,7 @@
 """Контекстная справка из публичного каталога и проверенных снимков чата."""
 
+from dataclasses import replace
+
 from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -71,6 +73,16 @@ def format_contextual_help(
         active = personal.by_id(mode_id) if mode_id else None
         if active is not None and active.descriptor.persistent_mode:
             catalog = active.descriptor.help if active_help is None else active_help
+            if pending is not None and pending.owner_id == active.descriptor.capability_id and pending.cancel_only_menu:
+                # В ожидании значения объясняем текущий шаг; остальные входы
+                # снова появятся после отмены или завершения ввода.
+                retry = (pending.retry_command or "").split(maxsplit=1)
+                name = retry[0] if retry else ""
+                catalog = replace(catalog, sections=tuple(
+                    replace(section, commands=commands)
+                    for section in catalog.sections
+                    if (commands := tuple(item for item in section.commands if item.name == name))
+                ), instructions=())
             line(f"Команды режима {mode_id}:")
             for section in catalog.sections:
                 line(section.title + ":")

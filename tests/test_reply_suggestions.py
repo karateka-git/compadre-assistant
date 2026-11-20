@@ -9,6 +9,7 @@ from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import HandlerContext, ReplyAction
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
@@ -52,9 +53,10 @@ class ReplySuggestionsTest(unittest.TestCase):
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions,
-                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION),))
-        self.assertIn("вызови /ask", content_text(response.content))
-        self._assert_command_visible_in_channels(response, "/ask")
+                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION), HELP_SECTION_ACTION))
+        self.assertIn("начни ввод заново", content_text(response.content))
+        self.assertNotIn("/ask", "".join(part.text for part in render_telegram_content(response.content)))
+        self.assertNotIn("/ask", "".join(part.text for part in render_vk_content(response.content)))
         model.answer.assert_not_called()
 
         model.answer.return_value = "Ответ модели"
@@ -63,7 +65,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         model.answer.assert_not_called()
         answered = accepted.cancellable_action(lambda: False)
         self.assertEqual(content_text(answered.content), "Ответ модели")
-        self.assertEqual(answered.suggested_actions, ())
+        self.assertEqual({action.command for action in answered.suggested_actions},
+                         {"/ask", "/get_text_from_image", "/exit", "/help"})
 
     def test_ask_without_pending_input_keeps_only_direct_retry(self) -> None:
         """Без хранилища ожиданий голая команда не предлагается."""
@@ -72,8 +75,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         response = AiCapability(question, Mock()).handle(
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
-        self.assertEqual(response.suggested_actions, ())
-        self.assertIn("/ask <question>", content_text(response.content))
+        self.assertEqual(response.suggested_actions, (HELP_SECTION_ACTION,))
+        self.assertNotIn("/ask", content_text(response.content))
         self.assertNotIn("вызови /ask", content_text(response.content))
         model.answer.assert_not_called()
 
