@@ -234,9 +234,9 @@ class AiChannelsTest(unittest.TestCase):
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
-            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            code = re.search(r"Код привязки: (?:<code>)?([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
-            send(processor, code.group(0))
+            send(processor, f"/link {code.group(1)}")
 
         # Новый процесс не знает, что отображается в клиенте VK.
         before = len(client.messages)
@@ -473,12 +473,12 @@ class AiChannelsTest(unittest.TestCase):
                         send("/settings")
                         self.assertIn("«Режим ИИ» (ai)", send("/capabilities"))
                         self.assertIn("Неизвестная возможность", send("/disable ask"))
-                        self.assertIn("«Режим ИИ» — /disable ai", send("/disable"))
+                        self.assertIn("«Режим ИИ» (ai)", send("/disable"))
                         self.assertIn("Возможность «Режим ИИ» выключена", send("/disable ai"))
                         self.assertEqual(send("/ai"),
                                          "Возможность «Режим ИИ» лично выключена. "
                                          "Включить: /settings, затем /enable ai.")
-                        self.assertIn("«Режим ИИ» — /enable ai", send("/enable"))
+                        self.assertIn("«Режим ИИ» (ai)", send("/enable"))
                         self.assertIsNotNone(self.response_message_id)
                         self.assertEqual(
                             self.press_action(channel, processor, self.keyboard, "Включить «Режим ИИ»",
@@ -1245,9 +1245,9 @@ class AiChannelsTest(unittest.TestCase):
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
-            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            code = re.search(r"Код привязки: (?:<code>)?([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
-            self.assertIn("привязал", self.send("vk", processor, code.group(0), chat_id=7))
+            self.assertIn("привязал", self.send("vk", processor, f"/link {code.group(1)}", chat_id=7))
             self.send("vk", processor, "/settings", chat_id=7)
             self.send("telegram", processor, "/ai", chat_id=7)
             self.send("telegram", processor, command, chat_id=7)

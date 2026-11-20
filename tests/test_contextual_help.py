@@ -45,7 +45,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
         self.ask = AiCapability(Mock(), Mock())
         self.other = FakeCapability("other", "/other")
-        self.settings = SettingsCapability()
+        self.settings = SettingsCapability(linked_channels=lambda _user_id: frozenset())
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
         self.key = ChatModeKey(23, "telegram", "101")

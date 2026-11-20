@@ -74,7 +74,8 @@ class LinkedChatMenusTest(unittest.TestCase):
         response = self.send("/disable ai")
         self.assertIn("выключена", response_text(response))
         menus = self.menus()
-        self.assertEqual(set(menus), {"202"})
+        self.assertEqual(set(menus), {"101", "202"})
+        self.assertIn("/enable", menus["101"])
         self.assertIn("/exit", menus["202"])
         self.assertNotIn("/ask", menus["202"])
         self.assertNotIn("/cancel", menus["202"])
@@ -146,7 +147,7 @@ class LinkedChatMenusTest(unittest.TestCase):
         self.assertEqual(
             response_text(response),
             "Канал остался в исходном профиле, потому что этот профиль ещё используется. "
-            "Привяжи к нему другой канал и открой /confirm, чтобы повторить перенос.",
+            "Привяжи к нему другой канал, затем открой «Подтверждения», чтобы повторить перенос.",
         )
         self.assertIn(approve, [action.command for action in self.send("/confirm", self.foreign).actions])
         self.assertEqual(self.service.resolve_without_touch(self.foreign), self.other)

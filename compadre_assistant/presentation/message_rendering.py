@@ -4,33 +4,28 @@ from collections.abc import Callable
 import re
 import unicodedata
 
-from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction
 from compadre_assistant.core.presentation.message_content import (
-    BulletList, MessageContent, Paragraph, TextSpan, confirmation_action_paragraph,
+    BulletList, MessageContent, Paragraph, TextSpan,
 )
 
 
-def content_groups(
-    content: MessageContent, actions: tuple[ConfirmationAction, ...],
-) -> tuple[tuple[TextSpan, ...], ...]:
-    """Разворачивает блоки и действия по порядку, сохраняя буквальные данные.
+def content_groups(content: MessageContent) -> tuple[tuple[TextSpan, ...], ...]:
+    """Разворачивает блоки по порядку, сохраняя буквальные данные.
 
     Абзацы разделяет двумя LF, пункты списка — одним LF с маркером «• ».
     Пустые структурные блоки пропускает; пробелы непустых spans не удаляет.
 
     Args:
         content: Упорядоченные нейтральные блоки ответа.
-        actions: Адресные действия для вывода после основных блоков.
 
     Returns:
-        Группы spans с буквальными разделителями и текстовыми командами.
+        Группы spans с буквальными разделителями.
 
     Raises:
         TypeError: Передан неподдерживаемый тип блока.
     """
     groups: list[tuple[TextSpan, ...]] = []
-    blocks = (*content.blocks, *(confirmation_action_paragraph(a) for a in actions))
-    for block in blocks:
+    for block in content.blocks:
         spans: list[TextSpan] = []
         if isinstance(block, Paragraph):
             spans.extend(block.spans)

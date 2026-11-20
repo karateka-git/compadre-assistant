@@ -214,7 +214,9 @@ class CapabilityCompositionTest(unittest.TestCase):
     def test_no_mode_and_exit_do_not_run_article_or_llm_after_restart(self) -> None:
         """Смена соединения сохраняет отсутствие режима и явный выход."""
         for text in ("https://example.com/article", "текст"):
-            self.assertIn("/obsidian", response_text(self.process(text)))
+            response = self.process(text)
+            self.assertIn("/obsidian", {action.command for action in response.suggested_actions})
+            self.assertNotIn("/obsidian", response_text(response))
         self.process("/obsidian")
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "obsidian")
@@ -235,7 +237,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", response_text(reply))
-            self.assertIn("/exit", response_text(reply))
+            self.assertIn("/exit", {action.command for action in reply.suggested_actions})
             self.assertIn("/settings", response_text(self.process("/help", enabled_capabilities=())))
             factory.assert_not_called()
         with connect_database(self.database_path) as connection:

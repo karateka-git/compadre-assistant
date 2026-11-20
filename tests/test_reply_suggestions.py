@@ -34,13 +34,13 @@ class ReplySuggestionsTest(unittest.TestCase):
         registered = fixture.dispatcher.execute(replace(event, text="Имя"))
         self.assertEqual({action.command for action in registered.suggested_actions},
                          {"/obsidian", "/ai", "/other", "/settings", "/help"})
-        self._assert_command_visible_in_channels(registered, "/help")
+        self.assertNotIn("/help", content_text(registered.content))
 
         fixture.identity.resolve.side_effect = None
         fixture.identity.resolve.return_value = user
         exited = fixture.dispatcher.execute(replace(event, text="/exit"))
         self.assertEqual(exited.suggested_actions, registered.suggested_actions)
-        self._assert_command_visible_in_channels(exited, "/help")
+        self.assertNotIn("/help", content_text(exited.content))
         self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
 
     def test_ask_long_question_offers_valid_retry(self) -> None:
@@ -106,17 +106,20 @@ class ReplySuggestionsTest(unittest.TestCase):
         fixture.setUp()
         fixture.rebind()
         response = fixture.dispatcher.execute(_event("/confirm"))
-        self.assertEqual(response.suggested_actions, ())
+        self.assertEqual(tuple(action.command for action in response.suggested_actions), ("/help",))
         self.assertEqual(len(response.actions), 2)
         self.assertTrue(all(action.command.startswith("/confirm core identity ")
                             for action in response.actions))
-        self.assertEqual(fixture.dispatcher.execute(_event("/help")).suggested_actions, ())
+        help_response = fixture.dispatcher.execute(_event("/help"))
+        for action in response.actions:
+            self.assertNotIn(action.command, content_text(response.content))
+            self._assert_command_visible_in_channels(help_response, action.command)
 
     def _assert_command_visible_in_channels(self, response, command: str) -> None:
         """Проверяет текстовый путь при отсутствии кнопок ответа в каналах."""
         self.assertIn(command, content_text(response.content))
-        self.assertIn(command, "".join(part.text for part in render_vk_content(response.content, response.actions)))
-        self.assertIn(command, "".join(part.text for part in render_telegram_content(response.content, response.actions)))
+        self.assertIn(command, "".join(part.text for part in render_vk_content(response.content)))
+        self.assertIn(command, "".join(part.text for part in render_telegram_content(response.content)))
 
 
 if __name__ == "__main__":

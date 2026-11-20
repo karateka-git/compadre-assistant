@@ -4,7 +4,6 @@ from dataclasses import dataclass
 import json
 import unicodedata
 
-from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction
 from compadre_assistant.core.presentation.message_content import MessageContent, TextStyle
 from compadre_assistant.presentation.message_rendering import content_groups, split_content
 
@@ -27,13 +26,12 @@ def _unambiguous_offsets(text: str) -> bool:
 
 
 def render_vk_content(
-    content: MessageContent, actions: tuple[ConfirmationAction, ...] = (), *, limit: int = 3500,
+    content: MessageContent, *, limit: int = 3500,
 ) -> tuple[VkChunk, ...]:
     """Возвращает текст и диапазоны bold/italic для смысловых стилей.
 
     Args:
         content: Нейтральные блоки ответа, без доверенной разметки.
-        actions: Действия с полными командами после блоков.
         limit: Положительный лимит текста в UTF-16 code units.
 
     Returns:
@@ -46,7 +44,7 @@ def render_vk_content(
         ValueError: Лимит неположительный или не вмещает символ UTF-16.
     """
     groups = split_content(
-        content_groups(content, actions), limit=limit,
+        content_groups(content), limit=limit,
         measure=lambda span: len(span.text.encode("utf-16-le")) // 2,
     )
     chunks: list[VkChunk] = []

@@ -56,6 +56,10 @@ def format_contextual_help(
                          pending.input_kind, label,
                      )
             line(f"Ожидается {label}. Отправь значение следующим сообщением.")
+            direct = {"link_code": ChatCommand.LINK, "profile_name": ChatCommand.NAME,
+                      "enable": ChatCommand.ENABLE, "disable": ChatCommand.DISABLE}.get(pending.input_kind)
+            if direct is not None:
+                command(direct.usage, direct.description)
         command("/cancel", "отменить ожидающий ввод")
     elif personal is None:
         line("Доступные действия:")

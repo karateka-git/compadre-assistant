@@ -92,7 +92,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
         """Кнопка выбора выполняет точную команду и не действует повторно."""
         disable = self.processor(replace(self.event, text="/disable"))
         self.assertEqual(tuple(action.command for action in disable.suggested_actions),
-                         ("/disable selected", "/cancel"))
+                         ("/disable selected", "/cancel", "/help"))
         self.assertTrue(disable.view_delivery.start())
         disable.view_delivery.finish("42")
         press = replace(self.event, callback_message_id="42")
@@ -102,7 +102,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
 
         enable = self.processor(replace(self.event, text="/enable"))
         self.assertEqual(tuple(action.command for action in enable.suggested_actions),
-                         ("/enable selected", "/cancel"))
+                         ("/enable selected", "/cancel", "/help"))
         self.assertTrue(enable.view_delivery.start())
         enable.view_delivery.finish("43")
         self.processor.select_action(replace(self.event, callback_message_id="43"), enable.bound_actions[0].token)

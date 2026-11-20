@@ -110,12 +110,17 @@ class CommandMenuTest(unittest.TestCase):
         fixture.preferences.rows[(23, "other")] = False
         fixture.send("/settings")
         self.assertEqual(set(self.commands()), {
-            "/status", "/name", "/connect", "/link", "/capabilities", "/enable", "/disable", "/exit", "/help",
+            "/status", "/name", "/connect", "/capabilities", "/exit", "/help",
         })
-        for command, kind in (("/name", "profile_name"), ("/enable", "enable"), ("/disable", "disable"), ("/link", "link_code")):
+        for screen, command, kind in (("/settings", "/name", "profile_name"),
+                                      ("/capabilities", "/enable", "enable"),
+                                      ("/capabilities", "/disable", "disable"),
+                                      ("/connect", "/link", "link_code")):
+            fixture.send(screen)
             self.assertIn(command, self.commands())
             fixture.send(command)
             self.assertEqual(fixture.store.get(_event("x").reply_address).input_kind, kind)
+            fixture.send("/cancel")
         fixture.send("/exit")
         fixture.preferences.rows[(23, "other")] = False
         self.assertNotIn("/other", self.commands())

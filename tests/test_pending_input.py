@@ -225,7 +225,7 @@ class PendingInputTest(unittest.TestCase):
     def test_cancel_arguments_preserve_pending(self):
         pending = self.start()
         response = self.dispatcher.execute(_event('/cancel лишнее'))
-        self.assertIn('без аргументов', response_text(response))
+        self.assertIn('выбери «Отмена»', response_text(response))
         self.assertEqual(self.store.get(pending.chat_key), pending)
 
 

@@ -37,7 +37,7 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
 
     def test_telegram_direct_receipt_and_background_use_same_rendered_parts(self) -> None:
         """Все три пути сохраняют HTML, действия, последовательность и адрес."""
-        expected = render_telegram_content(self.response.content, self.response.actions)
+        expected = render_telegram_content(self.response.content)
         message = TelegramMessage()
         message.text, message.message_id, message.from_user = "запрос", 1, None
         deliveries = []
@@ -68,6 +68,7 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
         asyncio.run(run())
         self.assertGreater(len(expected), 1)
         self.assertEqual(message.answers, [part.text for part in expected])
+        self.assertNotIn("/confirm item 42 yes", "\n".join(message.answers))
         self.assertEqual(message.parse_modes, ["HTML"] * len(expected))
         self.assertEqual(background_parts, [
             (chat, part.text, part.parse_mode)
@@ -87,11 +88,11 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
 
         _handle_update(_update(1, 42, "запрос"), incoming_message_processor=processor, client=client, logger=self.logger)
         deliveries[0].send(ReplyAddress("vk", "99"), self.response)
-        expected = render_vk_content(self.response.content, self.response.actions)
+        expected = render_vk_content(self.response.content)
         self.assertGreater(len(expected), 1)
         self.assertEqual(client.messages, [(chat, part.text) for chat in (42, 42, 99) for part in expected])
         self.assertEqual(client.formats, [part.format_data for part in expected] * 3)
-        self.assertIn("/confirm item 42 yes", client.messages[-1][1])
+        self.assertNotIn("/confirm item 42 yes", "\n".join(text for _, text in client.messages))
         self.assertNotIn("<code>", client.messages[-1][1])
 
     def test_immediate_response_needs_no_background_delivery(self) -> None:
@@ -188,8 +189,8 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
             asyncio.run(safe_send_telegram_reply(target, IncomingResponse(text_content("abcdefghij")), logger=self.logger, limit=4))
         self.assertEqual(calls, [("abcd", "HTML"), ("efgh", "HTML")])
 
-    def test_invalid_keyboard_preserves_all_parts_and_text_commands(self) -> None:
-        """Лимиты кнопок не теряют длинный ответ и его адресные команды."""
+    def test_invalid_keyboard_preserves_all_parts(self) -> None:
+        """Лимиты кнопок не изменяют содержание и разбиение длинного ответа."""
         for channel, max_buttons, max_label in (("telegram", 100, 64), ("vk", 30, 40)):
             for labels in (("я" * (max_label + 1),), ("Выбор",) * (max_buttons + 1)):
                 with self.subTest(channel=channel, count=len(labels)):
@@ -205,11 +206,11 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
                             asyncio.run(safe_send_telegram_reply(
                                 target, response, logger=self.logger, include_bound_actions=True))
                             self.assertEqual(target.answers,
-                                [part.text for part in render_telegram_content(response.content, actions)])
+                                [part.text for part in render_telegram_content(response.content)])
                         else:
                             target = FakeVkClient()
                             _safe_send_vk_message(target, peer_id=42, response=response,
                                 logger=self.logger, include_bound_actions=True)
                             self.assertEqual(target.messages,
-                                [(42, part.text) for part in render_vk_content(response.content, actions)])
+                                [(42, part.text) for part in render_vk_content(response.content)])
                             self.assertTrue(all(keyboard is None for keyboard in target.keyboards))

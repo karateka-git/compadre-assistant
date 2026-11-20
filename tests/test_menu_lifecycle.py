@@ -125,7 +125,9 @@ class MenuLifecycleTest(unittest.TestCase):
             self.assertIn("/confirm", tuple(item.command for item in self.menu(self.telegram).items))
             self.assert_menu_matches_help(self.telegram)
             response = self.send(self.telegram, "/confirm")
-            self.assertIn("/confirm core identity 4 1 yes", response_text(response))
+            self.assertNotIn("/confirm core identity 4 1 yes", response_text(response))
+            self.assertEqual([action.command for action in response.actions], ["/confirm core identity 4 1 yes"])
+            self.assertIn("/confirm core identity 4 1 yes", response_text(self.send(self.telegram, "/help")))
         with patch.object(IncomingMessageDispatcher, "_confirmation_snapshot",
                           return_value=ConfirmationQueryResult("unavailable", ())):
             self.processor.reconcile_menus(self.updates.append)

@@ -890,7 +890,7 @@ def _send_vk_view(
     finish = delivery.finish
     if delivery.start():
         try:
-            chunks = render_vk_content(response.content, response.actions, limit=limit)
+            chunks = render_vk_content(response.content, limit=limit)
             multipart = len(chunks) > 1
             finish_replacement = delivery.finish_replacement
             if finish_replacement is not None and (
@@ -1006,7 +1006,7 @@ def _send_vk_message(
     menu_keyboard: str | None, plain: bool = False, on_confirmed_reply: Callable[[], None] | None = None,
 ) -> tuple[bool, bool | None]:
     """Возвращает результаты доставки ответа и подходящей части с меню."""
-    chunks = render_vk_content(response.content, response.actions, limit=limit)
+    chunks = render_vk_content(response.content, limit=limit)
     keyboard = _optional_vk_inline_keyboard(response, logger, include_bound_actions)
     # VK принимает одну клавиатуру на сообщение. У короткого ответа
     # нижнее меню идёт с основным текстом, а кнопки — с отдельной подсказкой.

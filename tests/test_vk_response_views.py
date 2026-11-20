@@ -192,7 +192,7 @@ class VkResponseViewsTest(unittest.TestCase):
         updated_menu = self.requests("messages.send")[-1]
         self.assertIn("Действия раздела:", updated_menu["message"])
         self.assertIn("Открыть вид", updated_menu["message"])
-        self.assertIn("/help", updated_menu["message"])
+        self.assertNotIn("/help", updated_menu["message"])
         self.assertNotIn("Изменить вид", self.bottom_labels(updated_menu))
         self.assertIn("Очистить выбор", self.bottom_labels(updated_menu))
         self.assertEqual([method for method, _ in self.calls[-3:]],

@@ -92,7 +92,7 @@ class TextCommandSequencesTest(unittest.TestCase):
     def code(self, **address):
         """Извлекает из ответа точный код для ручной привязки другого канала."""
         self.say("/settings", **address)
-        match = re.search(r"/link (\S+)", self.say("/connect telegram" if address.get("channel") == "vk" else "/connect vk", **address))
+        match = re.search(r"Код привязки: ([\w-]+)", self.say("/connect telegram" if address.get("channel") == "vk" else "/connect vk", **address))
         self.assertIsNotNone(match)
         return match.group(1)
 
@@ -129,20 +129,20 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.register()
         code = self.code()
         self.assertIn("следующим сообщением", self.say("/link", channel="vk"))
-        self.assertIn("/cancel", self.say("wrong", channel="vk"))
+        self.assertIn("Код привязки не принят", self.say("wrong", channel="vk"))
         self.assertIn("привязал", self.say(code, channel="vk"))
         self.say("/settings", channel="vk")
         self.assertIn("уже привязан", self.say("/connect vk"))
         self.say("/name")
         for info in ("/help", "/status", "/capabilities", "/start"):
             self.say(info)
-        self.assertIn("/cancel", self.say("x" * 81))
+        self.assertIn("Имя не принято", self.say("x" * 81))
         self.say("Новое имя")
         self.assertIn("Новое имя", self.say("/status", channel="vk"))
         self.say("/name Прямое имя", channel="vk")
         self.assertEqual(self.profile_names(), ["Прямое имя"])
         self.say("/enable")
-        self.assertIn("/cancel", self.say("missing"))
+        self.assertIn("Пришли ID", self.say("missing"))
         self.say("obsidian")
         self.say("/obsidian")
         self.say("/disable", channel="vk")
@@ -274,7 +274,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertIn("перепривязал", self.say(selected, channel="vk"))
         self.say("/settings", channel="vk")
         self.assertIn("Первый", self.say("/status", channel="vk"))
-        self.assertIn("устарело", self.say(selected, channel="vk"))
+        self.assertIn("устарел", self.say(selected, channel="vk"))
         self.assertEqual(self.say("/confirm", channel="vk"),
             "В этом чате нет действий, которые нужно подтвердить.")
 
@@ -316,8 +316,8 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.assertEqual(response_text(responses[1]), model_text)
         for response in responses:
             expected = response_text(response)
-            telegram = render_telegram_content(response.content, response.actions)
-            vk = render_vk_content(response.content, response.actions)
+            telegram = render_telegram_content(response.content)
+            vk = render_vk_content(response.content)
             self.assertEqual("".join("".join(_HtmlReader(part.text).parts) for part in telegram), expected)
             self.assertEqual("".join(part.text for part in vk), expected)
         self.assertGreater(len(telegram), 1)

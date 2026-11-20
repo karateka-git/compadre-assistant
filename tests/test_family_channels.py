@@ -737,7 +737,9 @@ class FamilyChannelsTest(unittest.TestCase):
                 self.assertIn("Подтверждение недоступно", response_text(self._send(processor, self.owner_tg, invalid)))
 
             listed = self._send(processor, self.owner_tg, "/confirm")
-            self.assertIn(approve, response_text(listed))
+            self.assertNotIn(approve, response_text(listed))
+            self.assertIn(approve, [action.command for action in listed.actions])
+            self.assertIn(approve, response_text(self._send(processor, self.owner_tg, "/help")))
             self.assertIn(approve, response_text(self._send(processor, self.owner_tg, "/help")))
             self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
             self.assertIn("Действие отменено", response_text(self._send(
@@ -802,7 +804,9 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             pending = self._send(processor, self.guest, "/family_leave")
             now += 599
-            self.assertIn(self._decision(pending), response_text(self._send(processor, self.guest, "/confirm")))
+            listed = self._send(processor, self.guest, "/confirm")
+            self.assertIn(self._decision(pending), [action.command for action in listed.actions])
+            self.assertIn(self._decision(pending), response_text(self._send(processor, self.guest, "/help")))
             now += 1
             self.assertNotIn(self._decision(pending), response_text(self._send(processor, self.guest, "/confirm")))
             self.assertIn("Подтверждение недоступно", response_text(self._send(

@@ -40,25 +40,11 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
                 result.capability_reply or 'Выбери, что сделать дальше.',
             )
         case IncomingMessageResultType.NAME_COMMAND_INVALID:
-            return (
-                compose_content(
-                    'Не получилось сохранить имя. Используй от 1 до 80 символов без ссылки или команды.\nНапример: ',
-                    code_span('/name Влад'),
-                    '.',
-                )
-            )
+            return text_content('Не получилось сохранить имя. Используй от 1 до 80 символов без ссылки или команды.')
         case IncomingMessageResultType.NAME_UPDATED:
             return compose_content('Готово. Теперь буду обращаться к тебе: ' + str(_display_name(result)) + '.')
         case IncomingMessageResultType.CONFIRMATION_MISSING:
-            if result.capability_reply is not None:
-                return text_content(result.capability_reply)
-            return (
-                compose_content(
-                    'Сейчас нет действия, которое нужно подтвердить.\nСначала отправь действие, требующее подтверждения, или ',
-                    code_span('/link <code>'),
-                    '.',
-                )
-            )
+            return text_content(result.capability_reply or 'Сейчас нет действий, которые нужно подтвердить.')
         case IncomingMessageResultType.ALREADY_REGISTERED:
             return compose_content(
                 _display_name(result), ', ты уже зарегистрирован.\n',
@@ -71,23 +57,20 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
                 compose_content(
                     'Код привязки: ',
                     code_span(str(result.link_code.code)),
-                    '\nОткрой другой канал и отправь: ',
-                    code_span('/link ' + str(result.link_code.code)),
-                    '\nЕсли там уже есть профиль, сначала открой ', code_span('/settings'), '.',
-                    '\nКод действует 10 минут.',
+                    '\nКод действует 10 минут. Открой чат с ботом в другом мессенджере, '
+                    'выбери «У меня есть код» и пришли код отдельным сообщением. '
+                    'Если там уже есть профиль, выбери в настройках мессенджеров привязку к другому профилю.',
                 )
             )
         case IncomingMessageResultType.LINK_COMMAND_INVALID:
-            return compose_content('Пришли команду в формате ', code_span('/link <code>'), '.')
+            return text_content('Пришли код привязки отдельным сообщением.')
         case IncomingMessageResultType.LINKED:
             return compose_content('Готово, я привязал этот канал к твоему пользователю.')
         case IncomingMessageResultType.LINK_ALREADY_BOUND:
             return compose_content('Этот канал уже привязан к пользователю.')
         case IncomingMessageResultType.LINK_CODE_INVALID:
-            return compose_content(
-                'Код привязки не принят. Повтори ', code_span('/link <code>'), ' с действующим кодом. '
-                'Если код истёк, в уже привязанном канале открой ', code_span('/settings'),
-                ' и вызови ', code_span(result.capability_reply or '/connect'), '.',
+            return text_content(
+                'Код привязки не принят. Если срок истёк, получи новый код в настройках мессенджеров другого канала.'
             )
         case IncomingMessageResultType.LINK_REBOUND:
             if result.app_user is None:

@@ -116,7 +116,7 @@ class ScreenActionsCoreTest(unittest.TestCase):
         self.processor(replace(self.event, text="/settings"))
         self.processor(replace(self.event, text="/disable selected"))
         self.owner.reads.clear()
-        self.assertIn("/status", {action.command for action in self.processor.section_actions(self.event)})
+        self.assertIn("/capabilities", {action.command for action in self.processor.section_actions(self.event)})
         self.assertEqual(self.owner.reads, [])
 
     def test_query_filters_unknown_owner_and_direct_confirmation_and_rejects_screen_scope(self):

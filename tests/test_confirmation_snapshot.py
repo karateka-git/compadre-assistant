@@ -108,7 +108,8 @@ class ConfirmationSnapshotTest(unittest.TestCase):
         response = self.send()
         self.assertEqual(len(response.actions), 4)
         for action in response.actions:
-            self.assertIn(action.command, response_text(response))
+            self.assertNotIn(action.command, response_text(response))
+            self.assertIn(action.command, response_text(self.send("/help")))
         self.assertNotIn("неполный", response_text(response))
         self.identity.confirm_rebind.assert_not_called()
         self.identity.cancel_rebind.assert_not_called()
@@ -359,7 +360,7 @@ class ObsidianConfirmationChannelTest(unittest.TestCase):
                     labels = [button["action"]["label"] for row in keyboard["buttons"] for button in row]
                     render = render_vk_content
                 self.assertEqual(labels, [f"Принять предложение №{proposal.article_id}",
-                                          f"Отменить запрос №{proposal.article_id}"])
+                                          f"Отменить запрос №{proposal.article_id}", "Помощь"])
                 self.assertTrue(all(len(label) <= 40 for label in labels))
                 token = report.bound_actions[1].token
                 foreign = processor.select_action(replace(event, chat_id="102", external_user_id="102"), token)
@@ -370,10 +371,11 @@ class ObsidianConfirmationChannelTest(unittest.TestCase):
                     "compadre_assistant.capabilities.obsidian.presentation.processing", level="ERROR",
                 ):
                     report = processor(replace(event, text="/confirm"))
-                    self.assertEqual(report.bound_actions, ())
+                    self.assertEqual([action.label for action in report.bound_actions], ["Помощь"])
                     command = f"/confirm obsidian proposal {proposal.id} {proposal.version} no"
-                    rendered = "".join(part.text for part in render(report.content, report.actions))
-                    self.assertIn(command, rendered)
+                    self.assertNotIn(command, "".join(part.text for part in render(report.content)))
+                    help_response = processor(replace(event, text="/help"))
+                    self.assertIn(command, "".join(part.text for part in render(help_response.content)))
                     decided = processor(replace(event, text=command))
                 self.assertIn("Предложение отменено", response_text(decided))
                 service.cancel.assert_called_once_with(
@@ -455,7 +457,7 @@ class ConfirmationSnapshotSQLiteTest(unittest.TestCase):
                 else:
                     service._clock = lambda: datetime(2030, 1, 1, tzinfo=UTC)
                 response = dispatcher.execute(replace(event, text=response.actions[0].command))
-                self.assertIn("устарело или истекло", response_text(response))
+                self.assertIn("устарел или истёк", response_text(response))
                 self.assertNotEqual(service.resolve(source).id, target_user.id)
 
 

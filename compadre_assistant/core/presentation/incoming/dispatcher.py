@@ -6,7 +6,9 @@ from dataclasses import dataclass, replace
 from enum import StrEnum
 import logging
 
-from compadre_assistant.core.presentation.message_content import compose_content, code_span, text_content
+from compadre_assistant.core.presentation.message_content import (
+    MessageContent, code_span, compose_content, confirmation_action_paragraph, text_content,
+)
 from compadre_assistant.core.presentation.incoming.commands import PROFILE_COMMANDS, ChatCommand, ParsedChatCommand
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, SectionMenuDelivery
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
@@ -22,7 +24,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
-    CapabilityHelp, CommandSuggestion, ContextualCommandQueryPort,
+    CapabilityHelp, CommandSuggestion, ContextualCommandQueryPort, HelpSection,
     ReplyActionRecoveryPort, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
@@ -50,6 +52,9 @@ from compadre_assistant.core.presentation.incoming.action_selection import Actio
 LOGGER = logging.getLogger(__name__)
 _TEXT_INPUT_HINT = "Пришли текстовое сообщение или выбери действие в меню."
 _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля открой личный чат с ботом."
+_HELP_SCREEN_ACTION = replace(HELP_SECTION_ACTION, scope=ActionScope.SCREEN)
+_LINK_INPUT_SCREEN_ACTION = ReplyAction("Ввести код", "/link")
+_CONFIRM_SCREEN_ACTION = ReplyAction("Подтверждения", "/confirm")
 # Только успешная отмена требует пересчитать меню из проекции занятого чата.
 _DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
 
@@ -64,7 +69,8 @@ def _rebind_actions(pending: IdentityRebindConfirmation) -> tuple[ConfirmationAc
 
 def _capability_label(descriptor: CapabilityDescriptor) -> str:
     """Возвращает публичное название или идентификатор возможности без названия."""
-    return f"«{descriptor.display_name}»" if descriptor.display_name else descriptor.capability_id
+    name = descriptor.display_name
+    return f"«{name}»" if name is not None and not name.startswith("«") else name or descriptor.capability_id
 
 
 def pending_expired_reply(pending: PendingInput) -> IncomingResponse:
@@ -226,8 +232,9 @@ class IncomingMessageDispatcher:
         return pending if pending is not None and pending.external_user_id in (None, event.external_user_id) else None
 
     def _group_action_allowed(self, command: str) -> bool:
-        """Ограничивает общие групповые кнопки входами без аргументов."""
-        return (command in {"/register", "/cancel", "/help", "/exit"}
+        """Допускает общие действия группы без аргументов и привязки каналов."""
+        return (command in {"/register", "/cancel", "/help", "/exit", "/status", "/name",
+                            "/capabilities", "/enable", "/disable"}
                 or (command.split() == [command] and self._registry.by_command(command) is not None))
 
     def bind_response_actions(
@@ -396,7 +403,7 @@ class IncomingMessageDispatcher:
     def _rejected_action(self, event: IncomingEvent, previous_mode: str | None) -> IncomingResponse:
         """Сохраняет исходные кнопки и предлагает актуальный ручной переход."""
         content = text_content("Эта кнопка больше недоступна. Открой «Помощь», чтобы продолжить.")
-        recovery = (replace(HELP_SECTION_ACTION, scope=ActionScope.SCREEN),)
+        recovery = (_HELP_SCREEN_ACTION,)
         if is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
             try:
                 known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
@@ -479,7 +486,7 @@ class IncomingMessageDispatcher:
 
     @staticmethod
     def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
-        """Показывает названия, аргументы команд и доступность возможностей."""
+        """Показывает названия, идентификаторы и доступность возможностей."""
         lines = ["Личные возможности:"]
         visible = tuple(item for item in personal.visible_access if item.descriptor.personally_configurable)
         for access in visible:
@@ -494,9 +501,7 @@ class IncomingMessageDispatcher:
             )
         if not visible:
             lines.append("Сейчас нет известных возможностей.")
-        lines.append("Чтобы выбрать возможность следующим сообщением, вызови /enable или /disable. "
-                     "Если ID уже известен, укажи его сразу: /enable <id> или /disable <id>. "
-                     "Выбор действует во всех привязанных каналах.")
+        lines.append("Выбор действует во всех привязанных каналах.")
         return "\n".join(lines)
 
     def execute(
@@ -767,7 +772,7 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 "Ввод отменён. Можно продолжить в текущем разделе." if cleared else
                 "В этом чате нечего отменять."
-            ))
+            ), close_managed_views=bool(cleared and pending is not None and pending.owner_id == "core"))
         if text.startswith("/"):
             if pending is not None and command not in (ChatCommand.HELP, ChatCommand.STATUS,
                                                        ChatCommand.CAPABILITIES, ChatCommand.START):
@@ -825,9 +830,8 @@ class IncomingMessageDispatcher:
                            or not 0 < int(value) <= 2**63 - 1 for value in parts[2:4])
                     or parts[4] not in {"yes", "no"}
                 ):
-                    return IncomingResponse(
-                        compose_content('Используй адресную команду из актуального запроса привязки.')
-                    )
+                    return IncomingResponse(text_content('Выбери решение в актуальном запросе привязки.'),
+                                            suggested_actions=(_CONFIRM_SCREEN_ACTION, _HELP_SCREEN_ACTION))
                 try:
                     if parts[4] == "yes":
                         user = self._user_identity_service.confirm_rebind(
@@ -843,15 +847,13 @@ class IncomingMessageDispatcher:
                 except SourceProfileInUseError:
                     return IncomingResponse(compose_content(
                         "Канал остался в исходном профиле, потому что этот профиль ещё используется. "
-                        "Привяжи к нему другой канал и открой ", code_span("/confirm"), ", чтобы повторить перенос.",
-                    ))
+                        "Привяжи к нему другой канал, затем открой «Подтверждения», чтобы повторить перенос.",
+                    ), suggested_actions=(_CONFIRM_SCREEN_ACTION, _HELP_SCREEN_ACTION))
                 except InvalidLinkCodeError as error:
                     return IncomingResponse(
-                        compose_content(
-                            "Это действие устарело или истекло. В исходном чате открой ",
-                            code_span("/settings"), " и повтори ", code_span("/link"), ".",
-                        ),
+                        text_content("Запрос переноса устарел или истёк. Введи действующий код, чтобы создать новый запрос."),
                         error,
+                        suggested_actions=(_LINK_INPUT_SCREEN_ACTION, _HELP_SCREEN_ACTION),
                     )
             user = self._user_identity_service.resolve(identity)
             if user is None:
@@ -931,7 +933,15 @@ class IncomingMessageDispatcher:
 
         owner = self._registry.mode_command_owner(command.value)
         if owner is None or owner.capability_id != mode_id or command not in owner.profile_commands:
-            return IncomingResponse(text_content("Команда недоступна в этом режиме. Посмотри /help."))
+            return IncomingResponse(text_content("Это действие недоступно в текущем разделе."),
+                                    suggested_actions=(_HELP_SCREEN_ACTION,))
+        if not arguments and command in (ChatCommand.NAME, ChatCommand.ENABLE, ChatCommand.DISABLE):
+            pending = self._pending_inputs.get(event.reply_address)
+            if (pending is not None and pending.external_user_id not in (None, event.external_user_id)
+                    and not self._pending_inputs.expired(pending)):
+                return IncomingResponse(text_content(
+                    "В этом чате другой участник уже вводит данные. Попробуй позже или открой личный чат с ботом."
+                ))
         result = self._apply_profile_operation(command, arguments, user, event, mode_id, personal)
         return result if isinstance(result, IncomingResponse) else IncomingResponse(
             format_incoming_message_result(result), result.error,
@@ -943,12 +953,11 @@ class IncomingMessageDispatcher:
     ) -> ProcessIncomingMessageResult | IncomingResponse:
         if command is ChatCommand.CAPABILITIES:
             if arguments:
-                return IncomingResponse(compose_content('Используй ', code_span('/capabilities'), ' без аргументов.'))
+                return IncomingResponse(text_content('Открой список личных возможностей отдельным действием.'))
             actions = []
-            configurable = tuple(item for item in personal.visible_access if item.descriptor.personally_configurable)
-            if any(item.server_available and not item.user_enabled for item in configurable):
+            if self._profile_choices(personal, enabled=True):
                 actions.append(ReplyAction("Включить возможность", "/enable"))
-            if any(item.user_enabled for item in configurable):
+            if self._profile_choices(personal, enabled=False):
                 actions.append(ReplyAction("Выключить возможность", "/disable"))
             return IncomingResponse(text_content(self._capability_catalog(personal)), suggested_actions=tuple(actions))
         if command in (ChatCommand.ENABLE, ChatCommand.DISABLE):
@@ -963,7 +972,7 @@ class IncomingMessageDispatcher:
             try:
                 link_code = self._user_identity_service.create_link_code(user.id, target_channel=arguments)
             except IdentityAlreadyBoundError:
-                return IncomingResponse(text_content("Этот мессенджер уже привязан. Открой /connect."))
+                return IncomingResponse(text_content("Этот мессенджер уже привязан."))
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
                 app_user=user,
@@ -973,10 +982,10 @@ class IncomingMessageDispatcher:
             if not arguments:
                 self._pending_inputs.begin(
                     event.reply_address, "core", "profile_name", app_user_id=user.id,
-                    required_mode=mode_id, retry_command="/name",
+                    required_mode=mode_id, retry_command="/name", external_user_id=event.external_user_id,
                 )
                 return IncomingResponse(text_content(
-                    "Пришли новое имя профиля. Ожидание действует 10 минут. Для отмены введи /cancel."
+                    "Пришли новое имя профиля. Ожидание действует 10 минут."
                 ))
             return self._save_name(arguments, user)
         if command is ChatCommand.STATUS:
@@ -987,11 +996,11 @@ class IncomingMessageDispatcher:
                 app_user=user,
                 capability_reply=(
                     f"Профиль: {user.display_name or 'имя ещё не задано'}.\n"
-                    f"Режим этого чата: {mode_label}.\n"
-                    f"{personal.entry_hint()}"
+                    f"Режим этого чата: {mode_label}."
                 ),
             )
-        return IncomingResponse(text_content("Команда недоступна в этом режиме. Посмотри /help."))
+        return IncomingResponse(text_content("Это действие недоступно в текущем разделе."),
+                                suggested_actions=(_HELP_SCREEN_ACTION,))
 
     def _start_link(
         self, code: str, identity: IncomingIdentity, event: IncomingEvent,
@@ -1000,14 +1009,20 @@ class IncomingMessageDispatcher:
         if not self._profile_link_allowed(event):
             return IncomingResponse(text_content(_PROFILE_LINK_PRIVATE_HINT))
         if code:
-            return self._link_identity(code, identity)
+            from compadre_assistant.core.presentation.responses import format_incoming_message_result
+
+            result = self._link_identity(code, identity)
+            if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
+                return IncomingResponse(format_incoming_message_result(result), result.error,
+                                        suggested_actions=(_LINK_INPUT_SCREEN_ACTION, _HELP_SCREEN_ACTION))
+            return result
         self._pending_inputs.begin(
             event.reply_address, "core", "link_code", app_user_id=user.id if user else None,
-            required_mode=required_mode, retry_command="/link",
+            required_mode=required_mode, retry_command="/link", external_user_id=event.external_user_id,
         )
         return IncomingResponse(text_content(
-            "Пришли код привязки следующим сообщением. Ожидание действует 10 минут. Для отмены введи /cancel."
-        ), suggested_actions=(CANCEL_SECTION_ACTION,))
+            "Пришли код привязки следующим сообщением. Ожидание действует 10 минут."
+        ), suggested_actions=(CANCEL_SECTION_ACTION, HELP_SECTION_ACTION))
 
     def _link_identity(self, code: str, identity: IncomingIdentity) -> ProcessIncomingMessageResult | IncomingResponse:
         """Применяет код одинаково для прямой команды и ожидаемого значения."""
@@ -1023,8 +1038,9 @@ class IncomingMessageDispatcher:
                     code=code, identity=identity
                 )
                 return IncomingResponse(
-                    compose_content('Канал уже привязан к другому профилю. Подтверди перенос адресной командой.'),
+                    text_content('Канал уже привязан к другому профилю. Перенести аккаунт?'),
                     actions=_rebind_actions(pending),
+                    suggested_actions=(_HELP_SCREEN_ACTION,),
                 )
             except IdentityAlreadyBoundError:
                 return ProcessIncomingMessageResult(
@@ -1035,13 +1051,11 @@ class IncomingMessageDispatcher:
                 return ProcessIncomingMessageResult(
                     type=IncomingMessageResultType.LINK_CODE_INVALID,
                     error=rebind_error,
-                    capability_reply=f"/connect {identity.channel}",
                 )
         except InvalidLinkCodeError as error:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_INVALID,
                 error=error,
-                capability_reply=f"/connect {identity.channel}",
             )
 
     def _continue_input(
@@ -1190,15 +1204,15 @@ class IncomingMessageDispatcher:
                 result = self._link_identity(event.text.strip(), identity)
                 if isinstance(result, ProcessIncomingMessageResult) and result.type is IncomingMessageResultType.LINK_CODE_INVALID:
                     return IncomingResponse(text_content(
-                        "Код привязки не принят. Отправь исправленный код ещё раз до истечения ожидания; отмена: /cancel. "
-                        f"Если код истёк, в уже привязанном канале открой /settings и вызови /connect {event.channel}."
+                        "Код привязки не принят. Отправь исправленный код до истечения ожидания. "
+                        "Новый код можно получить в настройках мессенджеров другого канала."
                     ), result.error)
             elif pending.input_kind == "profile_name" and user is not None:
                 result = self._save_name(event.text, user)
                 if result.type is IncomingMessageResultType.NAME_COMMAND_INVALID:
                     return IncomingResponse(text_content(
                         "Имя не принято. Используй от 1 до 80 символов без ссылки или команды. "
-                        "Отправь исправленное имя ещё раз или введи /cancel."
+                        "Отправь исправленное имя до истечения ожидания."
                     ), result.error)
             else:
                 result = IncomingResponse(text_content("Ввод недоступен. Повтори команду."))
@@ -1232,21 +1246,15 @@ class IncomingMessageDispatcher:
         enabled = command is ChatCommand.ENABLE
         parts = arguments.split()
         if not parts and pending is None:
-            choices = tuple(
-                access for access in personal.visible_access
-                if access.descriptor.personally_configurable and access.server_available and not access.user_enabled
-            ) if enabled else tuple(
-                access for access in personal.visible_access
-                if access.descriptor.personally_configurable and access.user_enabled
-            )
+            choices = self._profile_choices(personal, enabled)
             if not choices:
                 return IncomingResponse(text_content(
-                    "Нет возможностей, которые можно включить. Посмотри /capabilities." if enabled
-                    else "Нет включённых возможностей. Посмотри /capabilities."
+                    "Нет возможностей, которые можно включить." if enabled else "Нет включённых возможностей."
                 ))
             self._pending_inputs.begin(
                 event.reply_address, "core", "enable" if enabled else "disable",
                 app_user_id=user.id, required_mode=required_mode, retry_command=command.value,
+                external_user_id=event.external_user_id,
             )
             option_lines = []
             actions = []
@@ -1255,34 +1263,26 @@ class IncomingMessageDispatcher:
                 descriptor = choice.descriptor
                 label = _capability_label(descriptor)
                 command_text = f"{command.value} {descriptor.capability_id}"
-                detail = command_text if descriptor.display_name else descriptor.entry.description
-                option_lines.append(f"{label} — {detail}")
+                option_lines.append(f"{label} ({descriptor.capability_id})" if descriptor.display_name else label)
                 actions.append(ReplyAction(f"{action} {label}", command_text, purpose=ActionPurpose.SELECTION))
             options = "\n".join(option_lines)
             private = is_private_chat_address(event.channel, event.external_user_id, event.chat_id)
             return IncomingResponse(text_content(
-                f"Выбери одну возможность, которую нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
-                "Ожидание действует 10 минут. Для отмены введи /cancel."
+                f"Выбери, что нужно {'включить' if enabled else 'выключить'}:\n{options}\n"
+                "Можно прислать ID из списка. Ожидание действует 10 минут."
             ), suggested_actions=tuple(actions) if private else (),
                 view=ResponseView("profile-capability-choice") if private else None)
         if len(parts) != 1:
             return IncomingResponse(text_content(
-                "Значение не принято. Введи один ID из предложенного списка ещё раз или введи /cancel."
-                if pending else "Укажи один ID в команде /enable <id> или /disable <id>. "
-                "Чтобы выбрать возможность следующим сообщением, вызови /enable или /disable без аргументов."
+                "Значение не принято. Пришли один ID из списка."
+                if pending else "Можно изменить только одну возможность за раз. Открой личные возможности, чтобы выбрать её."
             ))
         access = personal.status(parts[0])
         if access is None or not access.visible:
-            return IncomingResponse(
-                compose_content(
-                    'Неизвестная возможность. Введи известный ID ещё раз или /cancel. Прямой вызов: '
-                    if pending else 'Неизвестная возможность. Используй ',
-                    code_span(str(command.usage)),
-                    '. Список: ',
-                    code_span('/capabilities'),
-                    '.',
-                )
-            )
+            return IncomingResponse(text_content(
+                'Неизвестная возможность. Пришли ID из списка.' if pending else
+                'Неизвестная возможность. Открой личные возможности, чтобы выбрать её.'
+            ))
         descriptor = access.descriptor
         if not descriptor.personally_configurable:
             return IncomingResponse(text_content(
@@ -1295,9 +1295,8 @@ class IncomingMessageDispatcher:
                 compose_content(
                     'Возможность ',
                     label_content,
-                    ' недоступна на сервере. Личный выбор не изменён. Список: ',
-                    code_span('/capabilities'),
-                    '. Выбери другой доступный ID или введи /cancel.' if pending else '.',
+                    ' недоступна на сервере.',
+                    ' Пришли ID другой возможности из списка.' if pending else '',
                 )
             )
         if pending is not None:
@@ -1315,14 +1314,23 @@ class IncomingMessageDispatcher:
             return IncomingResponse(text_content(
                 f"Личный доступ к возможности {label} {action}. "
                 "Выбор действует во всех привязанных каналах."
-            ))
+            ), close_managed_views=True)
         state = "включена" if enabled else "выключена"
         return IncomingResponse(
             compose_content(
                 'Возможность ',
                 label_content,
-                ' ' + str('уже ' if not changed else '') + str(state) + '. Выбор действует во всех привязанных каналах. Режим и данные сохранены.',
-            )
+                ' ' + str('уже ' if not changed else '') + str(state) + '. Выбор действует во всех привязанных каналах.',
+            ), close_managed_views=True,
+        )
+
+    @staticmethod
+    def _profile_choices(personal: PersonalCapabilityRegistry, enabled: bool) -> tuple[CapabilityAccess, ...]:
+        """Отбирает доступные переключения для текущего состояния профиля."""
+        return tuple(
+            access for access in personal.visible_access
+            if access.descriptor.personally_configurable and access.user_enabled != enabled
+            and (not enabled or access.server_available)
         )
 
     def _dispatch(
@@ -1398,7 +1406,7 @@ class IncomingMessageDispatcher:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
                 app_user=user,
-                capability_reply=personal.entry_hint(),
+                capability_reply=_TEXT_INPUT_HINT if event.images else personal.entry_hint(),
                 personal=personal,
             )
         capability = personal.by_id(state.capability_id)
@@ -1453,13 +1461,19 @@ class IncomingMessageDispatcher:
         """Собирает контекст справки, не выполняя ожидаемый ввод или подтверждение."""
         from compadre_assistant.core.presentation.incoming.help import format_contextual_help
 
-        personal, mode_id, pending, snapshot, active_help, _ = self._command_context(event)
+        try:
+            context = self._command_context(event, include_menu=True)
+        except Exception:
+            LOGGER.exception("Could not read section actions for contextual help")
+            context = self._command_context(event)
+        personal, mode_id, pending, snapshot, active_help, section_actions = context
         response = format_contextual_help(
-            personal, mode_id, pending, snapshot, self._confirmation_response(snapshot),
+            personal, mode_id, pending, snapshot, self._confirmation_response(snapshot, show_commands=True),
             active_help=active_help, allow_link=self._profile_link_allowed(event),
         )
         common_screen = mode_id is None or (pending is not None and pending.owner_id == "core")
-        actions = main_actions(personal, pending, allow_link=self._profile_link_allowed(event)) if common_screen else ()
+        actions = (main_actions(personal, pending, allow_link=self._profile_link_allowed(event))
+                   if common_screen else section_actions or ())
         return replace(response, suggested_actions=actions, preserve_source_actions=True)
 
     def command_menu(self, event: IncomingEvent) -> CommandMenu:
@@ -1512,6 +1526,8 @@ class IncomingMessageDispatcher:
             raise RuntimeError("section action context changed during query")
         # Адресные подтверждения требуют публичного снимка и не исполняются
         # через подпись нижнего меню; ссылка вообще не является командой.
+        if not self._profile_link_allowed(event):
+            actions = tuple(action for action in actions if self._group_action_allowed(action.command))
         return tuple(action for action in actions if action.url is not None or (
             action.command.split()[0] != "/confirm" or len(action.command.split()) == 1
         ) and self._suggestion_allowed(action.command, before))
@@ -1598,13 +1614,14 @@ class IncomingMessageDispatcher:
                 if mode_id and valid_pending is None:
                     section_actions = (HOME_SECTION_ACTION, *section_actions)
             elif (user is not None and mode is not None and isinstance(active, SectionActionsQueryPort)
-                  and self._profile_link_allowed(event)):
+                  and (self._profile_link_allowed(event)
+                       or (active.descriptor.profile_commands and self._group_action_address(event)))):
                 section_actions = self._section_actions_for_context(
                     event, user, active, mode.capability_id, mode.revision, valid_pending,
                 )
         snapshot = self._confirmation_snapshot(event, user, active, mode_revision=mode.revision if mode else None)
         active_help = (
-            self._project_command_help(active, user, event.reply_address, mode.revision)
+            self._project_command_help(active, user, event.reply_address, mode.revision, personal)
             if active is not None and user is not None and mode is not None else None
         )
         if active is not None and active.descriptor.profile_commands and not self._profile_link_allowed(event):
@@ -1617,17 +1634,24 @@ class IncomingMessageDispatcher:
 
     def _project_command_help(
         self, capability: IncomingCapabilityPort, user: AppUser, address: ReplyAddress, mode_revision: int,
+        personal: PersonalCapabilityRegistry,
     ) -> CapabilityHelp | None:
         if not capability.descriptor.persistent_mode or not isinstance(capability, ContextualCommandQueryPort):
             return None
         try:
             names = capability.visible_mode_commands(user, address, mode_revision)
+            for command, enabled in ((ChatCommand.ENABLE, True), (ChatCommand.DISABLE, False)):
+                if command in names and not self._profile_choices(personal, enabled):
+                    names -= {command.value}
             catalog = capability.descriptor.help
             sections = tuple(
                 replace(section, commands=commands)
                 for section in catalog.sections
                 if (commands := tuple(command for command in section.commands if command.name in names))
             )
+            entry = capability.descriptor.entry
+            if entry.name in names and not any(item.name == entry.name for section in sections for item in section.commands):
+                sections += (HelpSection("Навигация", (entry,)),)
             return replace(catalog, sections=sections)
         except Exception:
             LOGGER.exception("Could not read contextual commands: capability_id=%s", capability.descriptor.capability_id)
@@ -1715,20 +1739,22 @@ class IncomingMessageDispatcher:
         return ConfirmationQueryResult("complete" if complete else "unavailable", tuple(confirmations))
 
     @staticmethod
-    def _confirmation_response(result: ConfirmationQueryResult) -> IncomingResponse:
+    def _confirmation_response(result: ConfirmationQueryResult, *, show_commands: bool = False) -> IncomingResponse:
         """Показывает обе стороны каждого решения с явной оговоркой неполноты."""
         if not result.confirmations:
             return IncomingResponse(text_content(
                 "В этом чате нет действий, которые нужно подтвердить."
                 if result.status == "complete" else
                 "Не удалось получить полный список действий для подтверждения. Попробуй позже."
-            ))
+            ), suggested_actions=() if show_commands else (_HELP_SCREEN_ACTION,))
         prefix = ("Список действий неполный: часть источников подтверждений недоступна.\n"
                   if result.status != "complete" else "")
         actions = tuple(action for item in result.confirmations for action in item.actions)
-        parts = [text_content(prefix + "Доступные действия:")]
-        parts.extend(compose_content("\n" + action.label + ": ", code_span(action.command)) for action in actions)
-        return IncomingResponse(compose_content(*parts), actions=actions)
+        content = text_content(prefix + "Доступные действия:")
+        if show_commands:
+            content = MessageContent((*content.blocks, *(confirmation_action_paragraph(action) for action in actions)))
+        return IncomingResponse(content, actions=actions,
+                                suggested_actions=() if show_commands else (_HELP_SCREEN_ACTION,))
 
     def _save_name(
         self,

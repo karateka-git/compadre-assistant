@@ -329,7 +329,7 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertNotIn("vault", reply)
 
     def test_format_incoming_message_result_reports_link_code(self) -> None:
-        """Код привязки форматируется как команда для второго канала."""
+        """Код привязки можно скопировать как отдельное значение."""
         reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
@@ -341,7 +341,8 @@ class TelegramResponsesTest(unittest.TestCase):
         ))
 
         self.assertIn("ABC123", reply)
-        self.assertIn("/link ABC123", reply)
+        self.assertIn("Код привязки: ABC123", reply)
+        self.assertNotIn("/link", reply)
 
     def test_format_incoming_message_result_reports_rebind_success(self) -> None:
         """Подтвержденная перепривязка сообщает нового пользователя."""

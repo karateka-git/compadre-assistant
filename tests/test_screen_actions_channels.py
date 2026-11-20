@@ -128,17 +128,20 @@ class ObservedVkClient(ProjectionClient):
         """Готовит журнал текста для сравнения обоих каналов."""
         super().__init__()
         self.texts = {}
+        self.peer_ids = {}
 
     def send_message(self, **kwargs):
         """Запоминает текст подтверждённой публикации."""
         message_id = super().send_message(**kwargs)
         self.texts[message_id] = kwargs["text"]
+        self.peer_ids[message_id] = kwargs["peer_id"]
         return message_id
 
     def edit_message(self, **kwargs):
         """Запоминает текст подтверждённого редактирования."""
         super().edit_message(**kwargs)
         self.texts[kwargs["conversation_message_id"]] = kwargs["text"]
+        self.peer_ids[kwargs["conversation_message_id"]] = kwargs["peer_id"]
 
 
 class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
@@ -248,19 +251,66 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                    if keyboard is not None and keyboard["inline"] else [])
         return text, actions, event[1]
 
-    def bottom(self):
+    def bottom(self, chat=None):
         """Читает последнюю доставленную нижнюю клавиатуру VK."""
-        keyboard = next(k for _, _, k in reversed(self.vk.events) if k and not k["inline"])
+        keyboard = next(k for _, message_id, k in reversed(self.vk.events)
+                        if k and not k["inline"] and (chat is None or str(self.vk.peer_ids[message_id]) == chat))
         return {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
 
     async def choose_section(self, channel, label, chat):
         """Нажимает реально показанное действие раздела по правилам канала."""
         if channel == "vk":
-            self.assertIn(label, self.bottom())
+            self.assertIn(label, self.bottom(chat))
             await self.send(channel, label, chat=chat, menu=True)
         else:
             _, actions, message_id = self.last(channel)
             await self.press(channel, dict(actions)[label], message_id, chat=chat)
+
+    def inline_action(self, channel, label):
+        """Читает кнопку на последнем ответе с inline-клавиатурой в канале."""
+        if channel == "telegram":
+            _, actions, message_id = self.last(channel)
+            return dict(actions)[label], message_id
+        _, message_id, keyboard = next(event for event in reversed(self.vk.events)
+                                       if event[2] and event[2]["inline"])
+        actions = {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
+        action = actions[label]
+        return action.get("link") or json.loads(action["payload"])["token"], message_id
+
+    async def test_profile_name_and_capabilities_follow_settings_screens(self):
+        """Меняет имя, выключает возможность и включает её в обоих каналах."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                chat = "1001"
+                await self.send(channel, "/start", chat=chat)
+                await self.choose_section(channel, "Настройки", chat)
+                await self.choose_section(channel, "Изменить имя", chat)
+                await self.choose_section(channel, "Помощь", chat)
+                help_text = self.last(channel)[0]
+                self.assertIn("/name", help_text)
+                self.assertNotIn("/connect", help_text)
+                await self.send(channel, "https://example.com/invalid-name", chat=chat)
+                self.assertIn("Имя не принято", self.last(channel)[0])
+                await self.send(channel, "Новое имя", chat=chat)
+                self.assertIn("Новое имя", self.last(channel)[0])
+                self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                await self.choose_section(channel, "Личные возможности", chat)
+                self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                await self.press(channel, *self.inline_action(channel, "Выключить возможность"), chat=chat)
+                self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                await self.press(channel, *self.inline_action(channel, "Выключить screens"), chat=chat)
+                self.assertIn("выключена", self.last(channel)[0])
+                await self.choose_section(channel, "Помощь", chat)
+                help_text = self.last(channel)[0]
+                self.assertIn("/enable", help_text)
+                self.assertNotIn("/disable", help_text)
+                self.assertNotIn("/name", help_text)
+                await self.choose_section(channel, "Личные возможности", chat)
+                await self.press(channel, *self.inline_action(channel, "Включить возможность"), chat=chat)
+                await self.press(channel, *self.inline_action(channel, "Включить screens"), chat=chat)
+                self.assertIn("включена", self.last(channel)[0])
+                await self.choose_section(channel, "Назад", chat)
+                self.assertIn("Новое имя", self.last(channel)[0])
 
     async def test_private_registration_and_contextual_help_from_buttons(self):
         """Регистрирует профиль кнопками, сохраняя ожидаемый ввод при справке."""
@@ -335,43 +385,106 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("У меня есть код", dict(actions))
 
     async def test_messenger_transfer_in_both_directions(self):
-        """Проверяет оба диалога, реальные клавиатуры переноса и восстановление по команде."""
+        """Переносит зарегистрированный аккаунт в оба канала после отказа и справки."""
         for source, target, title, chat, url in (
             ("telegram", "vk", "VK", "1001", "https://vk.com/write-731"),
             ("vk", "telegram", "Telegram", "1002", "https://t.me/example_chat_bot"),
         ):
             with self.subTest(target=target):
-                await self.send(source, "/settings", chat=chat)
+                await self.send(source, "/start", chat=chat)
+                await self.choose_section(source, "Настройки", chat)
                 await self.choose_section(source, "Мессенджеры", chat)
                 self.assertIn(f"{title} — не привязан", self.last(source)[0])
                 await self.choose_section(source, f"Привязать {title}", chat)
                 prompt, buttons, _ = self.last(source)
-                code = re.search(r"/link ([\w-]+)", prompt).group(1)
+                code = re.search(r"Код привязки: (?:<code>)?([\w-]+)", prompt).group(1)
                 self.assertEqual(dict(buttons)["Открыть бота"], url)
-                await self.send(target, "/settings", chat=chat)
+                self.assertNotIn("/link", prompt)
+                await self.send(target, "/start", chat=chat)
+                await self.choose_section(target, "Настройки", chat)
                 await self.choose_section(target, "Мессенджеры", chat)
+                await self.choose_section(target, "Помощь", chat)
+                self.assertIn("/connect", self.last(target)[0])
+                self.assertIn("/link", self.last(target)[0])
+                self.assertNotIn("/name", self.last(target)[0])
                 await self.choose_section(target, f"Привязать {title} к другому профилю", chat)
+                await self.choose_section(target, "Помощь", chat)
+                self.assertIn("/link", self.last(target)[0])
+                self.assertIn("/cancel", self.last(target)[0])
+                self.assertNotIn("/connect", self.last(target)[0])
                 await self.send(target, "неверный-код", chat=chat)
-                self.assertIn(f"/connect {target}", self.last(target)[0])
+                self.assertIn("Код привязки не принят", self.last(target)[0])
+                self.assertNotRegex(self.last(target)[0], r"/[a-z_]+")
                 await self.send(target, code, chat=chat)
-                # VK может отдельно доставить изменившееся нижнее меню.
-                if target == "vk":
-                    item = next(item for item in reversed(self.vk.events) if item[2] and item[2]["inline"])
-                    choose = next(button["action"] for row in item[2]["buttons"] for button in row
-                                  if button["action"]["label"] == "Перенести аккаунт")
-                    token, message_id = json.loads(choose["payload"])["token"], item[1]
-                else:
-                    _, actions, message_id = self.last(target)
-                    token = dict(actions)["Перенести аккаунт"]
-                await self.press(target, token, message_id, chat=chat)
+                reject = self.inline_action(target, "Отменить перенос")
+                self.assertNotIn("/confirm", self.last(target)[0])
+                await self.press(target, *self.inline_action(target, "Помощь"), chat=chat)
+                self.assertRegex(self.last(target)[0], r"/confirm core identity \d+ \d+ yes")
+                await self.press(target, *reject, chat=chat)
+                self.assertIn("оставляю текущую привязку", self.last(target)[0])
+                await self.choose_section(target, f"Привязать {title} к другому профилю", chat)
+                await self.send(target, code, chat=chat)
+                accept = self.inline_action(target, "Перенести аккаунт")
+                await self.press(target, *accept, chat=chat)
                 self.assertIn("перепривязал", self.last(target)[0])
-                await self.send(source, "/connect", chat=chat)
+                await self.press(target, *accept, chat=chat)
+                self.assertIn("больше недоступна", self.last(target)[0])
+                await self.choose_section(source, "Назад", chat)
+                await self.choose_section(source, "Мессенджеры", chat)
                 self.assertIn(f"{title} — привязан", self.last(source)[0])
                 if source == "vk":
-                    self.assertIn("Открыть бота", self.bottom())
-                delivered_url = (self.bottom()["Открыть бота"]["link"] if source == "vk"
+                    self.assertIn("Открыть бота", self.bottom(chat))
+                delivered_url = (self.bottom(chat)["Открыть бота"]["link"] if source == "vk"
                                  else dict(self.last(source)[1])["Открыть бота"])
                 self.assertEqual(delivered_url, url)
+
+    async def test_group_settings_name_and_capability_input_belong_to_the_author(self):
+        """Кнопки группы меняют профиль автора и сохраняют личный характер привязки."""
+        for channel, chat in (("telegram", "-413"), ("vk", "2000000413")):
+            with self.subTest(channel=channel):
+                author, stranger = "1001", "1002"
+                await self.send(channel, "/start", chat=chat, author=author)
+                await self.press(channel, *self.inline_action(channel, "Настройки"), chat=chat, author=author)
+                self.assertNotIn("Мессенджеры", dict(self.last(channel)[1]))
+                change_name = self.inline_action(channel, "Изменить имя")
+                await self.press(channel, *change_name, chat=chat, author=stranger)
+                self.assertIn("больше недоступна", self.last(channel)[0])
+                await self.press(channel, *change_name, chat=chat, author=author)
+                cancel = self.inline_action(channel, "Отмена")
+                await self.press(channel, *cancel, chat=chat, author=stranger)
+                self.assertIn("больше недоступна", self.last(channel)[0])
+                await self.send(channel, "/settings", chat=chat, author=stranger)
+                await self.send(channel, "/name", chat=chat, author=stranger)
+                self.assertIn("другой участник", self.last(channel)[0])
+                await self.send(channel, "Чужое имя", chat=chat, author=stranger)
+                self.assertNotIn("буду обращаться", self.last(channel)[0])
+                await self.send(channel, "Имя автора", chat=chat, author=author)
+                self.assertIn("Имя автора", self.last(channel)[0])
+                await self.press(channel, *self.inline_action(channel, "Личные возможности"), chat=chat, author=author)
+                await self.press(channel, *self.inline_action(channel, "Выключить возможность"), chat=chat, author=author)
+                self.assertIn("ID из списка", self.last(channel)[0])
+                await self.send(channel, "screens", chat=chat, author=stranger)
+                self.assertNotIn("выключена", self.last(channel)[0])
+                await self.send(channel, "screens", chat=chat, author=author)
+                self.assertIn("выключена", self.last(channel)[0])
+                await self.press(channel, *self.inline_action(channel, "Личные возможности"), chat=chat, author=author)
+                await self.press(channel, *self.inline_action(channel, "Включить возможность"), chat=chat, author=author)
+                await self.send(channel, "screens", chat=chat, author=author)
+                self.assertIn("включена", self.last(channel)[0])
+
+    async def test_unregistered_channel_accepts_plain_code_in_both_directions(self):
+        """Привязывает новый канал к профилю без ввода команды."""
+        for source, target, title in (("telegram", "vk", "VK"), ("vk", "telegram", "Telegram")):
+            with self.subTest(target=target):
+                await self.send(source, "/start")
+                await self.choose_section(source, "Настройки", "1001")
+                await self.choose_section(source, "Мессенджеры", "1001")
+                await self.choose_section(source, f"Привязать {title}", "1001")
+                code = re.search(r"Код привязки: (?:<code>)?([\w-]+)", self.last(source)[0]).group(1)
+                await self.send(target, "/start", chat="3005")
+                await self.choose_section(target, "У меня есть код", "3005")
+                await self.send(target, code, chat="3005")
+                self.assertIn("привязал", self.last(target)[0])
 
     async def test_first_entry_and_missing_public_address_keep_manual_link(self):
         """Без публичного имени Telegram ручной путь работает до регистрации."""
@@ -381,7 +494,7 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         prompt, actions, _ = self.last("vk")
         self.assertIn("Адрес бота не указан", prompt)
         self.assertNotIn("Открыть бота", dict(actions))
-        code = re.search(r"/link ([\w-]+)", prompt).group(1)
+        code = re.search(r"Код привязки: (?:<code>)?([\w-]+)", prompt).group(1)
         await self.send("telegram", "/start", chat="3003")
         self.assertEqual([name for name, _ in self.last("telegram")[1]], ["Создать профиль", "У меня есть код", "Помощь"])
         await self.choose_section("telegram", "У меня есть код", "3003")

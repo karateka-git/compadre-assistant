@@ -695,7 +695,7 @@ async def send_telegram_reply(
         ValueError: Лимит не вмещает даже один символ с оформлением.
         Exception: Ошибка отправки готовой части через Telegram API.
     """
-    chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    chunks = render_telegram_content(response.content, limit=limit)
     for index, chunk in enumerate(chunks):
         keyboard = None
         if TELEGRAM_INLINE_ACTIONS_ENABLED and index == len(chunks) - 1:
@@ -779,7 +779,7 @@ async def _send_telegram_view(
     finish = delivery.finish
     if delivery.start():
         try:
-            chunks = render_telegram_content(response.content, response.actions, limit=limit)
+            chunks = render_telegram_content(response.content, limit=limit)
             multipart = len(chunks) > 1
             finish_replacement = delivery.finish_replacement
             if finish_replacement is not None and (
@@ -871,7 +871,7 @@ async def _send_telegram_reply(
     sleeper: Callable[[float], Awaitable[None]], include_bound_actions: bool,
 ) -> bool:
     """Доставляет все части ответа и возвращает факт успешной доставки."""
-    chunks = render_telegram_content(response.content, response.actions, limit=limit)
+    chunks = render_telegram_content(response.content, limit=limit)
     keyboard = (
         _optional_telegram_inline_keyboard(response, logger)
         if include_bound_actions else None

@@ -224,7 +224,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Лишний аргумент не меняет настройки; незнакомый канал просит регистрацию."""
         self.dispatcher.execute(_event("/settings"))
         before = self.preferences.reads
-        self.assertIn("без аргументов", response_text(self.dispatcher.execute(_event("/capabilities extra"))))
+        self.assertIn("отдельным действием", response_text(self.dispatcher.execute(_event("/capabilities extra"))))
         self.assertEqual(self.preferences.rows, {})
         self.identity.user = None
         self.assertIn("пока нет профиля", response_text(self.dispatcher.execute(_event("/capabilities"))))
@@ -241,7 +241,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         dispatcher.execute(_event("/settings"))
         reply = dispatcher.execute(_event("/capabilities"))
         self.assertIn("нет известных возможностей", response_text(reply))
-        self.assertIn("/enable <id>", response_text(reply))
+        self.assertNotIn("/enable", response_text(reply))
+        self.assertNotIn("/enable", {action.command for action in reply.suggested_actions})
 
     def test_enable_validates_exact_id_and_server_availability(self) -> None:
         """Некорректный ID и отключённый сервером вход не создают настроек."""
@@ -254,7 +255,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         dispatcher.execute(_event("/settings"))
         for text in ("/enable Selected", "/enable unknown"):
             reply = dispatcher.execute(_event(text))
-            self.assertIn("/capabilities", response_text(reply))
+            self.assertIn("Открой личные возможности", response_text(reply))
             self.assertEqual(self.preferences.rows, {})
         self.assertIn("недоступна на сервере", response_text(dispatcher.execute(_event("/enable offline"))))
         self.assertEqual(self.preferences.rows, {})
@@ -329,7 +330,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         )
         dispatcher.execute(_event("/settings"))
         for text in ("/disable Offline", "/disable unknown"):
-            self.assertIn("/capabilities", response_text(dispatcher.execute(_event(text))))
+            self.assertIn("Открой личные возможности", response_text(dispatcher.execute(_event(text))))
             self.assertEqual(self.preferences.rows, {})
         self.preferences.rows[(23, "offline")] = True
         self.assertIn("выключена", response_text(dispatcher.execute(_event("/disable offline"))))
@@ -593,7 +594,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         for text in ("/selected аргумент Telegram", "действие"):
             message.text = text
             asyncio.run(aiogram.dispatcher.included_router.handler(message))
-        self.assertIn("/selected_confirm token", message.answers[-1])
+        self.assertNotIn("/selected_confirm token", message.answers[-1])
         self.assertIsNone(self.repository.get(ChatModeKey(23, "telegram", "42")))
         self.assertEqual(self.capability.entry_arguments, "аргумент Telegram")
         client = FakeVkClient()
@@ -604,7 +605,7 @@ class IncomingBoundaryTest(unittest.TestCase):
                 client=client,
                 logger=logging.getLogger("test.fake.vk"),
             )
-        self.assertIn("/selected_confirm token", client.messages[-1][1])
+        self.assertNotIn("/selected_confirm token", client.messages[-1][1])
         self.assertIsNone(self.repository.get(ChatModeKey(23, "vk", "42")))
         self.assertEqual(self.capability.entry_arguments, "аргумент VK")
         self.assertEqual([event.channel for _, event in self.capability.entries], ["telegram", "vk"])
