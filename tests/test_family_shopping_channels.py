@@ -47,10 +47,15 @@ _SHOPPING_HELP_COMMANDS = (
 )
 _SHOPPING_TEXT_DUPLICATES = (
     "/add", "/buy", "/delete", "/family_clear_bought", "/family_shopping page", "/family_shopping home",
+    "/family_shopping item",
 )
 _SELECTION_TEXT_DUPLICATES = (
     "Например", "/cancel", "/family_shopping buy", "/family_shopping delete", "/family_shopping back",
+    "/family_shopping item",
 )
+_TITLE_AT_PREVIEW_LIMIT = "А" * 90
+_TITLE_OVER_PREVIEW_LIMIT = "Б" * 90 + "Я"
+_PREVIEW_LINES = [f"1. {_TITLE_AT_PREVIEW_LIMIT}", f"2. {_TITLE_OVER_PREVIEW_LIMIT[:90]}..."]
 
 
 def _runtime(test: unittest.TestCase, channel: str, user_id: int) -> tuple[ChannelMessageProcessor, Path]:
@@ -251,7 +256,6 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._send("/add " + "\n".join([title, *(f"Товар {index}" for index in range(2, 12))]))
         ordinary = self.bot.send_message.await_args
         ordinary_id = self.last_sent
-        self.assertIn("/family_shopping item 1", ordinary.kwargs["text"])
         for duplicate in _SHOPPING_TEXT_DUPLICATES:
             self.assertNotIn(duplicate, ordinary.kwargs["text"])
         controls = self._actions(ordinary)
@@ -279,6 +283,35 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/help", self._menu())
         await self._send("/family_shopping page 2")
         self.assertIn("12. Морковь", self.bot.send_message.await_args.kwargs["text"])
+
+    async def test_long_titles_in_list_and_selection(self) -> None:
+        """Telegram показывает сокращение в тексте и сохраняет выбор товара кнопкой."""
+        await self._open()
+        await self._send(f"/add {_TITLE_AT_PREVIEW_LIMIT}\n{_TITLE_OVER_PREVIEW_LIMIT}")
+        ordinary = self.bot.send_message.await_args
+        active_list = self.last_sent
+        self.assertEqual(ordinary.kwargs["text"].splitlines()[3:], _PREVIEW_LINES)
+        actions = self._actions(ordinary)
+        self.assertEqual(list(actions), ["Добавить", "Купить", "Удалить", "Назад"])
+
+        await self._press(actions["Купить"], active_list)
+        choice = self.bot.edit_message_text.await_args
+        self.assertEqual(choice.kwargs["text"].splitlines()[3:5], _PREVIEW_LINES)
+        buy = self._actions(choice)
+        first, second, back = buy
+        self.assertEqual(back, "Назад")
+        self.assertTrue(first.startswith("1. "))
+        self.assertTrue(second.startswith("2. "))
+        await self._press(buy[second], active_list)
+        await self._press(self._actions(self.bot.edit_message_text.await_args)["Назад"], active_list)
+
+        ordinary = self.bot.edit_message_text.await_args
+        self.assertIn(f"Куплено\n1. {_TITLE_OVER_PREVIEW_LIMIT[:90]}...", ordinary.kwargs["text"])
+        await self._press(self._actions(ordinary)["Удалить"], active_list)
+        delete = self._actions(self.bot.edit_message_text.await_args)
+        await self._press(delete[first], active_list)
+        await self._press(self._actions(self.bot.edit_message_text.await_args)["Назад"], active_list)
+        self.assertNotIn(_TITLE_AT_PREVIEW_LIMIT, self.bot.edit_message_text.await_args.kwargs["text"])
 
     async def test_inline_shopping_commands_reflect_items_and_cancel_add(self) -> None:
         """Покупки доступны кнопками, а отмена пошагового ввода сохраняет список."""
@@ -640,6 +673,37 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertTrue(all(len(button["label"]) <= 40 for button in buttons))
         return {button["label"]: json.loads(button["payload"])["token"] for button in buttons}
 
+    def test_long_titles_in_list_and_selection(self) -> None:
+        """VK показывает сокращение в тексте и сохраняет выбор товара кнопкой."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Покупки")
+        ordinary = self._single_reply(
+            lambda: self._send(f"/add {_TITLE_AT_PREVIEW_LIMIT}\n{_TITLE_OVER_PREVIEW_LIMIT}"),
+            "Список покупок", labels=["Добавить", "Купить", "Удалить", "Назад"],
+        )
+        self.assertEqual(ordinary["message"].splitlines()[3:], _PREVIEW_LINES)
+
+        choice = self._single_reply(lambda: self._menu_press("Купить"), "Выбери, что купил")
+        cmid = self.last_cmid
+        self.assertEqual(choice["message"].splitlines()[3:5], _PREVIEW_LINES)
+        buy = self._actions(choice)
+        first, second, back = buy
+        self.assertEqual(back, "Назад")
+        self.assertTrue(first.startswith("1. "))
+        self.assertTrue(second.startswith("2. "))
+        self._press(buy[second], cmid)
+        self._single_reply(lambda: self._press(self._actions(self._latest_edit())["Назад"], cmid),
+                           f"Куплено\n1. {_TITLE_OVER_PREVIEW_LIMIT[:90]}...")
+
+        choice = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
+        cmid = self.last_cmid
+        self._press(self._actions(choice)[first], cmid)
+        ordinary = self._single_reply(lambda: self._press(self._actions(self._latest_edit())["Назад"], cmid),
+                                      "Нужно купить\nСписок пуст.")
+        self.assertNotIn(_TITLE_AT_PREVIEW_LIMIT, ordinary["message"])
+
     def test_long_ordinary_page_reaches_vk_with_menu_on_last_message(self) -> None:
         """Все части списка доходят, а нижнее меню прикрепляется к последней."""
         self._send("/family")
@@ -739,7 +803,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._press(self._actions(delete_page)["Предыдущая страница"], delete_cmid)
         delete = self._latest_edit()
         self.assertTrue(next(label for label in self._actions(delete) if label.startswith("1. ")).endswith("…"))
-        self.assertIn("/family_shopping item 1", delete["message"])
+        self.assertIn(f"1. {'>' * 90}...", delete["message"].splitlines())
         before = len(self.calls)
         self._press(self._actions(delete)["2. Товар 2"], delete_cmid)
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.edit"])
@@ -892,7 +956,6 @@ class VkFamilyShoppingTest(unittest.TestCase):
             lambda: self._send("/add " + "\n".join(["Молоко", title, *(f"Товар {i}" for i in range(3, 12))])),
             "Список покупок · 1/2",
         )
-        self.assertIn("/family_shopping item 2", added["message"])
         for duplicate in _SHOPPING_TEXT_DUPLICATES:
             self.assertNotIn(duplicate, added["message"])
         shopping_menu = self._visible_menu()

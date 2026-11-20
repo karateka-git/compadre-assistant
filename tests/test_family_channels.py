@@ -191,7 +191,8 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("Нужно купить", first_page)
             self.assertNotIn("Куплено", first_page)
             self.assertNotIn("Смотри другие страницы", first_page)
-            self.assertIn("/family_shopping item 1", first_page)
+            self.assertIn(f"1. {long_title[:90]}...", first_page.splitlines())
+            self.assertNotIn("/family_shopping item", first_page)
             self.assertNotIn(long_title, first_page)
             self.assertEqual(response_text(self._send(processor, self.owner_tg, "/family_shopping item 1")),
                              f"1. {long_title}")
