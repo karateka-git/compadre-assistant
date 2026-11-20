@@ -247,7 +247,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._send("Дом")
         self.assertFalse({"/add", "/buy", "/delete"} & self._menu())
         await self._send("/family_shopping")
-        self.assertEqual(self._menu(), {"/help", "/family_shopping", "/exit"})
+        self.assertEqual(self._menu(), {"/help"})
 
     async def test_menu_help_without_text_duplicates_preserves_pending_add(self) -> None:
         """Telegram публикует /help, а вызов справки сохраняет ожидание ввода."""
@@ -275,10 +275,10 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         for command in _SHOPPING_HELP_COMMANDS:
             self.assertIn(command + "</code>", help_text)
         await self._press(controls["Добавить"], ordinary_id)
-        self.assertEqual(self._menu(), {"/cancel"})
+        self.assertEqual(self._menu(), {"/help"})
         await self._send("/help")
         self.assertIn("Ожидается", self.bot.send_message.await_args.kwargs["text"])
-        self.assertEqual(self._menu(), {"/cancel"})
+        self.assertEqual(self._menu(), {"/help"})
         await self._send("Морковь")
         self.assertIn("/help", self._menu())
         await self._send("/family_shopping page 2")
@@ -916,7 +916,8 @@ class VkFamilyShoppingTest(unittest.TestCase):
                 self.assertIn(title, sent[0]["message"])
                 actions = self._actions(sent[0])
                 self.assertEqual(list(actions), inline_labels)
-                self.assertIn("/help", sent[1]["message"])
+                self.assertIn("Помощь", sent[1]["message"])
+                self.assertNotIn("/help", sent[1]["message"])
                 self.assertEqual(list(self._visible_menu()), home)
                 source = next(cmid for cmid, message in reversed(self.sent_messages.items()) if title in message["text"])
                 if command == "/family_invite":

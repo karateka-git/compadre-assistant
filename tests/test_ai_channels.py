@@ -830,21 +830,22 @@ class AiChannelsTest(unittest.TestCase):
                         await send("Тест")
                         await send("/ai")
                         normal = commands()
-                        self.assertIn("/ask" if channel == "telegram" else "Задать вопрос", normal)
+                        self.assertIn("/help" if channel == "telegram" else "Задать вопрос", normal)
+                        waiting_menu = ("/help",) if channel == "telegram" else ("Отмена",)
                         await send("/get_text_from_image")
-                        self.assertEqual(commands(), ("/cancel",) if channel == "telegram" else ("Отмена",))
+                        self.assertEqual(commands(), waiting_menu)
                         await send("/cancel")
                         self.assertEqual(commands(), normal)
                         if channel == "telegram":
                             await send("/ask")
-                            self.assertEqual(commands(), ("/cancel",))
+                            self.assertEqual(commands(), waiting_menu)
                             await send("  ")
-                            self.assertEqual(commands(), ("/cancel",))
+                            self.assertEqual(commands(), waiting_menu)
                             self.assertEqual(reports, [])
                         await send("пошаговый" if channel == "telegram" else "/ask прямой")
                         self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                         self.assertIn("Вопрос принят", sent[-1])
-                        self.assertEqual(commands(), ("/cancel",) if channel == "telegram" else ("Отмена",))
+                        self.assertEqual(commands(), waiting_menu)
                         await send("/cancel")
                         self.assertIn("Обработка отменена", sent[-1])
                         self.assertEqual(commands(), normal)
@@ -943,8 +944,8 @@ class AiChannelsTest(unittest.TestCase):
                 menu_calls = []
                 keyboards_by_reply = []
 
-                ask_label = "/ask" if channel == "telegram" else "Задать вопрос"
-                cancel_label = "/cancel" if channel == "telegram" else "Отмена"
+                ask_label = "/help" if channel == "telegram" else "Задать вопрос"
+                cancel_label = "/help" if channel == "telegram" else "Отмена"
 
                 def record_menu(chat, commands):
                     menu_calls.append((chat, commands))

@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aiogram import types as aiogram_types
 from aiogram.exceptions import (
     TelegramConflictError as AiogramTelegramConflictError,
     TelegramNetworkError as AiogramTelegramNetworkError,
@@ -154,6 +155,7 @@ class FakeAiogram:
 
     Bot = FakePollingBot
     Router = FakeRouter
+    types = aiogram_types
     exceptions = SimpleNamespace(
         TelegramConflictError=AiogramTelegramConflictError,
         TelegramNetworkError=AiogramTelegramNetworkError,
@@ -772,8 +774,8 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertEqual(len(updates), 1)
         self.assertEqual(updates[0].address, ReplyAddress("telegram", "42"))
 
-    def test_menu_publication_uses_chat_scope_and_exact_commands(self) -> None:
-        """Меню публикуется в личном scope с точными именами и описаниями."""
+    def test_menu_publication_uses_chat_scope_and_only_help(self) -> None:
+        """Telegram публикует в личном чате один вход в контекстную справку."""
         from aiogram.types import BotCommandScopeChat
 
         bot = MenuTelegramBot()
@@ -796,12 +798,12 @@ class TelegramBotHelpersTest(unittest.TestCase):
         self.assertEqual(len(bot.menu_calls), 1)
         commands, scope = bot.menu_calls[0]
         self.assertEqual([(item.command, item.description) for item in commands],
-                         [("help", "Показать справку"), ("ask", "Задать вопрос")])
+                         [("help", "Помощь")])
         self.assertIsInstance(scope, BotCommandScopeChat)
         self.assertEqual(scope.chat_id, 42)
 
-    def test_empty_menu_clears_commands_and_foreign_or_group_addresses_are_ignored(self) -> None:
-        """Пустой список очищает меню, а другой канал и group не получают публикацию."""
+    def test_help_remains_available_when_chat_has_no_other_commands(self) -> None:
+        """Пустой список оставляет справку, другой канал и группа не получают публикацию."""
         bot = MenuTelegramBot()
         loop = asyncio.new_event_loop()
         try:
@@ -826,7 +828,7 @@ class TelegramBotHelpersTest(unittest.TestCase):
         finally:
             loop.close()
         self.assertEqual(len(bot.menu_calls), 1)
-        self.assertEqual(bot.menu_calls[0][0], [])
+        self.assertEqual([command.command for command in bot.menu_calls[0][0]], ["help"])
 
     def test_menu_api_error_propagates_for_processor_retry(self) -> None:
         """Ошибка Telegram API выходит из callback, чтобы processor повторил публикацию."""

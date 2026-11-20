@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import threading
 from types import SimpleNamespace
 import time
@@ -14,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits
+from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.events import (
     ImageAttachment, ImageLoadError, IncomingEvent, ReplyAddress,
 )
@@ -79,7 +79,7 @@ def run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери действие в меню.",
 ) -> None:
     """Запускает Telegram-бота в polling-режиме.
 
@@ -114,7 +114,7 @@ async def _run_telegram_bot(
     proxy_url: str | None = None,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери действие в меню.",
 ) -> None:
     """Асинхронно запускает polling Telegram-бота."""
     aiogram = _load_aiogram()
@@ -147,6 +147,11 @@ async def _run_telegram_bot(
         logger=logger,
     )
     try:
+        await safe_send_async(
+            lambda: bot.set_my_commands(commands=_telegram_help_commands(aiogram),
+                                        scope=aiogram.types.BotCommandScopeDefault()),
+            logger=logger, channel="Telegram", target_id="default", retry_delay_resolver=_telegram_retry_delay,
+        )
         await _start_polling_with_retries(
             dispatcher,
             bot,
@@ -298,7 +303,7 @@ def _register_handlers(
     *,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери действие в меню.",
     menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
     """Регистрирует минимальные handlers Telegram adapter."""
@@ -446,20 +451,9 @@ def _create_telegram_menu_update_handler(
             logger.warning("Skipping Telegram menu for a non-private chat")
             return False
 
-        commands = []
-        if len(update.menu.items) > 100:
-            raise ValueError("Telegram menu supports at most 100 commands")
-        for item in update.menu.items:
-            command = item.command[1:] if item.command.startswith("/") else item.command
-            if re.fullmatch(r"[a-z0-9_]{1,32}", command) is None:
-                raise ValueError("Telegram command name must contain 1-32 lowercase letters, digits or underscores")
-            if not 1 <= len(item.description) <= 256:
-                raise ValueError("Telegram command description must contain 1-256 characters")
-            commands.append(aiogram.types.BotCommand(command=command, description=item.description))
-
         scope = aiogram.types.BotCommandScopeChat(chat_id=chat_id)
         future = asyncio.run_coroutine_threadsafe(
-            bot.set_my_commands(commands=commands, scope=scope), loop,
+            bot.set_my_commands(commands=_telegram_help_commands(aiogram), scope=scope), loop,
         )
         try:
             future.result(timeout=TELEGRAM_MENU_API_TIMEOUT_SECONDS)
@@ -473,6 +467,11 @@ def _create_telegram_menu_update_handler(
         return True
 
     return publish
+
+
+def _telegram_help_commands(aiogram: Any) -> list[Any]:
+    """Даёт один доступный вход в справку для всех системных меню Telegram."""
+    return [aiogram.types.BotCommand(command=ChatCommand.HELP.value.removeprefix("/"), description="Помощь")]
 
 
 def _start_telegram_menu_reconciliation(

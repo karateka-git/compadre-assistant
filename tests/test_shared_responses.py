@@ -287,9 +287,8 @@ class TelegramResponsesTest(unittest.TestCase):
 
         self.assertEqual(
             reply,
-            "Compadre Assistant запущен.\n"
             "Рад тебя видеть, Влад.\n"
-            "Справка: /help.",
+            "Выбери, что сделать дальше.",
         )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
@@ -300,8 +299,8 @@ class TelegramResponsesTest(unittest.TestCase):
             )
         ))
 
-        self.assertIn("пока не зарегистрирован", reply)
-        self.assertIn("/register", reply)
+        self.assertIn("Выбери, как начать", reply)
+        self.assertNotIn("/register", reply)
 
     def test_format_incoming_message_result_reports_already_registered(self) -> None:
         """Повторный /register получает честный ответ."""

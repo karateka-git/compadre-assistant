@@ -497,7 +497,8 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertNotIn("/family", response_text(self._send(processor, group, "/help")))
             self.assertIn("в личном чате", response_text(self._send(processor, group, "/family")))
             stranger = IncomingIdentity("telegram", "666", "666")
-            self.assertIn("/register", response_text(self._send(processor, stranger, "/family")))
+            response = self._send(processor, stranger, "/family")
+            self.assertIn("Создать профиль", {action.label for action in response.bound_actions})
             self.assertIn("/family", response_text(self._send(processor, self.owner_tg, "/help")))
             self.assertIn("войди в режим", response_text(self._send(processor, self.owner_tg, "/family_create")))
 

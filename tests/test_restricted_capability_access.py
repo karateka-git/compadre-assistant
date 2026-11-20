@@ -103,7 +103,7 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
         self.send("/settings")
         self.assertIn("restricted", self.send("/capabilities"))
         unknown = replace(self.owner, chat_id="4004", external_user_id="4004")
-        self.assertIn("/register", self.send("/restricted", unknown))
+        self.assertIn("пока нет профиля", self.send("/restricted", unknown))
         for event in (self.other, unknown):
             updates = []
             for command in ("/help", "/start", "/settings", "/status", "/capabilities", "/enable", "/disable"):

@@ -165,7 +165,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
             return response_text(self.processor(replace(self.event, text=text)))
 
         unregistered = replace(self.event, chat_id="2002", external_user_id="2002", text=command)
-        self.assertIn("/register", response_text(self.processor(unregistered)))
+        self.assertIn("Создать профиль", {action.label for action in self.processor(unregistered).bound_actions})
         self.assertIn("войди в режим через /selected", send(command))
         send("/other")
         self.assertIn("войди в режим через /selected", send(command))

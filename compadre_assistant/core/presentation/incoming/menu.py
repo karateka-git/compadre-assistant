@@ -4,10 +4,14 @@ from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
-    CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityHelp, CommandMenu, CommandSuggestion,
+    CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CommandMenu, CommandSuggestion,
     ConfirmationQueryResult, ReplyAction,
 )
 from compadre_assistant.core.presentation.incoming.registry import PersonalCapabilityRegistry
+
+
+HELP_SECTION_ACTION = ReplyAction("Помощь", ChatCommand.HELP.value, scope=ActionScope.SECTION)
+HOME_SECTION_ACTION = ReplyAction("На главную", ChatCommand.EXIT.value, scope=ActionScope.SECTION)
 
 
 # Пока принятое действие занимает чат, только отмена может изменить его состояние.
@@ -17,18 +21,36 @@ BUSY_COMMAND_MENU = CommandMenu(
 )
 
 
-def main_actions(personal: PersonalCapabilityRegistry | None, pending: PendingInput | None) -> tuple[ReplyAction, ...]:
-    """Возвращает действия первого входа, ожидания или главного меню по допуску профиля."""
+def capability_entry_action(descriptor: CapabilityDescriptor) -> ReplyAction:
+    """Создаёт кнопку входа с публичным названием возможности."""
+    return ReplyAction(descriptor.display_name or descriptor.entry.description,
+                       descriptor.entry.name, scope=ActionScope.SECTION)
+
+
+def main_actions(
+    personal: PersonalCapabilityRegistry | None, pending: PendingInput | None, *, allow_link: bool = True,
+) -> tuple[ReplyAction, ...]:
+    """Возвращает действия первого входа, ожидания или главного меню по допуску профиля.
+
+    Args:
+        personal: Проверенный доступ профиля либо None до регистрации.
+        pending: Применимое ожидание этого пользователя.
+        allow_link: Предлагать ввод кода в личном чате.
+
+    Returns:
+        Действия общего экрана, включая контекстную справку.
+    """
     if pending is not None:
-        return (CANCEL_SECTION_ACTION,)
+        return CANCEL_SECTION_ACTION, HELP_SECTION_ACTION
     if personal is None:
-        return (ReplyAction("Создать профиль", "/register", scope=ActionScope.SECTION),
-                ReplyAction("У меня есть код", "/link", scope=ActionScope.SECTION))
-    return tuple(
-        ReplyAction(access.descriptor.display_name or access.descriptor.entry.name,
-                    access.descriptor.entry.name, scope=ActionScope.SECTION)
-        for access in personal.access if access.effective
-    ) + (ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),)
+        create = ReplyAction("Создать профиль", "/register", scope=ActionScope.SECTION)
+        link = (ReplyAction("У меня есть код", "/link", scope=ActionScope.SECTION),) if allow_link else ()
+        return create, *link, HELP_SECTION_ACTION
+    entries = (access.descriptor for access in personal.access if access.effective)
+    return (*(
+        capability_entry_action(descriptor) for descriptor in entries
+        if not any(parameter.required for parameter in descriptor.entry.parameters)
+    ), HELP_SECTION_ACTION)
 
 
 def build_command_menu(

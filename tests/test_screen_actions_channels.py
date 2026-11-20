@@ -21,6 +21,7 @@ from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
 )
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityHelp, CapabilityResult, ConfirmationQueryResult, HelpSection,
     IncomingResponse, PendingConfirmationQueryPort, ReplyAction, ResponseView, SectionActionsQueryPort,
@@ -48,7 +49,7 @@ class NeutralScreenCapability(FakeCapability, SectionActionsQueryPort, PendingCo
         self.selected = []
         self.pages = []
         self.section = (ReplyAction("Открыть выбор", "/objects", scope=ActionScope.SECTION),
-                        ReplyAction("Показать текст", "/note", scope=ActionScope.SECTION))
+                        ReplyAction("Показать текст", "/note", scope=ActionScope.SECTION), HELP_SECTION_ACTION)
 
     def section_actions(self, app_user, address, mode_revision, pending):
         """Возвращает тот же неизменяемый набор, что основной экран."""
@@ -96,7 +97,7 @@ class NeutralScreenCapability(FakeCapability, SectionActionsQueryPort, PendingCo
             content = "\n".join(f"{number}. {label}" for number, _, label in shown)
             content += "\nВведи номер из этой страницы. Вернуться: /menu."
             return CapabilityResult(IncomingResponse(
-                text_content(content), suggested_actions=tuple(actions),
+                text_content(content), suggested_actions=(*actions, HELP_SECTION_ACTION),
                 view=ResponseView("objects", update=command == "/page",
                                   unavailable=text_content("Открой /objects заново."),
                                   on_delivered=lambda: self.delivered.__setitem__(key, shown), cleanup_previous=True),
@@ -196,35 +197,37 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.vk = ObservedVkClient()
         self.vk_menu = _create_vk_menu_update_handler(self.vk, logger=self.logger)
 
-    async def send(self, channel, text, *, chat="1001", menu=False):
+    async def send(self, channel, text, *, chat="1001", menu=False, author=None):
         """Передаёт сообщение реальному входному обработчику нужного канала."""
+        author = author or chat
         if channel == "telegram":
             async def answer(value, **kwargs):
                 return await self.bot.send_message(chat_id=int(chat), text=value, **kwargs)
 
             await self.router.handler(SimpleNamespace(
-                chat=SimpleNamespace(id=int(chat)), from_user=SimpleNamespace(id=int(chat)),
+                chat=SimpleNamespace(id=int(chat)), from_user=SimpleNamespace(id=int(author)),
                 message_id=1, text=text, bot=self.bot, answer=answer,
             ))
         else:
             _handle_update({"type": "message_new", "object": {"message": {
-                "peer_id": int(chat), "from_id": int(chat), "id": 1, "text": text,
+                "peer_id": int(chat), "from_id": int(author), "id": 1, "text": text,
                 "payload": '{"menu":true}' if menu else None,
             }}}, incoming_message_processor=self.processor, client=self.vk, logger=self.logger,
                 menu_update_handler=self.vk_menu)
 
-    async def press(self, channel, token, message_id, *, chat="1001"):
+    async def press(self, channel, token, message_id, *, chat="1001", author=None):
         """Передаёт callback с независимыми адресом и ID исходного сообщения."""
+        author = author or chat
         if channel == "telegram":
             callback = SimpleNamespace(
-                id="click", data=token, from_user=SimpleNamespace(id=int(chat)),
+                id="click", data=token, from_user=SimpleNamespace(id=int(author)),
                 message=SimpleNamespace(chat=SimpleNamespace(id=int(chat)), message_id=message_id),
                 bot=self.bot, answer=AsyncMock(),
             )
             await self.router.callback_handler(callback)
         else:
             _handle_update({"type": "message_event", "object": {
-                "peer_id": int(chat), "user_id": int(chat), "event_id": "click",
+                "peer_id": int(chat), "user_id": int(author), "event_id": "click",
                 "conversation_message_id": message_id, "payload": {"token": token},
             }}, incoming_message_processor=self.processor, client=self.vk, logger=self.logger,
                 menu_update_handler=self.vk_menu)
@@ -258,6 +261,78 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         else:
             _, actions, message_id = self.last(channel)
             await self.press(channel, dict(actions)[label], message_id, chat=chat)
+
+    async def test_private_registration_and_contextual_help_from_buttons(self):
+        """Регистрирует профиль кнопками, сохраняя ожидаемый ввод при справке."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                chat = "3003"
+                await self.send(channel, "/start", chat=chat)
+                self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                await self.choose_section(channel, "Помощь", chat)
+                self.assertIn("/register", self.last(channel)[0])
+                self.assertIn("/link", self.last(channel)[0])
+                await self.choose_section(channel, "Создать профиль", chat)
+                prompt, actions, source = self.last(channel)
+                self.assertIn("10 минут", prompt)
+                self.assertNotRegex(prompt, r"/[a-z_]+")
+                await self.choose_section(channel, "Помощь", chat)
+                help_text = self.last(channel)[0]
+                self.assertIn("/cancel", help_text)
+                self.assertNotIn("/register", help_text)
+                self.assertNotIn("/link", help_text)
+                await self.send(channel, "/help", chat=chat)
+                self.assertEqual(self.last(channel)[0], help_text)
+                if channel == "telegram":
+                    self.assertNotIn(source, self.telegram_cleared)
+                    await self.press(channel, dict(actions)["Отмена"], source, chat=chat)
+                else:
+                    await self.choose_section(channel, "Отмена", chat)
+                self.assertIn("отменён", self.last(channel)[0])
+                await self.choose_section(channel, "Создать профиль", chat)
+                await self.choose_section(channel, "Помощь", chat)
+                await self.send(channel, "Новый профиль", chat=chat)
+                self.assertIn("Регистрация завершена", self.last(channel)[0])
+                self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                await self.choose_section(channel, "Помощь", chat)
+                self.assertIn("/settings", self.last(channel)[0])
+                self.assertNotIn("/register", self.last(channel)[0])
+                if channel == "telegram":
+                    for call in self.bot.set_my_commands.await_args_list:
+                        self.assertEqual([item.command for item in call.kwargs["commands"]], ["help"])
+
+    async def test_group_registration_is_bound_to_the_initiating_author(self):
+        """В группе другой участник не отменяет ввод и не подставляет имя."""
+        for channel, chat in (("telegram", "-413"), ("vk", "2000000413")):
+            with self.subTest(channel=channel):
+                author, stranger = "3003", "3004"
+                await self.send(channel, "/start", chat=chat, author=author)
+                text, actions, source = self.last(channel)
+                self.assertNotRegex(text, r"/[a-z_]+")
+                self.assertEqual(set(dict(actions)), {"Создать профиль", "Помощь"})
+                await self.press(channel, dict(actions)["Создать профиль"], source, chat=chat, author=stranger)
+                self.assertIn("больше недоступна", self.last(channel)[0])
+                await self.send(channel, "/link чужой-код", chat=chat, author=stranger)
+                self.assertIn("личный чат", self.last(channel)[0])
+                await self.press(channel, dict(actions)["Создать профиль"], source, chat=chat, author=author)
+                _, actions, source = self.last(channel)
+                await self.press(channel, dict(actions)["Отмена"], source, chat=chat, author=stranger)
+                self.assertIn("больше недоступна", self.last(channel)[0])
+                await self.send(channel, "/cancel", chat=chat, author=stranger)
+                self.assertIn("нечего отменять", self.last(channel)[0])
+                await self.send(channel, "Чужое имя", chat=chat, author=stranger)
+                self.assertNotIn("Регистрация завершена", self.last(channel)[0])
+                await self.send(channel, "/register", chat=chat, author=stranger)
+                self.assertIn("другой участник", self.last(channel)[0])
+                await self.press(channel, dict(actions)["Помощь"], source, chat=chat, author=author)
+                self.assertIn("/cancel", self.last(channel)[0])
+                self.assertNotIn("/link", self.last(channel)[0])
+                await self.send(channel, "Моё имя", chat=chat, author=author)
+                text, actions, _ = self.last(channel)
+                self.assertIn("Моё имя", text)
+                self.assertIn("Регистрация завершена", text)
+                self.assertIn("Настройки", dict(actions))
+                self.assertNotIn("У меня есть код", dict(actions))
 
     async def test_messenger_transfer_in_both_directions(self):
         """Проверяет оба диалога, реальные клавиатуры переноса и восстановление по команде."""
@@ -308,7 +383,7 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Открыть бота", dict(actions))
         code = re.search(r"/link ([\w-]+)", prompt).group(1)
         await self.send("telegram", "/start", chat="3003")
-        self.assertEqual([name for name, _ in self.last("telegram")[1]], ["Создать профиль", "У меня есть код"])
+        self.assertEqual([name for name, _ in self.last("telegram")[1]], ["Создать профиль", "У меня есть код", "Помощь"])
         await self.choose_section("telegram", "У меня есть код", "3003")
         await self.send("telegram", f"/link {code}", chat="3003")
         self.assertIn("привязал", self.last("telegram")[0])
@@ -322,10 +397,10 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIn("/screens", {item.command for item in self.menus[-1].menu.items})
                 else:
                     bottom = json.loads(self.vk.keyboards[-1])
-                    self.assertIn("/screens", {button["action"]["label"] for row in bottom["buttons"] for button in row})
+                    self.assertIn("тестовая возможность", {button["action"]["label"] for row in bottom["buttons"] for button in row})
                 await self.send(channel, "/screens")
                 if channel == "telegram":
-                    self.assertEqual([label for label, _ in self.last(channel)[1]], ["Открыть выбор", "Показать текст"])
+                    self.assertEqual([label for label, _ in self.last(channel)[1]], ["Открыть выбор", "Показать текст", "Помощь"])
                 else:
                     self.assertFalse(json.loads(self.vk.keyboards[-1])["inline"])
                     self.assertEqual(len(self.vk.messages), 2)
@@ -346,12 +421,16 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 text, actions, message_id = self.last(channel)
                 size = self.owner.pages[-1][2]
                 self.assertEqual(size, 6 if channel == "telegram" else 4)
-                self.assertEqual(len(actions), size + 2)
+                self.assertEqual(len(actions), size + (3 if channel == "telegram" else 2))
                 await self.press(channel, dict(actions)["Дальше"], message_id)
                 text, actions, message_id = self.last(channel)
                 first_label, first_token = actions[0]
                 self.assertEqual(first_label, f"{size + 1}. Объект {size + 1}")
                 self.assertIn(first_label, text)
+                pages_before_help = list(self.owner.pages)
+                await self.choose_section(channel, "Помощь", "1001")
+                self.assertIn("/objects", self.last(channel)[0])
+                self.assertEqual(self.owner.pages, pages_before_help)
                 before = len(self.owner.selected)
                 await self.press(channel, first_token, message_id, chat="1002")
                 self.assertEqual(len(self.owner.selected), before)

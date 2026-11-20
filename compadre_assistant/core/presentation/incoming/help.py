@@ -46,9 +46,17 @@ def format_contextual_help(
         command(syntax, item.description + ("; одноразовое действие без смены режима" if one_shot else ""))
 
     registration = pending is not None and pending.owner_id == "core" and pending.input_kind == "register_name"
-    if registration:
-        line("Регистрация не завершена. Как к тебе обращаться? Пришли имя или название профиля.")
-        command("/cancel", "отменить ввод имени")
+    if pending is not None and pending.owner_id == "core":
+        if registration:
+            line("Регистрация не завершена. Как к тебе обращаться? Пришли имя или название профиля.")
+        else:
+            label = pending.value_label
+            label = {"link_code": "код привязки", "profile_name": "имя",
+                     "enable": "ID возможности для включения", "disable": "ID возможности для выключения"}.get(
+                         pending.input_kind, label,
+                     )
+            line(f"Ожидается {label}. Отправь значение следующим сообщением.")
+        command("/cancel", "отменить ожидающий ввод")
     elif personal is None:
         line("Доступные действия:")
         command("/register", "создать профиль")
@@ -69,10 +77,6 @@ def format_contextual_help(
             for instruction in catalog.instructions:
                 line(instruction)
             command("/exit", "выйти из режима этого чата")
-            parts.append(compose_content(
-                "\nПолная общая справка: ", code_span("/exit"),
-                ", затем ", code_span("/help"), ".",
-            ))
             for access in personal.access:
                 if access.effective and not access.descriptor.persistent_mode:
                     entry(access.descriptor.entry, one_shot=True)
@@ -89,14 +93,11 @@ def format_contextual_help(
             line("Возможности:" if available else "Сейчас нет доступных возможностей.")
             for item in available:
                 entry(item.descriptor.entry, one_shot=not item.descriptor.persistent_mode)
-            command("/help", ChatCommand.HELP.description)
-    if pending is not None and not registration:
-        label = pending.value_label
-        if pending.owner_id == "core":
-            label = {"link_code": "код привязки", "profile_name": "имя",
-                     "enable": "ID возможности для включения", "disable": "ID возможности для выключения"}.get(pending.input_kind, label)
-        line(f"Ожидается {label}. Отправь значение следующим сообщением.")
+            command("/start", "открыть главное меню")
+    if pending is not None and pending.owner_id != "core":
+        line(f"Ожидается {pending.value_label}. Отправь значение следующим сообщением.")
         command("/cancel", "отменить ожидающий ввод")
+    command("/help", ChatCommand.HELP.description)
     if snapshot.confirmations or snapshot.status != "complete":
         parts.append(compose_content("\n\n", confirmation.content))
         if personal is not None and snapshot.status == "complete" and confirmation.actions:

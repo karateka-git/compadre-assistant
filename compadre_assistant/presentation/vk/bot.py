@@ -70,7 +70,7 @@ def run_vk_bot(
     group_id: int,
     incoming_message_processor: IncomingMessageProcessor,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери действие в меню.",
     client: VkApiClient | None = None,
     retry_sleeper: Callable[[float], None] = time.sleep,
     retry_jitter: Callable[[float, float], float] = random.uniform,
@@ -549,7 +549,7 @@ def _handle_update(
     incoming_message_processor: IncomingMessageProcessor,
     client: VkApiClient,
     logger: logging.Logger,
-    empty_message_reply: str = "Пришли текстовое сообщение или выбери возможность через /help.",
+    empty_message_reply: str = "Пришли текстовое сообщение или выбери действие в меню.",
     menu_update_handler: CommandMenuUpdateHandler | None = None,
 ) -> None:
     if update.get("type") == "message_event":
@@ -949,8 +949,8 @@ def _send_vk_view(
         # При edit одна клавиатура занята выбором. Отдельное сообщение называет
         # доступные следующие шаги, поэтому доставка меню не отрывается от смысла.
         labels = [button["action"]["label"] for row in json.loads(menu_keyboard)["buttons"] for button in row]
-        menu_text = ("Действия раздела:\n" + "\n".join(f"• {label}" for label in labels) + "\nВсе команды: /help."
-                     if labels else "Меню раздела закрыто. Доступные команды: /help.")
+        menu_text = ("Действия раздела:\n" + "\n".join(f"• {label}" for label in labels)
+                     if labels else "Меню раздела закрыто.")
         followup = IncomingResponse(text_content(menu_text))
         _, menu_delivered = _send_vk_message(
             client, peer_id=peer_id, response=followup, logger=logger, sleeper=sleeper,

@@ -227,7 +227,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("без аргументов", response_text(self.dispatcher.execute(_event("/capabilities extra"))))
         self.assertEqual(self.preferences.rows, {})
         self.identity.user = None
-        self.assertIn("/register", response_text(self.dispatcher.execute(_event("/capabilities"))))
+        self.assertIn("пока нет профиля", response_text(self.dispatcher.execute(_event("/capabilities"))))
         self.assertEqual(self.preferences.reads, before + 1)
 
     def test_empty_capabilities_catalog_keeps_common_commands(self) -> None:
@@ -259,7 +259,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("недоступна на сервере", response_text(dispatcher.execute(_event("/enable offline"))))
         self.assertEqual(self.preferences.rows, {})
         self.identity.user = None
-        self.assertIn("/register", response_text(dispatcher.execute(_event("/enable selected"))))
+        self.assertIn("пока нет профиля", response_text(dispatcher.execute(_event("/enable selected"))))
 
     def test_enable_is_idempotent_and_reports_write_failure(self) -> None:
         """Повторный выбор сообщает «уже», а сбой записи не подтверждает включение."""
@@ -313,7 +313,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("уже выключена", response_text(self.dispatcher.execute(_event("/disable selected", "chat-2"))))
         self.dispatcher.execute(_event("/disable other", "chat-2"))
         self.assertNotIn("/other", response_text(self.dispatcher.execute(_event("/start"))))
-        self.assertIn("/settings", response_text(self.dispatcher.execute(_event("/exit"))))
+        self.assertIn("Настройки", {action.label for action in self.dispatcher.execute(_event("/exit")).suggested_actions})
         self.assertIsNone(self.repository.get(self.key))
         self.assertIn("включена", response_text(self.dispatcher.execute(_event("/enable selected", "chat-2"))))
         self.assertEqual(response_text(self.dispatcher.execute(_event("/selected"))), self.capability.pending)
@@ -336,13 +336,13 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertFalse(self.preferences.rows[(23, "offline")])
         self.assertIn("уже выключена", response_text(dispatcher.execute(_event("/disable offline"))))
         self.identity.user = None
-        self.assertIn("/register", response_text(dispatcher.execute(_event("/disable selected"))))
+        self.assertIn("пока нет профиля", response_text(dispatcher.execute(_event("/disable selected"))))
 
     def test_plain_text_and_url_without_mode_only_show_hint(self) -> None:
         """Содержание сообщения никогда не выбирает возможность автоматически."""
         for text in ("обычный текст", "https://example.com/article", "да", "/unknown"):
             reply = self.dispatcher.execute(_event(text))
-            self.assertIn("Выбери возможность", response_text(reply))
+            self.assertIn("Выбери, что сделать дальше", response_text(reply))
         self.assertFalse(self.capability.calls)
         self.assertIsNone(self.repository.get(self.key))
 
@@ -380,9 +380,10 @@ class IncomingBoundaryTest(unittest.TestCase):
             reply = self.dispatcher.execute(_event(text))
             self.assertEqual(self.preferences.reads, before + 1)
             self.assertNotIn("`/selected` —", response_text(reply))
+            self.assertNotIn("/selected", {action.command for action in reply.suggested_actions})
             if text == "/exit":
                 self.assertIsNone(self.repository.get(self.key))
-        self.assertIn("/other", response_text(reply))
+        self.assertIn("/other", {action.command for action in reply.suggested_actions})
 
     def test_entry_forwards_original_event_and_resolved_user(self) -> None:
         """Вход получает исходное событие с аргументом без анализа ядром."""
@@ -549,8 +550,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.repository.save(mode)
         reply = self.dispatcher.execute(_event("https://example.com/article"))
         self.assertIn("отключена", response_text(reply))
-        self.assertIn("/exit", response_text(reply))
-        self.assertIn("/other", response_text(reply))
+        self.assertTrue({"/exit", "/other"} <= {action.command for action in reply.suggested_actions})
         self.assertEqual(self.repository.get(self.key), mode)
         self.assertFalse(self.capability.calls)
         self.dispatcher.execute(_event("/other"))
@@ -656,7 +656,8 @@ class IncomingBoundaryTest(unittest.TestCase):
     def test_empty_registry_only_offers_general_help(self) -> None:
         """Отсутствие включённых возможностей не требует предметного обработчика."""
         dispatcher = create_incoming_message_dispatcher(capabilities=(), user_identity_service=self.identity, chat_mode_repository=self.repository, capability_preference_repository=self.preferences)
-        self.assertIn("/settings", response_text(dispatcher.execute(_event("текст"))))
+        reply = dispatcher.execute(_event("текст"))
+        self.assertIn("Настройки", {action.label for action in reply.suggested_actions})
         self.assertIn("/settings", response_text(dispatcher.execute(_event("/help"))))
 
 

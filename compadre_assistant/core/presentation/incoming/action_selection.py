@@ -349,6 +349,9 @@ class ResponseActionStore:
                         or slot.delivered_generation != entry.view.generation
                         or event.callback_message_id != slot.delivered_message_id):
                     return None
+            # Справка читает текущий контекст. Она оставляет кнопки шага действующими.
+            if entry.command == "/help" and entry.confirmation is None:
+                return entry
             for key, other in tuple(self._entries.items()):
                 same_confirmation = (entry.confirmation is not None
                                      and other.origin == entry.origin

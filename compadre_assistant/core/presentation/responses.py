@@ -12,43 +12,32 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
     """Формирует только общие ответы регистрации и связывания каналов."""
     match result.type:
         case IncomingMessageResultType.MODE_HINT | IncomingMessageResultType.PROFILE_STATUS | IncomingMessageResultType.CAPABILITY_DISABLED:
-            return text_content(result.capability_reply or "Выбери возможность через /help.")
+            return text_content(result.capability_reply or "Выбери, что сделать дальше.")
         case IncomingMessageResultType.MODE_EXITED:
-            return text_content('Режим этого чата завершён.\n' + (result.capability_reply or 'Справка: /help.'))
+            return text_content('Режим этого чата завершён.\n' + (result.capability_reply or 'Выбери, что сделать дальше.'))
         case IncomingMessageResultType.MODE_UNAVAILABLE:
             return compose_content(
-                'Сохранённая возможность этого чата отключена или недоступна. Выйти: ',
-                code_span('/exit'),
-                '.\n' + str(result.capability_reply or 'Справка: /help.'),
+                'Сохранённая возможность этого чата отключена или недоступна.\n',
+                result.capability_reply or 'Выбери другой раздел.',
             )
         case IncomingMessageResultType.UNKNOWN_IDENTITY:
-            return _format_unknown_identity_response()
+            return text_content('У тебя пока нет профиля в этом чате. Выбери действие ниже.')
         case IncomingMessageResultType.START_UNREGISTERED:
-            return (
-                compose_content(
-                    'Compadre Assistant запущен.\nЭтот канал пока не зарегистрирован.\nОтправь ',
-                    code_span('/register'),
-                    ', чтобы создать нового пользователя, или ',
-                    code_span('/link <code>'),
-                    ', чтобы привязать этот канал к уже существующему пользователю.\nВсе команды: ',
-                    code_span('/help'),
-                    '.',
-                )
-            )
+            return text_content('Привет! Я Compadre Assistant. Выбери, как начать.')
         case IncomingMessageResultType.START_REGISTERED:
             return compose_content(
-                'Compadre Assistant запущен.\nРад тебя видеть, ' + str(_display_name(result)) + '.\n' + str(result.capability_reply or 'Справка: /help.'),
+                'Рад тебя видеть, ', _display_name(result), '.\n',
+                result.capability_reply or 'Выбери, что сделать дальше.',
             )
         case IncomingMessageResultType.REGISTRATION_NAME_REQUIRED:
             return compose_content(
                 'Как к тебе обращаться? Пришли имя или название профиля. '
-                'Профиль будет создан после принятия имени; ожидание действует 10 минут. '
-                'Для отмены введи ', code_span('/cancel'), '.',
+                'Профиль будет создан после принятия имени. Ожидание действует 10 минут.',
             )
         case IncomingMessageResultType.REGISTRATION_NAME_SAVED:
             return compose_content(
                 'Приятно познакомиться, ', _display_name(result), '.\nРегистрация завершена.\n',
-                result.capability_reply or 'Справка: /help.',
+                result.capability_reply or 'Выбери, что сделать дальше.',
             )
         case IncomingMessageResultType.NAME_COMMAND_INVALID:
             return (
@@ -72,7 +61,8 @@ def format_incoming_message_result(result: ProcessIncomingMessageResult) -> Mess
             )
         case IncomingMessageResultType.ALREADY_REGISTERED:
             return compose_content(
-                str(_display_name(result)) + ', ты уже зарегистрирован.\n' + str(result.capability_reply or 'Справка: /help.'),
+                _display_name(result), ', ты уже зарегистрирован.\n',
+                result.capability_reply or 'Выбери, что сделать дальше.',
             )
         case IncomingMessageResultType.LINK_CODE_CREATED:
             if result.link_code is None:
@@ -116,16 +106,3 @@ def _display_name(result: ProcessIncomingMessageResult) -> str:
     if result.app_user is None or result.app_user.display_name is None:
         return "пользователь"
     return result.app_user.display_name
-
-
-def _format_unknown_identity_response() -> MessageContent:
-    """Возвращает подсказку для первого входа из нового канала."""
-    return (
-        compose_content(
-            'Я пока не знаю этот канал.\nОтправь ',
-            code_span('/register'),
-            ', чтобы создать нового пользователя, или ',
-            code_span('/link <code>'),
-            ', чтобы привязать этот канал к уже существующему пользователю.',
-        )
-    )

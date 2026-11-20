@@ -346,7 +346,7 @@ class VkScreenDeliveryTest(unittest.TestCase):
         self.send()
         self.assertEqual(self.client.events[-2][0], "edit")
         self.assertIn("Следующая операция", self.client.messages[-1][1])
-        self.assertIn("/help", self.client.messages[-1][1])
+        self.assertNotIn("/help", self.client.messages[-1][1])
         self.assertFalse(json.loads(self.client.keyboards[-1])["inline"])
 
     def test_single_message_replaces_multipart_and_delivers_both_keyboards(self):

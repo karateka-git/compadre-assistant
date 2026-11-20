@@ -106,10 +106,13 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/register Имя")
         self.assertEqual(self.profile_names(), [])
         self.say("/register")
-        self.assertIn("/cancel", self.say("https://example.com"))
+        retry = self.send("https://example.com")
+        self.assertIn("Имя не принято", response_text(retry))
+        self.assertIn("Отмена", {action.label for action in retry.bound_actions})
+        self.assertNotIn("/cancel", response_text(retry))
         self.assertEqual(self.profile_names(), [])
         self.assertIn("Регистрация не завершена", self.say("/help"))
-        self.assertEqual(self.say("/cancel"), "Ввод отменён. Активный режим этого чата не изменён.")
+        self.assertIn("Ввод отменён", self.say("/cancel"))
         self.say("Имя без ожидания")
         self.assertEqual(self.profile_names(), [])
         self.say("/register")
@@ -154,7 +157,7 @@ class TextCommandSequencesTest(unittest.TestCase):
     def test_unregistered_telegram_can_link_existing_vk_profile(self):
         """До регистрации обратная привязка принимает прямую команду с кодом."""
         self.register("Профиль VK", channel="vk")
-        self.assertIn("/register", self.say("/settings"))
+        self.assertIn("Создать профиль", {action.label for action in self.send("/settings").bound_actions})
         self.assertIn("привязал", self.say("/link " + self.code(channel="vk")))
         self.assertIn("Профиль VK", self.say("/settings"))
         self.assertEqual(self.profile_names(), ["Профиль VK"])
@@ -213,7 +216,7 @@ class TextCommandSequencesTest(unittest.TestCase):
         self.say("/ask")
         self.say("/cancel")
         self.assertEqual(self.say("/cancel"),
-            "В этом чате нечего отменять. Продолжай текущий режим или вызови нужную команду.")
+                         "В этом чате нечего отменять.")
         self.say("/settings")
         self.say("/name")
         self.restart()

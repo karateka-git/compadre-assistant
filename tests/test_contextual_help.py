@@ -160,7 +160,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIsNone(self.store.get(pending.chat_key))
         self.assertFalse(self.obsidian.values)
 
-    def test_ask_and_unknown_link_keep_base_context(self):
+    def test_ask_and_unknown_link_show_current_expected_value(self):
         """Вопрос в режиме ИИ и код до регистрации показывают ожидаемое значение."""
         self.send("/ai")
         self.send("/ask")
@@ -174,7 +174,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.send("/link")
         text = self.send()
         self.assertIn("Ожидается код привязки", text)
-        self.assertIn("/register", text)
+        self.assertNotIn("/register", text)
         self.assertIn("/cancel", text)
 
     def test_confirmations_complete_incomplete_and_pre_profile(self):
