@@ -835,8 +835,8 @@ async def _send_telegram_view(
 
     if delivery.unavailable is not None and target is not None:
         await _send_telegram_reply(
-            message, IncomingResponse(delivery.unavailable), logger=logger, limit=limit,
-            sleeper=sleeper, include_bound_actions=False,
+            message, IncomingResponse(delivery.unavailable, bound_actions=delivery.unavailable_actions),
+            logger=logger, limit=limit, sleeper=sleeper, include_bound_actions=include_bound_actions,
         )
     return False
 

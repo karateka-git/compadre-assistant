@@ -245,7 +245,7 @@ class OperationScopesTest(unittest.TestCase):
         """Выход сохраняет адресное ожидание и требует явного входа перед решением."""
         response = self.prepare()
         self.process("/exit")
-        self.assertIn("Войди снова", response_text(self.process(response.actions[0].command)))
+        self.assertIn("Открой раздел", response_text(self.process(response.actions[0].command)))
         self.process("/settings")
         self.assertIn("Профиль", response_text(self.process("/status")))
         self.assertEqual(len(self.pending()), 1)

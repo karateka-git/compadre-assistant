@@ -41,7 +41,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         exited = fixture.dispatcher.execute(replace(event, text="/exit"))
         self.assertEqual(exited.suggested_actions, registered.suggested_actions)
         self.assertNotIn("/help", content_text(exited.content))
-        self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
+        outside = fixture.dispatcher.execute(_event("/status"))
+        self.assertEqual({action.command for action in outside.suggested_actions}, {"/settings", "/help"})
 
     def test_ask_long_question_offers_valid_retry(self) -> None:
         """Слишком длинный вопрос можно ввести заново без аргумента-заполнителя."""

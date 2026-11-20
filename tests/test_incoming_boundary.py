@@ -304,8 +304,8 @@ class IncomingBoundaryTest(unittest.TestCase):
         self.assertIn("выключена", response_text(reply))
         self.assertEqual(self.repository.get_state(self.key), before)
         self.assertNotIn("`/selected` —", response_text(self.dispatcher.execute(_event("/help"))))
-        self.assertIn("/enable selected", response_text(self.dispatcher.execute(_event("текст"))))
-        self.assertIn("/enable selected", response_text(self.dispatcher.execute(
+        self.assertIn("лично выключена", response_text(self.dispatcher.execute(_event("текст"))))
+        self.assertIn("лично выключена", response_text(self.dispatcher.execute(
             _event("/confirm selected action 1 1 yes")
         )))
         self.assertEqual(len(self.capability.calls), handled)
@@ -351,7 +351,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         """Выключенная fake-возможность не получает вход и не меняет режим."""
         self.preferences.rows[(23, "selected")] = False
         reply = self.dispatcher.execute(_event("/selected аргумент"))
-        self.assertIn("/enable selected", response_text(reply))
+        self.assertIn("лично выключена", response_text(reply))
         self.assertEqual(self.preferences.reads, 1)
         self.assertEqual(self.capability.entries, [])
         self.assertIsNone(self.repository.get(self.key))
@@ -364,7 +364,7 @@ class IncomingBoundaryTest(unittest.TestCase):
         for text in ("обычный текст", "/confirm selected action 1 1 yes"):
             before = self.preferences.reads
             reply = self.dispatcher.execute(_event(text))
-            self.assertIn("/enable selected", response_text(reply))
+            self.assertIn("лично выключена", response_text(reply))
             self.assertEqual(self.preferences.reads, before + 1)
         self.assertEqual(self.capability.calls, [])
         self.assertEqual(self.repository.get_state(self.key).revision, revision)

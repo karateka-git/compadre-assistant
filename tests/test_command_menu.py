@@ -218,7 +218,8 @@ class CommandMenuTest(unittest.TestCase):
         self.assertEqual(response.suggested_actions, (suggested,))
         self.assertEqual(response.actions, confirmation.actions)
         self.assertEqual(IncomingResponse(text_content("Готово")).suggested_actions, ())
-        self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
+        outside = fixture.dispatcher.execute(_event("/status"))
+        self.assertEqual({action.command for action in outside.suggested_actions}, {"/settings", "/help"})
 
 
 class ContextualCommandProjectionTest(unittest.TestCase):

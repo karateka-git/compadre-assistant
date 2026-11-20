@@ -15,6 +15,7 @@ from compadre_assistant.core.presentation.incoming.action_contracts import (
 )
 from compadre_assistant.core.presentation.incoming.dispatcher import IncomingMessageDispatcher
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import (
     CapabilityCommand, CapabilityHelp, CapabilityResult, HelpSection, IncomingResponse,
     ReplyAction, ResponseView, SectionActionsQueryPort,
@@ -84,7 +85,7 @@ class ScreenActionsCoreTest(unittest.TestCase):
         before = (len(self.owner.entries), len(self.owner.calls))
         for channel in ("telegram", "vk"):
             event = replace(self.event, channel=channel, text="/exit")
-            self.assertEqual(self.processor.section_actions(event), self.owner.available)
+            self.assertEqual(self.processor.section_actions(event), (*self.owner.available, HELP_SECTION_ACTION))
             response = self.processor(replace(event, text="/choose"))
             self.assertEqual(response.suggested_actions, self.owner.available)
             self.assertEqual(response.bound_actions[0].scope, ActionScope.SECTION)
@@ -128,7 +129,7 @@ class ScreenActionsCoreTest(unittest.TestCase):
             *self.owner.available,
         )
         self.assertEqual(tuple(action.command for action in self.processor.section_actions(self.event)),
-                         ("/choose first",))
+                         ("/choose first", "/help"))
         self.owner.available = (ReplyAction("Выбор", "/choose first"),)
         with self.assertRaisesRegex(ValueError, "belonging to a screen"):
             self.processor.section_actions(self.event)
@@ -198,8 +199,9 @@ class ScreenActionsCoreTest(unittest.TestCase):
         stale = self.issue(replace(response, view=ResponseView(
             "missing", update=True, unavailable=text_content("Открой заново."),
         )))
-        self.assertEqual(stale.bound_actions, ())
-        self.assertEqual(stale.suggested_actions, ())
+        self.assertTrue(all(action.url is None for action in stale.bound_actions))
+        self.assertIn("Помощь", {action.label for action in stale.bound_actions})
+        self.assertTrue(all(action.url is None for action in stale.suggested_actions))
 
     def test_background_url_is_removed_after_context_change(self):
         """Поздний ответ не раскрывает URL-кнопку из завершённого режима."""
@@ -215,6 +217,27 @@ class ScreenActionsCoreTest(unittest.TestCase):
         delivery.send(self.event.reply_address, response)
         self.assertEqual(delivered[-1].response.bound_actions, ())
         self.assertEqual(delivered[-1].response.suggested_actions, ())
+
+    def test_background_navigation_is_removed_if_context_changes_while_reading_it(self):
+        """Пересчёт фоновых кнопок не переносит их в режим, который успел смениться."""
+        delivered = []
+        self.processor(replace(self.event, text="/choose"), delivered.append)
+
+        def leave():
+            """Меняет ревизию после первой проверки фонового контекста."""
+            self.owner.on_read = None
+            self.processor(replace(self.event, text="/exit"))
+
+        self.owner.on_read = leave
+        response = IncomingResponse(text_content("Фоновый результат."), suggested_actions=(
+            ReplyAction("Открыть", "/choose first"),
+        ))
+        with self.assertLogs("compadre_assistant.core.presentation.incoming.dispatcher", level="ERROR"):
+            self.owner.delivery.send(self.event.reply_address, response)
+        actual = delivered[-1].response
+        self.assertEqual(response_text(actual), "Фоновый результат.")
+        self.assertEqual(actual.suggested_actions, ())
+        self.assertEqual(actual.bound_actions, ())
 
     def test_section_source_failure_preserves_content_and_does_not_publish_empty_menu(self):
         """Недоступный источник меню не блокирует содержательный ответ."""

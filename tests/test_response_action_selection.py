@@ -166,9 +166,9 @@ class ResponseActionSelectionTest(unittest.TestCase):
 
         unregistered = replace(self.event, chat_id="2002", external_user_id="2002", text=command)
         self.assertIn("Создать профиль", {action.label for action in self.processor(unregistered).bound_actions})
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Открой раздел", send(command))
         send("/other")
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Открой раздел", send(command))
         self.assertFalse(other.calls)
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.issue(command).bound_actions)
@@ -188,7 +188,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
         button = self.issue(command).bound_actions[0]
         send("/other")
         self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Открой раздел", send(command))
         send("/selected")
         button = self.issue(command).bound_actions[0]
         other_chat = replace(self.event, chat_id="2002", text="/settings")

@@ -55,6 +55,7 @@ _PROFILE_LINK_PRIVATE_HINT = "Для привязки профиля откро�
 _HELP_SCREEN_ACTION = replace(HELP_SECTION_ACTION, scope=ActionScope.SCREEN)
 _LINK_INPUT_SCREEN_ACTION = ReplyAction("Ввести код", "/link")
 _CONFIRM_SCREEN_ACTION = ReplyAction("Подтверждения", "/confirm")
+_BUSY_COMMANDS = frozenset((ChatCommand.CANCEL.value, ChatCommand.HELP.value))
 # Только успешная отмена требует пересчитать меню из проекции занятого чата.
 _DEFERRED_CANCELLED_REPLY = IncomingResponse(text_content("Обработка отменена. Активный режим этого чата не изменён."))
 
@@ -74,11 +75,12 @@ def _capability_label(descriptor: CapabilityDescriptor) -> str:
 
 
 def pending_expired_reply(pending: PendingInput) -> IncomingResponse:
-    """Возвращает подсказку повторить команду после истечения ожидания."""
-    command_hint = pending.retry_command or "команду ввода"
-    return IncomingResponse(text_content(
-        f"Срок ожидания ввода истёк. Повтори {command_hint}, чтобы начать заново."
-    ))
+    """Предлагает заново открыть ввод, когда сценарий объявил способ повтора."""
+    retry = (ReplyAction("Начать заново", pending.retry_command),) if pending.retry_command else ()
+    return IncomingResponse(
+        text_content("Срок ожидания ввода истёк. Начни ввод заново."),
+        suggested_actions=(*retry, _HELP_SCREEN_ACTION), close_managed_views=True,
+    )
 
 
 class IncomingMessageResultType(StrEnum):
@@ -219,12 +221,15 @@ class IncomingMessageDispatcher:
         ) if user else None
         personal = self._personal_registry(user, event) if user else None
         pending = self._pending_for_event(event)
+        deferred = self._deferred_actions.get(event.reply_address) if self._deferred_actions is not None else None
         return ActionContext(
             user.id if user else None, personal.visible_mode(state.capability_id) if state else None,
             state.revision if state else 0,
             tuple((item.descriptor.capability_id, item.server_available, item.user_enabled, item.visible)
                   for item in personal.access) if personal else (),
             pending.request_id if pending and not self._pending_inputs.expired(pending) else None,
+            deferred.request_id if deferred and user and deferred.app_user_id == user.id
+            and deferred.external_user_id == event.external_user_id else None,
         )
 
     def _pending_for_event(self, event: IncomingEvent) -> PendingInput | None:
@@ -240,6 +245,7 @@ class IncomingMessageDispatcher:
     def bind_response_actions(
         self, event: IncomingEvent, response: IncomingResponse, store: ResponseActionStore, *,
         view_origin: ActionContext | None = None, generation: int | None = None,
+        expected_context: ActionContext | None = None,
     ) -> IncomingResponse:
         """Регистрирует только действия конкретного ответа после проверки контекста.
 
@@ -252,11 +258,18 @@ class IncomingMessageDispatcher:
             store: Процессный реестр действий и управляемых представлений.
             view_origin: Контекст до исполнения запроса на представление.
             generation: Порядок события среди операций с представлениями.
+            expected_context: Контекст фонового ответа, который должен сохраниться до привязки.
 
         Returns:
             Ответ, готовый к доставке, либо подсказка для недоступного обновления.
         """
         view = response.view
+
+        def unavailable(current_view: ResponseView) -> IncomingResponse:
+            fallback = self.resume_navigation(event, self._unavailable_view(event, response, current_view))
+            return self.bind_response_actions(event, fallback, store, view_origin=view_origin,
+                                              expected_context=expected_context)
+
         descriptions = response.suggested_actions
         response = replace(response, bound_actions=(), view=None, view_delivery=None)
         # Ссылка попадает в канал только после успешной проверки через bound_actions.
@@ -266,13 +279,15 @@ class IncomingMessageDispatcher:
             return response
         private_chat = self._profile_link_allowed(event)
         if not private_chat and view is not None:
-            return self._unavailable_view(response, view)
+            return unavailable(view)
         if not private_chat and not self._group_action_address(event):
             return response
         try:
             context = self.action_context(event)
+            if expected_context is not None and context != expected_context:
+                return replace(response, suggested_actions=())
             if view is not None and not self._may_deliver_view(view_origin, context):
-                return self._unavailable_view(response, view)
+                return unavailable(view)
             snapshot = self._action_confirmations(event) if response.actions and private_chat else None
             actions = []
             for action in response.actions if snapshot is not None else ():
@@ -311,18 +326,27 @@ class IncomingMessageDispatcher:
                     continue
                 actions.append((action, None, None))
             prepared = None
+            delivery = None
             if view is not None:
                 if generation is not None:
                     prepared = store.prepare_view(event, context, generation, view)
                 if prepared is None:
-                    return self._unavailable_view(response, view)
+                    return unavailable(view)
+                delivery = prepared.delivery
+                if delivery.target_message_id is not None and delivery.unavailable is not None:
+                    action = self._current_recovery_action(event, context.mode_id)
+                    options = (_HELP_SCREEN_ACTION,)
+                    if action is not None and action.command and self._suggestion_allowed(action.command, context):
+                        options = (action, *options)
+                    recovery = store.register(event, context, tuple((item, None, None) for item in options))
+                    delivery = replace(delivery, unavailable_actions=recovery)
             return replace(
                 response, bound_actions=store.register(event, context, tuple(actions), view=prepared),
-                view_delivery=prepared.delivery if prepared is not None else None,
+                view_delivery=delivery,
             )
         except Exception:
             LOGGER.exception("Could not bind response actions")
-            return self._unavailable_view(response, view) if view is not None else response
+            return unavailable(view) if view is not None else response
 
     @staticmethod
     def _may_deliver_view(before: ActionContext | None, after: ActionContext) -> bool:
@@ -334,14 +358,18 @@ class IncomingMessageDispatcher:
                     for identifier, server, enabled, allowed in after.access)
         )
 
-    @staticmethod
-    def _unavailable_view(response: IncomingResponse, view: ResponseView) -> IncomingResponse:
+    def _unavailable_view(
+        self, event: IncomingEvent, response: IncomingResponse, view: ResponseView,
+    ) -> IncomingResponse:
+        """Возвращает сообщение об ошибке доставки и безопасные переходы."""
+        action = self._current_recovery_action(event, None)
         return replace(
             response,
             content=view.unavailable if view.unavailable is not None else text_content(
                 "Состояние чата изменилось. Открой нужный раздел заново."
             ),
-            actions=(), suggested_actions=(), bound_actions=(), view=None, view_delivery=None,
+            actions=(), suggested_actions=(action, _HELP_SCREEN_ACTION) if action else (_HELP_SCREEN_ACTION,),
+            bound_actions=(), view=None, view_delivery=None,
         )
 
     def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
@@ -372,9 +400,22 @@ class IncomingMessageDispatcher:
                 LOGGER.exception("Could not validate selected managed response action")
                 return rejected()
         with self._pending_inputs.lock(event.reply_address):
-            if busy := self._busy_response(event, allow_cancel=False):
+            busy = self._busy_response(event, allow_cancel=False)
+            entry = store.claim(event, token, context=context, allowed_commands=_BUSY_COMMANDS if busy else None)
+            if entry is not None and entry.command == "/cancel" and entry.confirmation is None:
+                try:
+                    valid = self.action_context(event) == entry.context
+                except Exception:
+                    LOGGER.exception("Could not validate cancellation")
+                    valid = False
+                if not valid:
+                    return rejected()
+                # Отмена относится к тому же поколению, которое только что проверено.
+                reply = self.execute(replace(event, text=entry.command, images=()), completion_handler,
+                                     menu_update_handler)
+                return replace(reply, preserve_source_actions=True) if managed_source else reply
+            if entry is None and busy is not None:
                 return replace(busy, preserve_source_actions=True)
-            entry = store.claim(event, token, context=context)
         if entry is None:
             return rejected()
         try:
@@ -401,9 +442,18 @@ class IncomingMessageDispatcher:
         return replace(response, preserve_source_actions=True) if managed_source or entry.view is not None else response
 
     def _rejected_action(self, event: IncomingEvent, previous_mode: str | None) -> IncomingResponse:
-        """Сохраняет исходные кнопки и предлагает актуальный ручной переход."""
-        content = text_content("Эта кнопка больше недоступна. Открой «Помощь», чтобы продолжить.")
-        recovery = (_HELP_SCREEN_ACTION,)
+        """Сохраняет исходные кнопки и предлагает актуальные переходы."""
+        response = IncomingResponse(text_content("Эта кнопка больше недоступна. Выбери актуальное действие."),
+                                    preserve_source_actions=True)
+        action = self._current_recovery_action(event, previous_mode)
+        if action is not None:
+            response = replace(response, suggested_actions=(action,))
+        # Один ID мог уже получить свежую клавиатуру. Без подтверждённого перехода
+        # неизвестное нажатие не даёт права её снимать.
+        return self.resume_navigation(event, response)
+
+    def _current_recovery_action(self, event: IncomingEvent, previous_mode: str | None) -> ReplyAction | None:
+        """Запрашивает кнопку восстановления у доступного владельца представления."""
         if is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
             try:
                 known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
@@ -414,20 +464,16 @@ class IncomingMessageDispatcher:
                     capability = self._personal_registry(user, event).by_id(mode_id) if mode_id is not None else None
                     if isinstance(capability, ReplyActionRecoveryPort):
                         revision = mode.revision if mode_id == mode.capability_id else None
-                        command = capability.reply_action_recovery_command(user, event.reply_address, revision)
-                        content = compose_content("Эта кнопка больше недоступна. Открой ", code_span(command), ".")
-                        recovery = ()
+                        return capability.reply_action_recovery(user, event.reply_address, revision)
             except Exception:
                 LOGGER.exception("Could not resolve response action recovery")
-        # Один ID мог уже получить свежую клавиатуру. Без подтверждённого перехода
-        # неизвестное нажатие не даёт права её снимать.
-        return IncomingResponse(content, suggested_actions=recovery, preserve_source_actions=True)
+        return None
 
     def _suggestion_allowed(self, text: str, context: ActionContext) -> bool:
         """Не выдаёт неизвестную или недоступную предметную команду другому режиму."""
         command, *arguments = text.split()
         if command == "/cancel":
-            return context.pending_request_id is not None
+            return context.pending_request_id is not None or context.deferred_request_id is not None
         if context.app_user_id is None:
             return command in {"/register", "/link", "/help"} and not arguments
         effective = {identifier for identifier, server, enabled, allowed in context.access
@@ -476,13 +522,8 @@ class IncomingMessageDispatcher:
             return descriptor.private_chat_hint
         label = _capability_label(descriptor)
         if not access.server_available:
-            owner = self._registry.mode_command_owner(ChatCommand.CAPABILITIES.value)
-            hint = f"Список: {owner.entry.name}, затем /capabilities." if owner else "Справка: /help."
-            return f"Возможность {label} недоступна на сервере. {hint}"
-        owner = self._registry.mode_command_owner(ChatCommand.ENABLE.value)
-        hint = (f"Включить: {owner.entry.name}, затем /enable {descriptor.capability_id}."
-                if owner else "Справка: /help.")
-        return f"Возможность {label} лично выключена. {hint}"
+            return f"Возможность {label} недоступна на сервере."
+        return f"Возможность {label} лично выключена. Управлять доступом можно в настройках."
 
     @staticmethod
     def _capability_catalog(personal: PersonalCapabilityRegistry) -> str:
@@ -527,8 +568,10 @@ class IncomingMessageDispatcher:
             with self._pending_inputs.lock(event.reply_address):
                 busy = self._busy_response(event)
             if busy is not None:
-                if busy is _DEFERRED_CANCELLED_REPLY and menu_update_handler is not None:
-                    self._update_current_menu(event, menu_update_handler, BUSY_COMMAND_MENU)
+                if busy is _DEFERRED_CANCELLED_REPLY:
+                    if menu_update_handler is not None:
+                        self._update_current_menu(event, menu_update_handler, BUSY_COMMAND_MENU)
+                    return self.resume_navigation(event, busy)
                 return busy
         previous_menu = None
         previous_user = None
@@ -555,7 +598,7 @@ class IncomingMessageDispatcher:
                 IncomingMessageResultType.START_REGISTERED, IncomingMessageResultType.REGISTRATION_NAME_REQUIRED,
                 IncomingMessageResultType.REGISTRATION_NAME_SAVED, IncomingMessageResultType.ALREADY_REGISTERED,
                 IncomingMessageResultType.MODE_EXITED, IncomingMessageResultType.MODE_HINT,
-                IncomingMessageResultType.MODE_UNAVAILABLE,
+                IncomingMessageResultType.MODE_UNAVAILABLE, IncomingMessageResultType.CAPABILITY_DISABLED,
                 IncomingMessageResultType.LINKED,
             }:
                 personal = result.personal
@@ -565,6 +608,16 @@ class IncomingMessageDispatcher:
                                                  allow_link=self._profile_link_allowed(event))
                 if result.type is IncomingMessageResultType.MODE_UNAVAILABLE:
                     suggested_actions = (HOME_SECTION_ACTION, *suggested_actions)
+                if (result.type is IncomingMessageResultType.CAPABILITY_DISABLED
+                        and personal is not None and result.app_user is not None):
+                    settings = self._registry.mode_command_owner(ChatCommand.CAPABILITIES.value)
+                    user_id = result.app_user.id
+                    state = self._chat_mode_repository.get_state(ChatModeKey(user_id, event.channel, event.chat_id))
+                    if (settings is not None and personal.by_id(settings.capability_id) is not None
+                            and state.capability_id and state.capability_id != settings.capability_id
+                            and personal.by_id(state.capability_id) is not None):
+                        suggested_actions = (replace(capability_entry_action(settings), scope=ActionScope.SCREEN),
+                                             _HELP_SCREEN_ACTION)
             response = IncomingResponse(
                 format_incoming_message_result(result), result.error,
                 suggested_actions=suggested_actions,
@@ -576,6 +629,14 @@ class IncomingMessageDispatcher:
         continued_profile_input = (pending_before is not None and pending_before.owner_id == "core"
                                    and (not event.text.lstrip().startswith("/") or event.text.strip() == "/cancel"
                                         or event.menu_choice))
+        cancelled = result is _DEFERRED_CANCELLED_REPLY or event.text.strip() == "/cancel" or (
+            event.menu_choice and event.text == CANCEL_SECTION_ACTION.label
+        )
+        pending_after = self._pending_for_event(event)
+        waiting = (pending_after is not None and pending_after.cancel_only_menu
+                   and not response.preserve_source_actions and not self._pending_inputs.expired(pending_after))
+        if cancelled or waiting or (response.error is not None and not response.suggested_actions):
+            response = self.resume_navigation(event, response)
         if (finished_transfer or continued_profile_input) and not response.suggested_actions and not response.actions:
             actions = self._reply_section_actions(event)
             if actions is not None:
@@ -600,6 +661,32 @@ class IncomingMessageDispatcher:
             except Exception:
                 LOGGER.exception("Could not refresh linked chat menus after incoming action")
         return response
+
+    def resume_navigation(self, event: IncomingEvent, response: IncomingResponse) -> IncomingResponse:
+        """Добавляет проверенные действия раздела к ответу после завершения шага.
+
+        Args:
+            event: Исходный автор и адрес, по которым перечитывается доступ.
+            response: Ответ с действиями владельца сценария, если они заданы.
+
+        Returns:
+            Ответ с обратимыми переходами текущего раздела и справкой.
+        """
+        if response.view is not None:
+            return response
+        actions = response.suggested_actions
+        busy = self._busy_response(event, allow_cancel=False)
+        section = busy.suggested_actions if busy is not None else self._reply_section_actions(event) or ()
+        help_action = HELP_SECTION_ACTION if any(action.command == "/help" for action in section) else _HELP_SCREEN_ACTION
+        current = (*section, help_action)
+        seen = {(action.command, action.url) for action in actions}
+        available = []
+        for action in current:
+            key = action.command, action.url
+            if key not in seen:
+                available.append(action)
+                seen.add(key)
+        return replace(response, suggested_actions=(*actions, *available))
 
     def _reply_section_actions(self, event: IncomingEvent) -> tuple[ReplyAction, ...] | None:
         try:
@@ -653,15 +740,15 @@ class IncomingMessageDispatcher:
             if event.menu_choice:
                 command = self._resolve_menu_choice(event)
                 if command is None:
-                    return IncomingResponse(compose_content(
-                        "Эта кнопка меню устарела. Отправь ", code_span("/help"), " для актуальных команд.",
-                    ))
+                    return self.resume_navigation(event, IncomingResponse(text_content(
+                        "Эта кнопка меню устарела. Выбери действие из актуального меню.",
+                    )))
                 event = replace(event, text=command, menu_choice=False)
             if busy := self._busy_response(event):
                 return busy
             result = self._route_pending_input(event, completion_handler)
             if result is None and not event.text.strip() and not event.images:
-                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
+                return self.resume_navigation(event, IncomingResponse(text_content(_TEXT_INPUT_HINT)))
             parsed = ParsedChatCommand.parse(event.text.strip())
             if result is None and parsed is not None:
                 command = parsed.command
@@ -702,26 +789,41 @@ class IncomingMessageDispatcher:
             return None
         text = event.text.strip()
         if allow_cancel and event.menu_choice:
-            if (event.text != CANCEL_SECTION_ACTION.label
-                    or not is_private_chat_address(event.channel, event.external_user_id, event.chat_id)):
-                return self.busy_reply()
-            text = CANCEL_SECTION_ACTION.command
+            if self._profile_link_allowed(event):
+                text = next((item.command for item in BUSY_COMMAND_MENU.section_actions if item.label == event.text), "")
+            else:
+                text = ""
         parsed = ParsedChatCommand.parse(text) if allow_cancel else None
+        is_author = event.external_user_id is not None and action.external_user_id == event.external_user_id
+        if parsed is not None and parsed.command is ChatCommand.HELP:
+            user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event)) if is_author else None
+            can_cancel = user is not None and user.id == action.app_user_id
+            cancel_hint = compose_content("\n", code_span("/cancel"), " — отменить обработку") if can_cancel else text_content("")
+            content = compose_content("Compadre Assistant — справка.\nОбработка уже идёт.", cancel_hint,
+                                      "\n", code_span("/help"), " — открыть эту справку")
+            return replace(self.busy_reply(can_cancel=can_cancel), content=content,
+                           preserve_source_actions=True)
         if parsed is not None and parsed.command is ChatCommand.CANCEL:
             if parsed.arguments:
-                return IncomingResponse(compose_content("Используй ", code_span("/cancel"), " без аргументов."))
-            if event.external_user_id is not None and action.external_user_id == event.external_user_id:
+                return self.busy_reply(can_cancel=is_author)
+            if is_author:
                 user = self._user_identity_service.resolve_without_touch(_incoming_identity_from_event(event))
                 if user is not None and user.id == action.app_user_id and actions.cancel(action):
                     return _DEFERRED_CANCELLED_REPLY
-        return self.busy_reply()
+        return self.busy_reply(can_cancel=is_author)
 
     @staticmethod
-    def busy_reply() -> IncomingResponse:
-        """Возвращает общий ответ для временно занятого чата."""
-        return IncomingResponse(compose_content(
-            "Обработка уже идёт. Дождись результата или введи ", code_span("/cancel"), ".",
-        ))
+    def busy_reply(*, can_cancel: bool = False) -> IncomingResponse:
+        """Предлагает дождаться результата и даёт автору кнопку отмены.
+
+        Args:
+            can_cancel: Автор события совпадает с автором текущей работы.
+
+        Returns:
+            Ответ занятого чата с доступными обратимыми действиями.
+        """
+        return IncomingResponse(text_content("Обработка уже идёт. Дождись результата."),
+                                suggested_actions=BUSY_COMMAND_MENU.section_actions if can_cancel else (HELP_SECTION_ACTION,))
 
     def may_finish_deferred(self, event: IncomingEvent, app_user_id: int,
                             capability_id: str, required_mode: str | None) -> bool:
@@ -766,9 +868,11 @@ class IncomingMessageDispatcher:
                                         suggested_actions=(CANCEL_SECTION_ACTION, HELP_SECTION_ACTION))
             cleared = pending is not None and self._pending_inputs.clear(event.reply_address, pending.request_id)
             if cleared and pending is not None and pending.cancel_return_command is not None:
-                return IncomingResponse(compose_content(
-                    "Ввод отменён. Чтобы вернуться, открой ", code_span(pending.cancel_return_command), ".",
-                ), close_managed_views=True)
+                return IncomingResponse(
+                    text_content("Ввод отменён. Можно вернуться к предыдущему экрану."),
+                    suggested_actions=(ReplyAction("Вернуться", pending.cancel_return_command, scope=ActionScope.SECTION),),
+                    close_managed_views=True,
+                )
             return IncomingResponse(text_content(
                 "Ввод отменён. Можно продолжить в текущем разделе." if cleared else
                 "В этом чате нечего отменять."
@@ -784,10 +888,10 @@ class IncomingMessageDispatcher:
                 access = personal.status(pending.owner_id) if personal is not None else None
                 if access is None or not access.visible:
                     return None
-            return pending_expired_reply(pending)
+            return self.resume_navigation(event, pending_expired_reply(pending))
         elif pending is not None:
             if event.images and (pending.owner_id == "core" or not pending.accepts_images):
-                return IncomingResponse(text_content(_TEXT_INPUT_HINT))
+                return self.resume_navigation(event, IncomingResponse(text_content(_TEXT_INPUT_HINT)))
             return self._continue_input(pending, event, completion_handler)
         return None
 
@@ -863,11 +967,13 @@ class IncomingMessageDispatcher:
             target = parts[0] if parts else ""
             if mode is None or mode.capability_id != target:
                 capability = personal.by_id(target)
-                return IncomingResponse(
-                    text_content(f"Войди снова через {capability.descriptor.entry.name}, чтобы завершить действие в исходном чате."
-                    if capability
-                    else personal.entry_hint())
-                )
+                if capability is not None:
+                    return IncomingResponse(
+                        text_content("Открой раздел, чтобы продолжить подтверждение в этом чате."),
+                        suggested_actions=(replace(capability_entry_action(capability.descriptor), scope=ActionScope.SCREEN),
+                                           _HELP_SCREEN_ACTION),
+                    )
+                return IncomingResponse(text_content(personal.entry_hint()), suggested_actions=main_actions(personal, None))
             return self._dispatch(user, event, completion_handler, personal)
 
         if command is ChatCommand.START:
@@ -1097,20 +1203,20 @@ class IncomingMessageDispatcher:
         if owner is None or not isinstance(owner, PendingInputContinuationPort):
             self._pending_inputs.clear(event.reply_address, pending.request_id)
             access = personal.status(pending.owner_id) if personal is not None else None
-            return IncomingResponse(text_content(
+            return self.resume_navigation(event, IncomingResponse(text_content(
                 self._blocked_reply(access) if access is not None and not access.effective
-                else "Владелец ввода недоступен. Повтори команду."
-            ))
+                else "Этот ввод больше недоступен. Выбери актуальное действие."
+            )))
         if event.images and not owner.descriptor.accepts_images:
-            return IncomingResponse(text_content(_TEXT_INPUT_HINT))
+            return self.resume_navigation(event, IncomingResponse(text_content(_TEXT_INPUT_HINT)))
         mode = self._chat_mode_repository.get_state(ChatModeKey(user.id, event.channel, event.chat_id))
         if ((pending.app_user_id is not None and pending.app_user_id != user.id)
                 or (pending.required_mode is not None
                     and mode.capability_id != pending.required_mode)):
             self._pending_inputs.clear(event.reply_address, pending.request_id)
-            return IncomingResponse(text_content(
-                "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
-            ))
+            return self.resume_navigation(event, IncomingResponse(text_content(
+                "Контекст ввода изменился. Ожидание отменено. Выбери действие в текущем разделе."
+            )))
         context = HandlerContext(
             user, CallbackReplyDelivery(completion_handler) if completion_handler else None,
             self._pending_inputs,
@@ -1127,7 +1233,7 @@ class IncomingMessageDispatcher:
                 "Не удалось обработать ввод. Проверь состояние действия перед повторной отправкой."
             ), error)
         if result.response.view is not None and context.mode_revision is None:
-            result = replace(result, response=self._unavailable_view(result.response, result.response.view))
+            result = replace(result, response=self._unavailable_view(event, result.response, result.response.view))
         if result.cancellable_action is not None and self._can_defer(event, completion_handler):
             return self._defer_action(
                 event, user.id, pending.owner_id, pending.required_mode, result.response,
@@ -1151,11 +1257,14 @@ class IncomingMessageDispatcher:
         assert actions is not None and completion_handler is not None and may_finish is not None
         action = actions.reserve(event.reply_address, app_user_id, event.external_user_id)
         if action is None:
-            hint = "Попробуй отправить значение позже." if pending is not None else "Попробуй повторить команду позже."
-            return IncomingResponse(text_content(f"Обработка сейчас занята. {hint}"))
+            return self.resume_navigation(event, IncomingResponse(text_content(
+                "Обработка сейчас занята. Попробуй ещё раз немного позже."
+            )))
         if pending is not None and not self._pending_inputs.clear(event.reply_address, pending.request_id):
             actions.cancel(action)
-            return IncomingResponse(text_content("Ввод уже изменился. Повтори команду."))
+            return self.resume_navigation(event, IncomingResponse(text_content(
+                "Ввод уже изменился. Выбери актуальное действие."
+            )))
         origin = replace(event, text="принятый ввод", images=())
         pending_inputs = self._pending_inputs
         refresh_menu = self._deferred_menu_refresh
@@ -1175,7 +1284,7 @@ class IncomingMessageDispatcher:
         def after_delivery(delivered: bool) -> None:
             actions.after_delivery(action, delivered, work, finish, refresh_after_release)
 
-        return replace(receipt, after_delivery=after_delivery)
+        return replace(receipt, suggested_actions=BUSY_COMMAND_MENU.section_actions, after_delivery=after_delivery)
 
     def _continue_core_input(self, pending: PendingInput, event: IncomingEvent) -> ProcessIncomingMessageResult | IncomingResponse:
         """Повторно проверяет профиль и завершает либо сохраняет исходное ожидание."""
@@ -1184,16 +1293,18 @@ class IncomingMessageDispatcher:
             user = self._user_identity_service.resolve(identity)
             if (user.id if user else None) != pending.app_user_id:
                 self._pending_inputs.clear(event.reply_address, pending.request_id)
-                return IncomingResponse(text_content("Профиль канала изменился. Повтори команду."))
+                return self.resume_navigation(event, IncomingResponse(text_content(
+                    "Профиль канала изменился. Выбери действие для текущего профиля."
+                )))
             personal = self._personal_registry(user, event) if user is not None else None
             if pending.required_mode is not None:
                 mode = self._chat_mode_repository.get(ChatModeKey(user.id, event.channel, event.chat_id)) if user else None
                 if (mode is None or mode.capability_id != pending.required_mode or personal is None
                         or personal.by_id(pending.required_mode) is None):
                     self._pending_inputs.clear(event.reply_address, pending.request_id)
-                    return IncomingResponse(text_content(
-                        "Контекст ввода изменился. Ожидание отменено. Повтори команду в нужном режиме."
-                    ))
+                    return self.resume_navigation(event, IncomingResponse(text_content(
+                        "Контекст ввода изменился. Ожидание отменено. Выбери действие в текущем разделе."
+                    )))
             if pending.input_kind in ("enable", "disable") and user is not None and personal is not None:
                 command = ChatCommand.ENABLE if pending.input_kind == "enable" else ChatCommand.DISABLE
                 return self._change_capability(command, event.text, user, event, personal, pending)
@@ -1215,7 +1326,8 @@ class IncomingMessageDispatcher:
                         "Отправь исправленное имя до истечения ожидания."
                     ), result.error)
             else:
-                result = IncomingResponse(text_content("Ввод недоступен. Повтори команду."))
+                result = IncomingResponse(text_content("Этот ввод больше недоступен. Выбери актуальное действие."),
+                                          suggested_actions=(_HELP_SCREEN_ACTION,))
         except Exception as error:
             LOGGER.exception("Core pending input failed: kind=%s", pending.input_kind)
             result = IncomingResponse(text_content(
@@ -1354,6 +1466,7 @@ class IncomingMessageDispatcher:
                 type=IncomingMessageResultType.CAPABILITY_DISABLED,
                 app_user=user,
                 capability_reply=self._blocked_reply(blocked),
+                personal=personal,
             )
         entry = personal.by_command(event.text)
         if entry is not None:
@@ -1368,7 +1481,8 @@ class IncomingMessageDispatcher:
                 )
                 return IncomingResponse(
                     text_content("Не удалось открыть раздел. Попробуй ещё раз."), error,
-                    suggested_actions=(capability_entry_action(entry.descriptor),),
+                    suggested_actions=(replace(capability_entry_action(entry.descriptor), scope=ActionScope.SCREEN),
+                                       _HELP_SCREEN_ACTION),
                 )
             # Одноразовый вход и ошибка никогда не заменяют прежний режим.
             if (
@@ -1379,13 +1493,13 @@ class IncomingMessageDispatcher:
                     key, state.revision, entry.descriptor.capability_id
                 )
             response = result.response
-            return self._unavailable_view(response, response.view) if response.view is not None else response
+            return self._unavailable_view(event, response, response.view) if response.view is not None else response
         state = self._chat_mode_repository.get_state(key)
         active_access = personal.status(state.capability_id) if state.capability_id else None
         if active_access is not None and active_access.profile_allowed and not active_access.chat_allowed:
             # Такой режим мог остаться от прежней сборки в чате, где вход закрыт.
             self._chat_mode_repository.replace_if_revision(key, state.revision, None)
-            return IncomingResponse(text_content(self._blocked_reply(active_access)))
+            return self.resume_navigation(event, IncomingResponse(text_content(self._blocked_reply(active_access))))
         parts = event.text.split(maxsplit=1)
         owner = self._registry.mode_command_owner(parts[0]) if parts else None
         if owner is not None:
@@ -1395,13 +1509,13 @@ class IncomingMessageDispatcher:
                     type=IncomingMessageResultType.CAPABILITY_DISABLED,
                     app_user=user,
                     capability_reply=self._blocked_reply(access),
+                    personal=personal,
                 )
             if state.capability_id != owner.capability_id:
-                return IncomingResponse(compose_content(
-                    "Чтобы выполнить команду, войди в режим через ",
-                    code_span(owner.entry.name),
-                    ".",
-                ))
+                return IncomingResponse(
+                    text_content("Открой раздел, чтобы продолжить."),
+                    suggested_actions=(replace(capability_entry_action(owner), scope=ActionScope.SCREEN), _HELP_SCREEN_ACTION),
+                )
         if state.capability_id is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_HINT,
@@ -1411,7 +1525,7 @@ class IncomingMessageDispatcher:
             )
         capability = personal.by_id(state.capability_id)
         if event.images and (capability is None or not capability.descriptor.accepts_images):
-            return IncomingResponse(text_content(_TEXT_INPUT_HINT))
+            return self.resume_navigation(event, IncomingResponse(text_content(_TEXT_INPUT_HINT)))
         if capability is None:
             return ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.MODE_UNAVAILABLE,
@@ -1437,7 +1551,9 @@ class IncomingMessageDispatcher:
                         return busy
                     capability_id = capability.descriptor.capability_id
                     if not self.may_finish_deferred(event, user.id, capability_id, capability_id):
-                        return IncomingResponse(text_content("Контекст сообщения изменился. Повтори команду в нужном режиме."))
+                        return self.resume_navigation(event, IncomingResponse(text_content(
+                            "Контекст сообщения изменился. Выбери актуальное действие."
+                        )))
                     return self._defer_action(
                         event, user.id, capability_id, capability_id, result.response,
                         result.cancellable_action, completion_handler,
@@ -1518,7 +1634,7 @@ class IncomingMessageDispatcher:
                            for identifier, server, enabled, allowed in before.access)):
             raise RuntimeError("section action owner changed before query")
         if pending is not None and pending.cancel_only_menu:
-            return (CANCEL_SECTION_ACTION,)
+            return CANCEL_SECTION_ACTION, HELP_SECTION_ACTION
         actions = active.section_actions(user, event.reply_address, before.mode_revision, pending)
         if any(action.scope != ActionScope.SECTION for action in actions):
             raise ValueError("section action query returned an action belonging to a screen")
@@ -1619,6 +1735,8 @@ class IncomingMessageDispatcher:
                 section_actions = self._section_actions_for_context(
                     event, user, active, mode.capability_id, mode.revision, valid_pending,
                 )
+                if section_actions and not any(action.command == "/help" for action in section_actions):
+                    section_actions = (*section_actions, HELP_SECTION_ACTION)
         snapshot = self._confirmation_snapshot(event, user, active, mode_revision=mode.revision if mode else None)
         active_help = (
             self._project_command_help(active, user, event.reply_address, mode.revision, personal)

@@ -2,21 +2,28 @@
 
 import asyncio
 from dataclasses import replace
+from datetime import timedelta
 from itertools import count
 import json
 import logging
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event
 from types import SimpleNamespace
 import unittest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import aiogram
 
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
+from compadre_assistant.capabilities.ai.domain.errors import AiModelError
+from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
+from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.core.data.sqlite.capability_preference_repository import SQLiteUserCapabilityPreferenceRepository
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.domain.capability_preferences import UserCapabilityPreference
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
@@ -159,9 +166,11 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.owner = NeutralScreenCapability()
         self.open_channels({"telegram": "https://t.me/example_chat_bot", "vk": "https://vk.com/write-731"})
 
-    def open_channels(self, dialogs):
+    def open_channels(self, dialogs, *, capabilities=None):
         """Подключает два локальных клиента к процессору с публичными адресами установки."""
-        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=(self.owner,), messenger_dialogs=dialogs)
+        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=capabilities or (self.owner,),
+                                                messenger_dialogs=dialogs)
+        self.addCleanup(self.processor.close_deferred_actions)
         self.logger = logging.getLogger("test.screen-actions.channels")
         self.ids = count(42)
         self.telegram = []
@@ -471,6 +480,132 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 await self.press(channel, *self.inline_action(channel, "Включить возможность"), chat=chat, author=author)
                 await self.send(channel, "screens", chat=chat, author=author)
                 self.assertIn("включена", self.last(channel)[0])
+
+    async def test_expired_name_can_be_restarted_from_the_current_reply(self):
+        """После срока Telegram и VK дают продолжить из новой клавиатуры."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                self.open_channels({})
+                await self.send(channel, "/start")
+                await self.choose_section(channel, "Настройки", "1001")
+                await self.choose_section(channel, "Изменить имя", "1001")
+                store = self.processor._pending_inputs
+                address = next(address for address in store.addresses() if address.channel == channel)
+                expires = store.get(address).expires_at
+                with patch.object(store, "_clock", return_value=expires):
+                    if channel == "telegram":
+                        self.processor.reconcile_menus(self.menus.append)
+                    else:
+                        self.processor.reconcile_menus(
+                            self.vk_menu, notify_expiry=self.vk_menu.send_expiry,
+                        )
+                    if channel == "telegram":
+                        await self.send(channel, "Просроченное имя")
+                    self.assertIn("Срок ожидания ввода истёк", self.last(channel)[0])
+                    self.assertNotRegex(self.last(channel)[0], r"/[a-z_]+")
+                    if channel == "telegram":
+                        await self.choose_section(channel, "Начать заново", "1001")
+                    else:
+                        await self.choose_section(channel, "Изменить имя", "1001")
+                    self.assertEqual(store.get(address).expires_at, expires + timedelta(minutes=10))
+                    await self.send(channel, "Актуальное имя")
+                    self.assertIn("Актуальное имя", self.last(channel)[0])
+
+    async def test_revoked_selection_recovers_without_reopening_the_disabled_mode(self):
+        """Устаревший выбор после отзыва доступа возвращает рабочие общие кнопки."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                chat = "1001"
+                await self.send(channel, "/start", chat=chat)
+                await self.choose_section(channel, self.owner.descriptor.entry.description, chat)
+                await self.choose_section(channel, "Открыть выбор", chat)
+                selection = self.inline_action(channel, "1. Объект 1")
+                with connect_database(self.path) as connection:
+                    identity = IncomingIdentity(channel, chat, chat)
+                    user = create_user_identity_service(connection).resolve_without_touch(identity)
+                    SQLiteUserCapabilityPreferenceRepository(connection).upsert(
+                        UserCapabilityPreference(user.id, self.owner.descriptor.capability_id, False),
+                    )
+                await self.press(channel, *selection, chat=chat)
+                text, actions, _ = self.last(channel)
+                self.assertIn("больше недоступна", text)
+                self.assertNotRegex(text, r"/[a-z_]+")
+                labels = set(dict(actions)) if channel == "telegram" else set(self.bottom(chat))
+                self.assertTrue({"Настройки", "Помощь"} <= labels)
+                self.assertNotIn(self.owner.descriptor.entry.description, labels)
+                await self.choose_section(channel, "Настройки", chat)
+                self.assertIn("Настройки", self.last(channel)[0])
+                self.assertEqual(self.owner.selected, [])
+
+    async def test_background_cancellation_help_result_and_failure_in_both_channels(self):
+        """Справка, отмена и ответы фоновой работы возвращают актуальные действия."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                entered, release = Event(), Event()
+                entered_second, release_second = Event(), Event()
+                model = Mock()
+
+                def answer(question, instruction):
+                    if question == "Первый вопрос":
+                        entered.set()
+                        release.wait(5)
+                        return "Отменённый результат"
+                    if question == "Второй вопрос":
+                        entered_second.set()
+                        release_second.wait(5)
+                    if question == "Сбой модели":
+                        raise AiModelError("offline")
+                    return "Ответ модели с /ask как данными"
+
+                model.answer.side_effect = answer
+                use_case = AskQuestion(model=model, max_question_chars=100)
+                self.open_channels({}, capabilities=(AiCapability(use_case, Mock()),))
+
+                async def wait_for_reply(fragment):
+                    async with asyncio.timeout(5):
+                        while True:
+                            texts = ([kwargs["text"] for _, kwargs in self.telegram] if channel == "telegram"
+                                     else list(self.vk.texts.values()))
+                            if any(fragment in text for text in texts):
+                                return
+                            await asyncio.sleep(0.01)
+
+                try:
+                    await self.send(channel, "/start")
+                    await self.choose_section(channel, "Режим ИИ", "1001")
+                    await self.choose_section(channel, "Задать вопрос", "1001")
+                    await self.send(channel, "Первый вопрос")
+                    self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+                    if channel == "telegram":
+                        earlier_cancel = self.inline_action(channel, "Отмена")
+                    await self.choose_section(channel, "Помощь", "1001")
+                    self.assertIn("/cancel", self.last(channel)[0])
+                    self.assertNotIn("/ask", self.last(channel)[0])
+                    await self.choose_section(channel, "Отмена", "1001")
+                    cancellation = ([kwargs["text"] for _, kwargs in self.telegram] if channel == "telegram"
+                                    else list(self.vk.texts.values()))
+                    self.assertTrue(any("Обработка отменена" in text for text in cancellation))
+                    await self.choose_section(channel, "Задать вопрос", "1001")
+                    release.set()
+                    await self.send(channel, "Второй вопрос")
+                    self.assertTrue(await asyncio.to_thread(entered_second.wait, 5))
+                    if channel == "telegram":
+                        await self.press(channel, *earlier_cancel)
+                        self.assertIn("больше недоступна", self.last(channel)[0])
+                    release_second.set()
+                    await wait_for_reply("Ответ модели с /ask как данными")
+                    await self.choose_section(channel, "Помощь", "1001")
+                    self.assertIn("/ask", self.last(channel)[0])
+                    await self.choose_section(channel, "Задать вопрос", "1001")
+                    await self.send(channel, "Сбой модели")
+                    await wait_for_reply("Не удалось получить ответ модели")
+                    await self.choose_section(channel, "Задать вопрос", "1001")
+                    replies = ([kwargs["text"] for _, kwargs in self.telegram] if channel == "telegram"
+                               else list(self.vk.texts.values()))
+                    self.assertFalse(any("Отменённый результат" in reply for reply in replies))
+                finally:
+                    release.set()
+                    release_second.set()
 
     async def test_unregistered_channel_accepts_plain_code_in_both_directions(self):
         """Привязывает новый канал к профилю без ввода команды."""

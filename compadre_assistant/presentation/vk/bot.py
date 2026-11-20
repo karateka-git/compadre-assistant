@@ -959,8 +959,8 @@ def _send_vk_view(
         return True, menu_delivered
     if target is not None and delivery.unavailable is not None:
         _, menu_delivered = _send_vk_message(
-            client, peer_id=peer_id, response=IncomingResponse(delivery.unavailable), logger=logger,
-            sleeper=sleeper, limit=limit, include_bound_actions=False, menu_keyboard=menu_keyboard,
+            client, peer_id=peer_id, response=IncomingResponse(delivery.unavailable, bound_actions=delivery.unavailable_actions),
+            logger=logger, sleeper=sleeper, limit=limit, include_bound_actions=include_bound_actions, menu_keyboard=menu_keyboard,
         )
         return False, menu_delivered
     return False, menu_delivered

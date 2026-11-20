@@ -404,11 +404,11 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         cancel = self._actions(self.bot.send_message.await_args)["Отмена"]
         self.bot.edit_message_reply_markup.assert_awaited_once_with(chat_id=101, message_id=active_list, reply_markup=None)
         await self._press(old_buy, active_list)
-        self.assertIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+        self.assertNotIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
         self.assertEqual(self.bot.edit_message_reply_markup.await_count, 1)
         await self._press(cancel, prompt_id)
         self.assertIn("Ввод отменён", self.bot.send_message.await_args.kwargs["text"])
-        self.assertIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+        self.assertNotIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
         self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], prompt_id)
 
         await self._send("/family_shopping")
@@ -420,7 +420,7 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         await self._send("/settings")
         self.assertEqual(self.bot.edit_message_reply_markup.await_args.kwargs["message_id"], reopened)
         await self._press(refreshed_buy, reopened)
-        self.assertIn("Открой <code>/family</code>", self.bot.send_message.await_args.kwargs["text"])
+        self.assertIn("Семья", self._actions(self.bot.send_message.await_args))
         self.assertEqual(self.bot.edit_message_reply_markup.await_count, 3)
 
     async def test_failed_replacement_defers_removal_and_failed_cleanup_preserves_new_list(self) -> None:
@@ -459,7 +459,8 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(SQLiteFamilyRepository, "buy_items", autospec=True, side_effect=buy_items) as write:
             with self.assertLogs(self.logger, level="ERROR"):
                 await self._press(choice, active_list)
-            self.assertIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+            self.assertNotIn("/family_shopping", self.bot.send_message.await_args.kwargs["text"])
+            self.assertEqual(set(self._actions(self.bot.send_message.await_args)), {"Покупки", "Помощь"})
             await self._send("1")
             self.assertIn("Список для выбора недоступен", self.bot.send_message.await_args.kwargs["text"])
             await self._press(choice, active_list)
@@ -552,7 +553,8 @@ class TelegramFamilyShoppingTest(unittest.IsolatedAsyncioTestCase):
         self.bot.edit_message_reply_markup.assert_not_awaited()
         self.bot.edit_message_text.assert_not_awaited()
         self.assertIn("Не удалось обновить список", self.bot.send_message.await_args.kwargs["text"])
-        self.assertTrue(all("reply_markup" not in call.kwargs for call in self.bot.send_message.await_args_list))
+        self.assertTrue(all("reply_markup" not in call.kwargs for call in self.bot.send_message.await_args_list[:-1]))
+        self.assertIn("Помощь", self._actions(self.bot.send_message.await_args))
         self.bot.send_message.side_effect = self._send_message
         await self._send("/buy")
         self.assertEqual(self.bot.edit_message_text.await_args.kwargs["message_id"], previous_id)
@@ -681,7 +683,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._menu_press("Покупки")
         ordinary = self._single_reply(
             lambda: self._send(f"/add {_TITLE_AT_PREVIEW_LIMIT}\n{_TITLE_OVER_PREVIEW_LIMIT}"),
-            "Список покупок", labels=["Добавить", "Купить", "Удалить", "Назад"],
+            "Список покупок", labels=["Добавить", "Купить", "Удалить", "Назад", "Помощь"],
         )
         self.assertEqual(ordinary["message"].splitlines()[3:], _PREVIEW_LINES)
 
@@ -726,7 +728,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         for position, item in enumerate(items, 1):
             self.assertIn(f"{position}. {item}", joined)
         self.assertTrue(all("keyboard" not in part for part in sent[:-1]))
-        self.assertEqual(list(self._visible_menu()), ["Добавить", "Купить", "Удалить", "Назад"])
+        self.assertEqual(list(self._visible_menu()), ["Добавить", "Купить", "Удалить", "Назад", "Помощь"])
         self.assertIn("keyboard", sent[-1])
 
     def test_entire_bought_group_stays_on_last_logical_vk_page(self) -> None:
@@ -759,7 +761,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._menu_press("Покупки")
         self._send("/add " + "\n".join([">" * 110, *(f"Товар {number}" for number in range(2, 13))]))
         self._single_reply(lambda: self._menu_press("Следующая страница"), "2/2",
-                           labels=["Добавить", "Купить", "Удалить", "Предыдущая страница", "Назад"])
+                           labels=["Добавить", "Купить", "Удалить", "Предыдущая страница", "Назад", "Помощь"])
 
         menu_before_selection = self._visible_menu()
         first = self._single_reply(lambda: self._menu_press("Купить"), "3/3")
@@ -779,7 +781,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         navigation = ["Предыдущая страница", "Следующая страница"]
         self.assertEqual(rows, [[f"{number}. Товар {number}"] for number in range(5, 9)] + [navigation, ["Назад"]])
         before = len(self.calls)
-        self._single_reply(lambda: self._press(buttons["11. Товар 11"], cmid), "Открой /family_shopping")
+        self._single_reply(lambda: self._press(buttons["11. Товар 11"], cmid), "больше недоступна")
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
         self._send("8")
         bought = self._latest_edit()
@@ -787,7 +789,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertNotIn("Куплено", bought["message"])
         self.assertEqual(self._visible_menu(), menu_before_selection)
         self._single_reply(lambda: self._press(self._actions(bought)["Назад"], cmid), "Куплено\n1. Товар 8",
-                           labels=["Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Назад"])
+                           labels=["Добавить", "Купить", "Удалить", "Очистить купленное", "Предыдущая страница", "Назад", "Помощь"])
         cleared = self._single_reply(lambda: self._menu_press("Очистить купленное"), "Список покупок")
         self.assertNotIn("Куплено", cleared["message"])
         self.assertNotIn("Очистить купленное", self._visible_menu())
@@ -856,8 +858,8 @@ class VkFamilyShoppingTest(unittest.TestCase):
             self._send("/family_create")
             self._send("Дом")
             self._menu_press("Покупки")
-            self._single_reply(lambda: self._send("/add"), "/cancel", labels=["Отмена"])
-            self._single_reply(lambda: self._send("/cancel"), "Ввод отменён", labels=["Добавить", "Назад"])
+            self._single_reply(lambda: self._send("/add"), "/cancel", labels=["Отмена", "Помощь"])
+            self._single_reply(lambda: self._send("/cancel"), "Ввод отменён", labels=["Добавить", "Назад", "Помощь"])
             self._single_reply(lambda: self._send("/add Хлеб\nМолоко"), "1. Хлеб\n2. Молоко")
             previous_menu = self._visible_menu()
             choosing = self._single_reply(lambda: self._send("/buy"), "пришли номер товара")
@@ -871,11 +873,11 @@ class VkFamilyShoppingTest(unittest.TestCase):
 
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
-        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима", "Помощь"]
         home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
-        shopping = ["Добавить", "Назад"]
+        shopping = ["Добавить", "Назад", "Помощь"]
         self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
-        self._single_reply(lambda: self._menu_press("Создать семью"), "Пришли название семьи", labels=["Отмена"])
+        self._single_reply(lambda: self._menu_press("Создать семью"), "Пришли название семьи", labels=["Отмена", "Помощь"])
         self._single_reply(lambda: self._send("Дом"), "Семья «Дом»", labels=home)
         roster = self._single_reply(lambda: self._menu_press("Участники"), "Участники семьи «Дом»")
         self.assertEqual(self._visible_menu().keys(), set(home))
@@ -887,7 +889,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertNotIn("/add", empty["message"])
         self.assertEqual(list(self._actions(empty)), ["Назад"])
         self._single_reply(lambda: self._press(self._actions(empty)["Назад"], self.last_cmid), "Список покупок")
-        self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена"])
+        self._single_reply(lambda: self._menu_press("Добавить"), "Напиши, что купить", labels=["Отмена", "Помощь"])
         self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=shopping)
         self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»", labels=home)
         confirmation = self._single_reply(lambda: self._send("/family_close"), "Подтверждение действует")
@@ -908,7 +910,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         ):
             with self.subTest(command=command):
                 self._menu_press("Покупки")
-                self.assertEqual(list(self._visible_menu()), ["Добавить", "Назад"])
+                self.assertEqual(list(self._visible_menu()), ["Добавить", "Назад", "Помощь"])
                 previous = len(self.calls)
                 self._send(command)
                 sent = [params for method, params in self.calls[previous:] if method == "messages.send"]
@@ -927,11 +929,11 @@ class VkFamilyShoppingTest(unittest.TestCase):
 
     def test_join_retry_and_cancel_keep_the_same_waiting_input_path(self) -> None:
         """Отмена по кнопке VK завершает ввод кода и возвращает начальное меню семьи."""
-        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима"]
+        no_family = ["Создать семью", "Вступить по коду", "Выйти из режима", "Помощь"]
         self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
-        self._single_reply(lambda: self._menu_press("Вступить по коду"), "/cancel", labels=["Отмена"])
+        self._single_reply(lambda: self._menu_press("Вступить по коду"), "/cancel", labels=["Отмена", "Помощь"])
         self._single_reply(lambda: self._send("недействительный код"), "/cancel")
-        self.assertEqual(list(self._visible_menu()), ["Отмена"])
+        self.assertEqual(list(self._visible_menu()), ["Отмена", "Помощь"])
         self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён", labels=no_family)
         self._single_reply(lambda: self._send("другой текст"), "Семья")
 
@@ -940,7 +942,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self._send("/family")
         no_family_help = self._single_reply(lambda: self._send("/help"), "Команды режима family")
         self.assertNotIn("/add", no_family_help["message"])
-        self.assertNotIn("Помощь", self._visible_menu())
+        self.assertIn("Помощь", self._visible_menu())
 
         self._send("/family_create")
         self._send("Дом")
@@ -960,7 +962,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         for duplicate in _SHOPPING_TEXT_DUPLICATES:
             self.assertNotIn(duplicate, added["message"])
         shopping_menu = self._visible_menu()
-        self.assertEqual(list(shopping_menu), ["Добавить", "Купить", "Удалить", "Следующая страница", "Назад"])
+        self.assertEqual(list(shopping_menu), ["Добавить", "Купить", "Удалить", "Следующая страница", "Назад", "Помощь"])
         help_from_list = self._single_reply(lambda: self._send("/help"), "Команды режима family")
         for command in _SHOPPING_HELP_COMMANDS:
             self.assertIn(command, help_from_list["message"])
@@ -1014,8 +1016,8 @@ class VkFamilyShoppingTest(unittest.TestCase):
         clear = self._latest_edit()
         self.assertEqual(clear["cmid"], str(first_cmid))
         self.assertEqual(json.loads(clear["keyboard"])["buttons"], [])
-        self._single_reply(lambda: self._press(old_buy, first_cmid), "Открой /family_shopping")
-        self._single_reply(lambda: self._menu_press("Отмена"), "открой /family_shopping")
+        self._single_reply(lambda: self._press(old_buy, first_cmid), "больше недоступна")
+        self._single_reply(lambda: self._menu_press("Отмена"), "Ввод отменён")
         self._send("/family_shopping")
 
         second = self._single_reply(lambda: self._menu_press("Удалить"), "Выбери, что удалить")
@@ -1033,13 +1035,13 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.reject_edits.add(second_cmid)
         with self.assertLogs(self.logger, level="WARNING"):
             self._single_reply(lambda: self._send("/family_shopping"), "1. Хлеб")
-        self._single_reply(lambda: self._press(delete, second_cmid), "Открой /family_shopping")
+        self._single_reply(lambda: self._press(delete, second_cmid), "больше недоступна")
 
         third = self._single_reply(lambda: self._menu_press("Купить"), "Выбери, что купил")
         third_cmid = self.last_cmid
         now[0] = 10
         before = len(self.calls)
-        self._single_reply(lambda: self._press(self._actions(third)["1. Хлеб"], third_cmid), "Открой /family_shopping")
+        self._single_reply(lambda: self._press(self._actions(third)["1. Хлеб"], third_cmid), "больше недоступна")
         self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
         self._send("/family_shopping")
         self.assertIn("1. Хлеб\n2. Молоко", self.calls[-1][1]["message"])
@@ -1051,5 +1053,10 @@ class VkFamilyShoppingTest(unittest.TestCase):
         ))
         stale = self._actions(fourth)["1. Хлеб"]
         before = len(self.calls)
-        self._single_reply(lambda: self._press(stale, fourth_cmid), "Открой /family.")
-        self.assertEqual([method for method, _ in self.calls[before:]], ["messages.sendMessageEventAnswer", "messages.send"])
+        self._press(stale, fourth_cmid)
+        sent = [params for method, params in self.calls[before:] if method == "messages.send"]
+        self.assertIn("больше недоступна", sent[0]["message"])
+        self.assertIn("Семья", self._actions(sent[-1]))
+        self.assertIn("Помощь", self._visible_menu())
+        self.assertEqual([method for method, _ in self.calls[before:]],
+                         ["messages.sendMessageEventAnswer", "messages.send", "messages.send"])

@@ -466,7 +466,7 @@ class ChannelMessageProcessor:
             ):
                 return None
             menu, complete = dispatcher.command_menu_snapshot(
-                event, known_user=owner, preserve_expired=address.channel == "vk",
+                event, known_user=owner, preserve_expired=True,
                 cleanup_pending=not read_only,
             )
             if known is not None and not service.owns_known_private_chat(*known):
@@ -596,22 +596,26 @@ class ChannelMessageProcessor:
                 original_context = dispatcher.action_context(incoming_message)
             except Exception:
                 original_context = None
+            completion_context = original_context
 
             def deliver(reply: BackgroundReply) -> None:
                 """Связывает фоновые действия только с неизменившимся исходным чатом."""
                 response = replace(reply.response, bound_actions=(), after_delivery=None)
-                if original_context is not None and reply.address == origin.reply_address:
+                if completion_context is not None and reply.address == origin.reply_address:
                     try:
                         with connect_database(self._database_path) as background_connection:
                             background_dispatcher = IncomingMessageDispatcher(
                                 registry=self._registry, pending_inputs=self._pending_inputs,
+                                deferred_actions=self._deferred_actions,
                                 user_identity_service=create_user_identity_service(background_connection),
                                 chat_mode_repository=SQLiteChatModeRepository(background_connection),
                                 capability_preference_repository=SQLiteUserCapabilityPreferenceRepository(background_connection),
                             )
-                            if background_dispatcher.action_context(origin) == original_context:
+                            if background_dispatcher.action_context(origin) == completion_context:
+                                response = background_dispatcher.resume_navigation(origin, response)
                                 response = background_dispatcher.bind_response_actions(
-                                    origin, response, action_store, view_origin=original_context,
+                                    origin, response, action_store, view_origin=completion_context,
+                                    expected_context=completion_context,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
@@ -628,6 +632,9 @@ class ChannelMessageProcessor:
                 response = dispatcher.select_action(
                     incoming_message, token, action_store, completion, menu_handler,
                 )
+            if response.after_delivery is not None and original_context is not None:
+                # Принятый фоновый ввод уже погашен, когда итог готов к доставке.
+                completion_context = replace(original_context, pending_request_id=None)
             if (response.view is None and response.error is None and original_context is not None
                     and original_context.mode_id is not None):
                 close_views = response.close_managed_views

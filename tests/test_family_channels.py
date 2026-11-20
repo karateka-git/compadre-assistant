@@ -20,6 +20,7 @@ from compadre_assistant.core.data.sqlite.migration_runner import apply_migration
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionLayoutLimits, ActionPurpose, ActionScope
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse
 from compadre_assistant.presentation.telegram.bot import TELEGRAM_ACTION_LAYOUT
 from compadre_assistant.presentation.vk.bot import VK_ACTION_LAYOUT
@@ -285,8 +286,8 @@ class FamilyChannelsTest(unittest.TestCase):
                     ordinary = self._send(processor, identity, "/family_shopping")
                     probe = self._event(identity, "/exit")
                     offered = processor.section_actions(probe)
-                    self.assertEqual(offered, ordinary.suggested_actions)
-                    self.assertEqual([action.label for action in offered], ["Добавить", "Купить", "Удалить", "Назад"])
+                    self.assertEqual(offered, (*ordinary.suggested_actions, HELP_SECTION_ACTION))
+                    self.assertEqual([action.label for action in offered], ["Добавить", "Купить", "Удалить", "Назад", "Помощь"])
                     self.assertTrue(all(action.scope is ActionScope.SECTION for action in offered))
 
                     prompt = self._send(processor, identity, "/add")
@@ -294,8 +295,8 @@ class FamilyChannelsTest(unittest.TestCase):
                     pending = processor._pending_inputs.get(probe.reply_address)
                     self.assertIsNotNone(pending)
                     cancel = processor.section_actions(probe)
-                    self.assertEqual(cancel, prompt.suggested_actions)
-                    self.assertEqual([action.purpose for action in cancel], [ActionPurpose.CANCEL])
+                    self.assertEqual(cancel, (*prompt.suggested_actions, HELP_SECTION_ACTION))
+                    self.assertEqual([action.purpose for action in cancel], [ActionPurpose.CANCEL, ActionPurpose.ACTION])
                     self.assertIs(processor._pending_inputs.get(probe.reply_address), pending)
 
                     with patch.object(processor._pending_inputs, "_clock", return_value=pending.expires_at):
@@ -491,16 +492,17 @@ class FamilyChannelsTest(unittest.TestCase):
         """Семейный вход недоступен без включения, регистрации и личного чата."""
         with self._runtime() as processor:
             self.assertNotIn("/family", response_text(self._send(processor, self.owner_tg, "/help")))
-            self.assertFalse(self._send(processor, self.owner_tg, "/family").bound_actions)
+            self.assertEqual({action.label for action in self._send(processor, self.owner_tg, "/family").bound_actions},
+                             {"Настройки", "Помощь"})
         with self._runtime("family") as processor:
             group = IncomingIdentity("telegram", self.owner_tg.external_user_id, "-100101")
             self.assertNotIn("/family", response_text(self._send(processor, group, "/help")))
-            self.assertIn("в личном чате", response_text(self._send(processor, group, "/family")))
+            self.assertIn("Открой личный чат", response_text(self._send(processor, group, "/family")))
             stranger = IncomingIdentity("telegram", "666", "666")
             response = self._send(processor, stranger, "/family")
             self.assertIn("Создать профиль", {action.label for action in response.bound_actions})
             self.assertIn("/family", response_text(self._send(processor, self.owner_tg, "/help")))
-            self.assertIn("войди в режим", response_text(self._send(processor, self.owner_tg, "/family_create")))
+            self.assertIn("Открой раздел", response_text(self._send(processor, self.owner_tg, "/family_create")))
 
     def test_invitation_joins_distinct_profile_and_membership_follows_linked_profile(self) -> None:
         """Проверяет кнопки и ручные команды на одном хранилище обоих каналов."""
@@ -514,7 +516,7 @@ class FamilyChannelsTest(unittest.TestCase):
             created = self._send(processor, self.owner_tg, "Дом")
             self.assertIn("Семья «Дом»", response_text(created))
 
-            self.assertIn("войди в режим", response_text(self._send(processor, self.owner_vk, "/family_invite")))
+            self.assertIn("Открой раздел", response_text(self._send(processor, self.owner_vk, "/family_invite")))
             self.assertIn("Семья «Дом»", response_text(self._send(processor, self.owner_vk, "/family")))
             invite = self._choose(
                 processor, self.owner_tg, self._choose(processor, self.owner_tg, created, "Пригласить"), "Создать код",
@@ -547,12 +549,12 @@ class FamilyChannelsTest(unittest.TestCase):
                     waiting = self._send(processor, self.owner_tg, "/family_create")
                     self.assertIn("/cancel", response_text(waiting))
                     self.assertEqual([(action.label, action.purpose) for action in waiting.bound_actions],
-                                     [("Отмена", ActionPurpose.CANCEL)])
+                                     [("Отмена", ActionPurpose.CANCEL), ("Помощь", ActionPurpose.ACTION)])
                     response = (self._choose(processor, self.owner_tg, waiting, "Отмена") if interrupt == "/cancel"
                                 else self._send(processor, self.owner_tg, interrupt))
                     if interrupt == "/cancel":
                         self.assertIn("Ввод отменён", response_text(response))
-                        self.assertIn("/family", response_text(response))
+                        self.assertIn("Вернуться", {action.label for action in response.bound_actions})
                     result = self._send(processor, self.owner_tg, "Лишнее название")
                     self.assertNotIn("Семья «Лишнее название»", response_text(result))
                     self.assertIn("Вступить по коду", {action.label for action in result.bound_actions})
@@ -568,7 +570,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("Код недействителен", response_text(invalid))
             now += timedelta(minutes=1)
             expired = self._send(processor, self.guest, "опоздавший код")
-            self.assertIn("/family_join", response_text(expired))
+            self.assertIn("Начать заново", {action.label for action in expired.bound_actions})
             self.assertNotIn("Код недействителен", response_text(expired))
 
     def test_members_actions_use_current_chat_and_names(self) -> None:
@@ -876,7 +878,8 @@ class FamilyChannelsTest(unittest.TestCase):
             self._joined_family(processor)
             leave = self._send(processor, self.guest, "/family_leave")
         with self._runtime() as processor:
-            self.assertFalse(self._send(processor, self.guest, "/family").bound_actions)
+            self.assertEqual({action.label for action in self._send(processor, self.guest, "/family").bound_actions},
+                             {"Настройки", "Помощь"})
         with self._runtime("family") as processor:
             self.assertIn("Илья", response_text(self._send(processor, self.owner_tg, "/family_members")))
             self.assertIn("Подтверждение недоступно", response_text(self._send(

@@ -86,10 +86,10 @@ class RestrictedCapabilityAccessTest(unittest.TestCase):
             SQLiteUserCapabilityPreferenceRepository(connection).upsert(
                 UserCapabilityPreference(self.other_id, "restricted", True),
             )
-        self.assertIn("войди в режим через /restricted", self.send("/restricted_action"))
+        self.assertIn("Открой раздел", self.send("/restricted_action"))
         self.assertEqual(self.send("/restricted"), "Актуальное состояние")
         self.assertEqual(self.send("/restricted_action"), "Тестовый ответ")
-        self.assertIn("войди в режим через /restricted", self.send("/restricted_action", self.linked))
+        self.assertIn("Открой раздел", self.send("/restricted_action", self.linked))
         self.assertEqual(self.send("/restricted", self.linked), "Актуальное состояние")
         self.assertEqual(self.send("/restricted_action", self.linked), "Тестовый ответ")
         for event in (replace(self.other, chat_id=self.owner.chat_id), replace(self.owner, external_user_id=None)):

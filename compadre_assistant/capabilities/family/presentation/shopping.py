@@ -17,7 +17,7 @@ from compadre_assistant.core.presentation.incoming.action_contracts import (
 )
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse, ReplyAction, ResponseView
-from compadre_assistant.core.presentation.message_content import TextSpan, code_span, compose_content
+from compadre_assistant.core.presentation.message_content import TextSpan, compose_content, text_content
 
 
 SHOPPING_COMMAND = "/family_shopping"  # Вход в покупки и перемещение по списку.
@@ -344,7 +344,7 @@ def shopping_list(
             if choice is not None:
                 choice.delivered.set()
 
-    unavailable = compose_content("Не удалось обновить список. Открой его снова через ", code_span(SHOPPING_COMMAND), ".")
+    unavailable = text_content("Не удалось обновить список. Открой его заново.")
     return IncomingResponse(
         compose_content(*parts), suggested_actions=actions,
         command_menu_delivery=SectionMenuDelivery.PRESERVE if selection is not None else SectionMenuDelivery.RECONCILE,

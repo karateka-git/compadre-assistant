@@ -121,7 +121,7 @@ class CapabilityCompositionTest(unittest.TestCase):
             before = SQLiteChatModeRepository(connection).get_state(self.key)
         self.process("/settings", chat="settings-chat")
         self.assertIn("выключена", response_text(self.process("/disable obsidian", chat="settings-chat")))
-        self.assertIn("/enable obsidian", response_text(self.process("обычный текст")))
+        self.assertIn("лично выключена", response_text(self.process("обычный текст")))
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
         self.assertIn("Личный доступ к возможности «Статьи в Obsidian» включён",
@@ -361,7 +361,7 @@ class CapabilityCompositionTest(unittest.TestCase):
                 future.result(timeout=5)
             self.assertIn("octocat/notes", response_text(delivered[-1].response))
             self.assertEqual(delivered[-1].address, self.event("текст").reply_address)
-            self.assertIn("/enable obsidian", response_text(processor(self.event("текст"))))
+            self.assertIn("лично выключена", response_text(processor(self.event("текст"))))
             self.assertEqual(client.closes, 0)
         self.assertEqual(client.closes, 1)
 

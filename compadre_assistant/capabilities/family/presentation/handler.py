@@ -118,7 +118,7 @@ class FamilyCapability(
         ))),
         enabled_by_default=True,
         display_name="«Семья»",
-        private_chat_hint="Открой /family в личном чате с ботом.",
+        private_chat_hint="Открой личный чат с ботом, чтобы перейти в раздел «Семья».",
     )
 
     def __init__(
@@ -245,23 +245,24 @@ class FamilyCapability(
                 return _family_actions(family)
         return shopping_section_actions(section, from_selection=section.selection_shown.is_set())
 
-    def reply_action_recovery_command(
+    def reply_action_recovery(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
-    ) -> str:
+    ) -> ReplyAction:
         """Предлагает покупки только для ещё открытого и доступного списка."""
+        home = ReplyAction("Семья", self.descriptor.entry.name)
         section = (self._shopping_sections.current(app_user.id, address, mode_revision)
                    if mode_revision is not None else None)
         if section is None:
-            return "/family"
+            return home
         with self._open_scenarios() as (families, _, _):
             try:
                 members = families.list_members(app_user.id, section.family_id)
             except FamilyAccessEnded:
-                return "/family"
-        return (SHOPPING_COMMAND if any(
+                return home
+        return (ReplyAction("Покупки", SHOPPING_COMMAND) if any(
             member.app_user_id == app_user.id and section.joined_at == member.joined_at
             for member in members
-        ) else "/family")
+        ) else home)
 
     @staticmethod
     def _member_commands(actor: FamilyMember, member_count: int) -> frozenset[str]:

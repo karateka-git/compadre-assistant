@@ -173,7 +173,7 @@ class ActionAdapterFlowTest(unittest.TestCase):
                     }}, incoming_message_processor=self.processor, client=client,
                                    logger=logging.getLogger("test.action.vk.confirm"))
                 self.assertEqual([text for _, text in client.messages], [
-                    "Принято", "Эта кнопка больше недоступна. Открой «Помощь», чтобы продолжить.",
+                    "Принято", "Эта кнопка больше недоступна. Выбери актуальное действие.",
                     "Принято",
                 ])
                 self.assertEqual([call.args[0].text for call in execute.call_args_list],

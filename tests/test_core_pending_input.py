@@ -204,7 +204,9 @@ class CorePendingInputTest(unittest.TestCase):
 
     def test_profile_commands_require_settings_in_the_current_chat(self):
         """Изменение из другого чата и просроченный режим не применяют ввод."""
-        self.assertIn("/settings", self.send("/name Новое", "other"))
+        response = self.dispatcher.execute(_event("/name Новое", "other"))
+        self.assertIn("/settings", {action.command for action in response.suggested_actions})
+        self.assertNotIn("/settings", response_text(response))
         self.assertIsNone(self.pending("other"))
         self.send("/name")
         self.assertEqual(self.pending().required_mode, "settings")

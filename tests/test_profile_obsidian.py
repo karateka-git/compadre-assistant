@@ -254,7 +254,7 @@ class ProfileObsidianTest(unittest.TestCase):
             self.assertIn("отдельным сообщением", response_text(reply))
             self.assertIsNotNone(reply.error)
             self.assertFalse(manager.disconnect_pending)
-            self.assertIn("войди в режим через /obsidian", response_text(self.process("/vault_disconnect", runtime=runtime)))
+            self.assertIn("Открой раздел", response_text(self.process("/vault_disconnect", runtime=runtime)))
 
             self.process("/obsidian", runtime=runtime)
             pending = self.process("/vault_disconnect", runtime=runtime)

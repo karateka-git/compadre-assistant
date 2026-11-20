@@ -170,17 +170,17 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         tg = self.event("/example", "telegram", "tg-user", "tg-chat")
         vk = self.event("/example", "vk", "vk-user", "vk-chat")
         other = self.event("/example", "telegram", "other-user", "other-chat")
-        self.assertIn("/enable example", response_text(first(tg)))
+        self.assertIn("лично выключена", response_text(first(tg)))
         self.save(1, True)
         self.assertEqual(response_text(second(vk)), "Актуальное состояние")
         self.assertIn("/example", response_text(first(self.event("/help", "telegram", "tg-user", "tg-chat"))))
-        self.assertIn("/enable example", response_text(first(other)))
+        self.assertIn("лично выключена", response_text(first(other)))
         self.save(1, False)
-        self.assertIn("/enable example", response_text(second(vk)))
-        self.assertIn("/enable example", response_text(first(tg)))
+        self.assertIn("лично выключена", response_text(second(vk)))
+        self.assertIn("лично выключена", response_text(first(tg)))
         self.save(2, True)
         self.assertEqual(response_text(first(other)), "Актуальное состояние")
-        self.assertIn("/enable example", response_text(second(vk)))
+        self.assertIn("лично выключена", response_text(second(vk)))
 
     def test_adapters_share_selection_and_rebind_uses_destination_profile(self) -> None:
         """TG/VK видят commit и после rebind применяют настройки нового AppUser."""
@@ -202,14 +202,14 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         def send_vk(text: str) -> str:
             return self.send_adapter("vk", vk, text, "9", "9")
 
-        self.assertIn("/enable example", send_vk("/example"))
+        self.assertIn("лично выключена", send_vk("/example"))
         tg("/settings")
         self.assertIn("включена", tg("/enable example"))
         self.assertIn("Актуальное состояние", send_vk("/example"))
         send_vk("/settings")
         self.assertIn("выключена", send_vk("/disable example"))
-        self.assertIn("/enable example", tg("/example"))
-        self.assertIn("/enable example", tg("/example", "8", "8"))
+        self.assertIn("лично выключена", tg("/example"))
+        self.assertIn("лично выключена", tg("/example", "8", "8"))
         tg("/settings", "8", "8")
         self.assertIn("включена", tg("/enable example", "8", "8"))
         code_reply = tg("/connect vk", "8", "8")
@@ -223,7 +223,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         self.assertIsNotNone(confirmation, help_text)
         self.assertIn("перепривязал", send_vk(confirmation.group()))
         self.assertIn("Актуальное состояние", send_vk("/example"))
-        self.assertIn("/enable example", tg("/example"))
+        self.assertIn("лично выключена", tg("/example"))
         with connect_database(self.path) as connection:
             owner = connection.execute(
                 "SELECT app_user_id FROM external_identities WHERE channel = 'vk' "
@@ -258,8 +258,8 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
             finally:
                 capability.release.set()
             self.assertEqual(response_text(future.result(timeout=5)), "Актуальное состояние")
-        self.assertIn("/enable selected", response_text(first(self.event("текст", "telegram", "tg-user", "tg-chat"))))
-        self.assertIn("/enable example", response_text(second(self.event("/example", "vk", "vk-user", "vk-chat"))))
+        self.assertIn("лично выключена", response_text(first(self.event("текст", "telegram", "tg-user", "tg-chat"))))
+        self.assertIn("лично выключена", response_text(second(self.event("/example", "vk", "vk-user", "vk-chat"))))
 
     def test_enable_command_changes_both_channels_without_clearing_mode(self) -> None:
         """Выбор из TG открывает VK и сохраняет прежний маршрут этого чата."""
@@ -293,7 +293,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         second(self.event("/example", "vk", "vk-user", "vk-chat"))
         reply = first(self.event("/disable example", "telegram", "tg-user", "tg-chat"))
         self.assertIn("выключена", response_text(reply))
-        self.assertIn("/enable example", response_text(second(self.event(
+        self.assertIn("лично выключена", response_text(second(self.event(
             "текст", "vk", "vk-user", "vk-chat"
         ))))
         self.assertEqual(response_text(first(self.event(
@@ -347,7 +347,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         after.join(10)
         self.assertEqual(after.exitcode, 0)
         text, entered = after_results.get(timeout=2)
-        self.assertIn("/enable example", text)
+        self.assertIn("лично выключена", text)
         self.assertEqual(entered, 0)
 
     def test_separate_adapter_processes_see_cross_channel_commits(self) -> None:
@@ -380,7 +380,7 @@ class PersonalProcessorAdmissionTest(unittest.TestCase):
         send("vk", "/settings")
         self.assertIn("выключена", send("vk", "/disable example")[0])
         text, entered = send("telegram", "/example")
-        self.assertIn("/enable example", text)
+        self.assertIn("лично выключена", text)
         self.assertEqual(entered, 0)
 
     def test_process_writes_keep_distinct_keys_and_last_same_key(self) -> None:

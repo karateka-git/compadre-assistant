@@ -14,10 +14,10 @@ HELP_SECTION_ACTION = ReplyAction("Помощь", ChatCommand.HELP.value, scope=
 HOME_SECTION_ACTION = ReplyAction("На главную", ChatCommand.EXIT.value, scope=ActionScope.SECTION)
 
 
-# Пока принятое действие занимает чат, только отмена может изменить его состояние.
+# Справка объясняет состояние чата. Только отмена может изменить его.
 BUSY_COMMAND_MENU = CommandMenu(
     (CommandSuggestion(ChatCommand.CANCEL.value, ChatCommand.CANCEL.description),),
-    section_actions=(CANCEL_SECTION_ACTION,),
+    section_actions=(CANCEL_SECTION_ACTION, HELP_SECTION_ACTION),
 )
 
 
