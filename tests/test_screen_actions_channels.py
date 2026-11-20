@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import aiogram
 
 from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
+from compadre_assistant.capabilities.family.bootstrap import create_family_capability
 from compadre_assistant.capabilities.ai.domain.errors import AiModelError
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
@@ -285,6 +286,73 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         actions = {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
         action = actions[label]
         return action.get("link") or json.loads(action["payload"])["token"], message_id
+
+    async def test_family_buttons_help_and_membership_decisions_in_both_channels(self):
+        """Проходит семью без команд, сохраняя исходные кнопки при открытии справки."""
+        self.open_channels({}, capabilities=(create_family_capability(self.path, lambda ids: {
+            identifier: f"Участник {identifier}" for identifier in ids
+        }),))
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                async def section(label, chat="1001"):
+                    await self.choose_section(channel, label, chat)
+                    self.assertNotRegex(self.last(channel)[0], r"/(?:family(?:_[a-z]+)?|cancel|confirm|help|add|buy|delete)\b")
+
+                async def inline(label, chat="1001"):
+                    token, message_id = self.inline_action(channel, label)
+                    await self.press(channel, token, message_id, chat=chat)
+                    self.assertNotRegex(self.last(channel)[0], r"/(?:family(?:_[a-z]+)?|cancel|confirm|help|add|buy|delete)\b")
+
+                await self.send(channel, "/start")
+                await section("«Семья»")
+                await section("Создать семью")
+                await self.send(channel, "Дом")
+                await section("Пригласить")
+                create_token, invitation_id = self.inline_action(channel, "Создать код")
+                await self.choose_section(channel, "Помощь", "1001")
+                help_text = self.last(channel)[0]
+                self.assertIn("/family_invite", help_text)
+                self.assertNotIn("/family_remove", help_text)
+                await self.send(channel, "/help")
+                self.assertEqual(help_text, self.last(channel)[0])
+                await self.press(channel, create_token, invitation_id)
+                code = re.search(r"Код: (?:<code>)?([A-Z2-9-]+)", self.last(channel)[0])[1]
+                back_token, code_id = self.inline_action(channel, "Назад")
+                await self.send(channel, "/start", chat="1002")
+                await section("«Семья»", "1002")
+                await section("Вступить по коду", "1002")
+                await self.send(channel, "неверный код", chat="1002")
+                self.assertNotIn("/cancel", self.last(channel)[0])
+                await self.send(channel, code, chat="1002")
+                self.assertIn("Ты вступил в семью", self.last(channel)[0])
+                # Вернуться к ранее выданному коду и его кнопкам после действий другого профиля.
+                await self.press(channel, back_token, code_id)
+                await inline("Назад")
+                await section("Участники")
+                if channel == "telegram":
+                    labels = dict(self.last(channel)[1])
+                else:
+                    keyboard = next(event[2] for event in reversed(self.vk.events) if event[2] and event[2]["inline"])
+                    labels = {button["action"]["label"] for row in keyboard["buttons"] for button in row}
+                await inline(next(label for label in labels if label.startswith("2. ")))
+                remove_token, card_id = self.inline_action(channel, "Исключить")
+                await self.choose_section(channel, "Помощь", "1001")
+                self.assertIn("/family_remove", self.last(channel)[0])
+                self.assertNotIn("/family_invite", self.last(channel)[0])
+                await self.press(channel, remove_token, card_id)
+                self.assertIn("Подтверждение действует", self.last(channel)[0])
+                approve_token, confirmation_id = self.inline_action(channel, "Исключить")
+                await self.press(channel, approve_token, confirmation_id, author="1002")
+                self.assertNotIn("Участник исключён", self.last(channel)[0])
+                await self.press(channel, approve_token, confirmation_id)
+                self.assertIn("Участник исключён", self.last(channel)[0])
+                await section("Участники")
+                await inline("Закрыть семью")
+                await inline("Отменить")
+                await section("Участники")
+                await inline("Закрыть семью")
+                await inline("Закрыть семью")
+                self.assertIn("Семья закрыта", self.last(channel)[0])
 
     async def test_profile_name_and_capabilities_follow_settings_screens(self):
         """Меняет имя, выключает возможность и включает её в обоих каналах."""

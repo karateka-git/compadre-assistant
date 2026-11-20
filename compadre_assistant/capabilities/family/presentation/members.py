@@ -27,7 +27,7 @@ _LEAVE = "Выйти из семьи"
 _CLOSE = "Закрыть семью"
 _REMOVE = "Исключить"
 _TRANSFER = "Передать роль"
-_UNAVAILABLE = compose_content("Открой актуальный состав через ", code_span(MEMBERS_COMMAND), ".")
+_UNAVAILABLE = text_content("Открой актуальный состав семьи.")
 
 
 def _members_view(*, update: bool = False) -> ResponseView:
@@ -88,7 +88,6 @@ class MembersView:
         min_label_length = max(len(_PREVIOUS), len(operation[0]) if operation else len(_BACK))
         inline = capacity > 0 and layout.max_label_length >= min_label_length
         page_size = min(_PAGE_SIZE, capacity) if inline else _PAGE_SIZE
-        show_commands = show_commands or not inline
 
         total_pages = max(1, (len(members) + page_size - 1) // page_size)
         page = min(page, total_pages)
@@ -110,6 +109,8 @@ class MembersView:
             if show_commands:
                 parts.extend((" — ", code_span(command)))
                 continue
+            if not inline:
+                continue
             limit = min(layout.max_label_length, 30)
             label = f"{index}. {name}"
             if len(label) > limit:
@@ -127,6 +128,8 @@ class MembersView:
             parts.extend(("\nВ меню семьи — ", code_span("/family"), "."))
             return IncomingResponse(compose_content(*parts))
 
+        if not inline:
+            return IncomingResponse(compose_content(*parts, "\n\nКнопки недоступны. Открой помощь для ручного управления."))
         row = len(visible)
         for label, destination in links:
             actions.append(ReplyAction(
@@ -187,11 +190,7 @@ class MembersView:
         layout = context.action_layout
         if (layout.selection_capacity() < len(actions)
                 or layout.max_label_length < max(len(action.label) for action in actions)):
-            parts = [title]
-            for label, command in available:
-                parts.extend(("\n", label, " — ", code_span(f"{command} {reference}")))
-            parts.extend(("\nК составу — ", code_span(MEMBERS_COMMAND), "."))
-            return IncomingResponse(compose_content(*parts))
+            return IncomingResponse(text_content(title + "\n\nКнопки недоступны. Открой помощь для ручного управления."))
         return IncomingResponse(text_content(title), suggested_actions=actions, view=_members_view())
 
     def display_name(self, member: FamilyMember) -> str:

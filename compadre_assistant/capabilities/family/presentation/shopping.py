@@ -15,6 +15,7 @@ from compadre_assistant.capabilities.family.domain.shopping import (
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
 )
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse, ReplyAction, ResponseView
 from compadre_assistant.core.presentation.message_content import TextSpan, compose_content, text_content
@@ -346,7 +347,7 @@ def shopping_list(
 
     unavailable = text_content("Не удалось обновить список. Открой его заново.")
     return IncomingResponse(
-        compose_content(*parts), suggested_actions=actions,
+        compose_content(*parts), suggested_actions=(*actions, HELP_SECTION_ACTION),
         command_menu_delivery=SectionMenuDelivery.PRESERVE if selection is not None else SectionMenuDelivery.RECONCILE,
         view=ResponseView(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,
