@@ -106,7 +106,27 @@ def verify_admission(data: bytes, allowed_signers: Path, *, version: str, candid
         ValueError: Подпись, формат или ожидаемые реквизиты расходятся.
         OSError: Инструмент проверки или файл подписи недоступны.
     """
-    # Допуск содержит только идентификаторы и отпечатки. Сам отчёт CI хранится отдельно.
+    proof = read_signed_admission(data, allowed_signers)
+    expected = (version, candidate_sha, baseline, policy_sha, run_id, run_attempt)
+    actual = (proof.version, proof.candidate_sha, proof.baseline, proof.policy_sha, proof.run_id, proof.run_attempt)
+    if actual != expected:
+        raise ValueError("Допуск PATCH относится к другой установке или попытке CI")
+    return proof
+
+
+def read_signed_admission(data: bytes, allowed_signers: Path) -> PatchAdmission:
+    """Читает реквизиты допуска только после локального подтверждения подписи.
+
+    Args:
+        data: Канонический JSON подписанта.
+        allowed_signers: Доверенный файл открытых ключей вне кандидата.
+
+    Returns:
+        Подписанное утверждение CI для сверки с запросом и состоянием VPS.
+
+    Raises:
+        ValueError: Допуск или подпись недействительны.
+    """
     if len(data) > 8192:
         raise ValueError("Слишком большой допуск PATCH")
     raw = json.loads(data)
@@ -127,8 +147,4 @@ def verify_admission(data: bytes, allowed_signers: Path, *, version: str, candid
         proof = PatchAdmission(**(record | {"baseline": AcceptedBaseline(**record["baseline"])}))
     except (TypeError, KeyError, DeploymentAcceptanceError) as error:
         raise ValueError("Некорректные поля допуска PATCH") from error
-    expected = (version, candidate_sha, baseline, policy_sha, run_id, run_attempt)
-    actual = (proof.version, proof.candidate_sha, proof.baseline, proof.policy_sha, proof.run_id, proof.run_attempt)
-    if actual != expected:
-        raise ValueError("Допуск PATCH относится к другой установке или попытке CI")
     return proof

@@ -15,6 +15,7 @@ from urllib.parse import quote
 from scripts import deploy_metrics as metrics
 from scripts import publish_deployment_acceptance as deployments
 from scripts import publish_release as releases
+from scripts import publish_signed_patch as signed_patch
 from scripts import deployment_writer as writer
 from scripts import deployment_acceptance as records
 from scripts.check_hotfix_pairs import HotfixError
@@ -26,7 +27,7 @@ from scripts.full_ci_admission import AdmissionError, SHA_PATTERN
 from scripts.full_ci_controller import ControllerError, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.publish_installation_tag import InstallationReceipt, InstallationTagError, _receipt, run_vps_command
-from scripts.select_deploy_release import DeploySelectionError, SelectedRelease, select_release
+from scripts.select_deploy_release import DeploySelectionError, SelectedRelease, _release, select_release
 
 
 # Операторскому SSH-входу нужен только установленный root-контроллер.
@@ -108,14 +109,26 @@ def _v2_route(resume):
     return key, owner, snapshot
 
 
-def _run_attempt(api, selected, route, resume, remote):
+def _run_attempt(api, selected, route, resume, remote, *, signed=None):
     """Завершает одну установку по исходному ключу и перечитывает её итог."""
     key, owner, snapshot = route
     deployment_id = 0
+    status_id = 0
 
     def call(action):
-        raw = remote(metrics.HttpOperation.ATTEMPT, "--attempt", action, selected.sha, key, owner, snapshot,
-                     str(deployment_id), timeout=3600 if action in ("install", "complete") else 300)
+        arguments = [action, selected.sha, key, owner, snapshot, str(deployment_id)]
+        options = {}
+        option = "--attempt"
+        if signed is not None:
+            option = "--patch-attempt"
+            arguments.append(str(status_id))
+            if action in ("reserve", "resume"):
+                options["input_text"] = json.dumps({
+                    "admission": signed[1].decode("ascii"), "release_id": selected.release_id,
+                    "tag_object_sha": selected.tag_object_sha,
+                })
+        raw = remote(metrics.HttpOperation.ATTEMPT, option, *arguments,
+                     timeout=3600 if action in ("install", "complete") else 300, **options)
         # Контроллер заканчивает вывод одной JSON-строкой, установка до неё пишет этапы.
         lines = raw.stdout.splitlines()
         if not lines or len(lines[-1]) > 8192:
@@ -140,13 +153,19 @@ def _run_attempt(api, selected, route, resume, remote):
     bound = reserved["deployment_id"]
     with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
         if bound is None:
-            record = writer.create_attempt(api, attempt, claim_creation)
+            record = (writer.create_reserved(api, attempt, claim_creation) if signed is not None else
+                      writer.create_attempt(api, attempt, claim_creation))
             deployment_id = record.deployment_id
         else:
             deployment_id = records._positive(bound, "D18")
             record, _ = writer.current_attempt(api, attempt, deployment_id)
         if record.state is records.DeploymentState.MISSING:
-            record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS, claim_status)
+            if signed is None:
+                record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS, claim_status)
+            else:
+                record = writer.write_reserved_status(api, attempt, record, records.DeploymentState.IN_PROGRESS,
+                                                      signed[0].migration, claim_status)
+        status_id = record.status_id
     if record.state is records.DeploymentState.IN_PROGRESS:
         if record.description != f"v1 attempt={key}":
             raise ProductionReleaseError("D18 не подтвердил исходный ключ")
@@ -164,7 +183,11 @@ def _run_attempt(api, selected, route, resume, remote):
     target = records.DeploymentState.SUCCESS if result["outcome"] == "success" else records.DeploymentState.FAILURE
     receipt = InstallationReceipt(**result["receipt"])
     with http_phase(HttpPhase.DEPLOYMENT_PUBLISH):
-        record = writer.write_status(api, attempt, deployment_id, target, claim_status, receipt)
+        if signed is None:
+            record = writer.write_status(api, attempt, deployment_id, target, claim_status, receipt)
+        else:
+            record = writer.write_reserved_status(api, attempt, record, target, signed[0].migration, claim_status, receipt)
+        status_id = record.status_id
     if call("close") != result:
         raise ProductionReleaseError("Закрытие попытки не подтверждено для проверенного runtime")
     if record.state is records.DeploymentState.FAILURE:
@@ -180,19 +203,36 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     if not SHA_PATTERN.fullmatch(sha):
         raise ProductionReleaseError("Требуется полный 40-символьный SHA")
     route = _v2_route(change is None)
-    with http_phase(HttpPhase.AUTHOR):
-        deployments._require_trusted_author(api)
+    signer = os.environ.get("RELEASE_SIGNER_ATTEMPT", "")
+    enabled = os.environ.get("PRODUCTION_SIGNED_PATCH", "false") == "true"
+    signed = None
     print("Проверка GitHub Release", flush=True)
-    selected = _select_or_publish(api, version, sha, change=change, notes=notes)
+    if signer:
+        if not enabled or route is None or change not in (None, "patch"):
+            raise ProductionReleaseError("Подписанный допуск требует включённого PATCH и Deployment v2")
+        with http_phase(HttpPhase.RELEASE_PREPARE):
+            signed = signed_patch.download_admission(api, signer, Path(os.environ["PATCH_ALLOWED_SIGNERS_FILE"]),
+                                                     os.environ["COMPATIBILITY_POLICY_SHA"], version, sha)
+        selected = signed_patch.publish_or_select(api, signed[0], notes)
+    else:
+        if enabled and change == "patch":
+            # Готовый старый Release сохраняет прежний процесс установки.
+            # Отсутствие допуска для новой публикации закрывает её до записи.
+            with http_phase(HttpPhase.RELEASE_LOOKUP):
+                _release(api, version)
+        with http_phase(HttpPhase.AUTHOR):
+            deployments._require_trusted_author(api)
+        selected = _select_or_publish(api, version, sha, change=change, notes=notes)
     print(f"Release {selected.release_id}, CI {selected.run_id}/{selected.run_attempt}, SHA {selected.sha}", flush=True)
     accepted: InstallationReceipt | None = None
 
-    def remote(operation: metrics.HttpOperation, *arguments: str, timeout: int) -> subprocess.CompletedProcess[str]:
+    def remote(operation: metrics.HttpOperation, *arguments: str, timeout: int,
+               input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         """Сохраняет агрегат SSH-процесса, включая завершение с ошибкой."""
         try:
             result = run_vps_command((*_CONTROLLER, version, *arguments), ssh_host=ssh_host,
                                      known_hosts=known_hosts, identity=identity, capture_output=True,
-                                     timeout=timeout)
+                                     timeout=timeout, **({"input_text": input_text} if input_text is not None else {}))
         except InstallationTagError as error:
             cause = error.__cause__
             if isinstance(cause, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
@@ -202,7 +242,7 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
         return result
 
     if route is not None:
-        return _run_attempt(api, selected, route, change is None, remote)
+        return _run_attempt(api, selected, route, change is None, remote, signed=signed)
 
     def read_fresh() -> InstallationReceipt:
         """Удостоверяет точную приёмку и сохраняет runtime на весь сеанс."""

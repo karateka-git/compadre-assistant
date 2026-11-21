@@ -71,7 +71,7 @@ def _receipt(output: str, version: str, sha: str) -> InstallationReceipt:
 
 def run_vps_command(arguments: tuple[str, ...], *, ssh_host: str, known_hosts: Path,
                     identity: Path | None = None, capture_output: bool,
-                    timeout: int) -> subprocess.CompletedProcess[str]:
+                    timeout: int, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     """Выполняет команду на VPS по проверенному SSH-ключу хоста.
 
     Args:
@@ -81,6 +81,7 @@ def run_vps_command(arguments: tuple[str, ...], *, ssh_host: str, known_hosts: P
         identity: Необязательный локальный SSH private key для подключения.
         capture_output: Захватить вывод вместо передачи его на консоль.
         timeout: Максимальное время ожидания в секундах.
+        input_text: Подписанные реквизиты для однократной передачи через stdin.
 
     Returns:
         Результат успешной команды SSH.
@@ -109,7 +110,7 @@ def run_vps_command(arguments: tuple[str, ...], *, ssh_host: str, known_hosts: P
         local_tokens = {"GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"}
         return subprocess.run(
             command, check=True, capture_output=capture_output, encoding="utf-8", timeout=timeout,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL if input_text is None else None, input=input_text,
             env={key: value for key, value in os.environ.items() if key.upper() not in local_tokens},
         )
     except (OSError, subprocess.SubprocessError, UnicodeError) as error:
