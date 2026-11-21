@@ -1,0 +1,5 @@
+#!/bin/sh
+# Единственная разрешённая sudo-команда runner; загружает парсер из snapshot.
+set -eu
+[ "$#" -eq 0 ] || exit 1
+exec /usr/bin/env -i PATH=/usr/bin:/bin /usr/bin/python3 -IB /usr/local/lib/compadre-assistant-deploy/deploy/attempt-ssh.py

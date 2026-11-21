@@ -1,0 +1,4 @@
+#!/bin/sh
+# Устанавливается как root-owned forced command учётной записи runner.
+set -eu
+{ printf '%s\000' "${SSH_ORIGINAL_COMMAND:?}"; /bin/cat; } | /usr/bin/sudo -n /usr/local/libexec/compadre-release-ssh

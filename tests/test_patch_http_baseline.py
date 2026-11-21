@@ -547,10 +547,13 @@ class _ControllerFixture:
         """Запускает CLI контроллера с захваченными stdout и stderr одного SSH-вызова."""
         host = self.host
         command = list(arguments[3:])
-        self.calls.append(command[2] if command[1:2] == ["--attempt"] else
+        self.calls.append(command[2] if command[1:2] in (["--attempt"], ["--patch-attempt"]) else
                           command[1] if len(command) > 1 else "install")
         stdout, stderr = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
+            if command[1:2] == ["--patch-attempt"]:
+                stack.enter_context(patch.object(sys, "stdin", io.TextIOWrapper(
+                    io.BytesIO((kwargs.get("input_text") or "").encode("ascii")))))
             for patcher in (*system.DeployProdTests()._patches(), *self._switch_patches()):
                 stack.enter_context(patcher)
             host_type = deploy_prod.Host
