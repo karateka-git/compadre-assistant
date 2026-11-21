@@ -1,0 +1,40 @@
+name: Update deployment summary
+
+on:
+  workflow_run:
+    workflows: [Production release]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Production release run ID
+        required: true
+        type: string
+      run_attempt:
+        description: Production release attempt number
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  summary:
+    if: github.repository == 'karateka-git/compadre-assistant' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Update deployment summary PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE_RUN: ${{ inputs.run_id || github.event.workflow_run.id }}
+          RELEASE_ATTEMPT: ${{ inputs.run_attempt || github.event.workflow_run.run_attempt }}
+        run: python3 -m scripts.update_deploy_summary
