@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from scripts.full_ci_admission import (
-    FULL_CALLERS, FULL_SUITE_CHECK, MAIN_WORKFLOW, PR_CHECK, PR_WORKFLOW,
+    FULL_CALLERS, FULL_SUITE_CHECK, MAIN_WORKFLOW, PR_CHECK, PR_UNIT_STEP, PR_WORKFLOW, RELEASE_MANIFEST_STEP,
 )
 
 
@@ -48,11 +48,13 @@ def duration(start: object, end: object) -> int | None:
 
 
 def classify(workflow: str, jobs: list[dict]) -> str:
-    """Различает короткий PR, полный main/release и пропущенный набор."""
+    """Различает области unit-тестов PR и полного CI для сравнения одинаковых прогонов."""
     if workflow == PR_WORKFLOW:
-        if sum(job.get("name") == PR_CHECK for job in jobs) != 1:
+        pr_jobs = [job for job in jobs if job.get("name") == PR_CHECK]
+        if len(pr_jobs) != 1:
             raise MetricsError(f"Отсутствует или повторяется job {PR_CHECK}")
-        return PR_CHECK
+        steps = pr_jobs[0].get("steps") or []
+        return "pr-full-unit" if any(step["name"] == PR_UNIT_STEP for step in steps) else PR_CHECK
     prefix = FULL_CALLERS[workflow]
     suite = [job for job in jobs if job.get("name") in {prefix, f"{prefix} / {FULL_SUITE_CHECK}"}]
     if len(suite) != 1:
@@ -61,7 +63,10 @@ def classify(workflow: str, jobs: list[dict]) -> str:
         return "skipped"
     if suite[0].get("name") == prefix:
         raise MetricsError(f"Неизвестная структура job {FULL_SUITE_CHECK}")
-    return "full-main" if workflow == MAIN_WORKFLOW else "full-release"
+    kind = "full-main" if workflow == MAIN_WORKFLOW else "full-release"
+    if any(step["name"] == RELEASE_MANIFEST_STEP for step in suite[0].get("steps") or []):
+        return f"{kind}-unit-on-pr"
+    return kind
 
 
 def summarize(run: dict, jobs: list[dict], workflow: str, repository: str,

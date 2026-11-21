@@ -111,10 +111,6 @@ jobs:
       - name: Install runtime dependencies
         run: python -m scripts.ci_watch dependencies -- python -m pip install -r requirements.txt
 
-      - name: Run full unittest suite
-        id: unit
-        run: python -m scripts.ci_watch unit -- python -m unittest discover -s tests
-
       - name: Run three autonomous smoke checks
         id: smokes
         run: |
@@ -134,7 +130,7 @@ jobs:
           EXPECTED_SHA: ${{ github.sha }}
         run: python -m scripts.ci_watch candidate -- python -m scripts.check_candidate --expected-sha "$EXPECTED_SHA"
 
-      - name: Publish check manifest
+      - name: Publish release checks manifest
         if: always()
         env:
           PREVIOUS_SHA: ${{ inputs.previous-release-sha }}
@@ -143,7 +139,6 @@ jobs:
           COMPATIBILITY_ARTIFACT_DIGEST: ${{ needs.repository-compatibility.outputs.artifact-digest }}
           CHECK_COMPATIBILITY: ${{ needs.repository-compatibility.result }}
           CHECK_CHECKOUT: ${{ steps.checkout.outcome }}
-          CHECK_UNIT: ${{ steps.unit.outcome }}
           CHECK_SMOKES: ${{ steps.smokes.outcome }}
           CHECK_MIGRATIONS: ${{ steps.migrations.outcome }}
           CHECK_CANDIDATE: ${{ steps.candidate.outcome }}

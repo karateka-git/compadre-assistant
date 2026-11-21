@@ -53,6 +53,17 @@ class MetricsTests(unittest.TestCase):
         report = ci_metrics.summarize(run(), jobs, "main-full.yml", REPO, 12, 2, SHA)
         self.assertEqual((report["kind"], report["result"]), ("skipped", "success"))
 
+    def test_unit_move_separates_historical_pr_and_full_runs(self):
+        """Исторические длительности сравниваются только при одинаковой области unit."""
+        pr = job("pr-check", "success")
+        full = job("release-check-full / check-full-suite", "success")
+        self.assertEqual(ci_metrics.classify("pr-fast.yml", [pr]), "pr-check")
+        self.assertEqual(ci_metrics.classify("release-full.yml", [full]), "full-release")
+        pr["steps"].append({"name": "Run full PR unittest suite"})
+        full["steps"].append({"name": "Publish release checks manifest"})
+        self.assertEqual(ci_metrics.classify("pr-fast.yml", [pr]), "pr-full-unit")
+        self.assertEqual(ci_metrics.classify("release-full.yml", [full]), "full-release-unit-on-pr")
+
     def test_wrong_attempt_or_sha_rejected(self):
         """История другой попытки и job другого SHA не загрязняют отчёт."""
         jobs = [job("pre-release-check-full-controller", "success"),
