@@ -2,6 +2,7 @@
 
 from contextlib import chdir
 from dataclasses import asdict, replace
+import base64
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -16,7 +17,7 @@ import yaml
 
 from scripts import update_deploy_summary as writer
 from scripts.deploy_summary import AttemptSummary
-from scripts.deploy_summary_table import END, START, attempts, update_table, validated
+from scripts.deploy_summary_table import END, START, attempts, link_deployment_status, update_table, validated
 
 REPO = writer.REPOSITORY
 EMPTY = f"Введение\n{START}\n| дата |\n| --- |\n{END}\nМетодика\n"
@@ -33,16 +34,23 @@ class SummaryTests(unittest.TestCase):
         """Входные номера остаются данными, исполняется только фиксированная команда из main."""
         config = yaml.safe_load(Path(".github/workflows/deploy-summary.yml").read_text(encoding="utf-8"))
         triggers = config[True]
-        self.assertEqual(triggers["workflow_run"], {"workflows": ["Production release"],
-                                                   "branches": ["main"], "types": ["completed"]})
+        self.assertEqual(triggers["workflow_run"], {"workflows": ["Production release", "pr-check"],
+                                                   "branches": ["main", writer.BRANCH], "types": ["completed"]})
         self.assertEqual(set(triggers["workflow_dispatch"]["inputs"]), {"run_id", "run_attempt"})
         job = config["jobs"]["summary"]
         self.assertIn("github.ref == 'refs/heads/main'", job["if"])
-        self.assertEqual(job["permissions"], {"actions": "read", "contents": "write", "pull-requests": "write"})
+        self.assertEqual(job["permissions"], {"actions": "read", "contents": "read"})
+        self.assertEqual(job["environment"], {"name": "production-release", "deployment": False})
         checkout, update = job["steps"]
         self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
         self.assertEqual(update["run"], "python3 -m scripts.update_deploy_summary")
-        self.assertEqual(set(update["env"]), {"GITHUB_TOKEN", "RELEASE_RUN", "RELEASE_ATTEMPT"})
+        self.assertEqual(checkout["with"]["token"], "${{ secrets.PRODUCTION_RELEASE_TOKEN }}")
+        self.assertEqual(set(update["env"]), {"GITHUB_TOKEN", "RELEASE_RUN", "RELEASE_ATTEMPT", "SUMMARY_PR_TOKEN"})
+        merge = config["jobs"]["merge"]
+        self.assertNotIn("environment", merge)
+        self.assertNotIn("secrets.", str(merge))
+        self.assertEqual(merge["steps"][1]["env"]["GITHUB_TOKEN"], "${{ github.token }}")
+        self.assertEqual(merge["steps"][0]["with"]["ref"], "${{ github.sha }}")
 
     def test_out_of_order_resume_and_replay(self):
         """Поздний исходный отчёт и повторная доставка сохраняют одну измеренную строку."""
@@ -77,6 +85,11 @@ class SummaryTests(unittest.TestCase):
         key = "44907760823:1"
         fallback = AttemptSummary(key, key, None, None, "unknown", FIRST.started_at)
         self.assertEqual(update_table(OLD, REPO, fallback), OLD)
+        linked = link_deployment_status(OLD, REPO, key, "")
+        url = f"https://api.github.com/repos/{REPO}/deployments/7963840757/statuses"
+        self.assertIn(f"| 18 | [Успех]({url})", linked)
+        self.assertEqual(link_deployment_status(linked, REPO, key, ""), linked)
+        self.assertEqual(link_deployment_status(OLD, REPO, FIRST.attempt, linked), linked)
 
     def test_rejects_non_technical_values(self):
         """Отвергает строки и числа, выходящие за формат технического отчёта."""
@@ -156,3 +169,52 @@ class SummaryTests(unittest.TestCase):
         writer.ensure_pr(api)
         writer.ensure_pr(api)
         api.post.assert_called_once()
+
+    def test_only_successful_standard_check_can_merge_the_exact_table(self):
+        """Отказывает чужому прогону, устаревшему SHA и изменениям за пределами строк."""
+        sha = "f" * 40
+        trusted = {"full_name": REPO}
+        run = dict(id=14, run_attempt=2, head_sha=sha, workflow_id=342, path=writer.CHECK_WORKFLOW,
+                   event="pull_request", head_branch=writer.BRANCH, status="completed", conclusion="success",
+                   repository=trusted, head_repository=trusted)
+        pr = dict(number=51, state="open", base=dict(ref="main", repo=trusted, sha="a"*40),
+                  head=dict(ref=writer.BRANCH, repo=trusted, sha=sha))
+        jobs = [dict(name="pr-check", head_sha=sha, conclusion="success"),
+                dict(name="pr-merge-main-check", conclusion="skipped")]
+        files = [{"filename": writer.DOCUMENT, "status": "modified"}]
+        after = update_table(EMPTY, REPO, FIRST)
+        api = Mock(repository=REPO, root="https://api.github.com/repos/" + REPO, token="test")
+
+        def get(path, **params):
+            if path.startswith("/actions/runs/"):
+                return run
+            if path.startswith("/actions/workflows/"):
+                return {"id":342, "path":writer.CHECK_WORKFLOW}
+            if path == "/pulls":
+                return [pr]
+            text = after if params["ref"] == sha else EMPTY
+            return {"path":writer.DOCUMENT, "type":"file", "encoding":"base64",
+                    "content": base64.b64encode(text.encode()).decode()}
+
+        api.get.side_effect = get
+        api.pages.side_effect = lambda path, *args: jobs if path.endswith("/jobs") else files
+        with patch.object(writer, "open_http", return_value=BytesIO(json.dumps(
+                {"merged":True,"sha":"b"*40}).encode())) as request:
+            writer.merge_checked_pr(api, "14:2")
+            sent = request.call_args.args[0]
+            self.assertEqual(sent.get_method(), "PUT")
+            self.assertEqual(json.loads(sent.data), {"merge_method":"merge","sha":sha})
+            request.reset_mock()
+            for field, value in (("workflow_id",1),("event","push"),("head_repository",{"full_name":"fork/repo"})):
+                with patch.dict(run, {field:value}), self.assertRaises(ValueError):
+                    writer.merge_checked_pr(api, "14:2")
+            with patch.dict(pr["head"], sha="c"*40):
+                writer.merge_checked_pr(api, "14:2")
+            with patch.dict(jobs[0], conclusion="skipped"), self.assertRaises(ValueError):
+                writer.merge_checked_pr(api, "14:2")
+            with patch.dict(files[0], filename="scripts/publish_release.py"), self.assertRaises(ValueError):
+                writer.merge_checked_pr(api, "14:2")
+            after += "Изменение за пределами таблицы"
+            with self.assertRaises(ValueError):
+                writer.merge_checked_pr(api, "14:2")
+            request.assert_not_called()

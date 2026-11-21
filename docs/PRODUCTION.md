@@ -48,7 +48,7 @@ SHA snapshot. [Допустимая SSH-команда](OPERATIONS.md#прове
 | --- | --- |
 | Выпуск | Immutable Release `v4.4.1` (`453701231`), SHA `b9b78efab3f81f4ba40b835e4c988f4975ebd47c`. Полный release CI `44907237922/1` проверил совместимость с принятой `v4.4.0`. Допуск выпустил подписант `44907675261/1`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.4.1) · [CI](https://github.com/karateka-git/compadre-assistant/actions/runs/44907237922/attempts/1) · [Подписант](https://github.com/karateka-git/compadre-assistant/actions/runs/44907675261/attempts/1) |
 | Контроллер | Snapshot из 82 файлов, GitHub и локальный policy pin закреплены на `5848d8cccc2657dd68631f56cb5523b6ae67daaa`, SHA-256 архива `e401f449587016afa4ecdff6e1278ca4fb9bb258df96df3514d02cf4e4a2f23f`. Прежний snapshot сохранён. Два SSH-входа установлены из проверенного архива, открытый ключ подписанта закреплён на VPS. [Полный CI контроллера](https://github.com/karateka-git/compadre-assistant/actions/runs/44906516069/attempts/1) |
-| Установка | Попытка `44907760823:1` подтвердила статус `22798648504` (`success`) Deployment `7963840757`. Журнал закрыт, marker отсутствует. Независимый `--verify-installed` подтвердил runtime `22f4786b5339cc7b8f89d28ff68d5f0df6b9d777d588999b3565b9b235f87060`. Telegram и VK `healthy`, по нулю перезапусков. Живые ответы владельцем для этой версии отдельно не проверены. [Журнал установки и метрики](DEPLOY_METRICS.md#проверить-живой-подписанный-patch-v441) |
+| Установка | Попытка `44907760823:1` подтвердила статус `22798648504` (`success`) Deployment `7963840757`. Журнал закрыт, marker отсутствует. Независимый `--verify-installed` подтвердил runtime `22f4786b5339cc7b8f89d28ff68d5f0df6b9d777d588999b3565b9b235f87060`. Telegram и VK `healthy`, по нулю перезапусков. Живые ответы владельцем для этой версии отдельно не проверены. [Журнал установки и метрики](deployment/DEPLOY_MEASUREMENTS.md#проверить-живой-подписанный-patch-v441) |
 | SQLite и backup | Selector и штатная функция backup выбрали `ee2d45844d624175990d0a016f135928`, последняя миграция `0007_family.sql`. Прежнее поколение и его sidecars очищены. Проверены SHA-256, схема, внешние ключи и режим 0400 финальной копии. Основной сервис и таймер backup активны. |
 
 ## Снимок 19.11.2026, 16:07 UTC
@@ -60,7 +60,7 @@ SHA snapshot. [Допустимая SSH-команда](OPERATIONS.md#прове
 | Контроллер | Snapshot и локальный policy pin `7b4629b4254df085fb54cbff1a088c9f4ee405e1`. GitHub использует тот же SHA в `COMPATIBILITY_POLICY_SHA` и `PRODUCTION_CONTROLLER_SHA`. Writer установлен в `v2`. [PR main](https://github.com/karateka-git/compadre-assistant/pull/138) · [Полный CI snapshot](https://github.com/karateka-git/compadre-assistant/actions/runs/44557528623/attempts/1) · [Синхронизация полного CI в release/4.2](https://github.com/karateka-git/compadre-assistant/pull/139) |
 | SQLite и backup | Активное поколение `fd7495e834234c52ba9e650ece1675fa`, последняя миграция `0007_family.sql`. Подтверждены SHA-256, целостность и внешние ключи финальной копии, режим `0400` и выбор активной базы для планового backup. Файл прежнего поколения и его SQLite sidecars отсутствуют после штатной очистки. Сервис backup завершился успешно, таймер активен, следующий запуск 20.11 в 03:15 UTC. |
 | Каналы | Telegram и VK `healthy`, перезапусков 0. Основной сервис активен, `family` включена в обоих контейнерах. Квитанция работающего экземпляра совпала с сохранённым результатом выпуска. |
-| Длительность | Workflow занял 7 мин 18 с, job `release` — 7 мин 12 с, шаг выпуска — 7 мин 06 с. В отчёте контроллера 169,435 с установки и 80,744 с простоя. [Границы интервалов и расход HTTP](DEPLOY_METRICS.md#измерить-первый-production-выпуск-с-deployment-v2) · [Workflow](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) |
+| Длительность | Workflow занял 7 мин 18 с, job `release` — 7 мин 12 с, шаг выпуска — 7 мин 06 с. В отчёте контроллера 169,435 с установки и 80,744 с простоя. [Границы интервалов и расход HTTP](deployment/DEPLOY_MEASUREMENTS.md#измерить-первый-production-выпуск-с-deployment-v2) · [Workflow](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) |
 | Проверка владельцем | 19.11.2026 владелец подтвердил, что после выпуска `v4.2.5` оба бота ответили как обычно в Telegram и VK. |
 
 В том же окне под существующим `deploy.lock` проверили manifest из 75 файлов
@@ -248,7 +248,7 @@ workflow установил опубликованную версию и зап�
 | Пользовательская приёмка | Меню и отмену на `v4.0.1` ещё предстоит проверить в личных чатах. Admin выключен. |
 
 [Журнал выкладки](https://github.com/karateka-git/compadre-assistant/actions/runs/43594411914/job/132445758508) ·
-[Метрики выкладки](DEPLOY_METRICS.md#разбивка-по-этапам) ·
+[Метрики выкладки](deployment/DEPLOY_MEASUREMENTS.md#разбивка-по-этапам) ·
 [Порядок проверки VPS](OPERATIONS.md#подготовка-и-запуск-версии).
 
 ## Исторический снимок 14.11.2026, после 10:53 UTC
@@ -264,7 +264,7 @@ workflow установил опубликованную версию и зап�
 Штатный workflow подтвердил Deployment в 10:52:02.6534274 UTC.
 Перед следующим эксплуатационным действием повторите проверку VPS.
 [Порядок проверки](OPERATIONS.md#подготовка-и-запуск-версии) ·
-[Метрики выкладки](DEPLOY_METRICS.md#разбивка-по-этапам).
+[Метрики выкладки](deployment/DEPLOY_MEASUREMENTS.md#разбивка-по-этапам).
 
 ## Исторический снимок 13.11.2026
 
