@@ -24,6 +24,114 @@ def _description(generation: str, migration: str) -> str:
     return value
 
 
+def create_reserved(api: PublishingGitHub, attempt: DeploymentAttempt,
+                    claim: Callable[[str], bool]) -> DeploymentRecord:
+    """Создаёт один Deployment по принятой резервации и проверяет ответ POST.
+
+    Args:
+        api: Клиент доверенного писателя.
+        attempt: Идентичность попытки и базы из резервации.
+        claim: Выдача однократного права записи контроллером.
+
+    Returns:
+        Созданная запись либо подтверждённое состояние после обрыва.
+
+    Raises:
+        DeploymentPublishError: Отправка уже разрешалась, но точный результат не найден.
+    """
+    if claim("create"):
+        body = {"ref": attempt.sha, "task": records.TASK, "auto_merge": False, "required_contexts": [],
+                "payload": asdict(attempt), "environment": records.ENVIRONMENT,
+                "transient_environment": False, "production_environment": True}
+        try:
+            raw = api.post("/deployments", body)
+        except PublishingError:
+            pass  # При потере ответа разрешено только чтение результата.
+        else:
+            identifier, _ = records._deployment(api, raw)
+            if records._attempt(raw) != attempt:
+                raise DeploymentPublishError("Ответ создания Deployment относится к другой попытке")
+            return DeploymentRecord(identifier, DeploymentState.MISSING, None)
+    raw, status = records._latest_production(api)
+    if records._v1(raw) or records._attempt(raw) != attempt:
+        raise DeploymentPublishError("Исходный POST Deployment не подтверждён; требуется сверка")
+    return status
+
+
+def write_reserved_status(api: PublishingGitHub, attempt: DeploymentAttempt, before: DeploymentRecord,
+                          target: DeploymentState, migration: str, claim: Callable[[str], InstallationReceipt | None],
+                          completed: InstallationReceipt | None = None) -> DeploymentRecord:
+    """Сверяет свежую приёмку VPS и подтверждает переход по ответу GitHub.
+
+    Args:
+        api: Клиент публикации.
+        attempt: Закреплённая попытка и исходная база.
+        before: Подтверждённое состояние этой записи.
+        target: Требуемый статус.
+        migration: Проверенная CI ожидаемая миграция кандидата.
+        claim: Однократное право записи и фактическая приёмка с VPS.
+        completed: Терминальный результат установки или возврата.
+
+    Returns:
+        Точный статус с ID. Для терминального результата сверяется также текущий статус.
+
+    Raises:
+        DeploymentPublishError: Состояние, приёмка или ответ GitHub расходятся.
+    """
+    terminal = target in (DeploymentState.SUCCESS, DeploymentState.FAILURE)
+    if target is DeploymentState.IN_PROGRESS and completed is None:
+        description = f"v1 attempt={attempt.attempt_key}"
+    elif terminal and completed is not None:
+        records._schema_evidence(completed)
+        if target is DeploymentState.SUCCESS:
+            if ((completed.version, completed.sha, completed.kind, completed.release_id, completed.run_id,
+                 completed.run_attempt, completed.migration) != (attempt.version, attempt.sha, attempt.kind,
+                 attempt.release_id, attempt.run_id, attempt.run_attempt, migration)):
+                raise DeploymentPublishError("Приёмка не подтверждает установку выбранного PATCH")
+            description = _description(completed.generation_id, completed.migration)
+        else:
+            base = attempt.baseline
+            if (completed.version, completed.sha, completed.release_id) != (base.version, base.sha, base.release_id):
+                raise DeploymentPublishError("Приёмка возврата расходится с исходной базой")
+            description = f"v1 restored={base.deployment_id}/{base.status_id}"
+    else:
+        raise DeploymentPublishError("Недопустимый переход статуса PATCH")
+    if before.state is target and before.description == description:
+        # Восстановление уже опубликованного результата.
+        return before
+    source = DeploymentState.IN_PROGRESS if terminal else DeploymentState.MISSING
+    if before.state is not source or terminal and before.description != f"v1 attempt={attempt.attempt_key}":
+        raise DeploymentPublishError("Исходный статус не допускает этот переход")
+    receipt = claim("finish" if terminal else "in_progress")
+    expected_id = None
+    if receipt is not None:
+        records._schema_evidence(receipt)
+        if terminal and receipt != completed:
+            raise DeploymentPublishError("Приёмка изменилась перед записью результата")
+        base = attempt.baseline
+        if not terminal and (receipt.sha, receipt.version, receipt.release_id) != (base.sha, base.version, base.release_id):
+            raise DeploymentPublishError("Резервация не подтверждает принятую базу")
+        try:
+            raw = api.post(f"/deployments/{before.deployment_id}/statuses", {
+                "environment": records.ENVIRONMENT, "state": target.value, "description": description,
+                "auto_inactive": False,
+            })
+        except PublishingError:
+            pass
+        else:
+            result = records._parse_status(before.deployment_id, raw)
+            if (result.state, result.description) != (target, description):
+                raise DeploymentPublishError("Ответ POST не подтверждает запрошенный статус PATCH")
+            expected_id = result.status_id
+            if not terminal:
+                return result
+    result = records._current_status(api, before.deployment_id)
+    if ((result.state, result.description) != (target, description)
+            or expected_id is not None and result.status_id != expected_id):
+        raise DeploymentPublishError("Не подтверждён текущий статус PATCH")
+    return result
+
+
 def current_attempt(
     api: GitHub, attempt: DeploymentAttempt, deployment_id: int,
 ) -> tuple[DeploymentRecord, InstallationReceipt]:

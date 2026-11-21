@@ -508,7 +508,11 @@ snapshot, а `PRODUCTION_DEPLOYMENT_WRITER=v2` разрешает новые п�
 разрешает только этот dispatcher без аргументов. Уже от root dispatcher
 проверяет команду функцией `command` из `deploy/attempt-ssh.py` закрытого
 snapshot и запускает `/usr/local/sbin/deploy-prod` с проверенным списком
-аргументов без shell. Wrapper очищает окружение через `env -i` и загружает
+аргументов без shell. Для подписанного PATCH установите согласованные версии
+[forced entry](../deploy/compadre-release-entry) и [root-dispatcher](../deploy/compadre-release-ssh)
+по указанным путям как root-owned исполняемые файлы. Первый передаёт через sudo
+команду, NUL и входные байты runner. Второй читает ограниченный пакет и
+выполняет проверенный wrapper. Wrapper очищает окружение через `env -i` и загружает
 контроллер из отдельно установленного snapshot. После обновления сверьте
 права, правило sudo и SHA того snapshot, из которого загружается парсер.
 [Доступ на VPS](PRODUCTION.md#доступ) ·
@@ -516,6 +520,7 @@ snapshot и запускает `/usr/local/sbin/deploy-prod` с проверен
 
 ```text
 sudo -n /usr/local/sbin/deploy-prod VERSION --attempt ACTION SHA KEY OWNER SNAPSHOT D18
+sudo -n /usr/local/sbin/deploy-prod VERSION --patch-attempt ACTION SHA KEY OWNER SNAPSHOT D18 STATUS_ID
 ```
 
 Передаются каноническая версия `vX.Y.Z`, одно из действий `reserve`,
@@ -526,8 +531,40 @@ sudo -n /usr/local/sbin/deploy-prod VERSION --attempt ACTION SHA KEY OWNER SNAPS
 числа без начального нуля, до 20 и 10 цифр соответственно. `D18` —
 положительный числовой Deployment ID до 20 цифр. Runner передаёт `0` при
 резервации, получении существующей резервации и запросе права на создание.
-Парсер требует именно эту последовательность из 11 полей, разделённых
-одним пробелом. На каждое действие контроллер заново читает точный
+Для подписанного PATCH дополнительно передаётся числовой ID статуса. При
+`reserve` и `resume` передаётся подписанный пакет до 16 КиБ. Файл
+`patch-allowed-signers` устанавливают в каталоге состояния контроллера
+с владельцем root:root и правами 0600. Первое применение после старого
+протокола под lock сверяет прежнюю базу с GitHub. Последующие выпуски
+берут ID базы, поколения и статуса из локальной закрытой попытки и
+сверяют фактическую приёмку VPS. Release, тег и активность владельца
+проверяются при резервации. Перед переключением контроллер проверяет
+локальный журнал, pin политики и фактический runtime.
+
+При вводе подписанного PATCH сначала обновите подписывающий CI и
+[установленный snapshot](#обновить-отдельно-установленный-controller-snapshot).
+В согласованное окно при закрытом журнале проверьте новый snapshot и
+установите оба входа из него с правами root:root/0755. В следующем
+примере `$reviewed_signers` — путь к ранее проверенному файлу открытых
+ключей подписанта. Файл содержит строку `compadre-patch-ci ssh-ed25519 ...`.
+
+```sh
+snapshot=/usr/local/lib/compadre-assistant-deploy
+sudo install -o root -g root -m 0755 "$snapshot/deploy/compadre-release-ssh" /usr/local/libexec/compadre-release-ssh
+sudo install -o root -g root -m 0755 "$snapshot/deploy/compadre-release-entry" /usr/local/libexec/compadre-release-entry
+sudo install -o root -g root -m 0600 "$reviewed_signers" /var/lib/compadre-assistant-deploy/patch-allowed-signers
+```
+
+Сверьте правила sudo, пути forced command, `PRODUCTION_CONTROLLER_SHA`
+и внешний pin политики на VPS. После этого включите
+`PRODUCTION_SIGNED_PATCH=true` в защищённом окружении публикации.
+Первый подписанный PATCH сам подтверждает ранее принятую установку v2.
+Все обращения этой сверки входят в замер. При отказе или обрыве используйте
+`resume` для исходной попытки с тем же подписанным допуском; сверяйте
+результат до смены владельца. Совместимый готовый Release со старой
+аннотацией по-прежнему можно установить через прежний вход.
+
+На прежнем маршруте `--attempt` на каждое действие контроллер читает точный
 `GET /actions/runs/{run_id}/attempts/{run_attempt}` владельца и проверяет
 состояние `in_progress`. Для передачи владения через `resume` требуется
 `completed` у предыдущего владельца. [Проверки контроллера](../scripts/deploy_attempt.py)
@@ -536,7 +573,7 @@ sudo -n /usr/local/sbin/deploy-prod VERSION --attempt ACTION SHA KEY OWNER SNAPS
 административный вход вне открытой попытки. Снять спорное намерение и
 выполнить ручной forward recovery для открытой попытки можно через
 административные команды протокола. Ограниченный ключ runner принимает только
-`--attempt` и перечисленные действия. Сверка доступа должна показать
+`--attempt`, `--patch-attempt` и перечисленные действия. Сверка доступа должна показать
 отказ на прежний протокол и произвольный sudo. Доступ самого ключа
 runner подтверждает согласованный запуск.
 

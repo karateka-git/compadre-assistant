@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
@@ -229,6 +230,7 @@ def main() -> int:
     parser.add_argument("--previous-sha", required=True)
     parser.add_argument("--accepted-baseline", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--worker-image", help="Локальный образ из доверенной policy для изоляции CI")
     args = parser.parse_args()
     policy_root = Path(__file__).resolve().parents[1]
     candidate = os.environ["GITHUB_SHA"]
@@ -265,17 +267,47 @@ def main() -> int:
         # Candidate requirements/tests не получают API token и CI control file paths.
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("GITHUB_", "ACTIONS_", "INPUT_"))}
-        result = subprocess.run([
-            sys.executable, "-B", str(policy_root / "scripts/check_repository_compatibility.py"),
-            "--repository", str(args.repository.resolve()), "--previous-sha", args.previous_sha,
-            "--candidate-sha", candidate, "--output", str(args.output.resolve()),
-        ], cwd=policy_root, env=environment, check=False)
+        common = ["--previous-sha", args.previous_sha, "--candidate-sha", candidate]
+        if args.worker_image:
+            # Код и pip-крючки кандидата работают вне runner и его Actions control files.
+            # В контейнер передаём только Git-объекты без credentials и экспорт policy.
+            bare = root / "objects.git"
+            subprocess.run(["git", "clone", "--bare", "--no-hardlinks", str(args.repository.resolve()), str(bare)],
+                           check=True, capture_output=True)
+            results = root / "worker-output"
+            results.mkdir()
+            # Контейнеру оставляем stdout в файле, чтобы вложенный процесс не мог
+            # посылать управляющие команды обработчику журнала GitHub Actions.
+            log = root / "worker.log"
+            with log.open("wb") as stream:
+                result = subprocess.run([
+                    "docker", "run", "--rm", "--cap-drop=ALL", "--security-opt=no-new-privileges",
+                    "--user", f"{os.getuid()}:{os.getgid()}",
+                    "--mount", f"type=bind,src={root / 'policy'},dst=/policy,readonly",
+                    "--mount", f"type=bind,src={bare},dst=/objects.git,readonly",
+                    "--mount", f"type=bind,src={results},dst=/result",
+                    args.worker_image, "python", "-IB", "/policy/scripts/check_repository_compatibility.py",
+                    "--repository", "/objects.git", *common, "--output", "/result/report",
+                ], cwd=policy_root, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=False)
+            # После выхода контейнера сначала отвергаем ссылки, затем читаем файлы.
+            source = results / "report"
+            if source.is_symlink() or not source.is_dir():
+                raise ValueError("Изолированный worker не предоставил каталог отчёта")
+            snapshot(source)
+            shutil.copytree(source, args.output)
+        else:
+            result = subprocess.run([
+                sys.executable, "-B", str(policy_root / "scripts/check_repository_compatibility.py"),
+                "--repository", str(args.repository.resolve()), *common, "--output", str(args.output.resolve()),
+            ], cwd=policy_root, env=environment, check=False)
+        if result.returncode:
+            raise ValueError(f"Compatibility worker failed (exit={result.returncode}); inspect compatibility artifact")
         report = json.loads((args.output / "report.json").read_text(encoding="utf-8"))
-        if (result.returncode or report["candidate_sha"] != candidate
+        if (report["candidate_sha"] != candidate
                 or report["sources"]["previous"] != previous_manifest
                 or report["sources"]["candidate"] != candidate_manifest
                 or report.get("previous_git", {}).get("index_tree") != previous_tree):
-            raise ValueError("runner failed or source identity mismatch")
+            raise ValueError("Compatibility source identity mismatch")
         verify_report(report, policy, previous_sha=args.previous_sha)
         evidence = {
             "version": policy["version"], "repository": policy["repository"], "candidate_sha": candidate,

@@ -73,6 +73,14 @@ class AdmissionTests(unittest.TestCase):
         self.api.jobs = [*current, dict(current[0], name="ci-metrics")]
         self.assertIsNotNone(self.select())
 
+    def test_legacy_suite_requires_its_own_unit_step(self) -> None:
+        """Проверяет прежние выпуски по обязательным для них шагам unit и manifest."""
+        job = self.api.jobs[1]
+        job["steps"] = [dict(job["steps"][0], name=name) for name in admission.LEGACY_FULL_STEPS]
+        self.assertIsNotNone(self.select())
+        job["steps"] = [step for step in job["steps"] if step["name"] != "Run full unittest suite"]
+        self.assertIsNone(self.select())
+
     def test_missing_or_skipped_compatibility_job_is_denied(self) -> None:
         """Зелёный прежний full-suite не заменяет обязательный новый набор."""
         self.api.jobs[2]["conclusion"] = "skipped"

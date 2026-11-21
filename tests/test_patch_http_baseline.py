@@ -82,7 +82,7 @@ def _make_graph(checkout: Path, workflow_bytes: bytes) -> _Graph:
     _git(checkout, "config", "core.autocrlf", "false")
     _git(checkout, "config", "core.hooksPath", ".git/fixture-hooks")
     _git(checkout, "remote", "add", "origin", f"https://github.com/{REPOSITORY}.git")
-    (checkout / ".gitignore").write_text("data/\n", encoding="utf-8", newline="\n")
+    (checkout / ".gitignore").write_text("/data/\n", encoding="utf-8", newline="\n")
     for name in compatibility.WORKFLOWS:
         path = checkout / ".github" / "workflows" / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -547,10 +547,13 @@ class _ControllerFixture:
         """Запускает CLI контроллера с захваченными stdout и stderr одного SSH-вызова."""
         host = self.host
         command = list(arguments[3:])
-        self.calls.append(command[2] if command[1:2] == ["--attempt"] else
+        self.calls.append(command[2] if command[1:2] in (["--attempt"], ["--patch-attempt"]) else
                           command[1] if len(command) > 1 else "install")
         stdout, stderr = io.StringIO(), io.StringIO()
         with ExitStack() as stack:
+            if command[1:2] == ["--patch-attempt"]:
+                stack.enter_context(patch.object(sys, "stdin", io.TextIOWrapper(
+                    io.BytesIO((kwargs.get("input_text") or "").encode("ascii")))))
             for patcher in (*system.DeployProdTests()._patches(), *self._switch_patches()):
                 stack.enter_context(patcher)
             host_type = deploy_prod.Host
@@ -824,12 +827,26 @@ def _summary(scenario: dict) -> dict:
             total["http_ns"] += row["elapsed_ns"]
             if row["phase"] == "deployment_base" and row["method"] == "GET":
                 total["base_get"] += row["attempts"]
-    metadata = {key: scenario[key] for key in ("history_size", "first_v2") if key in scenario}
+    metadata = {key: scenario[key] for key in ("history_size", "first_v2", "github_api") if key in scenario}
     return {"scenario": scenario["scenario"], "wall_ns": scenario["wall_ns"], **metadata, **totals}
 
 
 class PatchHttpBaselineTests(unittest.TestCase):
     """Проверяет маршруты и соответствие метрик реальным вызовам транспорта."""
+
+    def test_signed_patch_budget(self) -> None:
+        """Проверяет лимит на полном маршруте при 16 и 1000 Deployment."""
+        from tests.test_signed_patch_controller import measure_signed_patch
+
+        short, long = measure_signed_patch()
+        self.assertEqual((short["history_size"], long["history_size"]), (16, 1000))
+        self.assertEqual(short["github_api"], long["github_api"])
+        for scenario in (short, long):
+            summary = _summary(scenario)
+            total = sum(summary[place][kind] for place in ("runner", "vps")
+                        for kind in ("get", "graphql_query", "post"))
+            self.assertEqual(total, scenario["github_api"])
+            self.assertLessEqual(total, 20)
 
     def test_patch_routes(self) -> None:
         """Определяет зафиксированные операции публикации, установки, resume и отказа."""
@@ -947,5 +964,14 @@ class PatchHttpBaselineTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    scenarios = measure_patch_v2() if sys.argv[1:] == ["--v2"] else measure_patch()
+    if sys.argv[1:] == ["--signed"]:
+        from tests.test_signed_patch_controller import measure_signed_patch
+
+        scenarios = measure_signed_patch()
+    elif sys.argv[1:] == ["--v2"]:
+        scenarios = measure_patch_v2()
+    elif not sys.argv[1:]:
+        scenarios = measure_patch()
+    else:
+        raise SystemExit("Допустимые варианты замера: без аргументов, --v2 или --signed")
     print(json.dumps({"summary": [_summary(scenario) for scenario in scenarios], "scenarios": scenarios}, indent=2))
