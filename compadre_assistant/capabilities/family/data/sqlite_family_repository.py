@@ -12,6 +12,7 @@ from compadre_assistant.capabilities.family.data.membership_dtos import (
     FamilyDto, FamilyMemberDto, family_from_dto, family_member_from_dto,
 )
 from compadre_assistant.capabilities.family.data.shopping_dtos import ShoppingItemDto, shopping_item_from_dto
+from compadre_assistant.capabilities.family.data.sqlite_shopping_batches import append_shopping_batches
 from compadre_assistant.capabilities.family.domain.invitations import (
     InvalidInvitation, InvitationPeriod, InvitationRepository,
 )
@@ -21,7 +22,7 @@ from compadre_assistant.capabilities.family.domain.membership import (
 from compadre_assistant.capabilities.family.domain.ports import FamilyRepository
 from compadre_assistant.capabilities.family.domain.shopping import (
     MAX_ITEM_NUMBER, ItemChange, ItemChangeStatus, ItemNumbersExhausted, ShoppingChangeResult,
-    ShoppingItem, ShoppingItemStatus, ShoppingRepository,
+    ShoppingAddMessage, ShoppingItem, ShoppingItemStatus, ShoppingRepository,
 )
 
 
@@ -234,6 +235,7 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
 
     def add_items(
         self, app_user_id: int, family_id: int, names: tuple[str, ...], now: datetime, *, actor_joined_at: datetime,
+        source: ShoppingAddMessage | None = None,
     ) -> tuple[ShoppingItem, ...]:
         """Резервирует последовательность номеров и пишет все покупки одной транзакцией.
 
@@ -242,6 +244,7 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
             family_id: Ожидаемая семья.
             names: Проверенные названия покупок в порядке ввода.
             now: Время добавления покупок.
+            source: Адрес сообщения для защиты от повторной записи после перезапуска.
             actor_joined_at: Время начала ожидаемого членства.
 
         Returns:
@@ -253,6 +256,14 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
         """
         with self._write():
             self._require_membership(app_user_id, family_id, actor_joined_at)
+            if source is not None:
+                receipt = self._connection.execute(
+                    """INSERT INTO family_shopping_add_receipts(channel, chat_id, message_id, family_id)
+                       VALUES (?, ?, ?, ?) ON CONFLICT(channel, chat_id, message_id) DO NOTHING""",
+                    (source.channel, source.chat_id, source.message_id, family_id),
+                )
+                if receipt.rowcount == 0:
+                    return self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)
             counter = self._connection.execute(
                 """UPDATE families SET next_item_number = next_item_number + ?
                    WHERE id = ? AND next_item_number <= ?
@@ -267,6 +278,10 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
                 """INSERT INTO family_shopping_items (family_id, number, name, status, created_by_app_user_id, created_at)
                    VALUES (?, ?, ?, 'needed', ?, ?)""",
                 ((family_id, number, name, app_user_id, stamp) for number, name in enumerate(names, first_number)),
+            )
+            append_shopping_batches(
+                self._connection, family_id, app_user_id, first_number, first_number + len(names) - 1,
+                datetime.fromisoformat(stamp),
             )
             return self.list_items(app_user_id, family_id, actor_joined_at=actor_joined_at)
 

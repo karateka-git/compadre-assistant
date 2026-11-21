@@ -71,6 +71,15 @@ class ShoppingChangeResult:
     items: tuple[ShoppingItem, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ShoppingAddMessage:
+    """Идентифицирует сообщение добавления при повторной доставке из канала."""
+
+    channel: str
+    chat_id: str
+    message_id: str
+
+
 class ShoppingRepository(Protocol):
     """Хранит покупки семьи с проверкой членства в каждой операции.
 
@@ -88,6 +97,7 @@ class ShoppingRepository(Protocol):
 
     def add_items(
         self, app_user_id: int, family_id: int, names: tuple[str, ...], now: datetime, *, actor_joined_at: datetime,
+        source: ShoppingAddMessage | None = None,
     ) -> tuple[ShoppingItem, ...]:
         """Выделяет номера и добавляет проверенные названия одним пакетом.
 
@@ -96,6 +106,7 @@ class ShoppingRepository(Protocol):
             family_id: Ожидаемая семья.
             names: Непустой набор нормализованных названий в порядке ввода.
             now: Время создания покупок.
+            source: Идентификатор сообщения, если добавление пришло из чата.
             actor_joined_at: Время начала членства, из которого открыт список.
 
         Returns:
@@ -175,6 +186,7 @@ class ManageShopping:
 
     def add(
         self, app_user_id: int, family_id: int, text: str, *, actor_joined_at: datetime,
+        source: ShoppingAddMessage | None = None,
     ) -> tuple[ShoppingItem, ...]:
         """Добавляет отдельную покупку на каждую непустую строку.
 
@@ -182,6 +194,7 @@ class ManageShopping:
             app_user_id: Профиль участника, добавляющего покупки.
             family_id: Ожидаемая семья.
             text: Названия и количества в исходном сообщении.
+            source: Идентификатор сообщения для идемпотентного добавления из чата.
             actor_joined_at: Время начала членства, из которого открыт список.
 
         Returns:
@@ -195,7 +208,9 @@ class ManageShopping:
         names = tuple(name for line in text.splitlines() if (name := line.strip()))
         if not names:
             raise InvalidShoppingNames("Нужно указать названия покупок")
-        return self._repository.add_items(app_user_id, family_id, names, self._clock(), actor_joined_at=actor_joined_at)
+        return self._repository.add_items(
+            app_user_id, family_id, names, self._clock(), actor_joined_at=actor_joined_at, source=source,
+        )
 
     def buy(
         self, app_user_id: int, family_id: int, numbers: tuple[int, ...], *, actor_joined_at: datetime,

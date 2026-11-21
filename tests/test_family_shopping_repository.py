@@ -3,16 +3,18 @@
 import sqlite3
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event
 
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
+from compadre_assistant.capabilities.family.data.sqlite_shopping_batches import SQLiteShoppingBatchRepository
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
 from compadre_assistant.capabilities.family.domain.shopping import (
     MAX_ITEM_NUMBER, InvalidItemNumbers, InvalidShoppingNames, ItemChange, ItemChangeStatus,
-    ItemNumbersExhausted, ManageShopping, ShoppingItemStatus,
+    ItemNumbersExhausted, ManageShopping, ShoppingAddMessage, ShoppingItemStatus,
 )
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
@@ -58,6 +60,77 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         ))
         self.assertEqual(self.shopping.list_items(1, self.home, actor_joined_at=_NOW), added)
         self.assertEqual(self.shopping.list_items(3, self.other, actor_joined_at=_NOW), ())
+
+    def test_batches_survive_restart_and_respect_due_membership_and_item_state(self) -> None:
+        """Продлевает персональные окна, закрывает в срок, проверяет адрес и состав перед отправкой."""
+        with self.db:
+            self.db.execute("INSERT INTO family_members VALUES (?, 4, ?)", (self.home, _NOW.isoformat()))
+        queue = SQLiteShoppingBatchRepository(self.db)
+        self.shopping.add(1, self.home, "Чай\nСыр", actor_joined_at=_NOW)
+        self.now += timedelta(minutes=1)
+        self.shopping.add(2, self.home, "Рис", actor_joined_at=_NOW)
+        self.shopping.add(3, self.other, "Перец", actor_joined_at=_NOW)
+        self.assertEqual(queue.due_batches(self.now), ())
+        self.now += timedelta(minutes=1)
+        self.shopping.add(1, self.home, "Соль", actor_joined_at=_NOW)
+        old, = queue.due_batches(self.now)
+        self.assertEqual(old.recipient_id, 2)
+        self.assertEqual([i.name for i in queue.current_items(old)], ["Чай", "Сыр"])
+        self.assertEqual(queue.current_items(replace(old, recipient_id=1)), ())
+        self.assertEqual(queue.current_items(replace(old, family_id=self.other)), ())
+        self.assertEqual(queue.current_items(replace(old, joined_at=self.now)), ())
+        self.shopping.buy(1, self.home, (1,), actor_joined_at=_NOW)
+        self.shopping.delete(1, self.home, (2,), actor_joined_at=_NOW)
+        self.now += timedelta(minutes=2)
+        with connect_database(self.path) as reopened:
+            restarted = SQLiteShoppingBatchRepository(reopened)
+            self.assertEqual([(b.recipient_id, [i.name for i in restarted.current_items(b)])
+                              for b in restarted.due_batches(self.now)],
+                             [(2, []), (1, ["Рис"]), (4, ["Рис", "Соль"]), (2, ["Соль"])])
+        self.repository.leave(2, self.home, actor_joined_at=_NOW)
+        with self.db:
+            self.db.execute("INSERT INTO family_members VALUES (?, 2, ?)", (self.home, self.now.isoformat()))
+        self.assertEqual(queue.current_items(old), ())
+        self.assertEqual([b.recipient_id for b in queue.due_batches(self.now)], [1, 4])
+
+    def test_batch_failure_rolls_back_receipt_goods_and_number_allocation(self) -> None:
+        """Сбой очереди откатывает всё добавление и разрешает повтор того же сообщения."""
+        key = ShoppingAddMessage("vk", "42", "23")
+        with self.db:
+            self.db.execute("""CREATE TRIGGER reject_batch BEFORE INSERT ON family_shopping_batches
+                               BEGIN SELECT RAISE(ABORT, 'fixture'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.shopping.add(1, self.home, "Рис", actor_joined_at=_NOW, source=key)
+        self.assertEqual(self.shopping.list_items(1, self.home, actor_joined_at=_NOW), ())
+        self.assertEqual(self.db.execute("SELECT count(*) FROM family_shopping_add_receipts").fetchone()[0], 0)
+        with self.db:
+            self.db.execute("DROP TRIGGER reject_batch")
+        added = self.shopping.add(1, self.home, "Рис", actor_joined_at=_NOW, source=key)
+        self.assertEqual([i.number for i in added], [1])
+        with connect_database(self.path) as reopened:
+            later = ManageShopping(SQLiteFamilyRepository(reopened), lambda: _NOW + timedelta(hours=1))
+            self.assertEqual(later.add(1, self.home, "Рис", actor_joined_at=_NOW, source=key), added)
+            queue = SQLiteShoppingBatchRepository(reopened)
+            batch, = queue.due_batches(_NOW + timedelta(minutes=2))
+            self.assertEqual(queue.current_items(batch), added)
+
+    def test_concurrent_redelivery_creates_one_addition_and_one_batch(self) -> None:
+        """Разные подключения, получившие одно сообщение, фиксируют его один раз."""
+        barrier = Barrier(2)
+        key = ShoppingAddMessage("telegram", "10", "11")
+
+        def add() -> tuple[int, ...]:
+            with connect_database(self.path) as db:
+                shopping = ManageShopping(SQLiteFamilyRepository(db), lambda: _NOW)
+                barrier.wait(timeout=5)
+                return tuple(i.number for i in shopping.add(1, self.home, "Сыр\nХлеб", actor_joined_at=_NOW, source=key))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(add) for _ in range(2)]
+            self.assertEqual([f.result() for f in futures], [(1, 2), (1, 2)])
+        queue = SQLiteShoppingBatchRepository(self.db)
+        batch, = queue.due_batches(_NOW + timedelta(minutes=2))
+        self.assertEqual([i.number for i in queue.current_items(batch)], [1, 2])
 
     def test_buy_deduplicates_numbers_and_preserves_first_mark(self) -> None:
         """Пакет сохраняет порядок номеров и не меняет отметку другого участника."""

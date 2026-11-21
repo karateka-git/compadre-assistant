@@ -3,12 +3,35 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Protocol
 
 from compadre_assistant.capabilities.family.domain.shopping import ShoppingItem, ShoppingItemStatus
 
 
 _QUIET_PERIOD = timedelta(minutes=2)  # Ждём следующих позиций из той же серии добавлений.
 _MAX_WAIT = timedelta(minutes=10)  # Продолжающийся ввод не должен отодвигать сводку дольше.
+
+
+@dataclass(frozen=True, slots=True)
+class ShoppingBatch:
+    """Адресует подборку текущему членству получателя независимо от его канала."""
+
+    id: int
+    family_id: int
+    recipient_id: int
+    joined_at: datetime
+
+
+class ShoppingBatchRepository(Protocol):
+    """Читает ожидающие отправки и перечитывает актуальные товары по их адресу."""
+
+    def due_batches(self, now: datetime) -> tuple[ShoppingBatch, ...]:
+        """Возвращает подборки с наступившим сроком и действующим членством."""
+        ...
+
+    def current_items(self, batch: ShoppingBatch) -> tuple[ShoppingItem, ...]:
+        """Возвращает ещё нужные товары либо пустой кортеж для завершённого членства."""
+        ...
 
 
 @dataclass(frozen=True, slots=True)

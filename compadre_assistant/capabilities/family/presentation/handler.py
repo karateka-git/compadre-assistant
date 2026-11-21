@@ -14,7 +14,7 @@ from compadre_assistant.capabilities.family.domain.membership import (
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
 from compadre_assistant.capabilities.family.domain.shopping import (
-    InvalidShoppingNames, ItemNumbersExhausted, ManageShopping, ShoppingItem,
+    InvalidShoppingNames, ItemNumbersExhausted, ManageShopping, ShoppingAddMessage, ShoppingItem,
 )
 from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
 from compadre_assistant.capabilities.family.presentation.members import (
@@ -671,7 +671,10 @@ class FamilyCapability(
             if not arguments:
                 return self._begin_shopping_add(context, address, section)
             try:
-                items = shopping.add(app_user_id, family_id, arguments, actor_joined_at=section.joined_at)
+                items = shopping.add(
+                    app_user_id, family_id, arguments, actor_joined_at=section.joined_at,
+                    source=ShoppingAddMessage(event.channel, event.chat_id, event.message_id),
+                )
                 return self._show_shopping_list(context, address, section, items)
             except ItemNumbersExhausted:
                 return self._shopping_numbers_exhausted()
@@ -819,7 +822,10 @@ class FamilyCapability(
             return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
         with self._open_scenarios() as (_, _, shopping):
             try:
-                items = shopping.add(app_user_id, section.family_id, event.text, actor_joined_at=section.joined_at)
+                items = shopping.add(
+                    app_user_id, section.family_id, event.text, actor_joined_at=section.joined_at,
+                    source=ShoppingAddMessage(event.channel, event.chat_id, event.message_id),
+                )
             except FamilyAccessEnded:
                 return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
             except InvalidShoppingNames:
