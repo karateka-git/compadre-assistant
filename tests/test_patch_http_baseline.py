@@ -82,7 +82,7 @@ def _make_graph(checkout: Path, workflow_bytes: bytes) -> _Graph:
     _git(checkout, "config", "core.autocrlf", "false")
     _git(checkout, "config", "core.hooksPath", ".git/fixture-hooks")
     _git(checkout, "remote", "add", "origin", f"https://github.com/{REPOSITORY}.git")
-    (checkout / ".gitignore").write_text("data/\n", encoding="utf-8", newline="\n")
+    (checkout / ".gitignore").write_text("/data/\n", encoding="utf-8", newline="\n")
     for name in compatibility.WORKFLOWS:
         path = checkout / ".github" / "workflows" / name
         path.parent.mkdir(parents=True, exist_ok=True)
