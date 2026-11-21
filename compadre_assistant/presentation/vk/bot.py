@@ -25,6 +25,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from compadre_assistant.presentation.vk.photos import vk_photo_attachments
+from compadre_assistant.core.presentation.notifications import NotificationDeclined, NotificationRetry
+from compadre_assistant.presentation.shared.notifications import start_notification_worker
 from compadre_assistant.presentation.vk.rendering import VkChunk, render_vk_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
@@ -62,6 +64,28 @@ class VkBotError(RuntimeError):
 
 class VkTransientError(VkBotError):
     """Временная сетевая или серверная ошибка VK, допускающая повтор запроса."""
+
+
+class VkApiRejection(VkBotError):
+    """VK вернул явный отказ API для конкретного вызова."""
+
+
+class VkRateLimitError(VkTransientError):
+    """VK явно подтвердил отказ по лимиту до принятия сообщения."""
+
+
+def _send_vk_notification(client: VkApiClient, address: ReplyAddress, response: IncomingResponse) -> None:
+    """Отправляет короткий анонс с кнопкой, проверяя подтверждение messages.send."""
+    chunk, = render_vk_content(response.content)
+    try:
+        result = client.send_message(peer_id=int(address.chat_id), text=chunk.text, format_data=chunk.format_data,
+                                     keyboard=_serialize_vk_inline_keyboard(response))
+    except VkRateLimitError as error:
+        raise NotificationRetry(30) from error
+    except VkApiRejection as error:
+        raise NotificationDeclined() from error
+    if result is None:
+        raise VkBotError("VK notification has no confirmed message ID")
 
 
 def run_vk_bot(
@@ -127,6 +151,10 @@ def run_vk_bot(
         menu_stop,
         logger=logger,
     )
+    notification_thread = start_notification_worker(
+        incoming_message_processor, "vk", lambda address, response: _send_vk_notification(api_client, address, response),
+        menu_stop, logger,
+    )
     logger.info("VK bot long polling started for group_id=%s", group_id)
     try:
         while True:
@@ -170,6 +198,8 @@ def run_vk_bot(
                 workers.submit(chat_id, update)
     finally:
         menu_stop.set()
+        if notification_thread is not None:
+            notification_thread.join(timeout=VK_LONG_POLL_WAIT_SECONDS + 5)
         if menu_thread is not None:
             menu_thread.join(timeout=VK_LONG_POLL_WAIT_SECONDS + 5)
             if menu_thread.is_alive():
@@ -519,6 +549,8 @@ class VkApiClient:
                 if error.code == 429 or error.code >= 500
                 else VkBotError
             )
+            if error.code == 429:
+                raise VkRateLimitError("VK API rate limit") from error
             raise error_type(f"VK request failed with HTTP {error.code}") from error
         except (URLError, TimeoutError, OSError, json.JSONDecodeError) as error:
             raise VkTransientError(
@@ -537,8 +569,10 @@ class VkApiClient:
             error_type = (
                 VkTransientError
                 if error_code in VK_TRANSIENT_API_ERROR_CODES
-                else VkBotError
+                else VkApiRejection
             )
+            if error_code in (6, 9, 29):
+                raise VkRateLimitError(f"VK API error {error_code}")
             raise error_type(f"VK API error {error_code}")
         return payload
 

@@ -22,6 +22,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CommandMenuUpdateHandler, IncomingResponse,
 )
 from compadre_assistant.core.presentation.message_content import text_content
+from compadre_assistant.core.presentation.notifications import NotificationDeclined, NotificationRetry
+from compadre_assistant.presentation.shared.notifications import start_notification_worker
 from compadre_assistant.presentation.telegram.rendering import TelegramChunk, render_telegram_content
 from compadre_assistant.presentation.shared.safe_send import (
     exponential_retry_delay,
@@ -146,6 +148,15 @@ async def _run_telegram_bot(
         reconciliation_stop,
         logger=logger,
     )
+    loop = asyncio.get_running_loop()
+
+    def send_notification(address: ReplyAddress, response: IncomingResponse) -> None:
+        future = asyncio.run_coroutine_threadsafe(_send_telegram_notification(bot, aiogram, address, response), loop)
+        future.result(timeout=TELEGRAM_MENU_API_TIMEOUT_SECONDS + 2)
+
+    notification_thread = start_notification_worker(
+        incoming_message_processor, "telegram", send_notification, reconciliation_stop, logger,
+    )
     try:
         await safe_send_async(
             lambda: bot.set_my_commands(commands=_telegram_help_commands(aiogram),
@@ -165,6 +176,8 @@ async def _run_telegram_bot(
         ) from error.error
     finally:
         reconciliation_stop.set()
+        if notification_thread is not None:
+            await asyncio.to_thread(notification_thread.join, TELEGRAM_MENU_SHUTDOWN_TIMEOUT_SECONDS)
         if reconciliation_thread is not None:
             await asyncio.to_thread(
                 reconciliation_thread.join,
@@ -179,6 +192,19 @@ async def _run_telegram_bot(
                 await asyncio.to_thread(stop_actions)
         finally:
             await bot.session.close()
+
+
+async def _send_telegram_notification(bot: Any, aiogram: Any, address: ReplyAddress, response: IncomingResponse) -> None:
+    """Доставляет короткое уведомление одним вызовом без повтора при потере ответа."""
+    chunk, = render_telegram_content(response.content)
+    keyboard = _serialize_telegram_inline_keyboard(response, aiogram)
+    try:
+        await bot.send_message(chat_id=int(address.chat_id), text=chunk.text, parse_mode=chunk.parse_mode,
+                               reply_markup=keyboard, request_timeout=TELEGRAM_MENU_API_TIMEOUT_SECONDS)
+    except aiogram.exceptions.TelegramRetryAfter as error:
+        raise NotificationRetry(error.retry_after) from error
+    except (aiogram.exceptions.TelegramForbiddenError, aiogram.exceptions.TelegramBadRequest) as error:
+        raise NotificationDeclined() from error
 
 
 def _create_polling_bot(

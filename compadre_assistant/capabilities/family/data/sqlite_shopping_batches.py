@@ -78,19 +78,54 @@ class SQLiteShoppingBatchRepository(ShoppingBatchRepository):
         rows = self._connection.execute(
             """SELECT b.id, b.family_id, b.recipient_id, m.joined_at FROM family_shopping_batches b
                JOIN family_members m ON m.family_id = b.family_id AND m.app_user_id = b.recipient_id
-               WHERE b.due_at <= ? ORDER BY b.due_at, b.id""", (now.astimezone(UTC).isoformat(),),
+               WHERE b.dispatching = 0 AND b.due_at <= :now AND (b.retry_at IS NULL OR b.retry_at <= :now)
+               ORDER BY b.due_at, b.id""", {"now": now.astimezone(UTC).isoformat()},
         )
         return tuple(_batch_from_dto(ShoppingBatchDto(**dict(row))) for row in rows)
+
+    def claim(
+        self, batch: ShoppingBatch, now: datetime, *, expected_items: tuple[ShoppingItem, ...] | None = None,
+    ) -> bool:
+        """Фиксирует начало попытки с проверкой срока и владельца до вызова внешнего API."""
+        with self._connection:
+            self._connection.execute("BEGIN IMMEDIATE")
+            if expected_items is not None and self.current_items(batch) != expected_items:
+                return False
+            cursor = self._connection.execute(
+                """UPDATE family_shopping_batches SET dispatching = 1
+                   WHERE id = :id AND family_id = :family AND recipient_id = :recipient AND dispatching = 0
+                   AND due_at <= :now AND (retry_at IS NULL OR retry_at <= :now)
+                   AND EXISTS (SELECT 1 FROM family_members WHERE family_id = :family
+                               AND app_user_id = :recipient AND joined_at = :joined)""",
+                {"id": batch.id, "family": batch.family_id, "recipient": batch.recipient_id,
+                 "joined": batch.joined_at.isoformat(), "now": now.astimezone(UTC).isoformat()},
+            )
+        return cursor.rowcount == 1
+
+    def finish(self, batch: ShoppingBatch, retry_at: datetime | None = None) -> None:
+        """Освобождает подборку после подтверждённого отказа либо удаляет завершённую."""
+        condition = """WHERE id = ? AND family_id = ? AND recipient_id = ? AND dispatching = 1
+                       AND EXISTS (SELECT 1 FROM family_members WHERE family_id = ? AND app_user_id = ?
+                                   AND joined_at = ?)"""
+        key = (batch.id, batch.family_id, batch.recipient_id, batch.family_id, batch.recipient_id,
+               batch.joined_at.isoformat())
+        with self._connection:
+            if retry_at is None:
+                self._connection.execute("DELETE FROM family_shopping_batches " + condition, key)
+            else:
+                self._connection.execute("UPDATE family_shopping_batches SET dispatching = 0, retry_at = ? "
+                                         + condition, (retry_at.astimezone(UTC).isoformat(), *key))
 
     def current_items(self, batch: ShoppingBatch) -> tuple[ShoppingItem, ...]:
         """Проверяет все поля адреса и возвращает только актуальную часть подборки."""
         rows = self._connection.execute(
-            """SELECT i.number, i.name, i.status, i.created_by_app_user_id, i.created_at,
+            """SELECT i.number, i.name, i.status, a.app_user_id AS created_by_app_user_id, i.created_at,
                       i.bought_by_app_user_id, i.bought_at
                FROM family_shopping_batches b JOIN family_members m
                    ON m.family_id = b.family_id AND m.app_user_id = b.recipient_id
                JOIN family_shopping_items i ON i.family_id = b.family_id
                    AND i.number BETWEEN b.first_number AND b.last_number
+               LEFT JOIN family_members a ON a.family_id = i.family_id AND a.app_user_id = i.created_by_app_user_id
                WHERE b.id = ? AND b.family_id = ? AND b.recipient_id = ? AND m.joined_at = ?""",
             (batch.id, batch.family_id, batch.recipient_id, batch.joined_at.isoformat()),
         )

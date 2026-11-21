@@ -29,6 +29,16 @@ class ShoppingBatchRepository(Protocol):
         """Возвращает подборки с наступившим сроком и действующим членством."""
         ...
 
+    def claim(
+        self, batch: ShoppingBatch, now: datetime, *, expected_items: tuple[ShoppingItem, ...] | None = None,
+    ) -> bool:
+        """Атомарно закрепляет созревшую подборку за одним отправителем."""
+        ...
+
+    def finish(self, batch: ShoppingBatch, retry_at: datetime | None = None) -> None:
+        """Завершает попытку или возвращает подборку в очередь после явного отказа."""
+        ...
+
     def current_items(self, batch: ShoppingBatch) -> tuple[ShoppingItem, ...]:
         """Возвращает ещё нужные товары либо пустой кортеж для завершённого членства."""
         ...

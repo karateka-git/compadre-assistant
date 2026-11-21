@@ -125,6 +125,128 @@ class FamilyChannelsTest(unittest.TestCase):
             invitations = ManageInvitations(repository, clock=lambda: actor.joined_at + timedelta(minutes=1))
             invitations.join(guest.id, invitations.issue(owner.id, family.id).code)
 
+    def test_outbound_route_channel_choice_concurrency_retry_and_unknown_result(self) -> None:
+        """Смена канала, конкурентный polling и потеря подтверждения учитываются после рестарта."""
+        from compadre_assistant.core.presentation.notifications import NotificationRetry
+        from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+
+        with self._runtime("family") as first, self._runtime("family") as second:
+            self._joined_family(first)
+            self._send(first, self.guest, "/family_shopping")
+            self._send(first, self.guest, "/add Хлеб")
+            self._send(first, self.owner_vk, "/settings")
+            self._send(first, self.owner_vk, "/connect")
+            self._send(first, self.owner_vk, "/notifications vk")
+            at = datetime.now(UTC) + timedelta(minutes=3)
+            calls = []
+
+            def delivery(address, response):
+                calls.append((address, response))
+                self.assertEqual(address, ReplyAddress("vk", self.owner_vk.external_chat_id))
+                self.assertIn("Хлеб", response_text(response))
+
+            first.dispatch_notifications("telegram", delivery, now=at)
+            self.assertEqual(calls, [])
+            with connect_database(self.database_path) as db, db:
+                db.execute("UPDATE app_users SET notification_channel = NULL WHERE id = 1")
+            second.dispatch_notifications("vk", delivery, now=at)
+            self.assertEqual(calls, [])
+            self._send(first, self.owner_vk, "/notifications vk")
+
+            def rate_limited(address, response):
+                delivery(address, response)
+                raise NotificationRetry(30)
+
+            first.dispatch_notifications("vk", rate_limited, now=at)
+            second.dispatch_notifications("vk", delivery, now=at + timedelta(seconds=29))
+            self.assertEqual(len(calls), 1)
+            barrier = Barrier(2)
+            def run(processor):
+                barrier.wait(timeout=3)
+                processor.dispatch_notifications("vk", delivery, now=at + timedelta(seconds=30))
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(run, (first, second)))
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], calls[1])
+            self.assertIn("/connect", response_text(self._send(first, self.owner_vk, "/help")))
+
+            self._send(first, self.guest, "/add Хлеб")
+            def lost(address, response):
+                delivery(address, response)
+                raise TimeoutError("Тестовая потеря подтверждения")
+            with self.assertLogs("compadre_assistant.capabilities.family.presentation.notifications", level="ERROR"):
+                second.dispatch_notifications("vk", lost, now=at)
+        with self._runtime("family") as restarted:
+            restarted.dispatch_notifications("vk", delivery, now=at + timedelta(days=1))
+            self.assertEqual(len(calls), 3)
+
+    def test_channel_notification_serialization_and_stale_membership(self) -> None:
+        """Адаптеры отправляют настоящие кнопки; повторное вступление делает старый вход недоступным."""
+        import asyncio
+        import json
+        import aiogram
+        from unittest.mock import AsyncMock, Mock
+        from compadre_assistant.presentation.telegram.bot import _send_telegram_notification
+        from compadre_assistant.presentation.vk.bot import _send_vk_notification, VkApiRejection, VkRateLimitError
+        from compadre_assistant.core.presentation.notifications import NotificationDeclined, NotificationRetry
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.owner_tg, "/family_shopping")
+            self._send(processor, self.owner_tg, "/add Чай")
+            due = datetime.now(UTC) + timedelta(minutes=3)
+            sent = []
+            processor.dispatch_notifications("vk", lambda *args: sent.append(args), now=due)
+            address, response = sent[0]
+            vk = Mock()
+            vk.send_message.return_value = 42
+            _send_vk_notification(vk, address, response)
+            markup = json.loads(vk.send_message.call_args.kwargs["keyboard"])
+            self.assertTrue(markup["inline"])
+            key = markup["buttons"][0][0]["action"]
+            self.assertEqual(key["label"], "Открыть покупки")
+            token = json.loads(key["payload"])["token"]
+            vk.send_message.side_effect = VkRateLimitError()
+            with self.assertRaises(NotificationRetry):
+                _send_vk_notification(vk, address, response)
+            vk.send_message.side_effect = VkApiRejection()
+            with self.assertRaises(NotificationDeclined):
+                _send_vk_notification(vk, address, response)
+            from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
+            original = FamilyCapability.notification_destination
+            def transfer_between_checks(handler, user_id, target, reference):
+                command = original(handler, user_id, target, reference)
+                self.assertIsNotNone(command)
+                with connect_database(self.database_path) as db, db:
+                    repository = SQLiteFamilyRepository(db)
+                    family_id = repository.create(3, "Другая семья", due).id
+                    ManageShopping(repository).add(3, family_id, "Чужой сыр", actor_joined_at=due)
+                    db.execute("DELETE FROM family_members WHERE app_user_id = 2")
+                    db.execute("INSERT INTO family_members VALUES (?, 2, ?)", (family_id, due.isoformat()))
+                return command
+            with patch.object(FamilyCapability, "notification_destination", transfer_between_checks):
+                stale = processor.select_action(self._event(self.guest, "callback"), token)
+                self.assertNotIn("Чужой сыр", response_text(stale))
+                self.assertIn("Доступ к семье завершён", response_text(stale))
+            with connect_database(self.database_path) as db, db:
+                db.execute("DELETE FROM family_members WHERE app_user_id = 2")
+                db.execute("INSERT INTO family_members VALUES (1, 2, ?)", (due.isoformat(),))
+            self.assertNotIn("Чай", response_text(processor.select_action(self._event(self.guest, "callback"), token)))
+            self._send(processor, self.guest, "/family_shopping")
+            self._send(processor, self.guest, "/add Чай")
+            telegram = AsyncMock()
+            processor.dispatch_notifications("telegram", lambda addr, msg: asyncio.run(
+                _send_telegram_notification(telegram, aiogram, addr, msg)), now=due)
+            button = telegram.send_message.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
+            telegram.send_message.side_effect = aiogram.exceptions.TelegramRetryAfter(
+                method=aiogram.methods.SendMessage(chat_id="1", text="тест"), message="test", retry_after=3,
+            )
+            with self.assertRaises(NotificationRetry):
+                asyncio.run(_send_telegram_notification(telegram, aiogram, address, response))
+            self.assertEqual(button.text, "Открыть покупки")
+            opened = processor.select_action(self._event(self.owner_tg, "callback"), button.callback_data)
+            self.assertIn("Чай", response_text(opened))
+
     def test_notification_entry_from_settings_and_restarted_processor(self) -> None:
         """Оба личных канала проверяют исходный адрес и открывают обычную страницу покупок."""
         from compadre_assistant.capabilities.family.presentation.notifications import shopping_notification

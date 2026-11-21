@@ -6,6 +6,8 @@ import sqlite3
 import logging
 from dataclasses import replace
 from threading import Event, RLock
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from contextlib import contextmanager
 from collections.abc import Callable, Iterator, Mapping
@@ -18,12 +20,14 @@ from compadre_assistant.capabilities.admin.presentation.handler import AdminCapa
 from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
 from compadre_assistant.capabilities.ai.data.configuration import AiConfig, load_ai_config
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
-from compadre_assistant.capabilities.family.bootstrap import create_family_capability
+from compadre_assistant.capabilities.family.bootstrap import create_family_capability, create_shopping_notifications
 from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.data.config import load_messenger_dialogs
 from compadre_assistant.core.presentation.incoming.deferred_actions import DeferredActions
 
+from compadre_assistant.core.domain.capability_preferences import CapabilityDefault, GetUserCapabilitySelections
+from compadre_assistant.core.presentation.notifications import NotificationRetry, NotificationSend, NotificationSource, NotificationTarget
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import (
     ChannelCompletionHandler,
@@ -184,7 +188,8 @@ class ChannelMessageProcessor:
                  capabilities: tuple[IncomingCapabilityPort, ...],
                  disabled_capabilities: tuple[CapabilityDescriptor, ...] = (),
                  profile_access: Mapping[str, Callable[[int], bool]] | None = None,
-                 messenger_dialogs: Mapping[str, str | None] | None = None) -> None:
+                 messenger_dialogs: Mapping[str, str | None] | None = None,
+                 notification_sources: tuple[tuple[str, NotificationSource], ...] = ()) -> None:
         """Регистрирует обработчики при запуске без соединения с SQLite.
 
         Args:
@@ -197,6 +202,7 @@ class ChannelMessageProcessor:
         Raises:
             ValueError: Повторный ID или команда входа в реестре.
         """
+        self._notification_sources = notification_sources
         self._database_path = database_path
         self._pending_inputs = PendingInputStore()
         self._deferred_actions = DeferredActions()
@@ -212,6 +218,52 @@ class ChannelMessageProcessor:
         self._menu_failures: dict[ReplyAddress, str] = {}
         self._unregistered_menu_events: dict[ReplyAddress, IncomingEvent] = {}
         self._expiry_attempts: dict[ReplyAddress, tuple[str, CommandMenuUpdate]] = {}
+
+    def _notification_target(self, capability_id: str, user_id: int) -> NotificationTarget:
+        with connect_database(self._database_path) as db:
+            # Профиль, доступ и личная привязка читаются из одного снимка.
+            db.execute("BEGIN")
+            user = SQLiteAppUserRepository(db).get_by_id(user_id)
+            if user is None:
+                return NotificationTarget(False)
+            defaults = tuple(CapabilityDefault(d.capability_id, d.enabled_by_default)
+                             for d in self._registry.descriptors())
+            selections = GetUserCapabilitySelections(SQLiteUserCapabilityPreferenceRepository(db), defaults)
+            personal = self._registry.for_user(selections.execute(user_id), app_user_id=user_id, private_chat=True)
+            if personal.by_id(capability_id) is None:
+                return NotificationTarget(False)
+            identities = create_user_identity_service(db)
+            matches = [identity for identity in identities.list_known_private_chats(user)
+                       if identity.channel == user.notification_channel
+                       and is_private_chat_address(identity.channel, identity.external_user_id, identity.external_chat_id)
+                       and identities.owns_known_private_chat(user, identity)]
+            if len(matches) != 1:
+                return NotificationTarget(True)
+            return NotificationTarget(True, ReplyAddress(matches[0].channel, matches[0].external_chat_id))
+
+    def dispatch_notifications(self, channel: str, send: NotificationSend, *, now: datetime | None = None) -> None:
+        """Предлагает подключённым источникам одну отправку через работающий канал.
+
+        Args:
+            channel: ID адаптера, запустившего фоновый цикл.
+            send: Отправка одного готового сообщения с подтверждением API.
+            now: Время проверки сроков; по умолчанию текущее UTC.
+        """
+        for capability_id, source in self._notification_sources:
+            route = partial(self._notification_target, capability_id)
+
+            def deliver(user_id: int, address: ReplyAddress, response: IncomingResponse) -> None:
+                # Адаптер получает сообщение только для всё ещё выбранного и принадлежащего профилю адреса.
+                try:
+                    current = route(user_id)
+                except Exception as error:
+                    # Адаптер ещё не вызван, поэтому повтор безопасен.
+                    raise NotificationRetry(5) from error
+                if address.channel != channel or current != NotificationTarget(True, address):
+                    raise NotificationRetry(1)
+                send(address, response)
+
+            source.dispatch(channel, now or datetime.now(UTC), route, deliver)
 
     def _linked_channels(self, app_user_id: int) -> frozenset[str]:
         with connect_database(self._database_path) as connection:
@@ -749,6 +801,7 @@ def create_channel_message_processor(
                 capabilities += (admin,)
             else:
                 disabled += (AdminCapability.descriptor,)
+            sources = ()
             if FamilyCapability.descriptor.capability_id in enabled_capabilities:
                 def family_member_names(app_user_ids: tuple[int, ...]) -> Mapping[int, str | None]:
                     """Передаёт имена профилей, уже проверенных семейным сценарием."""
@@ -761,12 +814,14 @@ def create_channel_message_processor(
                         }
 
                 capabilities += (create_family_capability(database_path, family_member_names),)
+                sources = (("family", create_shopping_notifications(database_path, family_member_names)),)
             else:
                 disabled += (FamilyCapability.descriptor,)
             processor = ChannelMessageProcessor(
                 database_path=database_path,
                 messenger_dialogs=load_messenger_dialogs() if messenger_dialogs is None else messenger_dialogs,
                 capabilities=capabilities,
+                notification_sources=sources,
                 disabled_capabilities=disabled,
                 profile_access={admin_id: trusted_admin_ids.__contains__} if admin_enabled else None,
             )

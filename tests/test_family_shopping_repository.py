@@ -93,6 +93,38 @@ class SQLiteFamilyShoppingRepositoryTest(unittest.TestCase):
         self.assertEqual(queue.current_items(old), ())
         self.assertEqual([b.recipient_id for b in queue.due_batches(self.now)], [1, 4])
 
+    def test_claim_and_finish_require_current_member_and_respect_retry(self) -> None:
+        """Подборка закрепляется один раз и переживает закрытие соединения после попытки."""
+        self.shopping.add(1, self.home, "Лук", actor_joined_at=_NOW)
+        due = _NOW + timedelta(minutes=2)
+        queue = SQLiteShoppingBatchRepository(self.db)
+        batch, = queue.due_batches(due)
+        self.assertFalse(queue.claim(batch, due, expected_items=()))
+        self.assertFalse(queue.claim(batch, _NOW))
+        self.assertFalse(queue.claim(replace(batch, recipient_id=1), due))
+        self.assertFalse(queue.claim(replace(batch, joined_at=due), due))
+        self.assertTrue(queue.claim(batch, due))
+        with connect_database(self.path) as db:
+            other = SQLiteShoppingBatchRepository(db)
+            self.assertEqual(other.due_batches(due), ())
+            self.assertFalse(other.claim(batch, due))
+            other.finish(replace(batch, family_id=self.other))
+            self.assertTrue(other.current_items(batch))
+            # Тестовая ошибка записи оставляет закреплённую подборку в прежнем состоянии.
+            db.execute("""CREATE TRIGGER reject_retry BEFORE UPDATE OF retry_at ON family_shopping_batches
+                          BEGIN SELECT RAISE(ABORT, 'fixture'); END""")
+            with self.assertRaises(sqlite3.IntegrityError):
+                other.finish(batch, due)
+            self.assertFalse(other.claim(batch, due))
+            db.execute("DROP TRIGGER reject_retry")
+            retry = due + timedelta(seconds=15)
+            other.finish(batch, retry)
+            self.assertEqual(other.due_batches(due), ())
+            self.assertTrue(other.claim(batch, retry))
+            other.finish(batch)
+            self.assertEqual(other.current_items(batch), ())
+            self.assertEqual(other.due_batches(retry), ())
+
     def test_batch_failure_rolls_back_receipt_goods_and_number_allocation(self) -> None:
         """Сбой очереди откатывает всё добавление и разрешает повтор того же сообщения."""
         key = ShoppingAddMessage("vk", "42", "23")
