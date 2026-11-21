@@ -20,7 +20,7 @@ from compadre_assistant.core.presentation.incoming.menu import (
 from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, CancellableAction, ConfirmationAction, BackgroundReply,
     CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
-    HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
+    HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort, NotificationEntryPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
@@ -375,6 +375,28 @@ class IncomingMessageDispatcher:
             actions=(), suggested_actions=(action, _HELP_SCREEN_ACTION) if action else (_HELP_SCREEN_ACTION,),
             bound_actions=(), view=None, view_delivery=None,
         )
+
+    def notification_destination(self, event: IncomingEvent, token: str) -> tuple[str, str, str] | None:
+        """Проверяет личный чат, допуск и адресную ссылку до явного входа по уведомлению.
+
+        Returns:
+            ID возможности, зарегистрированная команда входа и команда её раздела.
+            Устаревшая или чужая ссылка возвращает None.
+        """
+        parts = token.split(".")
+        if len(parts) != 3 or parts[0] != "notice" or not self._profile_link_allowed(event):
+            return None
+        known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+        if known is None or known[1].external_user_id != event.external_user_id:
+            return None
+        user = known[0]
+        capability = self._personal_registry(user, event).by_id(parts[1])
+        if not isinstance(capability, NotificationEntryPort):
+            return None
+        command = capability.notification_destination(user.id, event.reply_address, parts[2])
+        if not command or self._registry.mode_command_owner(command.split()[0]) != capability.descriptor:
+            return None
+        return parts[1], capability.descriptor.entry.name, command
 
     def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
                       completion_handler: ChannelCompletionHandler | None = None,

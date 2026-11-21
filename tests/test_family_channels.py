@@ -125,6 +125,54 @@ class FamilyChannelsTest(unittest.TestCase):
             invitations = ManageInvitations(repository, clock=lambda: actor.joined_at + timedelta(minutes=1))
             invitations.join(guest.id, invitations.issue(owner.id, family.id).code)
 
+    def test_notification_entry_from_settings_and_restarted_processor(self) -> None:
+        """Оба личных канала проверяют исходный адрес и открывают обычную страницу покупок."""
+        from compadre_assistant.capabilities.family.presentation.notifications import shopping_notification
+        from compadre_assistant.capabilities.family.domain.shopping_notifications import ShoppingBatch
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            self._send(processor, self.owner_tg, "/family_shopping")
+            self._send(processor, self.owner_tg, "/add " + "\n".join(f"Товар {i}" for i in range(1, 21)))
+            with connect_database(self.database_path) as connection:
+                user = create_user_identity_service(connection).resolve_without_touch(self.owner_tg)
+                repository = SQLiteFamilyRepository(connection)
+                family = repository.find_for_member(user.id)
+                member = next(m for m in repository.list_members(user.id, family.id) if m.app_user_id == user.id)
+                items = ManageShopping(repository).list_items(user.id, family.id, actor_joined_at=member.joined_at)
+            batch = ShoppingBatch(1, family.id, user.id, member.joined_at)
+            tokens = {}
+            for identity in (self.owner_tg, self.owner_vk):
+                event = self._event(identity, "callback")
+                for count in (1, 5, 6, 20):
+                    notification = shopping_notification(batch, items[:count], {user.id: "Оля"}, event.reply_address)
+                    preview = response_text(notification)
+                    self.assertIn("Оля", preview)
+                    self.assertEqual(preview.count("Товар "), min(count, 5))
+                    self.assertEqual("и ещё" in preview, count > 5)
+                    if count > 5:
+                        self.assertIn(f"и ещё {count - 5}", preview)
+                mixed = shopping_notification(batch, (items[0], replace(items[1], created_by_app_user_id=99,
+                    name="Я" * 150)), {user.id: "Оля", 99: "Илья"}, event.reply_address)
+                self.assertIn("Оля, Илья", response_text(mixed))
+                self.assertIn("Я" * 79 + "…", response_text(mixed))
+                tokens[identity.channel] = notification.bound_actions[0].token
+                self._send(processor, identity, "/settings")
+        with self._runtime("family") as processor:
+            for identity in (self.owner_tg, self.owner_vk):
+                event = self._event(identity, "callback")
+                wrong_channel = "vk" if identity.channel == "telegram" else "telegram"
+                rejected = processor.select_action(event, tokens[wrong_channel])
+                self.assertNotIn("Товар 1", response_text(rejected))
+                opened = processor.select_action(event, tokens[identity.channel])
+                self.assertIn("1/2", response_text(opened))
+                self.assertIn("10. Товар 10", response_text(opened))
+                self.assertIn("/add", response_text(self._send(processor, identity, "/help")))
+                page = self._send(processor, identity, "/family_shopping page 2")
+                self.assertIn("20. Товар 20", response_text(page))
+            rejected = processor.select_action(self._event(self.guest, "callback"), tokens["vk"])
+            self.assertNotIn("Товар 1", response_text(rejected))
+
     def test_shopping_section_is_scoped_to_tab_chat_and_revision(self) -> None:
         """Покупки открываются участнику и меняют каталог только одного чата."""
         with self._runtime("family") as processor:

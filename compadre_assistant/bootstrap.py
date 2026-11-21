@@ -628,6 +628,17 @@ class ChannelMessageProcessor:
             menu_handler = menu_updates.append if menu_update_handler is not None else None
             if token is None:
                 response = dispatcher.execute(incoming_message, completion, menu_handler)
+            elif token.startswith("notice.") and original_context is not None and (
+                    destination := dispatcher.notification_destination(incoming_message, token)) is not None:
+                capability_id, entry_command, section_command = destination
+                # Переход вызывает те же вход и команду раздела, что и ручная навигация.
+                response = dispatcher.execute(replace(incoming_message, text=entry_command), completion, menu_handler)
+                entered = dispatcher.action_context(incoming_message)
+                if (response.error is None and entered.app_user_id == original_context.app_user_id
+                        and entered.mode_id == capability_id
+                        and entered.mode_revision == original_context.mode_revision + 1):
+                    original_context = entered
+                    response = dispatcher.execute(replace(incoming_message, text=section_command), completion, menu_handler)
             else:
                 response = dispatcher.select_action(
                     incoming_message, token, action_store, completion, menu_handler,

@@ -308,6 +308,15 @@ class HandlerContext:
 
 
 @runtime_checkable
+class NotificationEntryPort(Protocol):
+    """Разрешает адресную кнопку фонового уведомления в команду раздела."""
+
+    def notification_destination(self, app_user_id: int, address: ReplyAddress, reference: str) -> str | None:
+        """Возвращает команду своего режима после проверки получателя и ссылки."""
+        ...
+
+
+@runtime_checkable
 class SectionActionsQueryPort(Protocol):
     """Читает действия раздела из того же описания, что использует его экран."""
 
