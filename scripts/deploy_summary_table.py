@@ -109,6 +109,33 @@ def _table(document: str) -> tuple[str, str, str]:
     return prefix + START, table, END + suffix
 
 
+def link_deployment_status(document: str, repository: str, attempt: str, pending: str) -> str:
+    """Связывает результат обработанной установки с журналом статусов её Deployment."""
+    prefix, table, suffix = _table(document)
+    lines = table.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        match = re.search(r"\| (Успех|Возврат подтверждён) <!-- deployment:([1-9][0-9]{0,19}) -->", line)
+        if not match:
+            continue
+        title, deployment = match.groups()
+        url = f"https://api.github.com/repos/{repository}/deployments/{deployment}/statuses"
+        link = f"[{title}]({url})"
+        if f"]({_url(repository, attempt)})" in line or link in pending:
+            lines[i] = line[:match.start(1)] + link + line[match.end(1):]
+    return prefix + "".join(lines) + suffix
+
+
+def verify_table_change(before: str, after: str) -> None:
+    """Проверяет, что PR изменил только строки выпусков между служебными метками."""
+    prefix, table, suffix = _table(before)
+    updated_prefix, updated_table, updated_suffix = _table(after)
+    updated_rows = updated_table.strip("\n").splitlines()
+    if (prefix != updated_prefix or suffix != updated_suffix or table == updated_table
+            or table.strip("\n").splitlines()[:2] != updated_rows[:2]
+            or not all(line.startswith("| ") and line.endswith(" |") for line in updated_rows[2:])):
+        raise ValueError("PR сводки должен менять только строки таблицы")
+
+
 def update_table(document: str, repository: str, incoming: AttemptSummary) -> str:
     """Сводит попытки одного Deployment и сохраняет подтверждённые исторические строки."""
     if incoming.source != incoming.attempt and (incoming.scenario != "resume" or not incoming.deployment):

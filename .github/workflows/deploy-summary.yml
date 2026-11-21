@@ -2,8 +2,8 @@ name: Update deployment summary
 
 on:
   workflow_run:
-    workflows: [Production release]
-    branches: [main]
+    workflows: [Production release, pr-check]
+    branches: [main, codex/deploy-metrics]
     types: [completed]
   workflow_dispatch:
     inputs:
@@ -20,9 +20,41 @@ permissions: {}
 
 jobs:
   summary:
-    if: github.repository == 'karateka-git/compadre-assistant' && github.ref == 'refs/heads/main'
+    if: >-
+      github.repository == 'karateka-git/compadre-assistant' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.path == '.github/workflows/production-release.yml' &&
+        github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment:
+      name: production-release
+      deployment: false
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          token: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+      - name: Update deployment summary PR
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SUMMARY_PR_TOKEN: ${{ secrets.PRODUCTION_RELEASE_TOKEN }}
+          RELEASE_RUN: ${{ inputs.run_id || github.event.workflow_run.id }}
+          RELEASE_ATTEMPT: ${{ inputs.run_attempt || github.event.workflow_run.run_attempt }}
+        run: python3 -m scripts.update_deploy_summary
+
+  merge:
+    if: >-
+      github.repository == 'karateka-git/compadre-assistant' && github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_run' && github.event.workflow_run.path == '.github/workflows/pr-fast.yml' &&
+      github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_branch == 'codex/deploy-metrics' &&
+      github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       actions: read
       contents: write
@@ -31,10 +63,10 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
-      - name: Update deployment summary PR
+          persist-credentials: false
+      - name: Merge checked summary PR
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RELEASE_RUN: ${{ inputs.run_id || github.event.workflow_run.id }}
-          RELEASE_ATTEMPT: ${{ inputs.run_attempt || github.event.workflow_run.run_attempt }}
-        run: python3 -m scripts.update_deploy_summary
+          CHECK_RUN: ${{ github.event.workflow_run.id }}
+          CHECK_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: python3 -m scripts.update_deploy_summary --merge

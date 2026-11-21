@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import asdict
 from hashlib import sha256
 from io import BytesIO
@@ -9,12 +10,15 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+from urllib.error import HTTPError
+from urllib.request import Request
 from zipfile import ZipFile
 
-from scripts.deploy_summary import ATTEMPT, AttemptSummary
-from scripts.deploy_summary_table import attempts, update_table, validated
-from scripts.full_ci_controller import HttpLocation, collect_http_metrics
+from scripts.deploy_summary import ATTEMPT, SHA, AttemptSummary
+from scripts.deploy_summary_table import attempts, link_deployment_status, update_table, validated, verify_table_change
+from scripts.full_ci_controller import HttpLocation, collect_http_metrics, open_http
 from scripts.github_publishing import PublishingError, PublishingGitHub
 from scripts.predeploy_compatibility import EvidenceAPI
 
@@ -23,6 +27,7 @@ WORKFLOW = ".github/workflows/production-release.yml"
 DOCUMENT = "docs/DEPLOY_METRICS.md"
 BRANCH = "codex/deploy-metrics"
 REPOSITORY = "karateka-git/compadre-assistant"
+CHECK_WORKFLOW = ".github/workflows/pr-fast.yml"
 
 
 def release_attempt(api: PublishingGitHub, key: str) -> AttemptSummary:
@@ -80,14 +85,15 @@ def _commit(main: str, parents: list[str], document: str) -> str:
                 "commit-tree", tree, *parent_args, "-m", "Обновить сводку выкладок").strip()
 
 
-def update_branch(repository: str, row: AttemptSummary) -> bool:
-    """Объединяет конкурирующие отчёты, возвращает необходимость открытого PR."""
+def update_branch(repository: str, row: AttemptSummary) -> str | None:
+    """Возвращает точный SHA проверенной ветки сводки, если нужен PR."""
     ref = "refs/heads/" + BRANCH
     for _ in range(8):
         _git("fetch", "--quiet", "--no-tags", "origin", "refs/heads/main")
         main = _git("rev-parse", "FETCH_HEAD").strip()
         main_doc = _git("show", f"{main}:{DOCUMENT}")
         document = main_doc
+        pending = ""
         head = None
         parents = [main]
         if _git("ls-remote", "--heads", "origin", ref).strip():
@@ -111,31 +117,118 @@ def update_branch(repository: str, row: AttemptSummary) -> bool:
                     if baseline.get(saved.attempt) != saved:
                         document = update_table(document, repository, saved)
         document = update_table(document, repository, row)
+        document = link_deployment_status(document, repository, row.attempt, pending)
         if document == main_doc:
-            return False
+            return None
         if head and base == main and document == pending:
-            return True
+            return head
         commit = _commit(main, parents, document)
         try:
             # Lease также защищает случай, когда ветку успели слить и удалить.
             _git("push", "--quiet", f"--force-with-lease={ref}:{head or ''}", "origin", f"{commit}:{ref}")
         except subprocess.CalledProcessError:
             continue
-        return True
+        return commit
     raise RuntimeError("Не удалось записать сводку после повторного чтения ветки")
 
 
-def ensure_pr(api: PublishingGitHub) -> None:
-    """Открывает один PR сводки и распознаёт его одновременное создание."""
+def ensure_pr(api: PublishingGitHub) -> dict:
+    """Открывает один PR от имени писателя и возвращает подтверждённые реквизиты."""
     query = dict(base="main", head=f"{api.repository.split('/')[0]}:{BRANCH}", state="open")
-    if api.get("/pulls", **query):
-        return
+    existing = api.get("/pulls", **query)
+    if existing:
+        return existing[0]
     try:
-        api.post("/pulls", {"head": BRANCH, "base": "main", "title": "Обновить сводку выкладок",
-                            "body": "Автоматическая сводка завершённых попыток Production release."})
-    except PublishingError:
-        if not api.get("/pulls", **query):
+        return api.post("/pulls", {"head": BRANCH, "base": "main", "title": "Обновить сводку выкладок",
+                                   "body": "Автоматическая сводка завершённых попыток Production release."})
+    except PublishingError as error:
+        existing = api.get("/pulls", **query)
+        if not existing:
+            if isinstance(error.__cause__, HTTPError) and error.__cause__.code == 403:
+                raise PublishingError("GitHub отказал в создании PR (HTTP 403). Проверьте право "
+                                      "Pull requests: write у PRODUCTION_RELEASE_TOKEN для этого репозитория") from error
             raise
+        return existing[0]
+
+
+def _document_at(api: PublishingGitHub, sha: str) -> str:
+    obj = api.get(f"/contents/{DOCUMENT}", ref=sha)
+    if obj["path"] != DOCUMENT or obj["type"] != "file" or obj["encoding"] != "base64":
+        raise ValueError("GitHub не подтвердил содержимое документа")
+    return base64.b64decode(obj["content"]).decode("utf-8")
+
+
+def _successful_check(api: PublishingGitHub, key: str) -> dict:
+    if not ATTEMPT.fullmatch(key):
+        raise ValueError("Некорректный номер попытки проверки PR")
+    run_id, attempt = map(int, key.split(":"))
+    path = f"/actions/runs/{run_id}/attempts/{attempt}"
+    run = api.get(path)
+    workflow = api.get("/actions/workflows/pr-fast.yml")
+    head = run["head_sha"]
+    if (run["id"] != run_id or run["run_attempt"] != attempt or not SHA.fullmatch(head)
+            or run["workflow_id"] != workflow["id"] or run["path"] != CHECK_WORKFLOW or workflow["path"] != CHECK_WORKFLOW
+            or run["event"] != "pull_request" or run["head_branch"] != BRANCH or run["status"] != "completed"
+            or run["conclusion"] != "success"
+            or any(run[field]["full_name"] != api.repository for field in ("repository", "head_repository"))):
+        raise ValueError("Не подтверждена проверка PR сводки")
+    jobs = api.pages(path + "/jobs", "jobs")
+    required = [j for j in jobs if j["name"] == "pr-check"]
+    release_only = [j for j in jobs if j["name"] == "pr-merge-main-check"]
+    if (len(required) != 1 or required[0]["head_sha"] != head or required[0]["conclusion"] != "success"
+            or len(release_only) != 1 or release_only[0]["conclusion"] != "skipped"):
+        raise ValueError("Обязательный pr-check не подтвердил SHA сводки")
+    return run
+
+
+def merge_checked_pr(api: PublishingGitHub, key: str) -> None:
+    """Сливает точный SHA сводки после успешного обычного pr-check.
+
+    Args:
+        api: Клиент со штатным GITHUB_TOKEN без обхода правил main.
+        key: ID запуска и номер попытки из события завершения проверки.
+    """
+    run = _successful_check(api, key)
+    head = run["head_sha"]
+    pulls = api.get("/pulls", state="open", base="main", head=f"{api.repository.split('/')[0]}:{BRANCH}")
+    if not pulls:
+        print("Открытого PR сводки уже нет")
+        return
+    if len(pulls) != 1:
+        raise ValueError("Неоднозначный PR сводки")
+    pr = pulls[0]
+    if (pr["state"] != "open" or pr["head"]["ref"] != BRANCH or pr["base"]["ref"] != "main"
+            or any(pr[side]["repo"]["full_name"] != api.repository for side in ("base", "head"))):
+        raise ValueError("Посторонняя ветка PR")
+    if pr["head"]["sha"] != head:
+        print("Ветка сводки обновилась и ожидает проверки нового SHA")
+        return
+    if run.get("pull_requests") and not any(link["number"] == pr["number"] and link["base"]["ref"] == "main"
+                                            for link in run["pull_requests"]):
+        raise ValueError("Попытка pr-check связана с другим PR")
+    pr_path = f"/pulls/{int(pr['number'])}"
+    files = api.pages(pr_path + "/files")
+    if len(files) != 1 or files[0]["filename"] != DOCUMENT or files[0]["status"] != "modified":
+        raise ValueError("В PR есть изменения вне сводки")
+    verify_table_change(_document_at(api, pr["base"]["sha"]), _document_at(api, head))
+    # GitHub атомарно проверяет этот SHA и правила защищённой ветки при слиянии.
+    request = Request(api.root + pr_path + "/merge", method="PUT",
+                      data=json.dumps({"merge_method": "merge", "sha": head}).encode(), headers={
+                          "Authorization": f"Bearer {api.token}", "Accept": "application/vnd.github+json",
+                          "Content-Type": "application/json"})
+    try:
+        with open_http(request, timeout=20) as response:
+            merged = json.load(response)
+    except HTTPError as error:
+        if error.code in (405, 409):
+            current = api.get(pr_path)
+            if current.get("merged") or current["head"]["sha"] != head:
+                print("PR уже слит или ожидает проверки обновлённого SHA")
+                return
+        raise
+    if merged.get("merged") is not True or not SHA.fullmatch(merged.get("sha", "")):
+        raise ValueError("GitHub не подтвердил слияние сводки")
+    print(f"PR #{pr['number']} со сводкой слит, merge SHA {merged['sha']}")
 
 
 def main() -> None:
@@ -143,12 +236,19 @@ def main() -> None:
     if os.environ["GITHUB_REPOSITORY"] != REPOSITORY or os.environ["GITHUB_REF"] != "refs/heads/main":
         raise ValueError("Требуется защищённая main репозитория проекта")
     api = PublishingGitHub(REPOSITORY, os.environ["GITHUB_TOKEN"])
-    key = os.environ["RELEASE_RUN"] + ":" + os.environ["RELEASE_ATTEMPT"]
     with collect_http_metrics(HttpLocation.CI) as traffic:
         try:
-            if update_branch(api.repository, release_attempt(api, key)):
-                ensure_pr(api)
-                print("Сводка подготовлена в PR")
+            if sys.argv[1:] == ["--merge"]:
+                merge_checked_pr(api, os.environ["CHECK_RUN"] + ":" + os.environ["CHECK_ATTEMPT"])
+                return
+            if sys.argv[1:]:
+                raise ValueError("Неизвестный режим обновления сводки")
+            key = os.environ["RELEASE_RUN"] + ":" + os.environ["RELEASE_ATTEMPT"]
+            head = update_branch(api.repository, release_attempt(api, key))
+            if head:
+                writer = PublishingGitHub(REPOSITORY, os.environ["SUMMARY_PR_TOKEN"])
+                pr = ensure_pr(writer)
+                print(f"PR #{pr['number']} со сводкой ожидает штатный pr-check")
             else:
                 print("Попытка уже учтена в main")
         finally:
