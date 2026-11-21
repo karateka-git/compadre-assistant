@@ -15,7 +15,8 @@ import time
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
-from scripts.full_ci_controller import HttpLocation, HttpPhase, collect_http_metrics
+from scripts.deploy_summary import TIMING_PREFIX
+from scripts.full_ci_controller import HttpLocation, HttpMetrics, HttpPhase, collect_http_metrics
 
 
 # Это интервал предупреждения, а не deadline системной операции.
@@ -61,7 +62,7 @@ def _emit_http(report: dict) -> None:
 
 
 @contextmanager
-def github_http_report(location: HttpLocation, operation: HttpOperation) -> Iterator[None]:
+def github_http_report(location: HttpLocation, operation: HttpOperation) -> Iterator[HttpMetrics]:
     """Пишет агрегаты процесса в stderr при штатном выходе и исключении.
 
     Args:
@@ -69,12 +70,12 @@ def github_http_report(location: HttpLocation, operation: HttpOperation) -> Iter
         operation: Каноническое имя команды без пользовательских значений.
 
     Yields:
-        Управление команде с активным замером HTTP.
+        Счётчик запросов текущей команды.
     """
     with collect_http_metrics(location) as metrics:
         result = "failure"
         try:
-            yield
+            yield metrics
             result = "success"
         finally:
             _emit_http({"schema_version": 1, "location": location.value, "operation": operation.value,
@@ -91,12 +92,15 @@ def _valid_http_row(row: object) -> bool:
             and row["attempts"] >= max(1, row["pages"], row["errors"]))
 
 
-def relay_vps_http_report(stderr: str | bytes | None, operation: HttpOperation) -> None:
+def relay_vps_http_report(stderr: str | bytes | None, operation: HttpOperation) -> dict | None:
     """Выводит подтверждённый агрегат из stderr одной завершившейся SSH-команды.
 
     Args:
         stderr: Захваченный stderr, в том числе частичный при таймауте.
         operation: Ожидаемая команда, запущенная runner.
+
+    Returns:
+        Проверенные агрегаты или None, если полный отчёт отсутствует.
     """
     if isinstance(stderr, bytes):
         stderr = stderr.decode("utf-8", errors="replace")
@@ -114,7 +118,8 @@ def relay_vps_http_report(stderr: str | bytes | None, operation: HttpOperation) 
                 and report["result"] in ("success", "failure") and isinstance(report["http"], list)
                 and all(_valid_http_row(row) for row in report["http"])):
             _emit_http(report)
-            return
+            return report
+    return None
 
 
 class Report:
@@ -168,6 +173,15 @@ def tracked(function: Callable) -> Callable:
         finally:
             report.value["ended_at"] = _utc()
             report.save()
+            if (report.value["operation"] == "deploy" and not report.value["downtime_open"]
+                    and report.value.get("sha")):
+                timing = {"sha": report.value["sha"], "version": report.value.get("version"),
+                          "started_at": report.value["started_at"],
+                          "downtime_ms": round(report.value["downtime_seconds"] * 1000)}
+                try:
+                    print(TIMING_PREFIX + json.dumps(timing), file=sys.stderr, flush=True)
+                except (ValueError, OSError):
+                    pass
             _current.reset(token)
     return wrapped
 

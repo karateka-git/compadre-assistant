@@ -7,6 +7,52 @@
 [Локальные замеры PATCH](#воспроизвести-замеры-patch) ·
 [Первый выпуск с Deployment v2](#измерить-первый-production-выпуск-с-deployment-v2)
 
+## Сводка по выпускам
+
+Одна строка соответствует одной выкладке. Версия открывает журнал запуска, ссылка `resume` — продолжение той же попытки. Установка считается от её начала до подтверждения результата, простой — по отчёту контроллера. Колонка API охватывает весь выпуск на runner и VPS, включая публикацию. Длительности даны в секундах. «Нет данных» означает, что полный показатель из источников установить не удалось.
+
+<!-- deploy-summary:start -->
+| Дата UTC | Версия и журнал | Сценарий | Установка, с | Простой, с | GitHub API | Результат |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| 2026-11-12 | [v3.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43204104011/attempts/1) | MINOR | нет данных | нет данных | нет данных | Результат не подтверждён <!-- run:43204104011:1 --> |
+| 2026-11-12 | [v3.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43204986522/attempts/1) | MINOR | нет данных | нет данных | нет данных | Результат не подтверждён <!-- run:43204986522:1 --> |
+| 2026-11-12 | [v3.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43213872069/attempts/1) | MINOR | 163,1 | нет данных | нет данных | Успех <!-- deployment:7736620585 --> |
+| 2026-11-14 | [v4.0.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43586845886/attempts/1) | MAJOR | 292,4 | нет данных | нет данных | Успех <!-- deployment:7786489171 --> |
+| 2026-11-14 | [v4.0.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43593886142/attempts/1) | PATCH | нет данных | нет данных | нет данных | Результат не подтверждён <!-- run:43593886142:1 --> |
+| 2026-11-14 | [v4.0.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43594411914/attempts/1) | PATCH | 186,4 | нет данных | нет данных | Успех <!-- deployment:7787504840 --> |
+| 2026-11-15 | [v4.0.2](https://github.com/karateka-git/compadre-assistant/actions/runs/43701263900/attempts/1) | PATCH | нет данных | нет данных | нет данных | Результат не подтверждён <!-- run:43701263900:1 --> |
+| 2026-11-15 | [v4.0.2](https://github.com/karateka-git/compadre-assistant/actions/runs/43701595685/attempts/1) | PATCH | 187,233 | нет данных | нет данных | Успех <!-- deployment:7801754211 --> |
+| 2026-11-15 | [v4.0.3](https://github.com/karateka-git/compadre-assistant/actions/runs/43704989348/attempts/1) | PATCH | 167,379 | нет данных | нет данных | Успех <!-- deployment:7802203831 --> |
+| 2026-11-15 | [v4.0.4](https://github.com/karateka-git/compadre-assistant/actions/runs/43709295689/attempts/1) | PATCH | 165,263 | нет данных | нет данных | Успех <!-- deployment:7802813380 --> |
+| 2026-11-15 | [v4.0.5](https://github.com/karateka-git/compadre-assistant/actions/runs/43710509526/attempts/1) | PATCH | 174,602 | нет данных | нет данных | Успех <!-- deployment:7802972672 --> |
+| 2026-11-15 | [v4.0.6](https://github.com/karateka-git/compadre-assistant/actions/runs/43714816325/attempts/1) | PATCH | 173,654 | нет данных | нет данных | Успех <!-- deployment:7803565338 --> |
+| 2026-11-16 | [v4.1.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43818497730/attempts/1) | MINOR | 205,099 | нет данных | нет данных | Успех <!-- deployment:7817397631 --> |
+| 2026-11-16 | [v4.1.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43877284834/attempts/1) | PATCH | 198,553 | 79,235 | нет данных | Успех <!-- deployment:7825559095 --> |
+| 2026-11-16 | [v4.2.0](https://github.com/karateka-git/compadre-assistant/actions/runs/43886394404/attempts/1) | MINOR | 195,405 | 79,407 | нет данных | Успех <!-- deployment:7826887651 --> |
+| 2026-11-16 | [v4.2.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43931387409/attempts/1) | PATCH | нет данных | нет данных | нет данных | Результат не подтверждён <!-- run:43931387409:1 --> |
+| 2026-11-16 | [v4.2.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43932077777/attempts/1) | PATCH | 188,944 | 71,812 | нет данных | Успех <!-- deployment:7833239413 --> |
+| 2026-11-17 | [v4.2.2](https://github.com/karateka-git/compadre-assistant/actions/runs/44040876729/attempts/1) | PATCH | 184,384 | 74,759 | нет данных | Успех <!-- deployment:7847267599 --> |
+| 2026-11-17 | [v4.2.3](https://github.com/karateka-git/compadre-assistant/actions/runs/44049484978/attempts/1) | PATCH | 185,628 | 75,454 | нет данных | Успех <!-- deployment:7848444081 --> |
+| 2026-11-17 | [v4.2.4](https://github.com/karateka-git/compadre-assistant/actions/runs/44070943979/attempts/1) | PATCH | 185,523 | 73,133 | нет данных | Успех <!-- deployment:7851484607 --> |
+| 2026-11-19 | [v4.2.5](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/attempts/1) | Первый Deployment v2 | 227,01 | 80,744 | 507 | Успех <!-- deployment:7918397506 --> |
+| 2026-11-19 | [v4.3.0](https://github.com/karateka-git/compadre-assistant/actions/runs/44571054172/attempts/1) | MINOR | нет данных | нет данных | 321 | Успех <!-- deployment:7919837817 --> |
+| 2026-11-19 | [v4.3.1](https://github.com/karateka-git/compadre-assistant/actions/runs/44576728858/attempts/1) · [resume](https://github.com/karateka-git/compadre-assistant/actions/runs/44577857314/attempts/1) | PATCH, восстановление | нет данных | нет данных | нет данных | Успех <!-- deployment:7920630977 --> |
+| 2026-11-21 | [v4.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/44895005552/attempts/1) | MINOR | нет данных | нет данных | 321 | Успех <!-- deployment:7962159412 --> |
+| 2026-11-21 | [v4.4.1](https://github.com/karateka-git/compadre-assistant/actions/runs/44907760823/attempts/1) | PATCH | 167,716 | 77,046 | 18 | Успех <!-- deployment:7963840757 --> |
+<!-- deploy-summary:end -->
+
+Исторические строки сверены с журналами Actions и [снимками VPS](PRODUCTION.md). У `v4.2.2` началом служит отметка контроллера, поскольку runner вывел сообщение об установке с задержкой. До `v4.2.5` в журналах отсутствовал счётчик HTTP. Для `v4.3.1` в двух запусках видны 303 и 92 обращения, полноту отчётов при обрыве связи за первую попытку подтвердить нельзя. Отказы с отдельным номером запуска до подтверждения Deployment приведены отдельными строками.
+
+## Обновить сводку после выпуска
+
+После каждого завершённого `Production release` из `main` запускается `Update deployment summary`. Он читает артефакт конкретной попытки и создаёт либо обновляет общий PR из `codex/deploy-metrics` в `main`. Установка и боты к этому моменту уже завершили свою часть работы. Расход HTTP самой записи документа показан отдельно в строке `documentation-http-metrics` журнала этого workflow.
+
+1. Откройте PR «Обновить сводку выкладок». Если GitHub показывает кнопку **Approve workflows to run**, участник с правом записи разрешает запуск обычных проверок PR. Когда они пройдут, сверьте строку и слейте PR. [Правила GitHub для PR, созданных автоматизацией](https://docs.github.com/en/actions/concepts/security/github_token)
+2. При ошибке записи откройте **Actions → Update deployment summary → Run workflow**. Выберите `main` и укажите `run_id` и `run_attempt` исходной выкладки. Например, для уже учтённой `v4.4.1` это `44907760823` и `1`. Повтор обрабатывает только документ. Ранее подтверждённая историческая строка сохраняется и после истечения срока хранения артефакта.
+3. При восстановлении по `resume` проверьте ссылки на обе попытки в одной строке. Расход складывается для разных попыток при наличии полного отчёта каждой. При отсутствии артефакта у нового запуска таблица показывает ссылку, неизвестные показатели и неподтверждённый результат. Идентификаторы в HTML-комментариях нужны для повторной обработки.
+
+Для автоматического заполнения простоя нужен контроллер с меткой `deploy-install-timing`. На прежнем snapshot runner сохранит остальные доступные показатели. Обновляйте контроллер по отдельной процедуре с проверкой содержимого архива и изолированного импорта. [Обновить controller snapshot](OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot)
+
 ## Что сравниваем
 
 | Показатель | Как считать |
@@ -34,7 +80,7 @@
 которые заканчиваются тем же событием. Выкладки с восстановлением
 помечаем отдельно, чтобы сравнивать однотипные сценарии.
 
-## Сводка по выпускам
+## Исторические замеры времени и токенов
 
 Точка отсчёта для автоматической выкладки — v3.4.0. Изменение считаем
 относительно предыдущей сопоставимой выкладки. В первой строке ставим
@@ -46,6 +92,7 @@
 | v4.0.0 | `119e36d2bdde0162b970c81cdc980d61dec0cc9c` | 4 мин 52,4 с | +129,2 с (+79,2 %) | `unknown` | — | `state=success`, `cleanup=completed` |
 | v4.0.1 | `f2da286c02efed55c2174e30aee2a1ad2af05e40` | 3 мин 6,4 с | −105,9 с (−36,2 %) | `unknown` | — | `state=success`, `cleanup=completed` |
 | v4.2.5 | `7aa730cd24ad71997a4097e43c47e68261522d15` | 3 мин 47,010 с | — | `unknown` | — | `state=success`, `cleanup=completed` |
+| v4.4.1 | `b9b78efab3f81f4ba40b835e4c988f4975ebd47c` | 2 мин 47,716 с | — | `unknown` | — | `state=success`, `cleanup=completed` |
 
 12 ноября 2026 года GitHub Actions запустил установку в 11:59:44.547 UTC
 и подтвердил Deployment в 12:02:27.665 UTC. Deployment `7736620585` получил
@@ -99,6 +146,10 @@
 [Журнал выкладки v4.0.1](https://github.com/karateka-git/compadre-assistant/actions/runs/43594411914/job/132445758508)
 
 ## Как снять замер
+
+При каждом новом запуске runner сохраняет файл `deployment-summary.json` в артефакте `deployment-summary-<run_id>-<run_attempt>`. В нём только реквизиты попытки, версия и SHA, сценарий, время UTC, ID Deployment, технический простой, совокупный расход API и результат. Начало установки берётся из отчёта контроллера либо, для старого snapshot, по времени отправки команды установки runner. Неполный SSH-отчёт даёт неизвестный совокупный расход. При обрыве до финального отчёта остаются уже сохранённые реквизиты. Если процесс остановился до формирования файла, источником остаётся журнал Actions.
+
+Runner отмечает успешную выкладку после подтверждения `success`, очистки и закрытия попытки v2. Исходный запуск и `resume` связаны ключом первой попытки. Артефакт отправляет отдельный шаг после завершения операции; сбой отправки виден в журнале. Передачу артефакта и обновление документации учитывают отдельно от установки.
 
 1. Перед установкой запишите время UTC, версию и полный SHA опубликованного
    Release. В журнале v1 отметкой начала служило сообщение «Установка
@@ -332,6 +383,25 @@ Release уже опубликован либо кандидат отвергну
 терминальный `failure` содержит прямую ссылку на принятую базу.
 [Продолжение попытки](OPERATIONS.md#возобновить-попытку-deployment-v2)
 
+## Проверить живой подписанный PATCH v4.4.1
+
+21 ноября 2026 года штатный PATCH поверх принятой `v4.4.0` завершился за **18 обращений к GitHub API**. Предыдущая попытка была в формате v2 без подписанного допуска, поэтому в замер вошла первая сверка базы на VPS. Runner публиковал новый Release. Повторных попыток не было. [Журнал Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/44907760823/attempts/1)
+
+| Место и операция | REST GET | GraphQL | Записи | Всего API | Страниц в этих запросах | Ошибок | GET ZIP вне API |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Runner, получение допуска | 3 | 0 | 0 | 3 | 1 | 0 | 1 |
+| Runner, поиск и публикация Release | 0 | 1 | 3 | 4 | 0 | 0 | 0 |
+| Runner, Deployment и его статусы | 1 | 0 | 3 | 4 | 1 | 0 | 0 |
+| VPS, резервирование и сверка базы | 6 | 1 | 0 | 7 | 2 | 0 | 0 |
+| VPS, следующие шесть команд попытки | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **Выпуск** | **10** | **2** | **6** | **18** | **4** | **0** | **1** |
+
+Источник — семь отчётов VPS и один отчёт runner `deploy-http-metrics`. В журнале checkout виден `git fetch` точного SHA; setup-python выбрал CPython 3.12.16 из `/opt/hostedtoolcache`. Журнал не показывает REST fallback или поиск Python по API. Счётчик проекта охватывает HTTP его клиентов. Внутренний трафик платформы Actions не имеет отдельной транспортной трассы в production. На стенде независимый транспорт подтвердил тот же итог. [Стенд и его ограничения](#проверить-бюджет-подписанного-patch-на-стенде)
+
+Перед выпуском отдельный подписант выполнил **43 обращения к API** (42 REST GET, один GraphQL, в том числе пять страниц, без ошибок) и скачал один ZIP из хранилища. Это расход шага проверки и подписи. Общий транспорт всех jobs предшествующего CI отдельно не измерялся. [CI кандидата](https://github.com/karateka-git/compadre-assistant/actions/runs/44907237922/attempts/1) · [Журнал подписанта](https://github.com/karateka-git/compadre-assistant/actions/runs/44907675261/attempts/1)
+
+Время установки — **167,716 с** от начала `deploy` на VPS в 13:13:55.558998 UTC до итоговой строки runner в 13:16:43.274790 UTC. Контроллер измерил 141,851 с работы и **77,046 с простоя**. Весь workflow занял 216 с, job — 211 с, шаг выпуска — 199 с. Текущий статус Deployment `7963840757` — `success` (`22798648504`), журнал VPS закрыт, результат очистки `completed`. Сравнение времени с предыдущим выпуском требует замера с теми же границами. [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7963840757/statuses)
+
 ## Измерить первый production-выпуск с Deployment v2
 
 19.11.2026 workflow `44560296240/1` выпустил `v4.2.5` поверх 16
@@ -339,7 +409,7 @@ Deployment v1. Журнал job `release` сохранил один отчёт r
 успешных отчётов SSH от VPS. Чтения GitHub — сумма REST GET и GraphQL,
 время HTTP — сумма длительностей запросов, включая переход в хранилище.
 [Журнал job](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/job/135687411891) ·
-[Снимок VPS](PRODUCTION.md#последний-проверенный-снимок-19112026-1607-utc)
+[Снимок VPS](PRODUCTION.md#снимок-19112026-1607-utc)
 
 | Место | REST GET | GraphQL | Чтения GitHub | REST POST | Страницы | Ошибки | ZIP GET | HTTP, с |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

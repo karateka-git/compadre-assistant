@@ -13,6 +13,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 
 from scripts import deploy_metrics as metrics
+from scripts.deploy_summary import AttemptSummary
 from scripts import publish_deployment_acceptance as deployments
 from scripts import publish_release as releases
 from scripts import publish_signed_patch as signed_patch
@@ -110,7 +111,7 @@ def _v2_route(resume):
     return key, owner, snapshot
 
 
-def _run_attempt(api, selected, route, resume, remote, *, signed=None):
+def _run_attempt(api, selected, route, resume, remote, *, signed=None, summary):
     """Завершает одну установку по исходному ключу и перечитывает её итог."""
     key, owner, snapshot = route
     deployment_id = 0
@@ -162,6 +163,8 @@ def _run_attempt(api, selected, route, resume, remote, *, signed=None):
         else:
             deployment_id = records._positive(bound, "D18")
             record, _ = writer.current_attempt(api, attempt, deployment_id)
+        summary.deployment = deployment_id
+        summary.save()
         if record.state is records.DeploymentState.MISSING:
             if signed is None:
                 record = writer.write_status(api, attempt, deployment_id, records.DeploymentState.IN_PROGRESS, claim_status)
@@ -194,13 +197,16 @@ def _run_attempt(api, selected, route, resume, remote, *, signed=None):
     if call("close") != result:
         raise ProductionReleaseError("Закрытие попытки не подтверждено для проверенного runtime")
     if record.state is records.DeploymentState.FAILURE:
+        summary.outcome = "restored"
         raise ProductionReleaseError(f"Deployment {deployment_id} завершён возвратом на {attempt.baseline.version}")
     return record
 
 
 def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str | None, notes: str | None,
-                 ssh_host: str, known_hosts: Path, identity: Path | None) -> DeploymentRecord:
+                 ssh_host: str, known_hosts: Path, identity: Path | None,
+                 summary: AttemptSummary | None = None) -> DeploymentRecord:
     """Проводит выпуск через GitHub и контроллер с повторными сверками VPS."""
+    summary = summary or AttemptSummary.start(version, sha, change or "resume")
     releases._version(version)
     deployments._require_deployment_version(version)
     if not SHA_PATTERN.fullmatch(sha):
@@ -232,6 +238,11 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
     def remote(operation: metrics.HttpOperation, *arguments: str, timeout: int,
                input_text: str | None = None) -> subprocess.CompletedProcess[str]:
         """Сохраняет агрегат SSH-процесса, включая завершение с ошибкой."""
+        install = operation == metrics.HttpOperation.INSTALL or (
+            operation == metrics.HttpOperation.ATTEMPT and arguments[1] == "install")
+        if install:
+            summary.installation()
+        report = None
         try:
             result = run_vps_command((*_CONTROLLER, version, *arguments), ssh_host=ssh_host,
                                      known_hosts=known_hosts, identity=identity, capture_output=True,
@@ -239,13 +250,22 @@ def _run_release(api: PublishingGitHub, version: str, sha: str, *, change: str |
         except InstallationTagError as error:
             cause = error.__cause__
             if isinstance(cause, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
-                metrics.relay_vps_http_report(cause.stderr, operation)
+                relayed = metrics.relay_vps_http_report(cause.stderr, operation)
+                if isinstance(cause, subprocess.CalledProcessError):
+                    report = relayed
+                    if install:
+                        summary.timing(cause.stderr)
             raise
-        metrics.relay_vps_http_report(result.stderr, operation)
-        return result
+        else:
+            report = metrics.relay_vps_http_report(result.stderr, operation)
+            if install:
+                summary.timing(result.stderr)
+            return result
+        finally:
+            summary.observe_ssh(report)
 
     if route is not None:
-        return _run_attempt(api, selected, route, change is None, remote, signed=signed)
+        return _run_attempt(api, selected, route, change is None, remote, signed=signed, summary=summary)
 
     def read_fresh() -> InstallationReceipt:
         """Удостоверяет точную приёмку и сохраняет runtime на весь сеанс."""
@@ -315,15 +335,19 @@ def main() -> None:
         parser.error("--change и --notes-file доступны только для --release")
 
     operation = metrics.HttpOperation.RELEASE if args.release else metrics.HttpOperation.RESUME
+    summary = AttemptSummary.start(args.version, args.sha, args.change or "resume")
     try:
         v2 = os.environ.get("COMPADRE_DEPLOYMENT_WRITER") in ("v2", "resume-only")
-        with metrics.github_http_report(HttpLocation.RUNNER, operation), immutable_git_reads(enabled=v2):
+        with metrics.github_http_report(HttpLocation.RUNNER, operation) as traffic, immutable_git_reads(enabled=v2):
             if repository_from_origin() != EXPECTED_REPOSITORY:
                 raise ProductionReleaseError("Origin не совпадает с репозиторием проекта")
             api = PublishingGitHub(EXPECTED_REPOSITORY, os.environ.get("GITHUB_TOKEN", ""))
             notes = args.notes_file.read_text(encoding="utf-8") if args.notes_file is not None else None
             record = _run_release(api, args.version, args.sha, change=args.change, notes=notes,
-                                  ssh_host=args.ssh_host, known_hosts=args.known_hosts, identity=args.identity)
+                                  ssh_host=args.ssh_host, known_hosts=args.known_hosts, identity=args.identity,
+                                  summary=summary)
+            summary.deployment = record.deployment_id
+            summary.outcome = "success"
             print(json.dumps({"deployment_id": record.deployment_id, "status_id": record.status_id,
                               "state": record.state.value, "cleanup": "completed"}, ensure_ascii=False))
     except (ProductionReleaseError, deployments.DeploymentPublishError, DeploymentAcceptanceError,
@@ -332,6 +356,8 @@ def main() -> None:
             TypeError, ValueError) as error:
         print(f"Production-выпуск: {error}", file=sys.stderr)
         raise SystemExit(1) from error
+    finally:
+        summary.finish(traffic.rows())
 
 
 if __name__ == "__main__":

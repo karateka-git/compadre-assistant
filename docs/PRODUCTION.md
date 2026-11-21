@@ -34,7 +34,16 @@ ssh -i "C:\Users\compadre\Downloads\SSH\H3LLO_CLOUD\karateka" user@91.188.213.14
 SHA snapshot. [Допустимая SSH-команда](OPERATIONS.md#проверить-ограниченный-ssh-вход-runner) ·
 [Обновить controller snapshot](OPERATIONS.md#обновить-отдельно-установленный-controller-snapshot)
 
-## Последний проверенный снимок 19.11.2026, 16:07 UTC
+## Последний проверенный снимок 21.11.2026 после 13:16 UTC
+
+| Область | Результат проверки |
+| --- | --- |
+| Выпуск | Immutable Release `v4.4.1` (`453701231`), SHA `b9b78efab3f81f4ba40b835e4c988f4975ebd47c`. Полный release CI `44907237922/1` проверил совместимость с принятой `v4.4.0`. Допуск выпустил подписант `44907675261/1`. [Release](https://github.com/karateka-git/compadre-assistant/releases/tag/v4.4.1) · [CI](https://github.com/karateka-git/compadre-assistant/actions/runs/44907237922/attempts/1) · [Подписант](https://github.com/karateka-git/compadre-assistant/actions/runs/44907675261/attempts/1) |
+| Контроллер | Snapshot из 82 файлов, GitHub и локальный policy pin закреплены на `5848d8cccc2657dd68631f56cb5523b6ae67daaa`, SHA-256 архива `e401f449587016afa4ecdff6e1278ca4fb9bb258df96df3514d02cf4e4a2f23f`. Прежний snapshot сохранён. Два SSH-входа установлены из проверенного архива, открытый ключ подписанта закреплён на VPS. [Полный CI контроллера](https://github.com/karateka-git/compadre-assistant/actions/runs/44906516069/attempts/1) |
+| Установка | Попытка `44907760823:1` подтвердила статус `22798648504` (`success`) Deployment `7963840757`. Журнал закрыт, marker отсутствует. Независимый `--verify-installed` подтвердил runtime `22f4786b5339cc7b8f89d28ff68d5f0df6b9d777d588999b3565b9b235f87060`. Telegram и VK `healthy`, по нулю перезапусков. Живые ответы владельцем для этой версии отдельно не проверены. [Журнал установки и метрики](DEPLOY_METRICS.md#проверить-живой-подписанный-patch-v441) |
+| SQLite и backup | Selector и штатная функция backup выбрали `ee2d45844d624175990d0a016f135928`, последняя миграция `0007_family.sql`. Прежнее поколение и его sidecars очищены. Проверены SHA-256, схема, внешние ключи и режим 0400 финальной копии. Основной сервис и таймер backup активны. |
+
+## Снимок 19.11.2026, 16:07 UTC
 
 | Область | Результат проверки |
 | --- | --- |
