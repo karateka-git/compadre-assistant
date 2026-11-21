@@ -395,7 +395,7 @@ class ObsidianEntryStateTest(unittest.TestCase):
             "",
         ).response
         self.assertIn("Ожидаю решения по предложению", response_text(response))
-        self.assertIn("/confirm", response_text(response))
+        self.assertNotIn("/confirm", response_text(response))
         self.assertEqual(tuple(action.command for action in response.actions), (
             "/confirm obsidian proposal 1 1 yes", "/confirm obsidian proposal 1 1 no",
         ))

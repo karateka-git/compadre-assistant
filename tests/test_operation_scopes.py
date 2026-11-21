@@ -339,7 +339,8 @@ class OperationScopesTest(unittest.TestCase):
         """Неизвестная slash-команда не запускает предметный pipeline через URL аргумента."""
         self.process("/obsidian")
         reply = self.process("/unknown https://example.com/a")
-        self.assertIn("Не знаю такой команды Obsidian", response_text(reply))
+        self.assertIn("Не знаю такого действия Obsidian", response_text(reply))
+        self.assertIn("«Помощь»", response_text(reply))
         self.assertEqual(self.fetcher.calls, 0)
         self.assertFalse(self.pending())
 
