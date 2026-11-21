@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
+import json
 import os
 from pathlib import Path
 import re
@@ -18,6 +19,9 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import SQLiteI
 from compadre_assistant.core.domain.users.entities import IncomingIdentity
 from compadre_assistant.core.domain.users.identity import IdentityAlreadyBoundError, InvalidLinkCodeError
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent
+from compadre_assistant.core.presentation.incoming.ports import CommandMenu, CommandMenuUpdate
+from compadre_assistant.presentation.telegram.bot import _load_aiogram, _serialize_telegram_inline_keyboard
+from compadre_assistant.presentation.vk.bot import _serialize_vk_command_menu
 from tests.response_assertions import response_text
 
 
@@ -63,6 +67,59 @@ class ProfileMessengersTest(unittest.TestCase):
         again = processor(replace(event, text="/connect vk"))
         self.assertIn("уже привязан", response_text(again))
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM identity_link_tokens").fetchone()[0], 1)
+
+    def test_choose_notification_channel_from_both_private_messengers(self):
+        """Оба канала показывают первый выбор, актуальную настройку и кнопку смены."""
+        apply_migrations(self.db)
+        service = create_user_identity_service(self.db)
+        telegram = IncomingIdentity("telegram", "11", "11")
+        vk = IncomingIdentity("vk", "22", "22")
+        owner = service.register_with_name(telegram, display_name="Оля")
+        processor = ChannelMessageProcessor(database_path=self.path, capabilities=(), messenger_dialogs={
+            "telegram": "https://t.me/example_bot", "vk": "https://vk.com/write-731",
+        })
+        event = IncomingEvent("telegram", "11", "1", "/settings", "11")
+        processor(event)
+        single = processor(replace(event, text="/connect"))
+        self.assertIn("Уведомления приходят в Telegram", response_text(single))
+        self.assertFalse(any(item.label.startswith("Получать в") for item in single.bound_actions))
+        self.assertIn("не привязан", response_text(processor(replace(event, text="/notifications vk"))))
+        service.link(code=service.create_link_code(owner.id, target_channel="vk").code, identity=vk)
+        with self.db:
+            self.db.execute("UPDATE app_users SET notification_channel = NULL WHERE id = ?", (owner.id,))
+        first = processor(replace(event, text="/connect"))
+        self.assertIn("Выбери мессенджер", response_text(first))
+        options = {item.label: item for item in first.bound_actions}
+        self.assertIn("Получать в Telegram", options)
+        self.assertIn("Получать в VK", options)
+        keyboard = _serialize_telegram_inline_keyboard(first, _load_aiogram())
+        self.assertEqual({button.text for row in keyboard.inline_keyboard for button in row}, set(options))
+        vk_event = IncomingEvent("vk", "22", "1", "/settings", "22")
+        processor(vk_event)
+        processor(replace(vk_event, text="/connect"))
+        menu = CommandMenu(section_actions=processor.section_actions(vk_event))
+        vk_keyboard = json.loads(_serialize_vk_command_menu(CommandMenuUpdate(vk_event.reply_address, menu)))
+        labels = {button["action"]["label"] for row in vk_keyboard["buttons"] for button in row}
+        self.assertTrue({"Получать в Telegram", "Получать в VK"} <= labels)
+        processor(replace(vk_event, text="/exit"))
+        self.assertIn("/notifications", response_text(processor(replace(event, text="/help"))))
+        first = processor(replace(event, text="/connect"))
+        choose_vk = next(item.token for item in first.bound_actions if item.label == "Получать в VK")
+        result = processor.select_action(replace(event, message_id="2"), choose_vk)
+        self.assertIn("Уведомления будут приходить в VK", response_text(result))
+        self.assertIn("Получать в Telegram", [item.label for item in result.bound_actions])
+        self.assertNotIn("Получать в VK", [item.label for item in result.bound_actions])
+        second = IncomingEvent("vk", "22", "3", "/notifications telegram", "22")
+        processor(second)
+        self.assertEqual(service.resolve_without_touch(vk).notification_channel, "vk")
+        processor(replace(second, text="/settings"))
+        processor(replace(second, text="/connect"))
+        result = processor(replace(second, text="Получать в Telegram", menu_choice=True))
+        self.assertIn("Уведомления будут приходить в Telegram", response_text(result))
+        group = replace(event, chat_id="-100")
+        processor(group)
+        self.assertIn("личный чат", response_text(processor(replace(group, text="/notifications vk"))))
+        self.assertEqual(service.resolve_without_touch(vk).notification_channel, "telegram")
 
     def test_direct_and_confirmed_links_compete_for_one_target_channel(self):
         """После конкурирующей привязки подтверждение сохраняет владельца и второй код."""
