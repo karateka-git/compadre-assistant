@@ -75,6 +75,7 @@ jobs:
           COMPADRE_CONTROLLER_SHA: ${{ vars.PRODUCTION_CONTROLLER_SHA }}
           RELEASE_CHANGE: ${{ inputs.change }}
           RELEASE_NOTES: ${{ inputs.notes }}
+          DEPLOY_SUMMARY_PATH: ${{ runner.temp }}/deployment-summary.json
         run: |
           set -u
           : "${GITHUB_TOKEN:?Missing PRODUCTION_RELEASE_TOKEN}"
@@ -116,3 +117,13 @@ jobs:
           python3 -m scripts.release_production "$RELEASE_VERSION" "$RELEASE_SHA" \
             --ssh-host "$VPS_HOST" --known-hosts "$run_dir/known_hosts" --identity "$run_dir/identity" \
             "${mode_args[@]}"
+
+      - name: Save deployment summary for documentation
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: deployment-summary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/deployment-summary.json
+          if-no-files-found: warn
+          retention-days: 90

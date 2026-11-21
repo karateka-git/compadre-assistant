@@ -109,6 +109,8 @@ class PatchControllerTests(unittest.TestCase):
     def setUp(self):
         """Готовит отдельные Git, SQLite и одноразовый тестовый ключ."""
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.summary_path = self.root / "deployment-summary.json"
+        self.enterContext(patch.dict(os.environ, DEPLOY_SUMMARY_PATH=str(self.summary_path)))
         graph, self.runner, fingerprint = fixture._fixture(self.root)
         self.api = SignedPatchAPI(graph, fingerprint, fixture.HISTORY_SIZE)
         self.keys = self.api.configure_signer(self.root, fingerprint)
@@ -144,6 +146,12 @@ class PatchControllerTests(unittest.TestCase):
         """Реальный CLI подтверждает новый runtime, очистку и ID принятого Deployment."""
         self.seed_acceptance()
         self.measure()
+        summary = json.loads(self.summary_path.read_bytes())
+        self.assertEqual((summary["api"], summary["outcome"], summary["sha"]),
+                         (15, "success", self.api.graph.candidate))
+        self.assertEqual(summary["source"], summary["attempt"])
+        self.assertIsNotNone(summary["installed_from"])
+        self.assertIsNotNone(summary["downtime_ms"])
         journal = json.loads(self.journal_path.read_bytes())
         self.assertTrue(journal["closed"])
         self.assertEqual(journal["patch"]["accepted"]["baseline"]["status_id"], journal["patch"]["terminal"])
@@ -200,6 +208,9 @@ class PatchControllerTests(unittest.TestCase):
         self.seed_acceptance()
         self.controller.lose_completion_response = True
         self.measure(error="Фикстура потеряла ответ SSH")
+        interrupted = json.loads(self.summary_path.read_bytes())
+        self.assertEqual(interrupted["outcome"], "unconfirmed")
+        self.assertIsNotNone(interrupted["installed_from"])
         self.controller.lose_completion_response = False
         self.api.calls.clear()
         self.controller.calls.clear()
@@ -209,6 +220,11 @@ class PatchControllerTests(unittest.TestCase):
         self.api.calls.clear()
         self.controller.calls.clear()
         self.measure(resume=True)
+        completed = json.loads(self.summary_path.read_bytes())
+        self.assertEqual((completed["deployment"], completed["source"], completed["outcome"]),
+                         (interrupted["deployment"], interrupted["attempt"], "success"))
+        self.assertNotEqual(completed["attempt"], completed["source"])
+        self.assertIsNone(completed["installed_from"])
         self.assertEqual(self.controller.calls, ["resume", "complete", "finish", "close"])
         self.assertEqual(self.api.posts.count("/deployments"), 1)
         self.assertEqual(self.api.status_writes, ["in_progress", "success"])
