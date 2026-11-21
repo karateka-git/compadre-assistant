@@ -73,4 +73,5 @@ def obsidian_descriptor() -> CapabilityDescriptor:
                 "После настройки пришли HTTP/HTTPS-ссылку — сохранить и проанализировать статью.",
             ),
         ),
+        display_name="Статьи в Obsidian",
     )

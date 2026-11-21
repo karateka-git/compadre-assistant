@@ -104,7 +104,7 @@ class MenuReconciliationTest(unittest.TestCase):
         self.assertNotIn("/confirm", self.commands())
 
     def test_ttl_expires_without_message(self):
-        """Периодический проход снимает ввод по TTL без пользовательского события."""
+        """Периодическая сверка убирает отмену, а следующее значение получает кнопку повтора."""
         now = datetime(2026, 10, 28, tzinfo=timezone.utc)
         self.processor._pending_inputs._clock = lambda: now
         self.processor(self.event("/settings"))
@@ -113,7 +113,11 @@ class MenuReconciliationTest(unittest.TestCase):
         self.processor._pending_inputs._clock = lambda: now + timedelta(minutes=11)
         self.processor.reconcile_menus(self.updates.append)
         self.assertNotIn("/cancel", self.commands())
-        self.assertIsNone(self.processor._pending_inputs.get(ReplyAddress("telegram", "1001")))
+        address = ReplyAddress("telegram", "1001")
+        self.assertIsNotNone(self.processor._pending_inputs.get(address))
+        expired = self.processor(self.event("Позднее имя"))
+        self.assertIn("Начать заново", {action.label for action in expired.bound_actions})
+        self.assertIsNone(self.processor._pending_inputs.get(address))
 
     def test_retry_uses_latest_menu_after_delivery_failure(self):
         """Неудачный снимок повторяется с актуальным состоянием после смены ввода."""

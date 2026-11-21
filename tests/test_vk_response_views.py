@@ -192,7 +192,7 @@ class VkResponseViewsTest(unittest.TestCase):
         updated_menu = self.requests("messages.send")[-1]
         self.assertIn("Действия раздела:", updated_menu["message"])
         self.assertIn("Открыть вид", updated_menu["message"])
-        self.assertIn("/help", updated_menu["message"])
+        self.assertNotIn("/help", updated_menu["message"])
         self.assertNotIn("Изменить вид", self.bottom_labels(updated_menu))
         self.assertIn("Очистить выбор", self.bottom_labels(updated_menu))
         self.assertEqual([method for method, _ in self.calls[-3:]],
@@ -210,9 +210,10 @@ class VkResponseViewsTest(unittest.TestCase):
             self.press(first, with_menu=True)
         self.assertEqual(self.capability.choices, ["A"])
         self.assertEqual(len(self.requests("messages.edit")), 1)
-        recovery = self.requests("messages.send")[-1]
+        recovery, help_reply = self.requests("messages.send")[-2:]
         self.assertEqual(recovery["message"], RECOVERY)
         self.assertNotIn("Изменить вид", self.bottom_labels(recovery))
+        self.assertEqual([label for label, _ in self.inline_actions(help_reply)], ["Помощь"])
         self.send("/adjust_view", with_menu=True)
         self.press(first, with_menu=True)
         self.assertEqual(self.capability.choices, ["A"])

@@ -95,7 +95,7 @@ class CapabilityPendingInputTest(unittest.TestCase):
         prompt = self.send('/reanalyze')
         self.assertIn('числовой ID', response_text(prompt))
         self.assertEqual([(action.label, action.command) for action in prompt.suggested_actions],
-                         [('Отмена', '/cancel')])
+                         [('Отмена', '/cancel'), ('Помощь', '/help')])
         pending = self.store.get(_event('x').reply_address)
         self.now += timedelta(minutes=9)
         for invalid in ('  ', 'abc', '7 8', '²', '9' * 5000):

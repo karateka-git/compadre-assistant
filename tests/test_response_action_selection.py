@@ -92,7 +92,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
         """Кнопка выбора выполняет точную команду и не действует повторно."""
         disable = self.processor(replace(self.event, text="/disable"))
         self.assertEqual(tuple(action.command for action in disable.suggested_actions),
-                         ("/disable selected", "/cancel"))
+                         ("/disable selected", "/cancel", "/help"))
         self.assertTrue(disable.view_delivery.start())
         disable.view_delivery.finish("42")
         press = replace(self.event, callback_message_id="42")
@@ -102,7 +102,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
 
         enable = self.processor(replace(self.event, text="/enable"))
         self.assertEqual(tuple(action.command for action in enable.suggested_actions),
-                         ("/enable selected", "/cancel"))
+                         ("/enable selected", "/cancel", "/help"))
         self.assertTrue(enable.view_delivery.start())
         enable.view_delivery.finish("43")
         self.processor.select_action(replace(self.event, callback_message_id="43"), enable.bound_actions[0].token)
@@ -165,10 +165,10 @@ class ResponseActionSelectionTest(unittest.TestCase):
             return response_text(self.processor(replace(self.event, text=text)))
 
         unregistered = replace(self.event, chat_id="2002", external_user_id="2002", text=command)
-        self.assertIn("/register", response_text(self.processor(unregistered)))
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Создать профиль", {action.label for action in self.processor(unregistered).bound_actions})
+        self.assertIn("Открой раздел", send(command))
         send("/other")
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Открой раздел", send(command))
         self.assertFalse(other.calls)
         self.assertFalse(self.capability.calls)
         self.assertFalse(self.issue(command).bound_actions)
@@ -188,7 +188,7 @@ class ResponseActionSelectionTest(unittest.TestCase):
         button = self.issue(command).bound_actions[0]
         send("/other")
         self.assertIn("больше недоступна", response_text(self.processor.select_action(self.event, button.token)))
-        self.assertIn("войди в режим через /selected", send(command))
+        self.assertIn("Открой раздел", send(command))
         send("/selected")
         button = self.issue(command).bound_actions[0]
         other_chat = replace(self.event, chat_id="2002", text="/settings")

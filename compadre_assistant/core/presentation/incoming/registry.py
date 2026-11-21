@@ -253,10 +253,7 @@ class PersonalCapabilityRegistry:
         )
 
     def entry_hint(self) -> str:
-        """Предлагает только эффективно доступные команды входа."""
-        commands = ", ".join(
-            f"{entry.descriptor.entry.name}" for entry in self.access if entry.effective
-        )
-        if not commands:
-            return "Сейчас нет включённых возможностей. Справка: /help."
-        return f"Выбери возможность: {commands}. Справка: /help."
+        """Предлагает выбрать раздел из меню с проверенными правами профиля."""
+        if not any(entry.effective for entry in self.access):
+            return "Сейчас нет доступных разделов."
+        return "Выбери, что сделать дальше."

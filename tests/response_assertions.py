@@ -6,7 +6,7 @@ from compadre_assistant.presentation.message_rendering import content_groups
 
 def content_text(content: MessageContent) -> str:
     """Возвращает видимый текст блоков независимо от адаптера канала."""
-    return "".join(span.text for group in content_groups(content, ()) for span in group)
+    return "".join(span.text for group in content_groups(content) for span in group)
 
 
 def response_text(response: IncomingResponse) -> str:

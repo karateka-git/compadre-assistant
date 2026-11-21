@@ -17,11 +17,13 @@ from compadre_assistant.capabilities.obsidian.domain.articles.url_utils import n
 
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, ConfirmationAction, CapabilityDescriptor, CapabilityResult, HandlerContext,
     IncomingCapabilityPort, IncomingResponse, PendingInputContinuationPort,
     PendingInputResult, PendingInputOutcome, PendingInput,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, ReplyAction, SectionActionsQueryPort,
+    ContextualCommandQueryPort,
 )
 from compadre_assistant.capabilities.obsidian.presentation.commands import ObsidianCommand, ParsedObsidianCommand
 from compadre_assistant.capabilities.obsidian.presentation.commands import obsidian_descriptor
@@ -133,15 +135,7 @@ _CONFIRM_ACTION = ReplyAction("Подтверждения", "/confirm", scope=Ac
 _EXIT_ACTION = ReplyAction("Выйти из режима", "/exit", scope=ActionScope.SECTION,
                            purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("main"))
 
-# Эти результаты меняют или показывают состояние хранилища. Telegram получает
-# актуальные действия возле результата, VK сверяет их для нижнего меню.
-_VAULT_SCREEN_RESULTS = frozenset({
-    ObsidianResultType.GITHUB_VAULT_SELECTED, ObsidianResultType.GITHUB_VAULT_ALREADY_SELECTED,
-    ObsidianResultType.GITHUB_VAULT_REPLACED, ObsidianResultType.GITHUB_VAULT_REPLACEMENT_CANCELLED,
-    ObsidianResultType.GITHUB_STATUS, ObsidianResultType.GITHUB_SYNC_COMPLETED,
-    ObsidianResultType.GITHUB_SYNC_FAILED, ObsidianResultType.GITHUB_DISCONNECTED,
-    ObsidianResultType.GITHUB_DISCONNECT_CANCELLED,
-})
+_WAITING_ACTIONS = (CANCEL_SECTION_ACTION, HELP_SECTION_ACTION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +176,7 @@ def _is_confirmation_reply(text: str) -> bool:
 
 class ObsidianMessageHandler(
     IncomingCapabilityPort, PendingInputContinuationPort, PendingConfirmationQueryPort, SectionActionsQueryPort,
+    ContextualCommandQueryPort,
 ):
     """Обрабатывает текст, команды и подтверждения возможности Obsidian."""
 
@@ -254,8 +249,7 @@ class ObsidianMessageHandler(
             # Аргумент входа проходит обработку до сохранения режима.
             return CapabilityResult(IncomingResponse(
                 compose_content(
-                    "Сначала войди через ", code_span("/obsidian"), " без аргументов, "
-                    "затем отправь команду или подтверждение отдельным сообщением."
+                    "Сначала открой раздел Obsidian, затем выбери действие в нём."
                 ),
                 ValueError("Команда или подтверждение переданы как аргумент входа Obsidian"),
             ))
@@ -282,11 +276,10 @@ class ObsidianMessageHandler(
             if self._llm_configured:
                 lines.append("Пришли HTTP/HTTPS-ссылку на статью для анализа.")
             if _STATUS_ACTION in section_actions:
-                lines.append(compose_content("Проверить состояние можно через ", code_span("/vault_status"), "."))
+                lines.append("Состояние локальной копии доступно по кнопке «Проверить состояние».")
             lines.append("Чтобы заменить хранилище, пришли ссылку на другой GitHub repository.")
         if not self._llm_configured:
             lines.append("Анализ статей сейчас недоступен: провайдер LLM не настроен на сервере.")
-        lines.append(compose_content("Команды режима — ", code_span("/help"), ". Чтобы выйти, введи ", code_span("/exit"), "."))
         actions = ()
         for proposal in pending.proposals:
             response = _present_result(ObsidianMessageResult(
@@ -302,7 +295,7 @@ class ObsidianMessageHandler(
             lines.append(f"Ожидает подтверждения {label} хранилища. Ожидание действует 10 минут с момента создания.")
             actions += _vault_operation_actions(operation)
         if not pending.complete:
-            lines.append("Если нужно подтвердить действие, открой /confirm для списка известных запросов.")
+            lines.append("Не удалось прочитать все запросы. Открой «Подтверждения», чтобы попробовать снова.")
         links = ()
         if self._github_connection_starter is not None:
             connection = self._github_connection_starter.get_pending(user.id, origin)
@@ -320,6 +313,22 @@ class ObsidianMessageHandler(
         )
         return CapabilityResult(_with_short_answer_hint(response, pending.as_query_result(address)))
 
+    def visible_mode_commands(
+        self, app_user: AppUser, address: ReplyAddress, mode_revision: int,
+    ) -> frozenset[str]:
+        """Отбирает справку по подключённому хранилищу и доступным службам.
+
+        Args:
+            app_user: Допущенный профиль, которому принадлежит хранилище.
+            address: Чат с активным Obsidian.
+            mode_revision: Проверенная ядром ревизия режима.
+
+        Returns:
+            Имена доступных команд без выполнения предметных операций.
+        """
+        actions = self._section_actions(self._selected_vault(app_user.id), _PendingDecisions((), None, True))
+        return frozenset(action.command for action in actions)
+
     def section_actions(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
     ) -> tuple[ReplyAction, ...]:
@@ -334,12 +343,11 @@ class ObsidianMessageHandler(
         Returns:
             Действия для текущего хранилища, доступных подтверждений и отмены ввода.
         """
+        if pending is not None and pending.owner_id == "obsidian":
+            return _WAITING_ACTIONS
         origin = PendingOrigin(address.channel, address.chat_id)
         decisions = self._read_pending_decisions(app_user.id, origin)
-        actions = self._section_actions(self._selected_vault(app_user.id), decisions)
-        if pending is not None and pending.owner_id == "obsidian":
-            return (CANCEL_SECTION_ACTION,) + actions
-        return actions
+        return self._section_actions(self._selected_vault(app_user.id), decisions)
 
     def _section_actions(
         self, vault: ObsidianVault | None, pending: _PendingDecisions,
@@ -352,9 +360,9 @@ class ObsidianMessageHandler(
             if self._article_analysis_use_case is not None and self._llm_configured:
                 actions += (_REANALYZE_ACTION,)
             actions += (_DISCONNECT_ACTION,)
-        if pending.complete and (pending.proposals or pending.operation is not None):
+        if not pending.complete or pending.proposals or pending.operation is not None:
             actions += (_CONFIRM_ACTION,)
-        return actions + (_EXIT_ACTION,)
+        return actions + (HELP_SECTION_ACTION, _EXIT_ACTION)
 
     def handle(self, context: HandlerContext, event: IncomingEvent) -> CapabilityResult:
         """Выполняет use cases Obsidian и переводит их результат в общий ответ.
@@ -371,13 +379,21 @@ class ObsidianMessageHandler(
                 and not parsed.arguments and context.pending_inputs is not None
                 and self._llm_configured and self._article_analysis_use_case is not None
                 and self._selected_vault(context.app_user.id) is not None):
-            context.pending_inputs.begin(event.reply_address, "obsidian", "reanalyze_article",
-                                         app_user_id=context.app_user.id, required_mode="obsidian",
-                                         value_label="ID статьи Obsidian", retry_command="/reanalyze")
+            with context.pending_inputs.lock(event.reply_address):
+                current = context.pending_inputs.get(event.reply_address)
+                if (current is not None and current.external_user_id not in (None, event.external_user_id)
+                        and not context.pending_inputs.expired(current)):
+                    return CapabilityResult(IncomingResponse(text_content(
+                        "В этом чате ожидается ввод от другого участника. Дождись завершения его шага."
+                    ), suggested_actions=(HELP_SECTION_ACTION,)))
+                context.pending_inputs.begin(event.reply_address, "obsidian", "reanalyze_article",
+                                             app_user_id=context.app_user.id, required_mode="obsidian",
+                                             value_label="ID статьи Obsidian", retry_command="/reanalyze",
+                                             external_user_id=event.external_user_id, cancel_only_menu=True)
             return CapabilityResult(IncomingResponse(text_content(
                 "Укажи числовой ID статьи для повторного анализа. "
-                "Ожидание действует 10 минут. Для отмены введи /cancel."
-            ), suggested_actions=(CANCEL_SECTION_ACTION,)))
+                "Ожидание действует 10 минут."
+            ), suggested_actions=_WAITING_ACTIONS))
         return self._handle(context, event)
 
     def continue_input(
@@ -395,19 +411,19 @@ class ObsidianMessageHandler(
         """
         if pending.input_kind != "reanalyze_article":
             return PendingInputResult(IncomingResponse(text_content(
-                "Ожидание ID недоступно. Повтори /reanalyze."
-            )), PendingInputOutcome.COMPLETE)
+                "Ожидание ID недоступно. Начни повторный анализ заново."
+            ), suggested_actions=(_REANALYZE_ACTION, HELP_SECTION_ACTION)), PendingInputOutcome.COMPLETE)
         value = event.text.strip()
         if not _valid_article_id(value):
             return PendingInputResult(IncomingResponse(text_content(
                 "Не удалось распознать ID статьи. Введи числовой ID или отмени ввод "
-                "командой /cancel. Ожидание ID продолжается."
-            ), suggested_actions=(CANCEL_SECTION_ACTION,)), PendingInputOutcome.RETRY)
+                "кнопкой отмены. Ожидание ID продолжается."
+            ), suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
         article = self._article_url_use_case.get_saved_for_user(int(value), context.app_user.id)
         if article is None:
             return PendingInputResult(IncomingResponse(text_content(
-                "Статья недоступна в этом профиле. Введи другой ID или отмени ввод командой /cancel."
-            ), suggested_actions=(CANCEL_SECTION_ACTION,)), PendingInputOutcome.RETRY)
+                "Статья недоступна в этом профиле. Введи другой ID или отмени ввод."
+            ), suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
         if self._obsidian_confirmation_service is not None:
             active = self._obsidian_confirmation_service.get_active_for_article(
                 app_user_id=context.app_user.id, article_id=article.id or 0
@@ -415,8 +431,8 @@ class ObsidianMessageHandler(
             if active is not None:
                 return PendingInputResult(IncomingResponse(text_content(
                     "Для этой статьи уже ожидается действие. Заверши его в исходном чате "
-                    "перед повторным анализом. Введи другой ID или отмени ввод через /cancel."
-                ), suggested_actions=(CANCEL_SECTION_ACTION,)), PendingInputOutcome.RETRY)
+                    "перед повторным анализом. Введи другой ID или отмени ввод."
+                ), suggested_actions=_WAITING_ACTIONS), PendingInputOutcome.RETRY)
 
         def analyze() -> IncomingResponse:
             """Отправляет квитанцию после принятия ID и повторяет предметные проверки."""
@@ -464,17 +480,17 @@ class ObsidianMessageHandler(
     def _result_response(self, result: ObsidianMessageResult, address: ReplyAddress) -> IncomingResponse:
         """Дополняет ответ доступными действиями после выполнения операции."""
         response = _present_result(result)
-        if result.app_user is None or (not response.actions and result.type not in _VAULT_SCREEN_RESULTS):
+        if result.app_user is None:
             return response
         user_id = result.app_user.id
         pending = self._read_pending_decisions(user_id, PendingOrigin(address.channel, address.chat_id))
-        if result.type in _VAULT_SCREEN_RESULTS:
-            try:
-                vault = self._selected_vault(user_id)
-                response = replace(response, suggested_actions=self._section_actions(vault, pending))
-            except Exception:
-                # Сбой чтения действий после операции не должен скрывать её итог.
-                LOGGER.exception("Could not read actions after Obsidian operation")
+        try:
+            vault = self._selected_vault(user_id)
+            response = replace(response, suggested_actions=response.suggested_actions + self._section_actions(vault, pending))
+        except Exception:
+            # Сбой чтения действий после операции не должен скрывать её итог.
+            LOGGER.exception("Could not read actions after Obsidian operation")
+            response = replace(response, suggested_actions=response.suggested_actions + (_CONFIRM_ACTION, HELP_SECTION_ACTION))
         return _with_short_answer_hint(response, pending.as_query_result(address))
 
     def _selected_vault(self, app_user_id: int) -> ObsidianVault | None:
@@ -511,7 +527,7 @@ class ObsidianMessageHandler(
             return decision
         if text.startswith("/") and parsed is None:
             return _operation_message(
-                "Не знаю такой команды Obsidian. Вызови /help, чтобы посмотреть доступные в этом чате команды.", app_user
+                "Не знаю такого действия Obsidian. Открой «Помощь», чтобы посмотреть доступные действия.", app_user
             )
         if command is ObsidianCommand.GITHUB_STATUS:
             if self._vault_sync_manager is None:
@@ -631,14 +647,14 @@ class ObsidianMessageHandler(
             if snapshot.status != "complete":
                 return _operation_message(
                     "Не удалось получить полный список действий Obsidian. Ответ «да» или «нет» не обработан. "
-                    "Повтори позже или используй точную адресную команду из актуального запроса.", app_user,
+                    "Открой «Подтверждения» позже, чтобы получить актуальные действия.", app_user,
                 )
             if len(snapshot.confirmations) != 1:
                 return _operation_message(
                     (
-                        "Есть несколько ожидающих действий, поэтому ответ «да» или «нет» неоднозначен. Выбери нужное действие точной командой /confirm из его ответа; команда содержит ID и версию."
+                        "Есть несколько ожидающих действий, поэтому ответ «да» или «нет» неоднозначен. Открой «Подтверждения» и выбери нужное действие."
                         if snapshot.confirmations
-                        else "В этом чате нет действия Obsidian, которое можно подтвердить. Чтобы посмотреть команды режима, вызови /help."
+                        else "В этом чате нет действия Obsidian, которое можно подтвердить. Доступные действия описаны в справке."
                     ),
                     app_user,
                 )
@@ -656,14 +672,14 @@ class ObsidianMessageHandler(
                 or parts[5].lower() not in {"yes", "no"}
             ):
                 return _operation_message(
-                    "Используй /confirm obsidian <proposal|replace|disconnect> <id> <version> <yes|no>.",
+                    "Не удалось распознать решение. Открой «Подтверждения» и выбери нужное действие.",
                     app_user,
                 )
             operation, operation_id, version = parts[2], int(parts[3]), int(parts[4])
             approve = parts[5].lower() == "yes"
         if operation == "proposal":
             if self._obsidian_confirmation_service is None:
-                return _operation_message("Служба подтверждений Obsidian недоступна. Действие не обработано; повтори точную команду /confirm после восстановления службы.", app_user)
+                return _operation_message("Служба подтверждений Obsidian недоступна. Действие не обработано; открой «Подтверждения» после восстановления службы.", app_user)
             method = (
                 self._obsidian_confirmation_service.confirm
                 if approve
@@ -1108,7 +1124,7 @@ class ObsidianMessageHandler(
             )
         if confirmation.status is ObsidianConfirmationStatus.STALE:
             return _operation_message(
-                "Это действие устарело. Вызови /obsidian в нужном чате, чтобы получить актуальное состояние.", app_user
+                "Это действие устарело. Актуальные действия доступны в исходном чате.", app_user
             )
         result_types = {
             ObsidianConfirmationStatus.PENDING: (

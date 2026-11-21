@@ -121,10 +121,11 @@ class CapabilityCompositionTest(unittest.TestCase):
             before = SQLiteChatModeRepository(connection).get_state(self.key)
         self.process("/settings", chat="settings-chat")
         self.assertIn("выключена", response_text(self.process("/disable obsidian", chat="settings-chat")))
-        self.assertIn("/enable obsidian", response_text(self.process("обычный текст")))
+        self.assertIn("лично выключена", response_text(self.process("обычный текст")))
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get_state(self.key), before)
-        self.assertIn("включена", response_text(self.process("/enable obsidian", chat="settings-chat")))
+        self.assertIn("Личный доступ к возможности «Статьи в Obsidian» включён",
+                      response_text(self.process("/enable obsidian", chat="settings-chat")))
         self.assertNotIn("/enable obsidian", response_text(self.process("обычный текст")))
 
     def test_processor_closes_only_owned_process_clients(self) -> None:
@@ -213,7 +214,9 @@ class CapabilityCompositionTest(unittest.TestCase):
     def test_no_mode_and_exit_do_not_run_article_or_llm_after_restart(self) -> None:
         """Смена соединения сохраняет отсутствие режима и явный выход."""
         for text in ("https://example.com/article", "текст"):
-            self.assertIn("/obsidian", response_text(self.process(text)))
+            response = self.process(text)
+            self.assertIn("/obsidian", {action.command for action in response.suggested_actions})
+            self.assertNotIn("/obsidian", response_text(response))
         self.process("/obsidian")
         with connect_database(self.database_path) as connection:
             self.assertEqual(SQLiteChatModeRepository(connection).get(self.key).capability_id, "obsidian")
@@ -234,7 +237,7 @@ class CapabilityCompositionTest(unittest.TestCase):
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_obsidian_entry") as factory:
             reply = self.process("https://example.com/article", enabled_capabilities=())
             self.assertIn("отключена", response_text(reply))
-            self.assertIn("/exit", response_text(reply))
+            self.assertIn("/exit", {action.command for action in reply.suggested_actions})
             self.assertIn("/settings", response_text(self.process("/help", enabled_capabilities=())))
             factory.assert_not_called()
         with connect_database(self.database_path) as connection:
@@ -358,7 +361,7 @@ class CapabilityCompositionTest(unittest.TestCase):
                 future.result(timeout=5)
             self.assertIn("octocat/notes", response_text(delivered[-1].response))
             self.assertEqual(delivered[-1].address, self.event("текст").reply_address)
-            self.assertIn("/enable obsidian", response_text(processor(self.event("текст"))))
+            self.assertIn("лично выключена", response_text(processor(self.event("текст"))))
             self.assertEqual(client.closes, 0)
         self.assertEqual(client.closes, 1)
 
@@ -392,7 +395,7 @@ class ObsidianEntryStateTest(unittest.TestCase):
             "",
         ).response
         self.assertIn("Ожидаю решения по предложению", response_text(response))
-        self.assertIn("/confirm", response_text(response))
+        self.assertNotIn("/confirm", response_text(response))
         self.assertEqual(tuple(action.command for action in response.actions), (
             "/confirm obsidian proposal 1 1 yes", "/confirm obsidian proposal 1 1 no",
         ))

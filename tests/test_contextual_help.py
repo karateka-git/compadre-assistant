@@ -45,7 +45,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.obsidian._descriptor = replace(obsidian_descriptor(), enabled_by_default=True)
         self.ask = AiCapability(Mock(), Mock())
         self.other = FakeCapability("other", "/other")
-        self.settings = SettingsCapability()
+        self.settings = SettingsCapability(linked_channels=lambda _user_id: frozenset())
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
         self.key = ChatModeKey(23, "telegram", "101")
@@ -85,6 +85,18 @@ class ContextualHelpTest(unittest.TestCase):
         self.identity.register_with_name.assert_not_called()
         self.send("/cancel")
         self.assertNotIn("/cancel", self.send())
+
+    def test_settings_screen_keeps_manual_commands_in_help(self):
+        """В личном чате действия настроек видны на кнопках, а синтаксис — в справке."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                response = self.dispatcher.execute(_event("/settings", "101", channel))
+                self.assertEqual(response_text(response), "Настройки открыты. Профиль: Имя.")
+                commands = {action.command for action in response.suggested_actions}
+                help_text = self.send(channel=channel)
+                for command in ("/name", "/connect", "/capabilities", "/help", "/exit"):
+                    self.assertIn(command, commands)
+                    self.assertIn(command, help_text)
 
     def test_main_lists_entries_without_subject_commands(self):
         """Основной режим показывает входы, но не внутренние команды возможностей."""
@@ -148,7 +160,7 @@ class ContextualHelpTest(unittest.TestCase):
                 self.assertIsNone(self.store.get(pending.chat_key))
         self.assertFalse(self.obsidian.values)
 
-    def test_ask_and_unknown_link_keep_base_context(self):
+    def test_ask_and_unknown_link_show_current_expected_value(self):
         """Вопрос в режиме ИИ и код до регистрации показывают ожидаемое значение."""
         self.send("/ai")
         self.send("/ask")
@@ -162,7 +174,7 @@ class ContextualHelpTest(unittest.TestCase):
         self.send("/link")
         text = self.send()
         self.assertIn("Ожидается код привязки", text)
-        self.assertIn("/register", text)
+        self.assertNotIn("/register", text)
         self.assertIn("/cancel", text)
 
     def test_confirmations_complete_incomplete_and_pre_profile(self):

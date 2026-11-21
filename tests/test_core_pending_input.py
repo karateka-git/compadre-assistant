@@ -32,12 +32,13 @@ class CorePendingInputTest(unittest.TestCase):
         self.identity.link = Mock(return_value=AppUser(42, "Связанный"))
         self.identity.request_rebind_confirmation = Mock(return_value=SimpleNamespace(id=4, version=2))
         self.capability = FakeCapability()
+        self.settings = SettingsCapability(linked_channels=lambda _user_id: frozenset(("telegram",)))
         self.preferences = MemoryCapabilityPreferences()
         self.modes = MemoryChatModes()
         self.key = ChatModeKey(23, "telegram", "101")
         self.modes.save(ChatMode(self.key, "settings"))
         self.dispatcher = IncomingMessageDispatcher(
-            registry=CapabilityRegistry((self.capability, SettingsCapability())), user_identity_service=self.identity,
+            registry=CapabilityRegistry((self.capability, self.settings)), user_identity_service=self.identity,
             chat_mode_repository=self.modes, capability_preference_repository=self.preferences,
             pending_inputs=self.store,
         )
@@ -56,7 +57,7 @@ class CorePendingInputTest(unittest.TestCase):
         original = self.pending()
         self.now += timedelta(minutes=9)
         self.identity.update_display_name.side_effect = InvalidDisplayNameError()
-        self.assertIn("/cancel", self.send("https://invalid.test"))
+        self.assertIn("Имя не принято", self.send("https://invalid.test"))
         self.assertEqual(self.pending(), original)
         self.identity.update_display_name.side_effect = None
         self.send("Новое")
@@ -96,7 +97,7 @@ class CorePendingInputTest(unittest.TestCase):
             self.send("/link")
             original = self.pending()
             self.identity.link.side_effect = InvalidLinkCodeError()
-            self.assertIn("/cancel", self.send("wrong"))
+            self.assertIn("Код привязки не принят", self.send("wrong"))
             self.assertEqual(self.pending(), original)
             self.identity.link.side_effect = None
             self.send("code")
@@ -127,7 +128,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.send("/disable")
         original = self.pending()
         for value in ("unknown", "selected extra"):
-            self.assertIn("/cancel", self.send(value))
+            self.assertIn("ID из списка", self.send(value))
             self.assertEqual(self.pending(), original)
         self.preferences.rows[(23, "selected")] = False
         self.assertIn("уже выключена", self.send("selected"))
@@ -176,7 +177,7 @@ class CorePendingInputTest(unittest.TestCase):
     def test_direct_malformed_arguments_do_not_start_input(self):
         """Несколько ID отклоняются и не создают пошаговый ввод."""
         for command in ("/enable selected extra", "/disable selected extra"):
-            self.assertIn("Укажи один ID", self.send(command))
+            self.assertIn("только одну возможность", self.send(command))
             self.assertIsNone(self.pending())
             self.assertFalse(self.preferences.rows)
 
@@ -185,7 +186,7 @@ class CorePendingInputTest(unittest.TestCase):
         self.preferences.rows[(23, "selected")] = False
         self.send("/enable")
         original = self.pending()
-        self.dispatcher._registry = CapabilityRegistry((SettingsCapability(),), (self.capability.descriptor,))
+        self.dispatcher._registry = CapabilityRegistry((self.settings,), (self.capability.descriptor,))
         self.assertIn("недоступна на сервере", self.send("selected"))
         self.assertFalse(self.preferences.rows[(23, "selected")])
         self.assertEqual(self.pending(), original)
@@ -203,7 +204,9 @@ class CorePendingInputTest(unittest.TestCase):
 
     def test_profile_commands_require_settings_in_the_current_chat(self):
         """Изменение из другого чата и просроченный режим не применяют ввод."""
-        self.assertIn("/settings", self.send("/name Новое", "other"))
+        response = self.dispatcher.execute(_event("/name Новое", "other"))
+        self.assertIn("/settings", {action.command for action in response.suggested_actions})
+        self.assertNotIn("/settings", response_text(response))
         self.assertIsNone(self.pending("other"))
         self.send("/name")
         self.assertEqual(self.pending().required_mode, "settings")

@@ -69,6 +69,35 @@ from compadre_assistant.core.presentation.responses import format_incoming_messa
 class TelegramResponsesTest(unittest.TestCase):
     """Проверяет пользовательский текст по результату обработки статьи."""
 
+    def test_obsidian_result_templates_do_not_teach_commands_outside_help(self):
+        """Шаблоны всех исходов предлагают кнопки и данные, сохраняя URL и пути."""
+        for result_type in ObsidianResultType:
+            with self.subTest(result=result_type):
+                content = format_obsidian_message_result(ObsidianMessageResult(type=result_type))
+                self.assertNotRegex(content_text(content), r"/(?:vault_[a-z]+|reanalyze|confirm|cancel|obsidian|link|help|exit)\b")
+
+    def test_saved_proposal_and_analysis_keep_command_like_data(self):
+        """Командоподобные строки модели и заметки остаются данными в обоих каналах."""
+        from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+        from compadre_assistant.presentation.vk.rendering import render_vk_content
+        from tests.test_process_incoming_message import FakeAnalysisUseCase, _proposal
+        from compadre_assistant.capabilities.obsidian.domain.articles.analyzing import AnalyzeArticleCommand
+        literal = "/confirm obsidian proposal 1 1 yes\n/reanalyze 42\n/help"
+        proposal = replace(_proposal(), action=ObsidianProposalAction.UPDATE, target_path="Notes/example.md",
+                           target_blob_sha="blob", proposed_markdown=literal, reasoning="Пример /exit")
+        restored = format_obsidian_message_result(ObsidianMessageResult(
+            type=ObsidianResultType.ARTICLE_REVIEW_CONFIRMATION_PENDING,
+            obsidian_confirmation=ObsidianConfirmationResult(ObsidianConfirmationStatus.PENDING, proposal),
+        ))
+        self.assertIn("Предлагаемый текст заметки", content_text(restored))
+        self.assertNotIn("Предлагаемый diff", content_text(restored))
+        analysis = FakeAnalysisUseCase().execute(AnalyzeArticleCommand(article_id=1, app_user_id=42))
+        analysis = replace(analysis, analysis=replace(analysis.analysis, result_text=literal))
+        rendered_analysis = format_article_analysis_result(ProcessArticleUrlResult(_article(), True, True), analysis)
+        for content in (restored, rendered_analysis):
+            for renderer in (render_telegram_content, render_vk_content):
+                self.assertIn(literal, "".join(part.text for part in renderer(content)))
+
     def test_format_missing_vault_configuration_includes_ready_example(
         self,
     ) -> None:
@@ -287,9 +316,8 @@ class TelegramResponsesTest(unittest.TestCase):
 
         self.assertEqual(
             reply,
-            "Compadre Assistant запущен.\n"
             "Рад тебя видеть, Влад.\n"
-            "Справка: /help.",
+            "Выбери, что сделать дальше.",
         )
 
     def test_format_incoming_message_result_reports_start_unregistered(self) -> None:
@@ -300,8 +328,8 @@ class TelegramResponsesTest(unittest.TestCase):
             )
         ))
 
-        self.assertIn("пока не зарегистрирован", reply)
-        self.assertIn("/register", reply)
+        self.assertIn("Выбери, как начать", reply)
+        self.assertNotIn("/register", reply)
 
     def test_format_incoming_message_result_reports_already_registered(self) -> None:
         """Повторный /register получает честный ответ."""
@@ -330,7 +358,7 @@ class TelegramResponsesTest(unittest.TestCase):
         self.assertNotIn("vault", reply)
 
     def test_format_incoming_message_result_reports_link_code(self) -> None:
-        """Код привязки форматируется как команда для второго канала."""
+        """Код привязки можно скопировать как отдельное значение."""
         reply = content_text(format_incoming_message_result(
             ProcessIncomingMessageResult(
                 type=IncomingMessageResultType.LINK_CODE_CREATED,
@@ -342,7 +370,8 @@ class TelegramResponsesTest(unittest.TestCase):
         ))
 
         self.assertIn("ABC123", reply)
-        self.assertIn("/link ABC123", reply)
+        self.assertIn("Код привязки: ABC123", reply)
+        self.assertNotIn("/link", reply)
 
     def test_format_incoming_message_result_reports_rebind_success(self) -> None:
         """Подтвержденная перепривязка сообщает нового пользователя."""
@@ -406,7 +435,7 @@ class TelegramResponsesTest(unittest.TestCase):
 
         self.assertIn("Изменение записано в GitHub прямым commit", reply)
         self.assertIn("поисковый индекс ещё не обновлён", reply)
-        self.assertIn("/vault_sync", reply)
+        self.assertIn("«Синхронизировать»", reply)
 
     def test_format_profile_status_preserves_general_text(self) -> None:
         """Общий статус профиля не требует модели vault."""

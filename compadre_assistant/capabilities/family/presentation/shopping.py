@@ -15,9 +15,10 @@ from compadre_assistant.capabilities.family.domain.shopping import (
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionLayoutLimits, ActionPurpose, ActionScope, ScreenDestination, SectionMenuDelivery,
 )
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse, ReplyAction, ResponseView
-from compadre_assistant.core.presentation.message_content import TextSpan, code_span, compose_content
+from compadre_assistant.core.presentation.message_content import TextSpan, compose_content, text_content
 
 
 SHOPPING_COMMAND = "/family_shopping"  # Вход в покупки и перемещение по списку.
@@ -29,7 +30,7 @@ _ORDINARY_PAGE_SIZE = 10  # Лимит группы «Нужно купить» 
 _SELECTION_PAGE_SIZE = 5  # Предметный предел числа товаров на странице выбора.
 _SELECTION_RESERVED_ROWS = 2  # Перелистывание и возврат занимают разные ряды.
 _SELECTION_RESERVED_BUTTONS = 3  # Две страницы и возврат доступны одновременно.
-_TITLE_PREVIEW = 90  # Оставляет место для текста команд при HTML-экранировании.
+_TITLE_PREVIEW = 90  # Предел длины названия перед тремя точками в тексте списка.
 _MAX_SECTIONS = 4096  # Разделы давно не использованных чатов вытесняются из памяти.
 _RECENT_NUMBER_MESSAGES = 128  # Повторное событие канала не меняет следующий товар.
 
@@ -300,8 +301,8 @@ def shopping_list(
         layout: Вместимость кнопок и подписей в сообщении выбора.
 
     Returns:
-        Ответ со списком и действиями. Длинный текст товара доступен
-        отдельной обычной командой, а последняя страница может занять несколько сообщений.
+        Ответ со списком и действиями. Длинные названия в списке сокращаются,
+        а последняя страница может занять несколько сообщений.
     """
     groups = _SHOPPING_GROUPS[:1] if selection is not None else _SHOPPING_GROUPS
     snapshot = selection_page if selection_page is not None else shopping_page(items, section.ordinary_page)
@@ -323,10 +324,8 @@ def shopping_list(
             for position, item in group:
                 title = item.name
                 if len(title) > _TITLE_PREVIEW:
-                    title = title[:_TITLE_PREVIEW] + "…"
-                    parts.extend((f"\n{position}. {title} · ", code_span(f"{SHOPPING_COMMAND} item {item.number}")))
-                else:
-                    parts.append(f"\n{position}. {title}")
+                    title = title[:_TITLE_PREVIEW] + "..."
+                parts.append(f"\n{position}. {title}")
 
     if selection is None:
         actions = shopping_section_actions(section)
@@ -346,9 +345,9 @@ def shopping_list(
             if choice is not None:
                 choice.delivered.set()
 
-    unavailable = compose_content("Не удалось обновить список. Открой его снова через ", code_span(SHOPPING_COMMAND), ".")
+    unavailable = text_content("Не удалось обновить список. Открой его заново.")
     return IncomingResponse(
-        compose_content(*parts), suggested_actions=actions,
+        compose_content(*parts), suggested_actions=(*actions, HELP_SECTION_ACTION),
         command_menu_delivery=SectionMenuDelivery.PRESERVE if selection is not None else SectionMenuDelivery.RECONCILE,
         view=ResponseView(
             f"shopping:{section.action_key}", update=update, unavailable=unavailable if update else None,

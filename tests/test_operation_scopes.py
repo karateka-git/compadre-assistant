@@ -245,7 +245,7 @@ class OperationScopesTest(unittest.TestCase):
         """Выход сохраняет адресное ожидание и требует явного входа перед решением."""
         response = self.prepare()
         self.process("/exit")
-        self.assertIn("Войди снова", response_text(self.process(response.actions[0].command)))
+        self.assertIn("Открой раздел", response_text(self.process(response.actions[0].command)))
         self.process("/settings")
         self.assertIn("Профиль", response_text(self.process("/status")))
         self.assertEqual(len(self.pending()), 1)
@@ -339,7 +339,8 @@ class OperationScopesTest(unittest.TestCase):
         """Неизвестная slash-команда не запускает предметный pipeline через URL аргумента."""
         self.process("/obsidian")
         reply = self.process("/unknown https://example.com/a")
-        self.assertIn("Не знаю такой команды Obsidian", response_text(reply))
+        self.assertIn("Не знаю такого действия Obsidian", response_text(reply))
+        self.assertIn("«Помощь»", response_text(reply))
         self.assertEqual(self.fetcher.calls, 0)
         self.assertFalse(self.pending())
 
@@ -628,7 +629,7 @@ class OperationScopesTest(unittest.TestCase):
             )
             self.assertEqual(user.id, target.id)
         repeated = self.process(f"/confirm core identity {pending.id} {pending.version} yes")
-        self.assertIn("устарело или истекло", response_text(repeated))
+        self.assertIn("устарел или истёк", response_text(repeated))
 
     def test_superseded_identity_operation_never_confirms_new_request(self):
         """Новое ожидание identity имеет новый ID; команда старого ID не переносит профиль."""

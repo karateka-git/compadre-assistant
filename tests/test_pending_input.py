@@ -225,7 +225,7 @@ class PendingInputTest(unittest.TestCase):
     def test_cancel_arguments_preserve_pending(self):
         pending = self.start()
         response = self.dispatcher.execute(_event('/cancel лишнее'))
-        self.assertIn('без аргументов', response_text(response))
+        self.assertIn('выбери «Отмена»', response_text(response))
         self.assertEqual(self.store.get(pending.chat_key), pending)
 
 
@@ -279,7 +279,8 @@ class DeferredInputTest(unittest.TestCase):
         self.assertIsNotNone(callbacks.claim(origin, button.token))
         self.assertIn('Обработка уже идёт', response_text(self.send('/cancel', author='43')))
         self.assertIsNotNone(self.actions.get(origin.reply_address))
-        self.assertIn('без аргументов', response_text(self.send('/cancel аргумент')))
+        self.assertIn('Обработка уже идёт', response_text(self.send('/cancel аргумент')))
+        self.assertIsNotNone(self.actions.get(origin.reply_address))
         self.assertIn('Обработка отменена', response_text(self.send('/cancel')))
         receipt.after_delivery(True)
         self.owner.work.assert_not_called()

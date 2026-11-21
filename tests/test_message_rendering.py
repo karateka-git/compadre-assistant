@@ -6,7 +6,7 @@ import unittest
 
 from compadre_assistant.core.presentation.incoming.ports import ConfirmationAction
 from compadre_assistant.core.presentation.message_content import (
-    BulletList, ListItem, MessageContent, Paragraph, TextSpan, TextStyle,
+    BulletList, ListItem, MessageContent, Paragraph, TextSpan, TextStyle, confirmation_action_paragraph,
 )
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
@@ -52,10 +52,11 @@ class MessageRenderingTest(unittest.TestCase):
         ))
         actions = (ConfirmationAction("yes", "Принять", command),
                    ConfirmationAction("no", "Отклонить", command[:-3] + "no"))
+        content = MessageContent((*content.blocks, *(confirmation_action_paragraph(action) for action in actions)))
         expected = (f"Заголовок\n\n• Первый\n• {url}\n\nФинал\n\nПринять: {command}"
                     f"\n\nОтклонить: {command[:-3]}no")
-        telegram = render_telegram_content(content, actions, limit=90)
-        vk = render_vk_content(content, actions, limit=90)
+        telegram = render_telegram_content(content, limit=90)
+        vk = render_vk_content(content, limit=90)
         decoded = ["".join(_HtmlReader(chunk.text).parts) for chunk in telegram]
         self.assertEqual("".join(decoded), expected)
         self.assertEqual("".join(chunk.text for chunk in vk), expected)
@@ -68,7 +69,7 @@ class MessageRenderingTest(unittest.TestCase):
         raw = '<b>"&amp;"</b> `md` \\path\n+diff\n-старое'
         content = _content(*(TextSpan(raw, style) for style in TextStyle))
         action = ConfirmationAction("a", '<img src="x">', "/confirm <x>& yes")
-        chunk, = render_telegram_content(content, (action,))
+        chunk, = render_telegram_content(MessageContent((*content.blocks, confirmation_action_paragraph(action))))
         parsed = _HtmlReader(chunk.text)
         self.assertEqual("".join(parsed.parts), raw * 3 + '\n\n<img src="x">: /confirm <x>& yes')
         self.assertEqual(parsed.tags, ["b", "code", "code"])

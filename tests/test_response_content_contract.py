@@ -7,7 +7,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
 )
 from compadre_assistant.core.presentation.message_content import (
     BulletList, ListItem, MessageContent, Paragraph, TextSpan, TextStyle,
-    code_span, compose_content, join_content, text_content,
+    code_span, compose_content, confirmation_action_paragraph, join_content, text_content,
 )
 from compadre_assistant.capabilities.obsidian.presentation.processing import (
     ObsidianMessageResult, _present_result,
@@ -40,7 +40,7 @@ class ResponseContentContractTest(unittest.TestCase):
         )
 
     def test_channel_renderers_preserve_content_and_addressed_actions(self) -> None:
-        """Runtime сохраняет полные команды yes/no после всех блоков."""
+        """Оба канала выводят адресные команды, явно включённые в содержание."""
         actions = tuple(
             ConfirmationAction(choice, label, f'/confirm obsidian replace 17 3 {choice}')
             for choice, label in (('yes', 'Подтвердить'), ('no', 'Отменить'))
@@ -49,12 +49,14 @@ class ResponseContentContractTest(unittest.TestCase):
             Paragraph((TextSpan('Заголовок', TextStyle.EMPHASIS),)),
             BulletList((ListItem((TextSpan('пункт'),)),)),
         ))
-        response = IncomingResponse(content, actions=actions)
+        response = IncomingResponse(MessageContent((
+            *content.blocks, *(confirmation_action_paragraph(action) for action in actions),
+        )), actions=actions)
         expected = content_text(content) + '\n\n' + '\n\n'.join(
             f'{action.label}: {action.command}' for action in actions
         )
-        telegram = render_telegram_content(response.content, response.actions)
-        vk = render_vk_content(response.content, response.actions)
+        telegram = render_telegram_content(response.content)
+        vk = render_vk_content(response.content)
         outputs = (
             "".join("".join(_HtmlReader(part.text).parts) for part in telegram),
             "".join(part.text for part in vk),
@@ -84,8 +86,8 @@ class ResponseContentContractTest(unittest.TestCase):
         self.assertEqual(content_text(result), 'Ответ: ' + data + '\n/help')
         self.assertEqual(result.blocks[0].spans[1], TextSpan(data))
         self.assertEqual(result.blocks[0].spans[-1], TextSpan('/help', TextStyle.CODE))
-        telegram = render_telegram_content(result, ())
-        vk = render_vk_content(result, ())
+        telegram = render_telegram_content(result)
+        vk = render_vk_content(result)
         self.assertEqual(
             ''.join(''.join(_HtmlReader(part.text).parts) for part in telegram),
             'Ответ: ' + data + '\n/help',

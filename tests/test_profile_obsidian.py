@@ -86,14 +86,14 @@ class ProfileObsidianTest(unittest.TestCase):
         options = dict(database_path=self.database_path, enabled_capabilities=())
         with create_channel_message_processor(**options) as processor:
             reply = processor(self.event("/register Лишнее имя"))
-            self.assertIn("без аргументов", response_text(reply))
+            self.assertIn("пришли имя отдельным сообщением", response_text(reply))
             processor(self.event("/register"))
             processor(self.event("/cancel"))
             processor(self.event("Имя после отмены"))
             processor(self.event("/register"))
         with create_channel_message_processor(**options) as processor:
             reply = processor(self.event("Имя после перезапуска"))
-            self.assertIn("Я пока не знаю", response_text(reply))
+            self.assertIn("пока нет профиля", response_text(reply))
         with connect_database(self.database_path) as connection:
             for table in ("app_users", "external_identities"):
                 self.assertEqual(connection.execute(
@@ -154,7 +154,7 @@ class ProfileObsidianTest(unittest.TestCase):
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_analyze_article_use_case") as analyzer, patch("compadre_assistant.capabilities.obsidian.bootstrap.create_prepare_obsidian_review_use_case") as review:
             options = dict(obsidian_config=ObsidianConfig(), analysis_use_case_factory=None)
             self.register(**options)
-            self.assertIn("/obsidian", response_text(self.process("/start", **options)))
+            self.assertIn("/obsidian", {action.command for action in self.process("/start", **options).suggested_actions})
             self.assertIn("провайдер LLM не настроен", response_text(self.process("/obsidian", **options)))
             analyzer.assert_not_called()
             review.assert_not_called()
@@ -207,9 +207,11 @@ class ProfileObsidianTest(unittest.TestCase):
                     self.assertEqual(getattr(saved, field), getattr(event, field))
                 user = enter.call_args.args[0].app_user
                 self.assertEqual(SQLiteChatModeRepository(connection).get(ChatModeKey(user.id, channel, event.chat_id)).capability_id, "obsidian")
-                self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, chat_id="other", text="https://example.com/article"))))
+                reply = dispatcher.execute(replace(event, chat_id="other", text="https://example.com/article"))
+                self.assertIn("/obsidian", {action.command for action in reply.suggested_actions})
                 dispatcher.execute(replace(event, text="/exit"))
-                self.assertIn("/obsidian", response_text(dispatcher.execute(replace(event, text="https://github.com/octocat/notes"))))
+                reply = dispatcher.execute(replace(event, text="https://github.com/octocat/notes"))
+                self.assertIn("/obsidian", {action.command for action in reply.suggested_actions})
         self.assertEqual(len(self.article.commands), 3)
 
     def test_github_entry_argument_connects_inside_obsidian(self) -> None:
@@ -218,7 +220,8 @@ class ProfileObsidianTest(unittest.TestCase):
         manager = FakeVaultSelectionManager()
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
-            self.assertIn("/obsidian", response_text(self.process("https://github.com/octocat/notes Vault", runtime=runtime)))
+            reply = self.process("https://github.com/octocat/notes Vault", runtime=runtime)
+            self.assertIn("/obsidian", {action.command for action in reply.suggested_actions})
             self.assertFalse(manager.calls)
             reply = self.process("/obsidian https://github.com/octocat/notes Vault", runtime=runtime)
             self.assertIn("Хранилище подключено", response_text(reply))
@@ -248,10 +251,10 @@ class ProfileObsidianTest(unittest.TestCase):
         runtime = ObsidianProcessRuntime(None, object())
         with patch("compadre_assistant.capabilities.obsidian.bootstrap.create_vault_selection_manager", return_value=manager):
             reply = self.process("/obsidian /vault_disconnect", runtime=runtime)
-            self.assertIn("отдельным сообщением", response_text(reply))
+            self.assertIn("Сначала открой раздел Obsidian", response_text(reply))
             self.assertIsNotNone(reply.error)
             self.assertFalse(manager.disconnect_pending)
-            self.assertIn("войди в режим через /obsidian", response_text(self.process("/vault_disconnect", runtime=runtime)))
+            self.assertIn("Открой раздел", response_text(self.process("/vault_disconnect", runtime=runtime)))
 
             self.process("/obsidian", runtime=runtime)
             pending = self.process("/vault_disconnect", runtime=runtime)
@@ -259,7 +262,7 @@ class ProfileObsidianTest(unittest.TestCase):
             self.process("/exit", runtime=runtime)
             for decision in (confirmation, "да"):
                 reply = self.process(f"/obsidian {decision}", runtime=runtime)
-                self.assertIn("отдельным сообщением", response_text(reply))
+                self.assertIn("Сначала открой раздел Obsidian", response_text(reply))
                 self.assertIsNotNone(reply.error)
                 self.assertTrue(manager.disconnect_pending)
                 self.assertIsNotNone(manager.selected)

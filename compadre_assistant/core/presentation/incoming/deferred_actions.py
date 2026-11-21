@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 import logging
 from threading import Event, Lock
+from uuid import uuid4
 
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
 from compadre_assistant.core.presentation.incoming.ports import IncomingResponse
@@ -21,6 +22,7 @@ class DeferredAction:
     address: ReplyAddress
     app_user_id: int
     external_user_id: str | None
+    request_id: str = field(default_factory=lambda: uuid4().hex)  # Привязывает кнопку отмены к работе.
     cancelled: Event = field(default_factory=Event, repr=False)
     submitted: bool = False  # Исполнитель занял слот до выхода сетевого вызова.
 

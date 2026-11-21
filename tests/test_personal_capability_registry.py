@@ -53,10 +53,10 @@ class PersonalCapabilityRegistryTest(unittest.TestCase):
         second = registry.for_user(())
         self.assertIsNone(first.by_id("example"))
         self.assertIsNotNone(first.blocked_by_command("/example"))
-        self.assertNotIn("/example", first.entry_hint())
+        self.assertIn("нет доступных разделов", first.entry_hint())
         self.assertFalse(any(item.effective for item in first.access))
         self.assertIsNotNone(second.by_command("/example"))
-        self.assertIn("/example", second.entry_hint())
+        self.assertIn("Выбери", second.entry_hint())
         self.assertIsNotNone(registry.by_id("example"))
         with self.assertRaises(FrozenInstanceError):
             first.access = ()
