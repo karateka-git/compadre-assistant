@@ -243,11 +243,15 @@ def require_current(host) -> records.AcceptedBaseline | None:
     if ownership is not None:
         attempt, deployment_id = ownership
         if getattr(host, "patch_selection", None) is not None:
+            from scripts.deploy_signed_attempt import _admitted
+
             journal = _read(host)
             if (journal is None or journal["closed"] or journal["attempt"] != asdict(attempt)
                     or journal["owner"] != host.patch_owner or journal["deployment_id"] != deployment_id
                     or not journal["started"] or not journal["patch"]["in_progress"]):
                 raise prod.DeployError("Утеряно локальное владение установкой PATCH")
+            if _admitted(host, journal["patch"]["packet"], attempt.version, attempt.sha) != host.patch_proof:
+                raise prod.DeployError("Допуск PATCH изменился перед переключением")
             return attempt.baseline
         status, _ = writer.current_attempt(host.release_api(), attempt, deployment_id)
         _require_in_progress(status, attempt)

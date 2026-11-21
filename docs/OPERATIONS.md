@@ -541,6 +541,29 @@ sudo -n /usr/local/sbin/deploy-prod VERSION --patch-attempt ACTION SHA KEY OWNER
 проверяются при резервации. Перед переключением контроллер проверяет
 локальный журнал, pin политики и фактический runtime.
 
+При вводе подписанного PATCH сначала обновите подписывающий CI и
+[установленный snapshot](#обновить-отдельно-установленный-controller-snapshot).
+В согласованное окно при закрытом журнале проверьте новый snapshot и
+установите оба входа из него с правами root:root/0755. В следующем
+примере `$reviewed_signers` — путь к ранее проверенному файлу открытых
+ключей подписанта. Файл содержит строку `compadre-patch-ci ssh-ed25519 ...`.
+
+```sh
+snapshot=/usr/local/lib/compadre-assistant-deploy
+sudo install -o root -g root -m 0755 "$snapshot/deploy/compadre-release-ssh" /usr/local/libexec/compadre-release-ssh
+sudo install -o root -g root -m 0755 "$snapshot/deploy/compadre-release-entry" /usr/local/libexec/compadre-release-entry
+sudo install -o root -g root -m 0600 "$reviewed_signers" /var/lib/compadre-assistant-deploy/patch-allowed-signers
+```
+
+Сверьте правила sudo, пути forced command, `PRODUCTION_CONTROLLER_SHA`
+и внешний pin политики на VPS. После этого включите
+`PRODUCTION_SIGNED_PATCH=true` в защищённом окружении публикации.
+Первый подписанный PATCH сам подтверждает ранее принятую установку v2.
+Все обращения этой сверки входят в замер. При отказе или обрыве используйте
+`resume` для исходной попытки с тем же подписанным допуском; сверяйте
+результат до смены владельца. Совместимый готовый Release со старой
+аннотацией по-прежнему можно установить через прежний вход.
+
 На прежнем маршруте `--attempt` на каждое действие контроллер читает точный
 `GET /actions/runs/{run_id}/attempts/{run_attempt}` владельца и проверяет
 состояние `in_progress`. Для передачи владения через `resume` требуется

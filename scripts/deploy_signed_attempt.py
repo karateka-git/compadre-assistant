@@ -1,12 +1,14 @@
 """Ведёт подписанную попытку PATCH под блокировкой установленного контроллера."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import re
 
+from scripts import deploy_acceptance as acceptance
 from scripts import deploy_attempt as attempts
 from scripts import deploy_prepare as prep
 from scripts import deploy_prod as prod
 from scripts import deployment_acceptance as records
+from scripts import deployment_writer as writer
 from scripts import predeploy_compatibility as compatibility
 from scripts.ci_repository_compatibility import DeploymentReleaseTagEvidence
 from scripts.patch_admission import SSH_INPUT_LIMIT, read_signed_admission
@@ -51,10 +53,45 @@ def _baseline(host, api, previous, expected):
     # Первый запуск после прежнего контроллера один раз сверяет старую историю.
     if previous and previous.get("patch", {}).get("accepted"):
         saved = previous["patch"]["accepted"]
-        if records.AcceptedBaseline(**saved["baseline"]) != expected:
+        installed = previous["result"]["outcome"] == "success"
+        persisted = (records.AcceptedBaseline(previous["attempt"]["sha"], previous["attempt"]["version"],
+                                              previous["attempt"]["release_id"], previous["deployment_id"],
+                                              previous["patch"]["terminal"]) if installed
+                     else records.AcceptedBaseline(**previous["attempt"]["baseline"]))
+        if (persisted != expected or records.AcceptedBaseline(**saved["baseline"]) != persisted
+                or saved["receipt"] != previous["result"]["receipt"]):
             raise prod.DeployError("Допуск получен для другой принятой установки")
-        return InstallationReceipt(**saved["receipt"])
-    return attempts._current_base(api, expected)
+        return attempts._base(host, InstallationReceipt(**saved["receipt"]))
+    raw, status = records._latest_production(api)
+    if records._v1(raw):
+        raise prod.DeployError("Подписанный PATCH требует ранее принятой установки v2")
+    if previous and previous["deployment_id"]:
+        if (previous["deployment_id"] != status.deployment_id
+                or previous["attempt"] != asdict(records._attempt(raw))):
+            raise prod.DeployError("Закрытая попытка VPS расходится с текущим Deployment")
+    if status.state is records.DeploymentState.FAILURE:
+        # Возврат требует сверить прямую ссылку на success прежней установки.
+        baseline, receipt = records._resolve_observed_baseline(api, (raw, status))
+        if baseline != expected:
+            raise prod.DeployError("После возврата действует другая принятая база")
+        return attempts._base(host, receipt)
+    if status.state is not records.DeploymentState.SUCCESS:
+        raise prod.DeployError("Предыдущий Deployment не имеет действующего success")
+    accepted = records._attempt(raw)
+    baseline = records.AcceptedBaseline(accepted.sha, accepted.version, accepted.release_id,
+                                        status.deployment_id, status.status_id)
+    if baseline != expected:
+        raise prod.DeployError("Допуск получен для другой принятой установки")
+    receipt = InstallationReceipt(**acceptance._verify_locked(host, accepted.version, accepted.sha))
+    if ((receipt.sha, receipt.version, receipt.kind, receipt.release_id, receipt.run_id, receipt.run_attempt) !=
+            (accepted.sha, accepted.version, accepted.kind, accepted.release_id, accepted.run_id, accepted.run_attempt)
+            or status.description != writer._description(receipt.generation_id, receipt.migration)):
+        raise prod.DeployError("Локальная приёмка расходится с текущим success GitHub")
+    if previous and previous.get("result"):
+        former = InstallationReceipt(**previous["result"]["receipt"])
+        if previous["result"]["outcome"] != "success" or replace(receipt, runtime_id=former.runtime_id) != former:
+            raise prod.DeployError("Квитанция завершённой установки расходится с фактической базой")
+    return receipt
 
 
 def _reserve(host, api, previous, packet, proof, owner, snapshot):
@@ -67,7 +104,7 @@ def _reserve(host, api, previous, packet, proof, owner, snapshot):
     base = proof.baseline
     if prod._version(proof.version) <= prod._version(base.version) or sha == base.sha:
         raise prod.DeployError("Повторная установка и понижение PATCH запрещены")
-    receipt = attempts._base(host, _baseline(host, api, previous, base))
+    receipt = _baseline(host, api, previous, base)
     attempt = records.DeploymentAttempt(2, owner, proof.version, sha, "ordinary", selected.release_id,
                                         proof.run_id, proof.run_attempt, base)
     journal = {"protocol": 2, "closed": False, "started": False, "deployment_id": None, "claims": [],
@@ -82,6 +119,54 @@ def _bind(journal, number, action):
             journal["deployment_id"] != number and not (journal["deployment_id"] is None and action == "in_progress")):
         raise prod.DeployError("ID Deployment не соответствует резервации")
     journal["deployment_id"] = number
+
+
+def _resume(host, api, journal, attempt):
+    """Сопоставляет GitHub, выданные намерения и фактическую установку под lock."""
+    raw, status = records._latest_production(api)
+    if records._v1(raw) or records._attempt(raw) != attempt:
+        if journal["deployment_id"] is not None or journal["started"]:
+            raise prod.DeployError("GitHub больше не подтверждает исходный Deployment")
+        base, receipt = records._resolve_observed_baseline(api, (raw, status))
+        if base != attempt.baseline or asdict(attempts._base(host, receipt)) != journal["base_receipt"]:
+            raise prod.DeployError("Смена владельца не подтвердила исходную установку")
+        return
+    number = status.deployment_id
+    if "create" not in journal["claims"] or journal["deployment_id"] not in (None, number):
+        raise prod.DeployError("Попытка GitHub не соответствует намерению создания")
+    patch = journal["patch"]
+    if status.state is records.DeploymentState.MISSING:
+        if journal["started"] or patch["in_progress"] or "result" in journal:
+            raise prod.DeployError("В GitHub исчез статус открытой установки")
+    elif status.state is records.DeploymentState.IN_PROGRESS:
+        attempts._require_in_progress(status, attempt)
+        if "in_progress" not in journal["claims"] or patch["in_progress"] not in (None, status.status_id) or journal["closed"]:
+            raise prod.DeployError("GitHub не подтвердил сохранённый in_progress")
+        patch["in_progress"] = status.status_id
+    elif status.state in (records.DeploymentState.SUCCESS, records.DeploymentState.FAILURE):
+        if "finish" not in journal["claims"] or "result" not in journal or patch["terminal"] not in (None, status.status_id):
+            raise prod.DeployError("Терминальный статус не соответствует намерению VPS")
+        result = journal["result"]
+        expected = ((records.DeploymentState.SUCCESS, writer._description(
+            result["receipt"]["generation_id"], result["receipt"]["migration"])) if result["outcome"] == "success"
+            else (records.DeploymentState.FAILURE, f"v1 restored={attempt.baseline.deployment_id}/{attempt.baseline.status_id}"))
+        if (status.state, status.description) != expected:
+            raise prod.DeployError("Текущий статус противоречит результату установки")
+        patch["terminal"] = status.status_id
+    else:
+        raise prod.DeployError("Продолжение установки для неизвестного статуса запрещено")
+    receipt = InstallationReceipt(**journal["base_receipt"])
+    journal["deployment_id"] = number
+    if not journal["started"]:
+        if asdict(attempts._base(host, receipt)) != journal["base_receipt"]:
+            raise prod.DeployError("Изменился runtime до установки")
+    elif "result" in journal:
+        attempts._complete(host, attempt, journal, status, receipt, recover=False)
+    else:
+        state = prod._read_recovery_state(host)
+        if state.get("deployment_attempt") != [attempt.attempt_key, number]:
+            if asdict(attempts._base(host, receipt)) != journal["base_receipt"]:
+                raise prod.DeployError("Состояние VPS не принадлежит исходной установке")
 
 
 def _record(attempt, journal, status_id, action):
@@ -208,6 +293,8 @@ def execute(host, version, action, sha, key, owner, snapshot, number, status_id,
             if action != "resume":
                 raise prod.DeployError("Команда от прежнего владельца")
             attempts._workflow(api, journal["owner"], "completed")
+        if action == "resume":
+            _resume(host, api, journal, attempt)
             journal["owner"] = owner
             attempts._save(host, journal)
         if reservation:

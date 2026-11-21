@@ -9,6 +9,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from urllib.error import URLError
 
 from scripts import deploy_attempt
 from tests import test_patch_http_baseline as fixture
@@ -85,3 +86,147 @@ class PatchControllerTests(unittest.TestCase):
         self.assertEqual(self.api.status_writes, ["in_progress", "success"])
         self.assertEqual((self.controller.switches, self.controller.cleanup_count), (1, 1))
         self.assertEqual(sum(n for (loc, _, _), n in self.api.calls.items() if loc == "vps"), 4)
+
+    def test_first_patch_after_legacy_close(self):
+        """На первой подписанной выкладке подтверждает прежний success в том же бюджете."""
+        self.seed_acceptance()
+        previous = json.loads(self.journal_path.read_bytes())
+        del previous["patch"]
+        self.journal_path.write_text(json.dumps(previous), encoding="utf8")
+        self.measure()
+        self.assertEqual(sum(n for (loc, _, _), n in self.api.calls.items() if loc == "vps"), 7)
+        self.assertEqual(self.api.posts.count("/deployments"), 1)
+
+    def test_first_patch_without_saved_ids(self):
+        """Действующая приёмка v2 подтверждается и без локальной копии D17."""
+        self.measure()
+        self.assertEqual(sum(n for (loc, _, _), n in self.api.calls.items() if loc == "vps"), 7)
+        self.assertEqual(self.controller.switches, 1)
+
+    def test_open_legacy_attempt_is_preserved(self):
+        """Первый подписанный PATCH не вытесняет прежнего владельца."""
+        self.seed_acceptance()
+        old = json.loads(self.journal_path.read_bytes())
+        del old["patch"]
+        old["closed"] = False
+        self.journal_path.write_text(json.dumps(old), encoding="utf8")
+        self.measure(error="Синтетическая команда VPS остановилась")
+        self.assertEqual(json.loads(self.journal_path.read_bytes()), old)
+        self.assertNotIn("/deployments", self.api.posts)
+
+    def test_lost_post_responses(self):
+        """После потери ответа на каждую из трёх записей runner читает созданный объект."""
+        self.seed_acceptance()
+        write = self.api._write
+
+        def lose_after_write(path, body):
+            response = write(path, body)
+            if path == "/deployments" or path.endswith("/statuses"):
+                raise URLError("Стенд потерял ответ POST")
+            return response
+
+        with patch.object(self.api, "_write", side_effect=lose_after_write):
+            self.measure()
+        self.assertEqual(self.api.posts.count("/deployments"), 1)
+        self.assertEqual(self.api.status_writes, ["in_progress", "success"])
+        self.assertEqual((self.controller.switches, self.controller.cleanup_count), (1, 1))
+
+    def test_resume_after_cleanup(self):
+        """Один Deployment закрывается после обрыва SSH и завершения исходного владельца."""
+        self.seed_acceptance()
+        self.controller.lose_completion_response = True
+        self.measure(error="Фикстура потеряла ответ SSH")
+        self.controller.lose_completion_response = False
+        self.api.calls.clear()
+        self.controller.calls.clear()
+        self.measure(resume=True, error="Синтетическая команда VPS остановилась")
+        self.assertIn("Не подтверждён владелец", self.controller.errors)
+        self.api.source_finished = True
+        self.api.calls.clear()
+        self.controller.calls.clear()
+        self.measure(resume=True)
+        self.assertEqual(self.controller.calls, ["resume", "complete", "finish", "close"])
+        self.assertEqual(self.api.posts.count("/deployments"), 1)
+        self.assertEqual(self.api.status_writes, ["in_progress", "success"])
+        self.assertEqual((self.controller.switches, self.controller.cleanup_count), (1, 1))
+
+    def test_rollback_preserves_accepted_version(self):
+        """Подтверждённый возврат закрывает D18 с failure и прежней принятой базой."""
+        self.seed_acceptance()
+        self.controller.restore = True
+        self.measure(error="возвратом на")
+        journal = json.loads(self.journal_path.read_bytes())
+        self.assertTrue(journal["closed"])
+        self.assertEqual(journal["patch"]["accepted"]["baseline"], asdict(self.api._baseline()))
+        self.assertEqual(self.api.status_writes, ["in_progress", "failure"])
+        self.assertEqual(self.controller.cleanup_count, 0)
+
+    def test_foreign_vps_key(self):
+        """VPS самостоятельно отклоняет подпись при несовпадающем локальном доверии."""
+        (self.controller.host.state_dir / "patch-allowed-signers").write_text("", encoding="ascii")
+        self.measure(error="Синтетическая команда VPS остановилась")
+        self.assertFalse(self.journal_path.exists())
+        self.assertNotIn("/deployments", self.api.posts)
+
+    def test_unconfirmed_create_cannot_be_repeated(self):
+        """Потерянная отправка без созданного D18 требует операторской сверки."""
+        self.seed_acceptance()
+        write = self.api._write
+        sends = []
+
+        def drop_create(path, body):
+            if path == "/deployments":
+                sends.append(path)
+                raise URLError("Стенд прервал отправку до GitHub")
+            return write(path, body)
+
+        with patch.object(self.api, "_write", side_effect=drop_create):
+            self.measure(error="требуется сверка")
+            self.api.source_finished = True
+            self.api.calls.clear()
+            self.controller.calls.clear()
+            self.measure(resume=True, error="требуется сверка")
+        self.assertEqual(sends, ["/deployments"])
+        self.assertEqual((self.api.status_writes, self.controller.switches), ([], 0))
+
+    def test_resume_rejects_changed_github_status(self):
+        """Новый владелец сравнивает текущий статус с состоянием после очистки."""
+        self.seed_acceptance()
+        self.controller.lose_completion_response = True
+        self.measure(error="Фикстура потеряла ответ SSH")
+        current = self.api.statuses[self.api.history_size + 1][0]
+        current["state"] = "success"
+        self.controller.lose_completion_response = False
+        self.api.source_finished = True
+        self.api.calls.clear()
+        self.controller.calls.clear()
+        self.measure(resume=True, error="Синтетическая команда VPS остановилась")
+        self.assertIn("Терминальный статус", self.controller.errors)
+        self.assertEqual((self.controller.switches, self.controller.cleanup_count), (1, 1))
+        self.assertFalse(json.loads(self.journal_path.read_bytes())["closed"])
+
+    def test_old_release_still_uses_legacy_v2_route(self):
+        """Установка старого допуска использует прежний протокол после обновления контроллера."""
+        graph, fingerprint = self.api.graph, self.api.proof.schema_fingerprint
+        first = fixture._V2RestFixture(graph, fingerprint, fixture.HISTORY_SIZE)
+        old = fixture._V2ControllerFixture(self.root / "old-publisher", first)
+        with patch.dict(os.environ, PRODUCTION_SIGNED_PATCH="false", RELEASE_SIGNER_ATTEMPT=""):
+            fixture._measure(self.root, "old-publish", first, self.runner, controller=old)
+        ready = fixture._V2RestFixture(graph, fingerprint, fixture.HISTORY_SIZE)
+        ready.seed_release(first)
+        control = Controller(self.root / "old-ready", ready)
+        with patch.dict(os.environ, PRODUCTION_SIGNED_PATCH="true", RELEASE_SIGNER_ATTEMPT=""):
+            result = fixture._measure(self.root, "old-ready", ready, self.runner, controller=control)
+        self.assertEqual(result["posts"].count("/releases"), 0)
+        self.assertEqual((control.switches, control.cleanup_count), (1, 1))
+        self.assertNotIn("patch", json.loads((control.host.state_dir / deploy_attempt.JOURNAL).read_bytes()))
+
+    def test_changed_local_baseline(self):
+        """Расхождение принятого локального статуса останавливает следующую попытку."""
+        self.seed_acceptance()
+        journal = json.loads(self.journal_path.read_bytes())
+        journal["patch"]["terminal"] += 1
+        self.journal_path.write_text(json.dumps(journal), encoding="utf8")
+        self.measure(error="Синтетическая команда VPS остановилась")
+        self.assertNotIn("/deployments", self.api.posts)
+        self.assertEqual(self.controller.switches, 0)
