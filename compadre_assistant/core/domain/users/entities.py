@@ -11,6 +11,14 @@ MAX_DISPLAY_NAME_LENGTH = 80
 PROFILE_MESSENGERS = ("telegram", "vk")
 
 
+class NotificationChannel(StrEnum):
+    """Определяет мессенджер для личных уведомлений профиля."""
+
+    TELEGRAM = "telegram"  # Доставка в Telegram.
+    VK = "vk"  # Доставка в VK.
+    UNKNOWN = "unknown"  # Незнакомое значение не разрешает доставку.
+
+
 class IdentityRebindStatus(StrEnum):
     """Описывает жизненный цикл перепривязки identity."""
 
@@ -45,6 +53,7 @@ class AppUser:
     id: int
     display_name: str | None = None
     created_at: datetime | None = None
+    notification_channel: NotificationChannel | None = None
 
     def __post_init__(self) -> None:
         if self.id <= 0:

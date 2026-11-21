@@ -35,11 +35,15 @@ class FamilyMigrationTest(unittest.TestCase):
         tables = ("app_users", "external_identities", "active_chat_modes", "user_capability_preferences")
         before = self._snapshot(tables)
 
-        self.assertEqual([migration.name for migration in apply_migrations(self.connection)], ["0007_family.sql"])
+        # Этот сценарий проверяет только переход 0006 → 0007.
+        family_migration = MIGRATIONS_DIR / "0007_family.sql"
+        (previous / family_migration.name).write_bytes(family_migration.read_bytes())
+        self.assertEqual([migration.name for migration in apply_migrations(self.connection, previous)],
+                         [family_migration.name])
         self.assertEqual(self._snapshot(tables), before)
         self.assertEqual(self._snapshot(("families", "family_members", "family_invites", "family_shopping_items")),
                          ([], [], [], []))
-        self.assertEqual(apply_migrations(self.connection), [])
+        self.assertEqual(apply_migrations(self.connection, previous), [])
         self._assert_integrity()
 
     def test_family_requires_an_owner_from_its_members(self) -> None:

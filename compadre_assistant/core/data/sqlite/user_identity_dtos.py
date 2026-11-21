@@ -10,6 +10,7 @@ class AppUserDto:
     id: int
     display_name: str | None
     created_at: str | None = None
+    notification_channel: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -22,7 +22,7 @@ from compadre_assistant.core.data.sqlite.user_identity_repository import (
     SQLiteIdentityLinkTokenRepository,
     SQLiteIdentityLifecycleRepository,
 )
-from compadre_assistant.core.domain.users.entities import IncomingIdentity
+from compadre_assistant.core.domain.users.entities import IncomingIdentity, NotificationChannel
 
 
 class SQLiteExternalIdentityRepositoryTest(unittest.TestCase):
@@ -290,7 +290,8 @@ class SQLiteUserIdentityRepositoryTest(unittest.TestCase):
                     self.assertEqual(service.confirm_rebind(source, **decision), new_user)
                     self.assertEqual(service.resolve_without_touch(source), new_user)
                     if resolution == "add_identity":
-                        self.assertEqual(service.resolve_without_touch(other), old_user)
+                        self.assertEqual(service.resolve_without_touch(other),
+                                         replace(old_user, notification_channel=NotificationChannel.VK))
                         self.assertEqual(tuple(db.execute(
                             "SELECT family_id, app_user_id FROM family_members"
                         ).fetchone()), (family, old_user.id))

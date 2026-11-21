@@ -70,7 +70,7 @@ class SQLiteAppUserRepository(AppUserRepository):
         """Возвращает пользователя приложения по ID."""
         row = self._connection.execute(
             """
-            SELECT id, display_name, created_at
+            SELECT id, display_name, created_at, notification_channel
             FROM app_users
             WHERE id = ?
             """,
@@ -110,6 +110,27 @@ class SQLiteAppUserRepository(AppUserRepository):
                 "DELETE FROM app_users WHERE id = ?",
                 (app_user_id,),
             )
+
+    def select_notification_channel(self, app_user_id: int, channel: str) -> bool:
+        """Сохраняет выбор и проверяет владельца канала одним UPDATE.
+
+        Args:
+            app_user_id: Профиль, изменяющий настройку.
+            channel: Выбранный мессенджер.
+
+        Returns:
+            True, если профиль существует и владеет аккаунтом указанного мессенджера.
+        """
+        if channel not in PROFILE_MESSENGERS:
+            return False
+        with self._connection:
+            result = self._connection.execute(
+                """UPDATE app_users SET notification_channel = ?
+                   WHERE id = ? AND EXISTS (SELECT 1 FROM external_identities
+                       WHERE app_user_id = app_users.id AND channel = ?)""",
+                (channel, app_user_id, channel),
+            )
+        return result.rowcount == 1
 
 
 class SQLiteExternalIdentityRepository(ExternalIdentityRepository):
@@ -489,7 +510,7 @@ class SQLiteIdentityLifecycleRepository(IdentityLifecycleRepository):
 
     def _require_user(self, app_user_id: int) -> AppUser:
         row = self._connection.execute(
-            "SELECT id, display_name, created_at FROM app_users WHERE id = ?", (app_user_id,)
+            "SELECT id, display_name, created_at, notification_channel FROM app_users WHERE id = ?", (app_user_id,)
         ).fetchone()
         if row is None:
             raise RuntimeError("Identity owner is missing")

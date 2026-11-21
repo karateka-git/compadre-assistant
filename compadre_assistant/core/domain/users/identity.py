@@ -217,6 +217,18 @@ class UserIdentityService:
         """Перечисляет мессенджеры, аккаунты которых уже связаны с профилем."""
         return self._external_identity_repository.linked_channels(app_user_id)
 
+    def select_notification_channel(self, app_user_id: int, channel: str) -> bool:
+        """Выбирает связанный мессенджер для уведомлений профиля.
+
+        Args:
+            app_user_id: Владелец настройки.
+            channel: Выбранный мессенджер.
+
+        Returns:
+            True, если мессенджер поддерживается и его связь с профилем действительна.
+        """
+        return self._app_user_repository.select_notification_channel(app_user_id, channel)
+
     def create_link_code(self, app_user_id: int, *, target_channel: str) -> CreatedLinkCode:
         """Выдаёт одноразовый код для свободного мессенджера профиля.
 
