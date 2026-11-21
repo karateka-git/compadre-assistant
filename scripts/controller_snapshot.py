@@ -205,6 +205,8 @@ def check_imports(directory: Path) -> None:
             "deploy_schema_admission, deploy_forward_recovery, deploy_acceptance, "
             "deploy_cleanup_old, deploy_attempt, deployment_writer; "
             "assert str(deploy_prod.SOURCE_ROOT) == sys.argv[1]")
+    if (directory / "scripts/deploy_signed_attempt.py").is_file():
+        code += "; from scripts import deploy_signed_attempt, patch_admission"
     result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(directory.resolve())],
                             cwd=directory.parent, capture_output=True, check=False)
     if result.returncode:

@@ -35,7 +35,7 @@ def _read(host):
     fields = {"protocol", "closed", "attempt", "deployment_id", "claims", "owner", "snapshot", "started", "base_receipt"}
     claims = value.get("claims")
     deployment_id = value.get("deployment_id")
-    if (set(value) - {"result", "installed_receipt"} != fields or type(value["protocol"]) is not int or value["protocol"] != 2
+    if (set(value) - {"result", "installed_receipt", "patch"} != fields or type(value["protocol"]) is not int or value["protocol"] != 2
             or type(value["closed"]) is not bool or type(value["started"]) is not bool
             or not _KEY.fullmatch(value["owner"]) or not prep.SHA_PATTERN.fullmatch(value["snapshot"])
             or claims not in ([], ["create"], ["create", "in_progress"], ["create", "in_progress", "finish"])
@@ -242,6 +242,17 @@ def require_current(host) -> records.AcceptedBaseline | None:
     ownership = getattr(host, "locked_attempt", None)
     if ownership is not None:
         attempt, deployment_id = ownership
+        if getattr(host, "patch_selection", None) is not None:
+            from scripts.deploy_signed_attempt import _admitted
+
+            journal = _read(host)
+            if (journal is None or journal["closed"] or journal["attempt"] != asdict(attempt)
+                    or journal["owner"] != host.patch_owner or journal["deployment_id"] != deployment_id
+                    or not journal["started"] or not journal["patch"]["in_progress"]):
+                raise prod.DeployError("Утеряно локальное владение установкой PATCH")
+            if _admitted(host, journal["patch"]["packet"], attempt.version, attempt.sha) != host.patch_proof:
+                raise prod.DeployError("Допуск PATCH изменился перед переключением")
+            return attempt.baseline
         status, _ = writer.current_attempt(host.release_api(), attempt, deployment_id)
         _require_in_progress(status, attempt)
         return attempt.baseline
@@ -372,6 +383,8 @@ def execute(host, version: str, action: str, sha: str, key: str, owner: str, sna
         if action == "reserve" and owner == key and number == "0":
             if journal is None or journal["closed"] and journal["attempt"]["attempt_key"] != key:
                 journal = _reserve(host, api, version, sha, key, snapshot)
+        if journal and "patch" in journal:
+            raise prod.DeployError("Эта резервация требует подписанного PATCH")
         if not journal or journal["closed"] and action not in {"resume", "complete", "close"} or journal["snapshot"] != snapshot:
             raise prod.DeployError("Открытая резервация этого snapshot отсутствует")
         attempt = records._attempt({"id": 0, "sha": sha, "payload": journal["attempt"]})

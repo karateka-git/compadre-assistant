@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 # Только полный успех всех обязательных проверок может создать success.
-CHECKS = ("compatibility", "checkout", "unit", "smokes", "migrations", "candidate")
+CHECKS = ("compatibility", "checkout", "smokes", "migrations", "candidate")
 
 
 def main() -> None:

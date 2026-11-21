@@ -19,6 +19,9 @@ on:
       source_attempt:
         description: Original installation run_id:run_attempt (required for v2 resume)
         type: string
+      signer_attempt:
+        description: Signed PATCH admission run_id:run_attempt from Sign PATCH admission
+        type: string
       change:
         description: Required in release mode (initial, major, minor, patch)
         type: string
@@ -64,6 +67,10 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SHA: ${{ inputs.sha }}
           RELEASE_SOURCE_ATTEMPT: ${{ inputs.source_attempt }}
+          RELEASE_SIGNER_ATTEMPT: ${{ inputs.signer_attempt }}
+          PATCH_ALLOWED_SIGNERS: ${{ vars.PATCH_ALLOWED_SIGNERS }}
+          COMPATIBILITY_POLICY_SHA: ${{ vars.COMPATIBILITY_POLICY_SHA }}
+          PRODUCTION_SIGNED_PATCH: ${{ vars.PRODUCTION_SIGNED_PATCH || 'false' }}
           COMPADRE_DEPLOYMENT_WRITER: ${{ vars.PRODUCTION_DEPLOYMENT_WRITER || 'v1' }}
           COMPADRE_CONTROLLER_SHA: ${{ vars.PRODUCTION_CONTROLLER_SHA }}
           RELEASE_CHANGE: ${{ inputs.change }}
@@ -77,12 +84,17 @@ jobs:
 
           umask 077
           run_dir="$(mktemp -d "$RUNNER_TEMP/production-release.XXXXXX")"
-          trap 'rm -f -- "$run_dir/identity" "$run_dir/known_hosts" "$run_dir/notes.md"; rmdir -- "$run_dir"' EXIT
+          trap 'rm -f -- "$run_dir/identity" "$run_dir/known_hosts" "$run_dir/notes.md" "$run_dir/signers"; rmdir -- "$run_dir"' EXIT
           trap 'exit 1' HUP INT TERM
 
           printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > "$run_dir/identity"
           printf '%s\n' "$VPS_KNOWN_HOSTS" > "$run_dir/known_hosts"
           unset VPS_SSH_PRIVATE_KEY VPS_KNOWN_HOSTS
+          if [[ -n "$RELEASE_SIGNER_ATTEMPT" ]]; then
+            : "${PATCH_ALLOWED_SIGNERS:?Missing trusted PATCH signer keys}"
+            export PATCH_ALLOWED_SIGNERS_FILE="$run_dir/signers"
+            printf '%s\n' "$PATCH_ALLOWED_SIGNERS" > "$PATCH_ALLOWED_SIGNERS_FILE"
+          fi
 
           case "$RELEASE_MODE" in
             release)

@@ -19,7 +19,7 @@ jobs:
   pr-fast:
     name: pr-check
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 45
     steps:
       - name: Checkout test merge
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
@@ -54,11 +54,8 @@ jobs:
       - name: Install runtime dependencies
         run: python -m scripts.ci_watch dependencies -- python -m pip install -r requirements.txt
 
-      - name: Fixed unit subset
-        run: |
-          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_config.py'
-          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_capability_composition.py'
-          python -m scripts.ci_watch unit -- python -m unittest discover -s tests -p 'test_migration_runner.py'
+      - name: Run full PR unittest suite
+        run: python -m scripts.ci_watch unit -- python -m unittest discover -s tests
 
       - name: Validate Compose with synthetic environment
         run: |

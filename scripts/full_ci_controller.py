@@ -45,6 +45,7 @@ class HttpLocation(StrEnum):
 
     RUNNER = "runner"
     VPS = "vps"
+    CI = "ci"  # Выдача допуска до старта Production release.
 
 
 class HttpPhase(StrEnum):

@@ -21,13 +21,17 @@ COMPATIBILITY_CHECK = "check-full-repository-compatibility-check"
 FULL_SUITE_CHECK = "check-full-suite"
 SHA_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 RELEASE_BRANCH_PATTERN = re.compile(r"release/(\d+)\.(\d+)\Z")
+PR_UNIT_STEP = "Run full PR unittest suite"  # Полный набор кандидата до слияния PR.
+RELEASE_MANIFEST_STEP = "Publish release checks manifest"  # Манифест после переноса unit-тестов.
 FULL_STEPS = frozenset({
     "Require repository compatibility evidence",
     "Checkout exact candidate", "Verify candidate commit", "Setup Python",
-    "Install runtime dependencies", "Run full unittest suite",
+    "Install runtime dependencies",
     "Run three autonomous smoke checks", "Check fresh and previous SQLite schemas",
-    "Build and healthcheck candidate image", "Publish check manifest",
+    "Build and healthcheck candidate image", RELEASE_MANIFEST_STEP,
 })
+# Старые опубликованные попытки подтверждают обязательный для них прогон unit.
+LEGACY_FULL_STEPS = (FULL_STEPS - {RELEASE_MANIFEST_STEP}) | {"Run full unittest suite", "Publish check manifest"}
 COMPATIBILITY_STEPS = frozenset({
     "Validate external policy pin", "Checkout trusted compatibility policy",
     "Checkout compatibility candidate", "Setup compatibility Python",
@@ -115,7 +119,8 @@ def _names_and_steps(jobs: list[object], workflow: str, sha: str) -> bool:
                for step in steps.values()):
             return False
         if name in required and not required[name].issubset(steps):
-            return False
+            if name != f"{caller} / {FULL_SUITE_CHECK}" or not LEGACY_FULL_STEPS.issubset(steps):
+                return False
     return required.keys() <= seen
 
 

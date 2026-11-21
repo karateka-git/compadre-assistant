@@ -63,6 +63,11 @@ def _positive(value: object, label: str) -> int:
 def _release(api: ReadOnlyGitHub, version: str) -> dict:
     """Получает ровно названный опубликованный immutable GitHub Release."""
     value = api.get(f"/releases/tags/{quote(version, safe='')}")
+    return checked_release(value, version)
+
+
+def checked_release(value: object, version: str) -> dict:
+    """Проверяет опубликованный immutable Release из ответа на чтение или создание."""
     if not isinstance(value, dict):
         raise DeploySelectionError("Некорректный объект GitHub Release")
     if (value.get("tag_name") != version or value.get("name") != version or

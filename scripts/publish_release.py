@@ -258,11 +258,7 @@ def _prepare(api: GitHub, version: str, sha: str, change: str, notes: str, *,
     major, minor, patch = parts = _version(version)
     if not SHA_PATTERN.fullmatch(sha):
         raise PublishError("Требуется полный 40-символьный SHA")
-    if not notes.strip():
-        raise PublishError("Release notes не должны быть пустыми")
-    reserved = ("Тип выпуска:", "Commit:", "Ветка:", "Полный CI:", EXPECTED_MIGRATION_LABEL)
-    if any(line.startswith(reserved) for line in notes.splitlines()):
-        raise PublishError("Release notes содержат служебное поле манифеста")
+    check_notes(notes)
     branch = f"release/{major}.{minor}"
     _candidate(api, branch, sha, github_history=github_history)
     history = _published_versions(api)
@@ -309,6 +305,15 @@ def _prepare(api: GitHub, version: str, sha: str, change: str, notes: str, *,
                            change, notes, make_latest, compatibility, previous_patch_sha, github_history, reads)
 
 
+def check_notes(notes: str) -> None:
+    """Отклоняет пустые notes и дублирование служебных полей манифеста."""
+    if not notes.strip():
+        raise PublishError("Release notes не должны быть пустыми")
+    reserved = ("Тип выпуска:", "Commit:", "Ветка:", "Полный CI:", EXPECTED_MIGRATION_LABEL)
+    if any(line.startswith(reserved) for line in notes.splitlines()):
+        raise PublishError("Release notes содержат служебное поле манифеста")
+
+
 def _require_published_tag(api: GitHub, prepared: PreparedRelease, object_sha: str) -> None:
     """Подтверждает неизменность объекта тега и реквизитов допуска."""
     reference = api.get(f"/git/ref/tags/{quote(prepared.version, safe='')}")
@@ -340,18 +345,7 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
     if _prepare(api, prepared.version, prepared.sha, prepared.change, prepared.notes,
                 github_history=prepared.github_history, reads=prepared._reads) != prepared:
         raise PublishError("Допуск изменился после подготовки выпуска")
-    tag = api.post("/git/tags", {"tag": prepared.version, "message": prepared.compatibility.message(),
-                                "object": prepared.sha, "type": "commit"})
-    object_sha = _sha(tag.get("sha"), "объект аннотированного тега")
-    reference = {"object": {"type": "tag", "sha": object_sha}}
-    target, _, message = resolve_release_tag(reference, prepared.version, lambda _: tag)
-    if (target != prepared.sha or message is None
-            or ReleaseTagEvidence.from_message(message) != prepared.compatibility):
-        raise PublishError("Создание объекта аннотированного тега не подтверждено")
-    tag = api.post("/git/refs", {"ref": f"refs/tags/{prepared.version}", "sha": object_sha})
-    if (tag.get("ref") != f"refs/tags/{prepared.version}"
-            or tag.get("object", {}).get("type") != "tag" or tag["object"].get("sha") != object_sha):
-        raise PublishError("Создание тега не подтверждено; версию разбирать вручную")
+    object_sha = create_annotated_tag(api, prepared.version, prepared.sha, prepared.compatibility)
     _require_published_tag(api, prepared, object_sha)
     _candidate(api, prepared.branch, prepared.sha, github_history=prepared.github_history)
     if prepared.previous_patch_sha is not None:
@@ -394,6 +388,36 @@ def publish(api: PublishingGitHub, prepared: PreparedRelease) -> str:
         raise PublishError("Опубликованный Release не совпадает с подготовленным")
     _require_published_tag(api, prepared, object_sha)
     return release["html_url"]
+
+
+def create_annotated_tag(api: PublishingGitHub, version: str, sha: str, evidence: ReleaseTagEvidence) -> str:
+    """Публикует объект и ref аннотированного тега, сверяя оба ответа GitHub.
+
+    Args:
+        api: Клиент доверенного писателя.
+        version: Свободное имя версии.
+        sha: Commit проверенного кандидата.
+        evidence: Аннотация CI для этой установки.
+
+    Returns:
+        SHA опубликованного объекта тега.
+
+    Raises:
+        PublishError: Ответ не подтверждает записанную связь.
+        PublishingError: GitHub не подтвердил запись.
+    """
+    tag = api.post("/git/tags", {"tag": version, "message": evidence.message(), "object": sha, "type": "commit"})
+    object_sha = _sha(tag.get("sha"), "объект аннотированного тега")
+    reference = {"object": {"type": "tag", "sha": object_sha}}
+    target, _, message = resolve_release_tag(reference, version, lambda _: tag)
+    if target != sha or message is None or ReleaseTagEvidence.from_message(message) != evidence:
+        raise PublishError("Создание объекта аннотированного тега не подтверждено")
+    ref = f"refs/tags/{version}"
+    tag = api.post("/git/refs", {"ref": ref, "sha": object_sha})
+    if (tag.get("ref") != ref or tag.get("object", {}).get("type") != "tag"
+            or tag["object"].get("sha") != object_sha):
+        raise PublishError("Создание тега не подтверждено; версию разбирать вручную")
+    return object_sha
 
 
 def main() -> None:

@@ -152,6 +152,9 @@ class Host:
 
     def select(self, version: str) -> SelectedRelease:
         """Повторно проверяет опубликованный Release и точную попытку CI."""
+        selected = getattr(self, "patch_selection", None)
+        if selected is not None and selected.version == version:
+            return selected
         previous = Path.cwd()
         try:
             os.chdir(self.checkout)
@@ -1088,7 +1091,13 @@ class Host:
         policy_sha = compatibility.private_text(pin_path)
         token = compatibility.private_text(self.state_dir / "github-read-token")
         with metrics.stage("predeploy.evidence"), compatibility.check("SAFE_EVIDENCE_READ"):
-            if annotated:
+            if getattr(self, "patch_selection", None) == selected:
+                evidence = compatibility.tag_evidence_record(self.checkout, selected, policy_sha, old_sha)
+                if (not annotated or evidence.get("baseline") != asdict(self.patch_proof.baseline)
+                        or expected[-1] != self.patch_proof.migration
+                        or evidence["schema_fingerprint"] != self.patch_proof.schema_fingerprint):
+                    raise compatibility.PredeployError("SAFE_TAG_EVIDENCE")
+            elif annotated:
                 evidence = compatibility.verify_tag_evidence(
                     GitHub(EXPECTED_REPOSITORY, token), self.checkout, selected, policy_sha, old_sha,
                     frozen=getattr(self, "locked_attempt", None) is not None)
@@ -1856,6 +1865,8 @@ def main() -> None:
                       help="удалить прежнюю SQLite для технически принятого выпуска")
     mode.add_argument("--attempt", nargs=6, metavar=("ACTION", "SHA", "KEY", "OWNER", "SNAPSHOT", "D18"),
                       help="выполнить команду протокола владения Deployment v2")
+    mode.add_argument("--patch-attempt", nargs=7, metavar=("ACTION", "SHA", "KEY", "OWNER", "SNAPSHOT", "D18", "STATUS"),
+                      help="выполнить команду подписанного допуска PATCH")
     mode.add_argument("--reconcile-rejected-post", nargs=4, metavar=("SHA", "KEY", "SNAPSHOT", "ACTION"),
                       help="сверить подтверждённо неисполненный POST после завершения runner")
     mode.add_argument("--recover-attempt-forward", nargs=3, metavar=("SHA", "KEY", "SNAPSHOT"),
@@ -1867,7 +1878,7 @@ def main() -> None:
         if args.verify_pinned == (args.version is not None):
             raise DeployError("Укажите версию или --verify-pinned")
         separate_mode = (args.verify_pinned or args.verify_installed or args.cleanup_old
-                         or args.attempt or args.reconcile_rejected_post or args.recover_attempt_forward)
+                         or args.attempt or args.patch_attempt or args.reconcile_rejected_post or args.recover_attempt_forward)
         if separate_mode and (args.emergency or args.reason is not None):
             raise DeployError("Установку аварийного выпуска выполняют отдельной командой")
         host = Host()
@@ -1879,6 +1890,14 @@ def main() -> None:
             from scripts import deploy_attempt
 
             deploy_attempt.reconcile_post(host, args.version, *args.reconcile_rejected_post)
+        elif args.patch_attempt is not None:
+            from scripts import deploy_signed_attempt
+            from scripts.patch_admission import SSH_INPUT_LIMIT
+
+            with metrics.github_http_report(HttpLocation.VPS, metrics.HttpOperation.ATTEMPT), immutable_git_reads():
+                payload = sys.stdin.buffer.read(SSH_INPUT_LIMIT + 1)
+                result = deploy_signed_attempt.execute(host, args.version, *args.patch_attempt, payload)
+                print(json.dumps(result, sort_keys=True, separators=(",", ":")), flush=True)
         elif args.attempt is not None:
             from scripts import deploy_attempt
 

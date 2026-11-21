@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 import yaml
 
-from scripts import ci_watch
+from scripts import ci_watch, write_full_manifest
 
 
 class WatchTests(unittest.TestCase):
@@ -105,16 +105,23 @@ class WatchTests(unittest.TestCase):
         full = yaml.safe_load((root / ".github/workflows/full-suite.yml").read_text(encoding="utf-8"))
         pr = yaml.safe_load((root / ".github/workflows/pr-fast.yml").read_text(encoding="utf-8"))
         self.assertEqual(full["jobs"]["full-suite"]["timeout-minutes"], 45)
-        self.assertEqual(pr["jobs"]["pr-fast"]["timeout-minutes"], 10)
+        self.assertEqual(pr["jobs"]["pr-fast"]["timeout-minutes"], 45)
         steps = {step.get("id"): step for step in full["jobs"]["full-suite"]["steps"]}
-        for step_id in ("unit", "smokes", "migrations", "candidate"):
+        self.assertNotIn("unit", steps)
+        for step_id in ("smokes", "migrations", "candidate"):
             self.assertIn("python -m scripts.ci_watch", steps[step_id]["run"])
             self.assertNotIn("continue-on-error", steps[step_id])
         for job in (full["jobs"]["full-suite"], pr["jobs"]["pr-fast"]):
             install = next(step for step in job["steps"] if step["name"] == "Install runtime dependencies")
             self.assertIn("ci_watch dependencies", install["run"])
-        fixed = next(step for step in pr["jobs"]["pr-fast"]["steps"] if step["name"] == "Fixed unit subset")
-        self.assertEqual(fixed["run"].count("ci_watch unit"), 3)
+        manifest = next(step for step in full["jobs"]["full-suite"]["steps"] if step["name"] == "Publish release checks manifest")
+        self.assertEqual({name for name in manifest["env"] if name.startswith("CHECK_")},
+                         {f"CHECK_{key.upper()}" for key in write_full_manifest.CHECKS})
+        unit = next(step for step in pr["jobs"]["pr-fast"]["steps"] if step["name"] == "Run full PR unittest suite")
+        self.assertEqual(unit["run"], "python -m scripts.ci_watch unit -- python -m unittest discover -s tests")
+        event = pr[True]["pull_request"]  # PyYAML читает ключ workflow on как логическое значение.
+        self.assertEqual(event["branches"], ["main", "release/*"])
+        self.assertIn("synchronize", event["types"])
 
 
 if __name__ == "__main__":
