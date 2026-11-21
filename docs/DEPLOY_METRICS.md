@@ -27,5 +27,5 @@
 | 2026-11-19 | [v4.3.0](https://github.com/karateka-git/compadre-assistant/actions/runs/44571054172/attempts/1) | MINOR | нет данных | нет данных | 321 | Успех <!-- deployment:7919837817 --> |
 | 2026-11-19 | [v4.3.1](https://github.com/karateka-git/compadre-assistant/actions/runs/44576728858/attempts/1) · [resume](https://github.com/karateka-git/compadre-assistant/actions/runs/44577857314/attempts/1) | PATCH, восстановление | нет данных | нет данных | нет данных | Успех <!-- deployment:7920630977 --> |
 | 2026-11-21 | [v4.4.0](https://github.com/karateka-git/compadre-assistant/actions/runs/44895005552/attempts/1) | MINOR | нет данных | нет данных | 321 | Успех <!-- deployment:7962159412 --> |
-| 2026-11-21 | [v4.4.1](https://github.com/karateka-git/compadre-assistant/actions/runs/44907760823/attempts/1) | PATCH | 167,716 | 77,046 | 18 | Успех <!-- deployment:7963840757 --> |
+| 2026-11-21 | [v4.4.1](https://github.com/karateka-git/compadre-assistant/actions/runs/44907760823/attempts/1) | PATCH | 167,716 | 77,046 | 18 | [Успех](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7963840757/statuses) <!-- deployment:7963840757 --> |
 <!-- deploy-summary:end -->
