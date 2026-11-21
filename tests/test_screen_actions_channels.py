@@ -633,14 +633,23 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         }),))
         for channel in ("telegram", "vk"):
             with self.subTest(channel=channel):
+                def check_reply(chat):
+                    text, actions, _ = self.last(channel)
+                    labels = [label for label, _ in actions]
+                    if channel == "vk":
+                        labels.extend(self.bottom(chat))
+                    # Исключаем закрывающие HTML-теги Telegram из пользовательского текста.
+                    for visible in (text, *labels):
+                        self.assertNotRegex(visible, r"(?<![<\w])/[a-z][a-z_]*\b")
+
                 async def section(label, chat="1001"):
                     await self.choose_section(channel, label, chat)
-                    self.assertNotRegex(self.last(channel)[0], r"/(?:family(?:_[a-z]+)?|cancel|confirm|help|add|buy|delete)\b")
+                    check_reply(chat)
 
                 async def inline(label, chat="1001"):
                     token, message_id = self.inline_action(channel, label)
                     await self.press(channel, token, message_id, chat=chat)
-                    self.assertNotRegex(self.last(channel)[0], r"/(?:family(?:_[a-z]+)?|cancel|confirm|help|add|buy|delete)\b")
+                    check_reply(chat)
 
                 await self.send(channel, "/start")
                 await section("«Семья»")
@@ -681,10 +690,21 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                 await self.press(channel, remove_token, card_id)
                 self.assertIn("Подтверждение действует", self.last(channel)[0])
                 approve_token, confirmation_id = self.inline_action(channel, "Исключить")
+                check_reply("1001")
+                await self.choose_section(channel, "Помощь", "1001")
+                help_text = self.last(channel)[0]
+                for decision in ("yes", "no"):
+                    self.assertRegex(help_text, rf"/confirm family remove \d+ \d+ {decision}")
+                self.assertNotIn("/confirm family close", help_text)
+                await self.send(channel, "/help")
+                self.assertEqual(help_text, self.last(channel)[0])
                 await self.press(channel, approve_token, confirmation_id, author="1002")
                 self.assertNotIn("Участник исключён", self.last(channel)[0])
                 await self.press(channel, approve_token, confirmation_id)
                 self.assertIn("Участник исключён", self.last(channel)[0])
+                check_reply("1001")
+                await self.choose_section(channel, "Помощь", "1001")
+                self.assertNotIn("/confirm family remove", self.last(channel)[0])
                 await section("Участники")
                 await inline("Закрыть семью")
                 await inline("Отменить")
