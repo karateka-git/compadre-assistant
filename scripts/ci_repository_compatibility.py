@@ -282,7 +282,7 @@ def main() -> int:
             with log.open("wb") as stream:
                 result = subprocess.run([
                     "docker", "run", "--rm", "--cap-drop=ALL", "--security-opt=no-new-privileges",
-                    "--user", f"{os.getuid()}:{os.getgid()}", "--env", "HOME=/tmp",
+                    "--user", f"{os.getuid()}:{os.getgid()}",
                     "--mount", f"type=bind,src={root / 'policy'},dst=/policy,readonly",
                     "--mount", f"type=bind,src={bare},dst=/objects.git,readonly",
                     "--mount", f"type=bind,src={results},dst=/result",
@@ -300,12 +300,14 @@ def main() -> int:
                 sys.executable, "-B", str(policy_root / "scripts/check_repository_compatibility.py"),
                 "--repository", str(args.repository.resolve()), *common, "--output", str(args.output.resolve()),
             ], cwd=policy_root, env=environment, check=False)
+        if result.returncode:
+            raise ValueError(f"Compatibility worker failed (exit={result.returncode}); inspect compatibility artifact")
         report = json.loads((args.output / "report.json").read_text(encoding="utf-8"))
-        if (result.returncode or report["candidate_sha"] != candidate
+        if (report["candidate_sha"] != candidate
                 or report["sources"]["previous"] != previous_manifest
                 or report["sources"]["candidate"] != candidate_manifest
                 or report.get("previous_git", {}).get("index_tree") != previous_tree):
-            raise ValueError("runner failed or source identity mismatch")
+            raise ValueError("Compatibility source identity mismatch")
         verify_report(report, policy, previous_sha=args.previous_sha)
         evidence = {
             "version": policy["version"], "repository": policy["repository"], "candidate_sha": candidate,
