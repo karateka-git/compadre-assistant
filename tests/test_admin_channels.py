@@ -144,14 +144,14 @@ class AdminChannelsTest(unittest.TestCase):
              patch("compadre_assistant.capabilities.admin.domain.cost_report._utc_now",
                    return_value=end), \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
-            self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs")[0])
+            self.assertIn("Открой раздел", self.telegram(processor, "/llm_costs")[0])
             self.assertIn("без аргументов", self.telegram(processor, "/admin /llm_costs")[0])
-            self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs")[0])
+            self.assertIn("Открой раздел", self.telegram(processor, "/llm_costs")[0])
             hello, keyboard = self.telegram(processor, "/admin")
             self.assertIn("Режим администрирования включён", hello)
             self.assertIsNotNone(keyboard)
             self.assertIn("/llm_costs <DAY|MONTH|YEAR> <timezone>", self.telegram(processor, "/help")[0])
-            self.assertIn("войди в режим через /admin", self.vk(processor, "/llm_costs").messages[-1][1])
+            self.assertIn("Открой раздел", self.vk(processor, "/llm_costs").messages[-1][1])
             self.assertFalse(requests)
             tg_report = self.telegram(processor, "/llm_costs")[0]
             self.assertIn("Сегодня — 0,01 ₽. Запросов: 4.", tg_report)
@@ -172,8 +172,8 @@ class AdminChannelsTest(unittest.TestCase):
 
             self.vk(processor, "/llm_costs Europe/Moscow", client=vk, publish=publish)
             moscow = vk.messages[-1][1]
-            self.assertIn("/llm_costs DAY Europe/Moscow", moscow)
-            self.assertIn("Вместо DAY можно указать MONTH или YEAR.", moscow)
+            self.assertIn("Часовой пояс Europe/Moscow", moscow)
+            self.assertNotIn("/llm_costs", moscow)
             self.assertIn("Сегодня — Известная сумма 0,01 ₽. Интервалов без стоимости — 1. Запросов: 9.", moscow)
             self.assertEqual(len(requests), 12)
             periods = _vk_buttons(vk.keyboards[-1], inline=True)
@@ -182,7 +182,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertIn("Часовой пояс Europe/Moscow", today)
             self.assertIn("Запросов: 9.", today)
             self.assertNotIn("Текущий месяц —", today)
-            self.assertIn("Чтобы открыть сводку, введи /llm_costs Europe/Moscow.", today)
+            self.assertNotIn("/llm_costs", today)
             other_periods = _vk_buttons(vk.keyboards[-1], inline=True)
             self.assertEqual(set(other_periods), {"Текущий месяц", "Текущий год", "Сводка"})
             self.assertEqual(len(requests), 14)
@@ -199,16 +199,16 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertEqual(len(requests), 20)
 
             self.vk(processor, "/llm_costs Europe/Moscow DAY", client=vk, publish=publish)
-            self.assertIn("/llm_costs DAY Europe/Moscow", vk.messages[-1][1])
+            self.assertIn("Не удалось распознать параметры отчёта", vk.messages[-1][1])
             self.assertIsNone(vk.keyboards[-1])
             self.assertEqual(len(vk.messages), 6)
             self.assertEqual(len(requests), 20)
             self.assertIn("Asia/Omsk", self.vk(processor, "/llm_costs").messages[-1][1])
             self.assertIn("Часовой пояс не найден", self.telegram(processor, "/llm_costs /invalid")[0])
-            self.assertIn("/llm_costs DAY Europe/Moscow", self.telegram(processor, "/llm_costs x y")[0])
+            self.assertIn("Не удалось распознать параметры отчёта", self.telegram(processor, "/llm_costs x y")[0])
             self.assertEqual(len(requests), 24)
             self.telegram(processor, "/exit")
-            self.assertIn("войди в режим через /admin", self.telegram(processor, "/llm_costs")[0])
+            self.assertIn("Открой раздел", self.telegram(processor, "/llm_costs")[0])
         load_ask.assert_not_called()
         model.assert_not_called()
         self.assertTrue(client.is_closed)
@@ -276,10 +276,12 @@ class AdminChannelsTest(unittest.TestCase):
         private_hint = "Открой личный чат с ботом, чтобы получить отчёт."
         with patch.object(GetGatewayCostReport, "execute", autospec=True) as execute, \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
-            self.assertEqual(self.telegram(processor, "/admin", chat=tg_group), (private_hint, None))
+            text, keyboard = self.telegram(processor, "/admin", chat=tg_group)
+            self.assertEqual(text, private_hint)
+            self.assertIn("Помощь", {button.text for row in keyboard.inline_keyboard for button in row})
             entered = self.vk(processor, "/admin", peer=vk_group)
             self.assertEqual(entered.messages[-1], (vk_group, private_hint))
-            self.assertIsNone(entered.keyboards[-1])
+            self.assertNotIn("Расходы", _vk_buttons(entered.keyboards[-1], inline=True))
             with connect_database(self.path) as connection:
                 modes = SQLiteChatModeRepository(connection)
                 self.assertIsNone(modes.get(tg_key))
@@ -303,16 +305,16 @@ class AdminChannelsTest(unittest.TestCase):
                               IncomingEvent("vk", str(vk_group), "1", "/help", "202")):
                     menu, complete = dispatcher.command_menu_snapshot(event)
                     self.assertTrue(complete)
-                    self.assertEqual(tuple(item.command for item in menu.items), ("/settings",))
+                    self.assertEqual(tuple(item.command for item in menu.items), ("/settings", "/help"))
             tg_help, tg_keyboard = self.telegram(processor, "/help", chat=tg_group)
             vk_help = self.vk(processor, "/help", peer=vk_group)
             for text in (tg_help, vk_help.messages[-1][1]):
                 self.assertIn("/settings", text)
                 self.assertNotIn("/admin", text)
                 self.assertNotIn("/llm_costs", text)
-            self.assertIsNone(tg_keyboard)
-            self.assertIsNone(vk_help.keyboards[-1])
-            self.assertEqual(self.telegram(processor, "/llm_costs Invalid", chat=tg_group), (private_hint, None))
+            self.assertEqual({button.text for row in tg_keyboard.inline_keyboard for button in row}, {"Настройки", "Помощь"})
+            self.assertEqual(set(_vk_buttons(vk_help.keyboards[-1], inline=True)), {"Настройки", "Помощь"})
+            self.assertEqual(self.telegram(processor, "/llm_costs Invalid", chat=tg_group)[0], private_hint)
             reply = self.vk(processor, "/llm_costs Europe/Moscow", peer=vk_group)
             self.assertEqual(reply.messages[-1], (vk_group, private_hint))
             with connect_database(self.path) as connection:
@@ -321,7 +323,7 @@ class AdminChannelsTest(unittest.TestCase):
                 self.assertIsNone(modes.get(vk_key))
             self.assertIn("нет доступа", self.telegram(processor, "/llm_costs", user=303, chat=303)[0])
             self.assertIn("нет доступа", self.telegram(processor, "/llm_costs", user=None)[0])
-            self.assertIn("/register", self.vk(processor, "/admin", user=405, peer=405).messages[-1][1])
+            self.assertIn("пока нет профиля", self.vk(processor, "/admin", user=405, peer=405).messages[-1][1])
             self.assertNotIn("/admin", self.telegram(processor, "/help", user=303, chat=303)[0])
             self.assertNotIn("/admin", self.telegram(processor, "/help", user=None)[0])
             execute.assert_not_called()
@@ -330,13 +332,47 @@ class AdminChannelsTest(unittest.TestCase):
         """Главная в обоих каналах показывает доверенному профилю входы."""
         self.configure(str(self.owner_id))
         with create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
-            self.assert_channel_menus(processor, {"/admin", "/settings", "/help"},
-                                      {"/admin", "Настройки", "Помощь"})
+            self.assert_channel_menus(processor, {"Администрирование", "Настройки", "Помощь"})
             for text in (self.telegram(processor, "/help")[0], self.vk(processor, "/help").messages[-1][1]):
                 self.assertIn("/admin", text)
                 self.assertIn("/settings", text)
                 for command in ("/exit", "/register", "/name", "/capabilities", "/link", "/llm_costs", "/cancel", "/confirm"):
                     self.assertNotIn(command, text)
+
+    def test_timezone_and_period_are_isolated_between_linked_chats_and_mode_revisions(self) -> None:
+        """Связанные Telegram/VK меняют пояс независимо, новый вход сбрасывает выбор."""
+        self.configure(str(self.owner_id))
+
+        def report(_use_case, timezone=None, *, period=None):
+            """Возвращает только выбранные строки без внешнего API."""
+            return GatewayCostReport(timezone or "Asia/Omsk", "RUB", tuple(
+                CostReportRow(option, CostReportStatus.PERIOD_UNAVAILABLE)
+                for option in ((period,) if period is not None else tuple(ReportPeriod))
+            ))
+
+        with patch.object(GetGatewayCostReport, "execute", autospec=True, side_effect=report), \
+             create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
+            self.telegram(processor, "/admin")
+            self.telegram(processor, "/llm_costs MONTH Europe/Moscow")
+            self.vk(processor, "/admin")
+            self.vk(processor, "/llm_timezone")
+            vk = self.vk(processor, "Asia/Tokyo").messages[-1][1]
+            self.assertIn("Asia/Tokyo", vk)
+            self.assertIn("Сегодня —", vk)
+            self.telegram(processor, "/llm_timezone")
+            telegram = self.telegram(processor, "Asia/Kathmandu")[0]
+            self.assertIn("Asia/Kathmandu", telegram)
+            self.assertIn("Текущий месяц —", telegram)
+            self.assertNotIn("Сегодня —", telegram)
+            direct = self.telegram(processor, "/llm_timezone Europe/Moscow")[0]
+            self.assertIn("Europe/Moscow", direct)
+            self.assertNotIn("Сегодня —", direct)
+            self.telegram(processor, "/exit")
+            self.telegram(processor, "/admin")
+            self.telegram(processor, "/llm_timezone")
+            renewed = self.telegram(processor, "Europe/Moscow")[0]
+            self.assertIn("Сегодня —", renewed)
+            self.assertIn("Текущий год —", renewed)
 
     def test_restart_revokes_existing_button_and_channel_menus(self) -> None:
         """Новая конфигурация блокирует сохранённый режим сразу после перезапуска."""
@@ -354,8 +390,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.vk(processor, "/llm_costs DAY", client=vk_client, publish=publish)
             periods = _vk_buttons(vk_client.keyboards[-1], inline=True)
             payload = periods["Текущий месяц"]["payload"]
-            self.assert_channel_menus(processor, {"/llm_costs", "/help", "/exit"},
-                                      {"Показать расходы ИИ", "Выйти из режима"}, vk_client=vk_client)
+            self.assert_channel_menus(processor, {"Показать расходы ИИ", "Часовой пояс", "Выйти из режима", "Помощь"}, vk_client=vk_client)
             # Активность в группе не должна скрывать ранее сохранённый личный чат
             # от фоновой сверки меню нового процесса.
             self.telegram(processor, "/admin", chat=-404)
@@ -364,7 +399,7 @@ class AdminChannelsTest(unittest.TestCase):
         self.configure("")
         with patch.object(GetGatewayCostReport, "execute", autospec=True) as execute, \
              create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as restarted:
-            self.assert_channel_menus(restarted, {"/settings", "/help"}, {"Настройки", "Помощь"})
+            self.assert_channel_menus(restarted, {"Настройки", "Помощь"})
             self.assertIn("больше недоступна", self.select_vk(restarted, vk_client, payload))
             rejected = self.vk(restarted, "Показать расходы ИИ", payload=lower["Показать расходы ИИ"]["payload"])
             self.assertIn("кнопка меню устарела", rejected.messages[-1][1])
@@ -426,7 +461,7 @@ class AdminChannelsTest(unittest.TestCase):
             client.assert_not_called()
 
     def assert_channel_menus(
-        self, processor: ChannelMessageProcessor, expected: set[str], vk_expected: set[str] | None = None,
+        self, processor: ChannelMessageProcessor, vk_expected: set[str],
         *, vk_client: FakeVkClient | None = None,
     ) -> None:
         """Проверяет меню, доставленные настоящими обработчиками обоих каналов."""
@@ -441,7 +476,7 @@ class AdminChannelsTest(unittest.TestCase):
             )
             owner_commands = next(commands for commands, scope in bot.menu_calls if scope.chat_id == 101)
             commands = {"/" + command.command for command in owner_commands}
-            self.assertEqual(commands, expected)
+            self.assertEqual(commands, {"/help"})
 
         asyncio.run(check_telegram())
         if vk_client is None:
@@ -449,7 +484,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.vk(processor, "/help", client=vk_client,
                     publish=_create_vk_menu_update_handler(vk_client, logger=self.logger))
         keyboard = next(item for item in reversed(vk_client.keyboards) if item and not json.loads(item)["inline"])
-        self.assertEqual(set(_vk_buttons(keyboard, inline=False)), vk_expected if vk_expected is not None else expected)
+        self.assertEqual(set(_vk_buttons(keyboard, inline=False)), vk_expected)
         self.assertFalse(processor.menu_delivery_failures)
 
 

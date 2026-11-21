@@ -6,9 +6,11 @@ from unittest.mock import Mock
 
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
-from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler
+from compadre_assistant.capabilities.obsidian.presentation.processing import ObsidianMessageHandler, ObsidianMessageResult
+from compadre_assistant.capabilities.obsidian.presentation.results import ObsidianResultType
 from compadre_assistant.core.domain.users.entities import AppUser
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionScope
+from compadre_assistant.core.presentation.incoming.menu import HELP_SECTION_ACTION
 from compadre_assistant.core.presentation.incoming.ports import HandlerContext, ReplyAction
 from compadre_assistant.presentation.telegram.rendering import render_telegram_content
 from compadre_assistant.presentation.vk.rendering import render_vk_content
@@ -34,14 +36,15 @@ class ReplySuggestionsTest(unittest.TestCase):
         registered = fixture.dispatcher.execute(replace(event, text="Имя"))
         self.assertEqual({action.command for action in registered.suggested_actions},
                          {"/obsidian", "/ai", "/other", "/settings", "/help"})
-        self._assert_command_visible_in_channels(registered, "/help")
+        self.assertNotIn("/help", content_text(registered.content))
 
         fixture.identity.resolve.side_effect = None
         fixture.identity.resolve.return_value = user
         exited = fixture.dispatcher.execute(replace(event, text="/exit"))
         self.assertEqual(exited.suggested_actions, registered.suggested_actions)
-        self._assert_command_visible_in_channels(exited, "/help")
-        self.assertEqual(fixture.dispatcher.execute(_event("/status")).suggested_actions, ())
+        self.assertNotIn("/help", content_text(exited.content))
+        outside = fixture.dispatcher.execute(_event("/status"))
+        self.assertEqual({action.command for action in outside.suggested_actions}, {"/settings", "/help"})
 
     def test_ask_long_question_offers_valid_retry(self) -> None:
         """Слишком длинный вопрос можно ввести заново без аргумента-заполнителя."""
@@ -51,9 +54,10 @@ class ReplySuggestionsTest(unittest.TestCase):
         response = ask.handle(HandlerContext(AppUser(23, "Имя"), pending_inputs=Mock()),
                               _event("/ask вопрос")).response
         self.assertEqual(response.suggested_actions,
-                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION),))
-        self.assertIn("вызови /ask", content_text(response.content))
-        self._assert_command_visible_in_channels(response, "/ask")
+                         (ReplyAction("Задать вопрос", "/ask", scope=ActionScope.SECTION), HELP_SECTION_ACTION))
+        self.assertIn("начни ввод заново", content_text(response.content))
+        self.assertNotIn("/ask", "".join(part.text for part in render_telegram_content(response.content)))
+        self.assertNotIn("/ask", "".join(part.text for part in render_vk_content(response.content)))
         model.answer.assert_not_called()
 
         model.answer.return_value = "Ответ модели"
@@ -62,7 +66,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         model.answer.assert_not_called()
         answered = accepted.cancellable_action(lambda: False)
         self.assertEqual(content_text(answered.content), "Ответ модели")
-        self.assertEqual(answered.suggested_actions, ())
+        self.assertEqual({action.command for action in answered.suggested_actions},
+                         {"/ask", "/get_text_from_image", "/exit", "/help"})
 
     def test_ask_without_pending_input_keeps_only_direct_retry(self) -> None:
         """Без хранилища ожиданий голая команда не предлагается."""
@@ -71,8 +76,8 @@ class ReplySuggestionsTest(unittest.TestCase):
         response = AiCapability(question, Mock()).handle(
             HandlerContext(AppUser(23, "Имя")), _event("/ask вопрос"),
         ).response
-        self.assertEqual(response.suggested_actions, ())
-        self.assertIn("/ask <question>", content_text(response.content))
+        self.assertEqual(response.suggested_actions, (HELP_SECTION_ACTION,))
+        self.assertNotIn("/ask", content_text(response.content))
         self.assertNotIn("вызови /ask", content_text(response.content))
         model.answer.assert_not_called()
 
@@ -92,13 +97,26 @@ class ReplySuggestionsTest(unittest.TestCase):
                 handler = ObsidianMessageHandler(article_url_use_case=Mock(), vault_selection_manager=selected,
                                                  vault_sync_manager=sync)
                 response = handler.enter(context, event, "").response
-                self.assertEqual(tuple(action.command for action in response.suggested_actions), commands)
+                self.assertEqual(tuple(action.command for action in response.suggested_actions),
+                                 commands[:-1] + ("/confirm", "/help", "/exit"))
                 self.assertEqual(response.suggested_actions, handler.section_actions(user, event.reply_address, 1, None))
                 self.assertTrue(all(action.scope == ActionScope.SECTION for action in response.suggested_actions))
-                if "/vault_status" in commands:
-                    self._assert_command_visible_in_channels(response, "/vault_status")
-                self._assert_command_visible_in_channels(response, "/help")
+                self.assertNotRegex(content_text(response.content), r"/(?:vault_status|help|exit)\b")
                 self.assertEqual(response.actions, ())
+
+    def test_every_obsidian_outcome_keeps_available_actions_and_help(self) -> None:
+        """Последний результат и ошибка не обрывают кнопочный путь хранилища."""
+        user, event = AppUser(23, "Имя"), _event("/obsidian")
+        service = Mock()
+        service.list_pending.return_value = ()
+        handler = ObsidianMessageHandler(article_url_use_case=Mock(), article_analysis_use_case=Mock(),
+                                         vault_selection_manager=FakeVaultSelectionManager(selected=_test_vault(23)),
+                                         vault_sync_manager=Mock(), obsidian_confirmation_service=service)
+        for result_type in ObsidianResultType:
+            with self.subTest(result=result_type):
+                response = handler._result_response(ObsidianMessageResult(type=result_type, app_user=user), event.reply_address)
+                self.assertEqual({action.command for action in response.suggested_actions},
+                                 {"/vault_status", "/vault_sync", "/vault_disconnect", "/reanalyze", "/help", "/exit"})
 
     def test_confirmation_actions_stay_separate_from_suggestions(self) -> None:
         """Адресные решения не превращаются в общие следующие шаги."""
@@ -106,17 +124,20 @@ class ReplySuggestionsTest(unittest.TestCase):
         fixture.setUp()
         fixture.rebind()
         response = fixture.dispatcher.execute(_event("/confirm"))
-        self.assertEqual(response.suggested_actions, ())
+        self.assertEqual(tuple(action.command for action in response.suggested_actions), ("/help",))
         self.assertEqual(len(response.actions), 2)
         self.assertTrue(all(action.command.startswith("/confirm core identity ")
                             for action in response.actions))
-        self.assertEqual(fixture.dispatcher.execute(_event("/help")).suggested_actions, ())
+        help_response = fixture.dispatcher.execute(_event("/help"))
+        for action in response.actions:
+            self.assertNotIn(action.command, content_text(response.content))
+            self._assert_command_visible_in_channels(help_response, action.command)
 
     def _assert_command_visible_in_channels(self, response, command: str) -> None:
         """Проверяет текстовый путь при отсутствии кнопок ответа в каналах."""
         self.assertIn(command, content_text(response.content))
-        self.assertIn(command, "".join(part.text for part in render_vk_content(response.content, response.actions)))
-        self.assertIn(command, "".join(part.text for part in render_telegram_content(response.content, response.actions)))
+        self.assertIn(command, "".join(part.text for part in render_vk_content(response.content)))
+        self.assertIn(command, "".join(part.text for part in render_telegram_content(response.content)))
 
 
 if __name__ == "__main__":

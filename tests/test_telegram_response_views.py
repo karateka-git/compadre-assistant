@@ -211,7 +211,7 @@ class TelegramResponseViewsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.bot.edit_message_reply_markup.await_count, 1)
 
     async def test_oversized_edit_sends_only_recovery_and_invalidates_target(self) -> None:
-        """Ответ из нескольких частей не выдаёт новые кнопки после отказа редактирования."""
+        """После отказа только последняя часть подсказки предлагает справку."""
         await self.open_view()
         message = self.message("/adjust_view")
         response = self.processor(IncomingEvent("telegram", "1001", str(message.message_id), message.text, "1001"))
@@ -220,7 +220,9 @@ class TelegramResponseViewsTest(unittest.IsolatedAsyncioTestCase):
         self.bot.edit_message_text.assert_not_awaited()
         recovery = self.bot.send_message.await_args_list[1:]
         self.assertEqual(len(recovery), 3)
-        self.assertTrue(all("reply_markup" not in call.kwargs for call in recovery))
+        self.assertTrue(all("reply_markup" not in call.kwargs for call in recovery[:-1]))
+        keyboard = recovery[-1].kwargs["reply_markup"]
+        self.assertEqual([button.text for row in keyboard.inline_keyboard for button in row], ["Помощь"])
         await self.send("/adjust_view")
         self.assertEqual(self.bot.send_message.await_args.kwargs["text"], RECOVERY)
 

@@ -61,8 +61,8 @@ class AiChannelsTest(unittest.TestCase):
 
     def send(self, channel, processor, text, chat_id=42, on_delivery=None, *, images=(), load=None):
         """Проводит сообщение через канал и возвращает доставленный текст."""
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
-        progress = ("Вопрос принят. Готовлю ответ… Для отмены введи /cancel.", receipt)
+        receipt = "Фото получено. Распознаю текст."
+        progress = ("Вопрос принят. Готовлю ответ…", receipt)
         finished = threading.Event()
         self.response_message_id = None
 
@@ -177,7 +177,8 @@ class AiChannelsTest(unittest.TestCase):
                 if keyboard is None:
                     return client.messages[start][1], {}
                 menu = json.loads(keyboard)
-                self.assertFalse(menu["inline"])
+                if menu["inline"]:
+                    return client.messages[start][1], {}
                 return client.messages[start][1], {
                     button["action"]["label"]: button["action"].get("payload")
                     for row in menu["buttons"] for button in row
@@ -187,8 +188,8 @@ class AiChannelsTest(unittest.TestCase):
             send("Тест", single_reply=False)
             reply, actions = send("/ai")
             self.assertIn("Режим ИИ включён", reply)
-            self.assertIn("/get_text_from_image", reply)
-            self.assertEqual(set(actions), {"Задать вопрос", "Извлечь текст с фото", "Выйти из режима"})
+            self.assertNotIn("/", reply)
+            self.assertEqual(set(actions), {"Задать вопрос", "Извлечь текст с фото", "Выйти из режима", "Помощь"})
             self.assertEqual(send("обычный вопрос")[1], {})
 
             for label, hint in (("Задать вопрос", "Введи один вопрос"),
@@ -196,8 +197,8 @@ class AiChannelsTest(unittest.TestCase):
                 with self.subTest(label=label):
                     reply, cancel = send(label, payload=actions[label])
                     self.assertIn(hint, reply)
-                    self.assertIn("/cancel", reply)
-                    self.assertEqual(set(cancel), {"Отмена"})
+                    self.assertNotIn("/", reply)
+                    self.assertEqual(set(cancel), {"Отмена", "Помощь"})
                     stale, menu = send(label, payload=actions[label])
                     self.assertIn("кнопка меню устарела", stale)
                     self.assertEqual(menu, {})
@@ -209,7 +210,7 @@ class AiChannelsTest(unittest.TestCase):
             self.assertIn("Режим этого чата завершён", reply)
             self.assertTrue(actions_after_exit)
             self.assertNotIn("Задать вопрос", actions_after_exit)
-            self.assertIn("/ai", send("/ask")[0])
+            self.assertIn("Открой раздел", send("/ask", single_reply=False)[0])
 
     def test_vk_keeps_menu_until_a_reply_in_the_same_chat(self) -> None:
         """Запуск и смена доступа из Telegram не публикуют меню в VK."""
@@ -234,9 +235,9 @@ class AiChannelsTest(unittest.TestCase):
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
-            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            code = re.search(r"Код привязки: (?:<code>)?([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
-            send(processor, code.group(0))
+            send(processor, f"/link {code.group(1)}")
 
         # Новый процесс не знает, что отображается в клиенте VK.
         before = len(client.messages)
@@ -261,7 +262,7 @@ class AiChannelsTest(unittest.TestCase):
             send(restarted, "/ask")
             reply = "\n".join(text for _, text in client.messages[before:])
             self.assertIn("лично выключена", reply)
-            self.assertIn("/enable ai", reply)
+            self.assertIn("Управлять доступом можно в настройках", reply)
             self.assertNotIn("Задать вопрос", commands())
 
     def test_vk_pending_input_expires_once_and_restores_menu(self) -> None:
@@ -283,7 +284,7 @@ class AiChannelsTest(unittest.TestCase):
 
         client.send_message = send_with_loss
         now = datetime(2026, 11, 14, tzinfo=UTC)
-        expired = "Срок ожидания ввода истёк. Повтори {}, чтобы начать заново."
+        expired = "Срок ожидания ввода истёк. Начни ввод заново."
         address = ReplyAddress("vk", "7")
         with create_channel_message_processor(
             database_path=self.path, enabled_capabilities=("ai",), ai_config=self.config,
@@ -305,7 +306,7 @@ class AiChannelsTest(unittest.TestCase):
                 reconcile()
             self.assertIsNotNone(processor._pending_inputs.get(address))
             reconcile()
-            self.assertEqual(client.messages[-1], (7, expired.format("/register")))
+            self.assertEqual(client.messages[-1], (7, expired))
             self.assertEqual(attempts[0], attempts[1])
             self.assertIsNone(processor._pending_inputs.get(address))
             send("/register")
@@ -342,12 +343,12 @@ class AiChannelsTest(unittest.TestCase):
                     now += timedelta(seconds=1)
                     reconcile()
                     reconcile()
-                    self.assertEqual(client.messages[start:], [(7, expired.format(command))])
+                    self.assertEqual(client.messages[start:], [(7, expired)])
                     keyboard = json.loads(client.keyboards[-1])
                     self.assertFalse(keyboard["inline"])
                     self.assertEqual(
                         {button["action"]["label"] for row in keyboard["buttons"] for button in row},
-                        {"Задать вопрос", "Извлечь текст с фото", "Выйти из режима"},
+                        {"Задать вопрос", "Извлечь текст с фото", "Выйти из режима", "Помощь"},
                     )
 
     def test_vk_pending_expiry_yields_to_incoming_or_changed_profile(self) -> None:
@@ -412,9 +413,9 @@ class AiChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     denied = self.send(channel, processor, "/ask до входа")
-                    self.assertIn("войди в режим через", denied)
-                    self.assertIn("/ai", denied)
-                    self.assertIn("/ai без аргументов", self.send(channel, processor, "/ai /ask вопрос"))
+                    self.assertIn("Открой раздел", denied)
+                    self.assertNotIn("/ai", denied)
+                    self.assertIn("Открой режим ИИ", self.send(channel, processor, "/ai /ask вопрос"))
                     model.answer.assert_not_called()
                     self.assertIn("Режим ИИ включён", self.send(channel, processor, "/ai"))
                     for question in ("первый", "https://example.com/article"):
@@ -432,8 +433,8 @@ class AiChannelsTest(unittest.TestCase):
                         ).fetchone()[0], "ai")
                     self.send(channel, processor, "/exit")
                     denied = self.send(channel, processor, "/ask после выхода")
-                    self.assertIn("войди в режим через", denied)
-                    self.assertIn("/ai", denied)
+                    self.assertIn("Открой раздел", denied)
+                    self.assertNotIn("/ai", denied)
                     self.assertEqual(model.answer.call_count, 2)
                 model.close.assert_called_once_with()
 
@@ -469,16 +470,16 @@ class AiChannelsTest(unittest.TestCase):
 
                         send("/register")
                         send("Тест")
-                        self.assertIn("/settings", send("/capabilities"))
+                        self.assertIn("Открой раздел", send("/capabilities"))
                         send("/settings")
                         self.assertIn("«Режим ИИ» (ai)", send("/capabilities"))
                         self.assertIn("Неизвестная возможность", send("/disable ask"))
-                        self.assertIn("«Режим ИИ» — /disable ai", send("/disable"))
+                        self.assertIn("«Режим ИИ» (ai)", send("/disable"))
                         self.assertIn("Возможность «Режим ИИ» выключена", send("/disable ai"))
                         self.assertEqual(send("/ai"),
                                          "Возможность «Режим ИИ» лично выключена. "
-                                         "Включить: /settings, затем /enable ai.")
-                        self.assertIn("«Режим ИИ» — /enable ai", send("/enable"))
+                                         "Управлять доступом можно в настройках.")
+                        self.assertIn("«Режим ИИ» (ai)", send("/enable"))
                         self.assertIsNotNone(self.response_message_id)
                         self.assertEqual(
                             self.press_action(channel, processor, self.keyboard, "Включить «Режим ИИ»",
@@ -488,10 +489,10 @@ class AiChannelsTest(unittest.TestCase):
                         )
                         self.assertIn("«Режим ИИ» уже включён", send("/enable ai"))
                         denied = send("/ask вопрос")
-                        self.assertIn("войди в режим", denied)
-                        self.assertIn("/ai", denied)
+                        self.assertIn("Открой раздел", denied)
+                        self.assertNotIn("/ai", denied)
                         send("/ai")
-                        self.assertIn("/settings", send("/status"))
+                        self.assertIn("Открой раздел", send("/status"))
                         self.assertEqual(send("/ask вопрос"), "Ответ")
                 self.assertEqual(model_type.return_value.answer.call_count, 2)
 
@@ -530,7 +531,7 @@ class AiChannelsTest(unittest.TestCase):
                         finally:
                             release.set()
                         self.assertEqual(response_text(future.result(timeout=5)), "Ответ: долгий")
-                    self.assertIn("/enable ai", self.send(channel, processor, "/ask следующий"))
+                    self.assertIn("Управлять доступом можно в настройках", self.send(channel, processor, "/ask следующий"))
                     self.assertEqual(model.answer.call_count, 1)
                     self.assertIn("«Режим ИИ» включён", self.send(channel, processor, "/enable ai", chat_id=7))
                     self.assertEqual(self.send(channel, processor, "/ask другой"), "Ответ: другой")
@@ -558,9 +559,10 @@ class AiChannelsTest(unittest.TestCase):
                             UserCapabilityPreference(owner, "obsidian", True)
                         )
                     opened = self.send(channel, processor, "/obsidian")
-                    self.assertIn("/confirm", opened)
+                    self.assertIn("«Подтверждения»", opened)
+                    self.assertNotIn("/confirm", opened)
                     self.assertNotIn("Ответь да", opened)
-                    self.assertIn("/ai", self.send(channel, processor, "/ask вопрос"))
+                    self.assertIn("Открой раздел", self.send(channel, processor, "/ask вопрос"))
                     model.answer.assert_not_called()
                     self.send(channel, processor, "/ai")
                     with connect_database(self.path) as connection:
@@ -593,7 +595,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.assertEqual(self.send(channel, processor, "/ai"),
-                                     "Возможность «Режим ИИ» недоступна на сервере. Список: /settings, затем /capabilities.")
+                                     "Возможность «Режим ИИ» недоступна на сервере.")
                     self.assertIn("недоступна на сервере", self.send(channel, processor, "/ask вопрос"))
             loader.assert_not_called()
             model.assert_not_called()
@@ -689,11 +691,11 @@ class AiChannelsTest(unittest.TestCase):
                     initial_downloads, initial_requests = len(downloads), len(requests)
                     send("/register")
                     send("Тест")
-                    self.assertIn("войди в режим", send(command))
+                    self.assertIn("Открой раздел", send(command))
                     self.assertNotIn(command, photo("/ai"))
-                    self.assertIn(command, send("/ai"))
+                    self.assertNotIn("/", send("/ai"))
                     self.assertIn(command, send("/help"))
-                    self.assertIn(command, photo(command))
+                    self.assertIn("Извлечь текст с фото", photo(command))
                     if channel == "telegram":
                         self.assertIn("Пришли одно фото", self.press_action(
                             channel, processor, self.keyboard, "Извлечь текст с фото",
@@ -707,7 +709,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.assertEqual((len(downloads), len(requests)), (initial_downloads, initial_requests))
                     result = photo("/exit")
                     self.assertEqual(result, escape(transcription, quote=False) if channel == "telegram" else transcription)
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     self.assertIn("Пришли одно фото", send(command))
                     self.assertEqual(photo(), "На фото нет текста.")
                     send(command)
@@ -717,7 +719,7 @@ class AiChannelsTest(unittest.TestCase):
                         ))
                     else:
                         send("/cancel")
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     send(command)
                     # Обычное неподходящее значение не продлевает исходный срок.
                     timestamp += timedelta(minutes=9)
@@ -736,7 +738,7 @@ class AiChannelsTest(unittest.TestCase):
                     send("/enable ai", chat_id=8)
                     send(command)
                     self.assertIn("Не удалось прочитать фото", photo(file_id="broken"))
-                    self.assertIn(command, photo())
+                    self.assertIn("Извлечь текст с фото", photo())
                     send(command)
                     self.assertIn("Не удалось распознать", photo())
                     self.assertIn("Введи один вопрос", send("/ask"))
@@ -830,21 +832,22 @@ class AiChannelsTest(unittest.TestCase):
                         await send("Тест")
                         await send("/ai")
                         normal = commands()
-                        self.assertIn("/ask" if channel == "telegram" else "Задать вопрос", normal)
+                        self.assertIn("/help" if channel == "telegram" else "Задать вопрос", normal)
+                        waiting_menu = ("/help",) if channel == "telegram" else ("Отмена", "Помощь")
                         await send("/get_text_from_image")
-                        self.assertEqual(commands(), ("/cancel",) if channel == "telegram" else ("Отмена",))
+                        self.assertEqual(commands(), waiting_menu)
                         await send("/cancel")
                         self.assertEqual(commands(), normal)
                         if channel == "telegram":
                             await send("/ask")
-                            self.assertEqual(commands(), ("/cancel",))
+                            self.assertEqual(commands(), waiting_menu)
                             await send("  ")
-                            self.assertEqual(commands(), ("/cancel",))
+                            self.assertEqual(commands(), waiting_menu)
                             self.assertEqual(reports, [])
                         await send("пошаговый" if channel == "telegram" else "/ask прямой")
                         self.assertTrue(await asyncio.to_thread(entered.wait, 5))
                         self.assertIn("Вопрос принят", sent[-1])
-                        self.assertEqual(commands(), ("/cancel",) if channel == "telegram" else ("Отмена",))
+                        self.assertEqual(commands(), waiting_menu)
                         await send("/cancel")
                         self.assertIn("Обработка отменена", sent[-1])
                         self.assertEqual(commands(), normal)
@@ -928,7 +931,7 @@ class AiChannelsTest(unittest.TestCase):
 
     def test_ocr_cancels_during_download_or_model(self) -> None:
         """VK очередь и Telegram handler принимают отмену при заблокированной сети."""
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        receipt = "Фото получено. Распознаю текст."
         marker = "Распознанный ответ"
         command = "/get_text_from_image"
         for channel in ("telegram", "vk"):
@@ -943,8 +946,9 @@ class AiChannelsTest(unittest.TestCase):
                 menu_calls = []
                 keyboards_by_reply = []
 
-                ask_label = "/ask" if channel == "telegram" else "Задать вопрос"
-                cancel_label = "/cancel" if channel == "telegram" else "Отмена"
+                ask_label = "/help" if channel == "telegram" else "Задать вопрос"
+                cancel_label = "/help" if channel == "telegram" else "Отмена"
+                waiting_labels = (cancel_label,) if channel == "telegram" else ("Отмена", "Помощь")
 
                 def record_menu(chat, commands):
                     menu_calls.append((chat, commands))
@@ -1000,10 +1004,10 @@ class AiChannelsTest(unittest.TestCase):
                         await send("", photo="undelivered", fail_receipt=True)
                         self.assertEqual(stages, [])
                         if channel == "telegram":
-                            self.assertEqual(menu_calls[-2:], [(7, (cancel_label,)), normal])
+                            self.assertEqual(menu_calls[-2:], [(7, waiting_labels), normal])
                         else:
                             self.assertEqual(len(messages), message_count)
-                            self.assertEqual(menu_calls[-1], (7, ("Отмена",)))
+                            self.assertEqual(menu_calls[-1], (7, waiting_labels))
                             await send("/help")
                             self.assertEqual(menu_calls[-1], normal)
                             self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
@@ -1013,7 +1017,7 @@ class AiChannelsTest(unittest.TestCase):
                         await send("/exit", photo="first")
                         self.assertTrue(await asyncio.to_thread(entered_download.wait, 5))
                         self.assertEqual(stages, ["receipt", "download:first"])
-                        self.assertEqual(menu_calls[-1], (7, (cancel_label,)))
+                        self.assertEqual(menu_calls[-1], (7, waiting_labels))
                         if channel == "vk":
                             self.assertEqual(len(menu_calls), waiting_menu_count)
                         call_count = len(menu_calls)
@@ -1045,7 +1049,7 @@ class AiChannelsTest(unittest.TestCase):
                         self.assertTrue(await asyncio.to_thread(first_finished.wait, 5))
                         await asyncio.to_thread(processor.reconcile_menus, publish)
                         self.assertEqual(len(menu_calls), call_count)
-                        self.assertEqual(menu_calls[-1], (7, (cancel_label,)))
+                        self.assertEqual(menu_calls[-1], (7, waiting_labels))
                         self.assertEqual([commands for chat, commands in menu_calls if chat == 43][-1], normal[1])
                         await send("/cancel")
                         self.assertIn("Обработка отменена", messages[-1][1])
@@ -1058,7 +1062,7 @@ class AiChannelsTest(unittest.TestCase):
                             await send("", photo=photo)
                             self.assertTrue(await asyncio.to_thread(restored.wait, 5))
                             self.assertTrue(await asyncio.to_thread(result_delivered.wait, 5))
-                            self.assertEqual(menu_calls[-2:], [(7, (cancel_label,)), normal])
+                            self.assertEqual(menu_calls[-2:], [(7, waiting_labels), normal])
                             self.assertIn(expected, messages[-1][1])
                             if channel == "vk" and photo == "fast":
                                 self.assertEqual(keyboards_by_reply[-1], (messages[-1][1], normal[1]))
@@ -1227,7 +1231,7 @@ class AiChannelsTest(unittest.TestCase):
         """Отзыв персонального доступа в VK скрывает начатый результат в Telegram."""
         release, menu_restored = threading.Event(), threading.Event()
         command = "/get_text_from_image"
-        receipt = "Фото получено. Распознаю текст. Для отмены введи /cancel."
+        receipt = "Фото получено. Распознаю текст."
         menus = []
 
         def publish(update):
@@ -1244,9 +1248,9 @@ class AiChannelsTest(unittest.TestCase):
             self.send("telegram", processor, "Тест", chat_id=7)
             self.send("telegram", processor, "/settings", chat_id=7)
             link_reply = self.send("telegram", processor, "/connect vk", chat_id=7)
-            code = re.search(r"/link ([A-Za-z0-9_-]+)", link_reply)
+            code = re.search(r"Код привязки: (?:<code>)?([A-Za-z0-9_-]+)", link_reply)
             self.assertIsNotNone(code)
-            self.assertIn("привязал", self.send("vk", processor, code.group(0), chat_id=7))
+            self.assertIn("привязал", self.send("vk", processor, f"/link {code.group(1)}", chat_id=7))
             self.send("vk", processor, "/settings", chat_id=7)
             self.send("telegram", processor, "/ai", chat_id=7)
             self.send("telegram", processor, command, chat_id=7)
@@ -1465,7 +1469,7 @@ class AiChannelsTest(unittest.TestCase):
                     self.send(channel, processor, "/register")
                     self.send(channel, processor, "Тест")
                     self.send(channel, processor, "/ai")
-                    receipt = "Вопрос принят. Готовлю ответ… Для отмены введи /cancel."
+                    receipt = "Вопрос принят. Готовлю ответ…"
                     self.send(channel, processor, "/ask вопрос", on_delivery=lambda text: accepted.set() if text == receipt else None)
                     self.assertEqual(self.delivered[0], receipt)
                     self.assertGreater(len(self.delivered), 2)

@@ -742,8 +742,8 @@ class VkBotTest(unittest.TestCase):
         self.assertEqual(deliveries, [(True, True)])
         self.assertEqual(receipts, [True])
 
-    def test_short_confirmation_reply_keeps_text_command_and_inline_token(self) -> None:
-        """Кнопка подтверждения сохраняет токен и ручную команду."""
+    def test_short_confirmation_reply_shows_inline_token(self) -> None:
+        """Кнопка подтверждения сохраняет токен, а текст отображается как задан."""
         client = FakeVkClient()
         update = CommandMenuUpdate(ReplyAddress("vk", "22"), CommandMenu())
         command = "/confirm obsidian disconnect 7 2 yes"
@@ -755,7 +755,7 @@ class VkBotTest(unittest.TestCase):
                 bound_actions=(BoundReplyAction("Да", "opaque-confirmation", "response"),),
             ),
         )
-        self.assertIn(command, client.messages[0][1])
+        self.assertNotIn(command, client.messages[0][1])
         self.assertEqual(client.messages[1], (22, "Выбери действие."))
         menu, inline = map(json.loads, client.keyboards)
         self.assertFalse(menu["inline"])

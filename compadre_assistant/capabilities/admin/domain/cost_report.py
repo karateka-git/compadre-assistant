@@ -193,8 +193,19 @@ class GetGatewayCostReport:
             return None
 
 
-def _calendar_periods(timezone: str | None, clock: Callable[[], datetime],
-                      periods: tuple[ReportPeriod, ...]) -> tuple[str, tuple[tuple[ReportPeriod, datetime, datetime], ...]]:
+def validate_report_timezone(timezone: str | None) -> str:
+    """Проверяет пояс отчёта без чтения статистики и текущего времени.
+
+    Args:
+        timezone: Идентификатор IANA либо None для пояса по умолчанию.
+
+    Returns:
+        Ключ часового пояса для последующего расчёта отчёта.
+
+    Raises:
+        InvalidReportTimezone: Передан неизвестный или недопустимый пояс.
+        ZoneInfoNotFoundError: В окружении отсутствует пояс по умолчанию.
+    """
     zone_key = DEFAULT_REPORT_TIMEZONE if timezone is None else timezone
     try:
         zone = ZoneInfo(zone_key)
@@ -202,6 +213,12 @@ def _calendar_periods(timezone: str | None, clock: Callable[[], datetime],
         if zone_key == DEFAULT_REPORT_TIMEZONE:
             raise
         raise InvalidReportTimezone("Часовой пояс отчёта неизвестен.") from None
+    return zone.key
+
+
+def _calendar_periods(timezone: str | None, clock: Callable[[], datetime],
+                      periods: tuple[ReportPeriod, ...]) -> tuple[str, tuple[tuple[ReportPeriod, datetime, datetime], ...]]:
+    zone = ZoneInfo(validate_report_timezone(timezone))
 
     current = clock()
     if current.utcoffset() is None:

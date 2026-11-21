@@ -230,6 +230,7 @@ class ResponseViewDelivery:
             успешной доставки всех частей и принимает признак нескольких частей.
             При сбое принимает None, сохраняя прежнюю подтверждённую доставку.
         section_transition: Действия переходят между разделом и экраном.
+        unavailable_actions: Проверенные кнопки для отдельной подсказки после сбоя.
     """
 
     target_message_id: str | None
@@ -242,6 +243,7 @@ class ResponseViewDelivery:
         default=None, repr=False, compare=False,
     )
     section_transition: bool = False
+    unavailable_actions: tuple[BoundReplyAction, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +252,7 @@ class IncomingResponse:
 
     actions содержит точные адресные подтверждения; suggested_actions —
     другие следующие шаги. Полное меню не копируется в ответ автоматически.
-    Текст содержимого сохраняет ручной путь независимо от поддержки кнопок.
+    Справка содержит ручной путь для текущего контекста.
     """
 
     content: MessageContent
@@ -353,12 +355,12 @@ class ContextualCommandQueryPort(Protocol):
 
 @runtime_checkable
 class ReplyActionRecoveryPort(Protocol):
-    """Указывает ручной путь после недоступного действия в личном чате."""
+    """Предлагает открыть актуальный экран после недоступного действия."""
 
-    def reply_action_recovery_command(
+    def reply_action_recovery(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int | None,
-    ) -> str:
-        """Возвращает точную команду по проверенному профилю и текущему разделу.
+    ) -> ReplyAction:
+        """Возвращает действие по проверенному профилю и текущему разделу.
 
         Args:
             app_user: Профиль с действующим доступом к возможности.
@@ -366,7 +368,7 @@ class ReplyActionRecoveryPort(Protocol):
             mode_revision: Ревизия активного режима или None после выхода.
 
         Returns:
-            Команда, которая открывает доступный экран.
+            Кнопка, которая открывает доступный экран.
         """
         ...
 

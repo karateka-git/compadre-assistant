@@ -626,7 +626,7 @@ def _make_use_case(**dependencies: object) -> PresentationScenario:
     preferences = MemoryCapabilityPreferences()
     preferences.rows[(identity_service.app_user.id, "obsidian")] = True
     dispatcher = IncomingMessageDispatcher(
-        registry=CapabilityRegistry((obsidian, SettingsCapability())),
+        registry=CapabilityRegistry((obsidian, SettingsCapability(linked_channels=lambda _user_id: frozenset()))),
         user_identity_service=identity_service,
         chat_mode_repository=modes,
         capability_preference_repository=preferences,
@@ -936,7 +936,7 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         response = use_case.dispatcher.execute(_telegram_message("https://github.com/octocat/notes"))
         self.assertIn("ABCD-EFGH", response_text(response))
         self.assertIn("https://github.com/login/device", response_text(response))
-        self.assertEqual(tuple(action.url for action in response.suggested_actions),
+        self.assertEqual(tuple(action.url for action in response.suggested_actions if action.url is not None),
                          ("https://github.com/login/device",))
 
     def test_execute_reports_unconfigured_github_connector(self) -> None:
@@ -1287,7 +1287,8 @@ class IncomingMessageDispatcherTest(unittest.TestCase):
         use_case.dispatcher.execute(_private_event("/settings"))
         result = use_case.dispatcher.execute(_private_event("/link ABC123"))
 
-        self.assertIn("адресной командой", response_text(result))
+        self.assertIn("Перенести аккаунт?", response_text(result))
+        self.assertNotIn("/confirm", response_text(result))
         self.assertIn("/confirm core identity 1 1 yes", result.actions[0].command)
         self.assertTrue(identity_service.rebind_requested)
 

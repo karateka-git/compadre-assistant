@@ -351,7 +351,7 @@ class GitHubVaultSelectionService(VaultSelectionManager):
             or pending.status is not VaultConfirmationStatus.PENDING
         ):
             raise PendingOperationError(
-                "Действие устарело. Войди снова в /obsidian для актуального ожидания."
+                "Действие устарело. Открой актуальные подтверждения хранилища."
             )
         vault = self._confirmation_repository.decide(pending, approve=approve, now=self._clock())
         if action is VaultConfirmationAction.REPLACE:

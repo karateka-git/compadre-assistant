@@ -17,13 +17,14 @@ from compadre_assistant.core.presentation.incoming.ports import (
 
 @dataclass(frozen=True, slots=True)
 class ActionContext:
-    """Фиксирует владельца, ревизию режима, доступ и ожидаемый ввод ответа."""
+    """Фиксирует владельца, ревизию режима, доступ, ввод и фоновую работу."""
 
     app_user_id: int | None
     mode_id: str | None
     mode_revision: int
     access: tuple[tuple[str, bool, bool, bool], ...]
     pending_request_id: str | None
+    deferred_request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +322,7 @@ class ResponseActionStore:
 
     def claim(
         self, event: IncomingEvent, token: str, *, context: ActionContext | None = None,
+        allowed_commands: frozenset[str] | None = None,
     ) -> RegisteredAction | None:
         """Атомарно принимает один выбор, обезвреживая соседние кнопки.
 
@@ -332,6 +334,7 @@ class ResponseActionStore:
             event: Адрес, автор и ID фактически нажатого сообщения.
             token: Непрозрачный токен действия.
             context: Проверенный текущий контекст управляемого представления.
+            allowed_commands: Команды, которые чат может принять в текущем состоянии.
 
         Returns:
             Действие после одноразового допуска либо None.
@@ -343,12 +346,17 @@ class ResponseActionStore:
             entry = self._entries.get(token)
             if entry is None or entry.origin != event.reply_address or entry.external_user_id != event.external_user_id:
                 return None
+            if allowed_commands is not None and entry.command not in allowed_commands:
+                return None
             if entry.view is not None:
                 slot = self._views.get(entry.view.scope)
                 if (context != entry.context or slot is None or slot.sending or slot.retired
                         or slot.delivered_generation != entry.view.generation
                         or event.callback_message_id != slot.delivered_message_id):
                     return None
+            # Справка читает текущий контекст. Она оставляет кнопки шага действующими.
+            if entry.command == "/help" and entry.confirmation is None:
+                return entry
             for key, other in tuple(self._entries.items()):
                 same_confirmation = (entry.confirmation is not None
                                      and other.origin == entry.origin
