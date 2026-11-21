@@ -10,9 +10,14 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
+from urllib.request import AbstractHTTPHandler
 
 from scripts import deploy_attempt
+from scripts.full_ci_controller import HttpLocation, collect_http_metrics, immutable_git_reads
+from scripts.issue_patch_admission import prepare_admission
+from scripts.predeploy_compatibility import EvidenceAPI
 from tests import test_patch_http_baseline as fixture
+from tests.test_issue_patch_admission import completed_event
 from tests.test_signed_patch_runner import SignedPatchAPI
 
 
@@ -37,6 +42,65 @@ class Controller(fixture._V2ControllerFixture):
             if dispatch(frame) != 0:
                 raise AssertionError("Ошибка SSH-диспетчера")
         return reply[0]
+
+
+def measure_signed_patch() -> list[dict]:
+    """Измеряет полный подписанный PATCH на двух объёмах прежней истории v2.
+
+    Returns:
+        Две трассы от запуска runner до закрытия журнала контроллера.
+
+    Raises:
+        AssertionError: Расход превысил бюджет, учёт разошёлся с транспортом
+            или приёмка зафиксировала другой выпуск.
+    """
+    scenarios = []
+    for history_size in (fixture.HISTORY_SIZE, 1000):
+        with tempfile.TemporaryDirectory(prefix="signed-patch-budget-") as directory:
+            root = Path(directory)
+            graph, runner, fingerprint = fixture._fixture(root)
+            api = SignedPatchAPI(graph, fingerprint, history_size)
+            ci_api = fixture._V2RestFixture(graph, fingerprint, history_size)
+            with (patch.object(AbstractHTTPHandler, "do_open", side_effect=ci_api.transport),
+                  immutable_git_reads(), collect_http_metrics(HttpLocation.CI) as ci_metrics):
+                proof = prepare_admission(EvidenceAPI(fixture.REPOSITORY, fixture.RUNNER_TOKEN),
+                                          completed_event(ci_api), graph.checkout, fixture.POLICY_SHA)
+            keys = api.configure_signer(root, fingerprint, proof=proof)
+            if len(api.releases) != 16 or len(graph.pairs) != 2 or graph.main == graph.candidate:
+                raise AssertionError("Изменились условия сравнения PATCH")
+            with (patch.object(fixture.system, "OLD_SHA", graph.base),
+                  patch.object(fixture.system, "NEW_SHA", graph.candidate),
+                  patch.dict(os.environ, RELEASE_SIGNER_ATTEMPT="99:1", PRODUCTION_SIGNED_PATCH="true",
+                             PATCH_ALLOWED_SIGNERS_FILE=str(keys), COMPATIBILITY_POLICY_SHA=fixture.POLICY_SHA)):
+                controller = Controller(root / "vps", api)
+                (controller.host.state_dir / "patch-allowed-signers").write_bytes(keys.read_bytes())
+                scenario = fixture._measure(root, f"signed_patch_{history_size}", api, runner, controller=controller)
+            scenario["prior_signer_http"] = ci_metrics.rows()
+            journal = json.loads((controller.host.state_dir / deploy_attempt.JOURNAL).read_bytes())
+            receipt = journal["result"]["receipt"]
+            deployment_id = journal["deployment_id"]
+            release = api.releases[fixture.VERSION]
+            tag = api.tags[api.refs[fixture.VERSION]["object"]["sha"]]
+            observed_shas = {tag["object"]["sha"], release["target_commitish"], api.deployments[deployment_id]["sha"],
+                             receipt["sha"], controller.host.head}
+            if observed_shas != {graph.candidate} or receipt["release_id"] != release["id"]:
+                raise AssertionError("Тег, Release, Deployment и runtime относятся к разным объектам")
+            if ((receipt["version"], receipt["migration"]) != (fixture.VERSION, fixture.MIGRATION)
+                    or (controller.installed, controller.switches, controller.cleanup_count) != (True, 1, 1)):
+                raise AssertionError("Установка и очистка не завершили однократное переключение")
+            if (not journal["closed"] or journal["result"]["outcome"] != "success"
+                    or journal["patch"]["terminal"] != api.statuses[deployment_id][0]["id"]
+                    or api.posts.count("/deployments") != 1 or api.status_writes != ["in_progress", "success"]):
+                raise AssertionError("Журнал VPS и итоговый статус Deployment расходятся")
+            scenario["git_fetch_operations"] = controller.host.actions.count("fetch")
+            scenario["github_api"] = sum(count for (_, target, _), count in api.calls.items()
+                                         if target in {"github_api", "github_graphql_query"})
+            if scenario["github_api"] > 20:
+                raise AssertionError(f"Превышен бюджет PATCH: {scenario['github_api']}")
+            scenarios.append(scenario)
+    if scenarios[0]["routes"] != scenarios[1]["routes"]:
+        raise AssertionError("Чтение истории зависит от числа старых Deployment")
+    return scenarios
 
 
 class PatchControllerTests(unittest.TestCase):

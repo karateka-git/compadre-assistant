@@ -26,13 +26,13 @@ from tests import test_patch_http_baseline as fixture
 class SignedPatchAPI(fixture._V2RestFixture):
     """Добавляет один подписанный артефакт к стенду двух пар PR."""
 
-    def configure_signer(self, root: Path, fingerprint: str) -> Path:
+    def configure_signer(self, root: Path, fingerprint: str, *, proof: PatchAdmission | None = None) -> Path:
         """Создаёт разовый ключ, архив подписанта и возвращает путь доверенных ключей."""
         key = root / "key"
         subprocess.run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(key)], check=True)
         allowed = root / "signers"
         allowed.write_text(f"{PRINCIPAL} {key.with_suffix('.pub').read_text()}", encoding="ascii")
-        self.proof = PatchAdmission(fixture.REPOSITORY, fixture.BRANCH, fixture.VERSION, self.graph.candidate,
+        self.proof = proof or PatchAdmission(fixture.REPOSITORY, fixture.BRANCH, fixture.VERSION, self.graph.candidate,
                                     fixture.PREVIOUS_VERSION, self.graph.base, self._baseline(), fixture.RELEASE_WORKFLOW,
                                     1, 1, fixture.POLICY_SHA, fixture.MIGRATION, fingerprint, "e" * 64)
         self.signed_data = sign_admission(self.proof, key)

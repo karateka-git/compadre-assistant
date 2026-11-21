@@ -17,6 +17,18 @@ from tests.test_patch_http_baseline import (BRANCH, HISTORY_SIZE, MIGRATION, POL
                                            RUNNER_TOKEN, _fixture, _V2RestFixture)
 
 
+def completed_event(api: _V2RestFixture) -> dict:
+    """Связывает исходный run с успешными шагами и digest артефакта совместимости."""
+    job = next(job for job in api.jobs if job["name"].endswith(" / check-full-suite"))
+    compat_job = next(job for job in api.jobs if job["name"].endswith("repository-compatibility-check"))
+    compat_job["steps"].append({"name": "Build isolated compatibility worker",
+                                "status": "completed", "conclusion": "success"})
+    digest = api.artifact.artifact["digest"].removeprefix("sha256:")
+    job["steps"].append({"name": f"Compatibility artifact 22 {digest}",
+                         "status": "completed", "conclusion": "success"})
+    return {"action": "completed", "repository": {"full_name": REPOSITORY}, "workflow_run": dict(api.run)}
+
+
 class IssuePatchAdmissionTests(unittest.TestCase):
     """Сопоставляет допуск двух merge с независимым счётчиком HTTP."""
 
@@ -28,13 +40,7 @@ class IssuePatchAdmissionTests(unittest.TestCase):
         self.api = _V2RestFixture(graph, fingerprint, HISTORY_SIZE)
         self.job = next(job for job in self.api.jobs if job["name"].endswith(" / check-full-suite"))
         self.compat_job = next(job for job in self.api.jobs if job["name"].endswith("repository-compatibility-check"))
-        self.compat_job["steps"].append({"name": "Build isolated compatibility worker",
-                                         "status": "completed", "conclusion": "success"})
-        digest = self.api.artifact.artifact["digest"].removeprefix("sha256:")
-        self.job["steps"].append({"name": f"Compatibility artifact 22 {digest}",
-                                  "status": "completed", "conclusion": "success"})
-        self.event = {"action": "completed", "repository": {"full_name": REPOSITORY},
-                      "workflow_run": dict(self.api.run)}
+        self.event = completed_event(self.api)
         self.enterContext(patch.object(AbstractHTTPHandler, "do_open", side_effect=self.api.transport))
 
     def _prepare(self):
