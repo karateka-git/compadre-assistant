@@ -18,6 +18,8 @@ from scripts.full_ci_admission import RELEASE_WORKFLOW
 # Принципал и пространство имён отделяют допуск PATCH от иных подписей SSH.
 PRINCIPAL = "compadre-patch-ci"
 NAMESPACE = "compadre-patch-admission-v1"
+# Контроллер читает из stdin один конверт с подписанными данными и идентификаторами Release.
+SSH_INPUT_LIMIT = 16384
 
 
 def _canonical(record: dict) -> bytes:

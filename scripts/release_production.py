@@ -26,6 +26,7 @@ from scripts.deployment_acceptance import DeploymentAcceptanceError, DeploymentR
 from scripts.full_ci_admission import AdmissionError, SHA_PATTERN
 from scripts.full_ci_controller import ControllerError, HttpLocation, HttpPhase, http_phase, immutable_git_reads
 from scripts.github_publishing import PublishingError, PublishingGitHub
+from scripts.patch_admission import SSH_INPUT_LIMIT
 from scripts.publish_installation_tag import InstallationReceipt, InstallationTagError, _receipt, run_vps_command
 from scripts.select_deploy_release import DeploySelectionError, SelectedRelease, _release, select_release
 
@@ -127,6 +128,8 @@ def _run_attempt(api, selected, route, resume, remote, *, signed=None):
                     "admission": signed[1].decode("ascii"), "release_id": selected.release_id,
                     "tag_object_sha": selected.tag_object_sha,
                 })
+                if len(options["input_text"].encode("ascii")) > SSH_INPUT_LIMIT:
+                    raise ProductionReleaseError("Пакет резервации PATCH превышает лимит SSH")
         raw = remote(metrics.HttpOperation.ATTEMPT, option, *arguments,
                      timeout=3600 if action in ("install", "complete") else 300, **options)
         # Контроллер заканчивает вывод одной JSON-строкой, установка до неё пишет этапы.

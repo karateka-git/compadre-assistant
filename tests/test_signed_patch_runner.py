@@ -1,5 +1,6 @@
 """Проверяет публикацию подписанного PATCH на HTTP-транспорте штатного runner."""
 
+from collections import Counter
 from contextlib import chdir, redirect_stderr, redirect_stdout
 from dataclasses import asdict
 from hashlib import sha256
@@ -17,7 +18,7 @@ from zipfile import ZipFile
 
 from scripts import release_production
 from scripts.deployment_acceptance import DeploymentAttempt
-from scripts.patch_admission import PRINCIPAL, PatchAdmission, sign_admission
+from scripts.patch_admission import PRINCIPAL, SSH_INPUT_LIMIT, PatchAdmission, sign_admission
 from scripts.publish_installation_tag import InstallationReceipt
 from tests import test_patch_http_baseline as fixture
 
@@ -81,6 +82,7 @@ class _Remote:
         assert snapshot == fixture.SNAPSHOT
         base = self.api._baseline()
         if action in ("reserve", "resume"):
+            assert len(options["input_text"].encode("ascii")) <= SSH_INPUT_LIMIT
             data = json.loads(options["input_text"])
             assert data["admission"].encode() == self.api.signed_data
             assert data["tag_object_sha"] == self.api.refs[version]["object"]["sha"]
@@ -103,6 +105,8 @@ class _Remote:
         else:
             assert action in ("complete", "close")
             response = self.result
+        if action not in ("reserve", "resume"):
+            assert options.get("input_text") is None
         return subprocess.CompletedProcess([], 0, json.dumps(response), "")
 
 
@@ -113,8 +117,13 @@ class SignedPatchRunnerTests(unittest.TestCase):
         """Подготавливает независимые main, кандидат и базу v2."""
         self.root = Path(self.enterContext(TemporaryDirectory()))
         graph, self.runner, fingerprint = fixture._fixture(self.root)
-        self.api = SignedPatchAPI(graph, fingerprint, fixture.HISTORY_SIZE)
-        keys = self.api.configure_signer(self.root, fingerprint)
+        self._bind(SignedPatchAPI(graph, fingerprint, fixture.HISTORY_SIZE), fingerprint)
+
+    def _bind(self, api, fingerprint):
+        self.api = api
+        key_dir = self.root / f"key-{api.history_size}"
+        key_dir.mkdir()
+        keys = self.api.configure_signer(key_dir, fingerprint)
         self.remote = _Remote(self.api)
         self.notes = self.root / "notes.md"
         self.notes.write_text("Исправления PATCH", encoding="utf8")
@@ -145,7 +154,10 @@ class SignedPatchRunnerTests(unittest.TestCase):
 
     def test_patch_after_branch_advanced(self) -> None:
         """Публикует выбранный SHA после продвижения ветки, сохраняя latest старшей линии."""
-        self.api.release_tip = self.api.graph.main
+        graph = self.api.graph
+        tree = fixture._git(graph.checkout, "rev-parse", graph.candidate + "^{tree}")
+        self.api.release_tip = fixture._git(graph.checkout, "commit-tree", tree, "-p", graph.candidate, "-m", "B")
+        fixture._git(graph.checkout, "update-ref", "refs/heads/" + fixture.BRANCH, self.api.release_tip)
         self.api.latest = "v5.0.0"
         result, _ = self._run()
         self.assertEqual(result["state"], "success")
@@ -153,6 +165,37 @@ class SignedPatchRunnerTests(unittest.TestCase):
         self.assertEqual(release["target_commitish"], self.api.graph.candidate)
         self.assertEqual(release["make_latest"], "false")
         self.assertEqual(len(self.api.posts), 6)
+
+    def test_runner_transport_at_16_and_1000(self) -> None:
+        """Сверяет отчёт CLI с транспортом при увеличении истории на 984 Deployment."""
+        expected = {("runner", "github_api", "GET"): 4, ("runner", "github_graphql_query", "POST"): 1,
+                    ("runner", "github_api", "POST"): 6, ("runner", "artifact_storage", "GET"): 1}
+        for size in (16, 1000):
+            with self.subTest(size=size):
+                if size != self.api.history_size:
+                    other = self.root / "long"
+                    other.mkdir()
+                    graph, self.runner, fingerprint = fixture._fixture(other)
+                    self.assertEqual((graph.main, graph.candidate, graph.pairs),
+                                     (self.api.graph.main, self.api.graph.candidate, self.api.graph.pairs))
+                    self._bind(SignedPatchAPI(graph, fingerprint, size), fingerprint)
+                result, reports = self._run()
+                self.assertEqual((result["state"], result["deployment_id"]), ("success", size + 1))
+                self.assertEqual(len(reports), 1)
+                rows = reports[0]["http"]
+                measured = Counter()
+                for row in rows:
+                    measured[row["location"], row["target"], row["method"]] += row["attempts"]
+                self.assertEqual(measured, self.api.calls)
+                self.assertEqual(measured, expected)
+                self.assertEqual(sum(row["pages"] for row in rows), 2)
+                self.assertEqual(sum(row["errors"] for row in rows), 0)
+                self.assertEqual(set(self.api.rest_reads), {
+                    ("runner", "/actions/runs/99/attempts/1"), ("runner", "/actions/runs/99/artifacts"),
+                    ("runner", "/actions/artifacts/22/zip"), ("runner", f"/deployments/{size + 1}/statuses"),
+                })
+                self.assertEqual(self.api.posts.count("/deployments"), 1)
+                self.assertEqual(self.remote.actions, ["reserve", "create", "in_progress", "install", "complete", "finish", "close"])
 
     def test_wrong_sha_and_damaged_zip_stop_before_publication(self) -> None:
         """Чужой SHA и другой digest останавливают выпуск до первой записи."""
@@ -162,6 +205,17 @@ class SignedPatchRunnerTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._run()
         self.assertEqual((self.api.posts, self.remote.actions), ([], []))
+
+    def test_partial_graphql_and_ssh_limit(self) -> None:
+        """Неполное чтение закрывает запись, превышение лимита закрывает отправку по SSH."""
+        with patch.object(self.api, "_graphql", return_value={"repository": {"nameWithOwner": fixture.REPOSITORY}}):
+            with self.assertRaises(SystemExit):
+                self._run()
+        self.assertEqual(self.api.posts, [])
+        with patch.object(release_production, "SSH_INPUT_LIMIT", 10), self.assertRaises(SystemExit):
+            self._run()
+        self.assertIn("лимит SSH", self.last_error)
+        self.assertEqual(self.remote.actions, [])
 
     def test_resume_ready_release_after_lost_post(self) -> None:
         """Сверяет потерянный success и завершает прежний Deployment без повторной установки."""
