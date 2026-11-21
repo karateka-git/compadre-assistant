@@ -200,6 +200,12 @@ class CompatibilityContractTests(unittest.TestCase):
                 self.assertEqual(ci.main(), 0)
                 tree.assert_called_once_with(root, BASELINE.sha)
                 self.assertFalse(any(key.startswith(("GITHUB_", "ACTIONS_")) for key in run.call_args.kwargs["env"]))
+                # Даже корректный источник не даёт допуска после ошибки worker.
+                export.side_effect = [trusted, workflows, {"old": "hash"}]
+                run.return_value.returncode = 1
+                with self.assertRaisesRegex(ValueError, r"worker failed \(exit=1\)"):
+                    ci.main()
+                run.return_value.returncode = 0
                 for kind in ("policy", "resolver", "workflow", "baseline"):
                     export.side_effect = [trusted, workflows, {"old": "hash"}]
                     run.reset_mock()

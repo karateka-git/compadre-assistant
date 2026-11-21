@@ -54,7 +54,20 @@ jobs:
         with:
           python-version: '3.12'
       - name: Build isolated compatibility worker
-        run: docker build -t compadre-compatibility-worker - < policy/deploy/compatibility-worker.Dockerfile
+        run: |
+          docker build --build-arg WORKER_UID="$(id -u)" --build-arg WORKER_GID="$(id -g)" \
+            -t compadre-compatibility-worker - < policy/deploy/compatibility-worker.Dockerfile
+          docker run --rm -i --user "$(id -u):$(id -g)" --cap-drop=ALL --security-opt=no-new-privileges \
+            compadre-compatibility-worker python - <<'PY'
+          import grp
+          import os
+          import pwd
+          from pathlib import Path
+
+          home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+          grp.getgrgid(os.getgid())
+          assert home == Path.home() and os.access(home, os.W_OK)
+          PY
       - name: Check exact repository compatibility pair
         env:
           GITHUB_TOKEN: ${{ github.token }}
