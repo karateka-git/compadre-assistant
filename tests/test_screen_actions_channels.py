@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import aiogram
 
-from compadre_assistant.bootstrap import ChannelMessageProcessor, create_user_identity_service
+from compadre_assistant.bootstrap import ChannelMessageProcessor, create_channel_message_processor, create_user_identity_service
 from compadre_assistant.capabilities.family.bootstrap import create_family_capability
 from compadre_assistant.capabilities.ai.domain.errors import AiModelError
 from compadre_assistant.capabilities.ai.domain.ocr import OcrResult
@@ -46,8 +46,10 @@ from compadre_assistant.core.presentation.incoming.ports import (
     IncomingResponse, PendingConfirmationQueryPort, ReplyAction, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import text_content
-from compadre_assistant.presentation.telegram.bot import _create_telegram_menu_update_handler, _register_handlers
-from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handler, _handle_update
+from compadre_assistant.presentation.telegram.bot import (
+    _create_telegram_menu_update_handler, _register_handlers, _send_telegram_notification,
+)
+from compadre_assistant.presentation.vk.bot import _create_vk_menu_update_handler, _handle_update, _send_vk_notification
 from tests.test_incoming_boundary import FakeCapability
 from tests.test_telegram_bot import FakeAiogram
 from tests.test_vk_screen_actions import ProjectionClient
@@ -182,11 +184,15 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.owner = NeutralScreenCapability()
         self.open_channels({"telegram": "https://t.me/example_chat_bot", "vk": "https://vk.com/write-731"})
 
-    def open_channels(self, dialogs, *, capabilities=None, profile_access=None):
+    def open_channels(self, dialogs, *, capabilities=None, profile_access=None, processors=None):
         """Подключает два локальных клиента к процессору с публичными адресами установки."""
-        self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=capabilities or (self.owner,),
-                                                messenger_dialogs=dialogs, profile_access=profile_access)
-        self.addCleanup(self.processor.close_deferred_actions)
+        if processors is None:
+            self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=capabilities or (self.owner,),
+                                                    messenger_dialogs=dialogs, profile_access=profile_access)
+            self.addCleanup(self.processor.close_deferred_actions)
+            telegram_processor = self.processor
+        else:
+            telegram_processor, self.processor = processors
         self.logger = logging.getLogger("test.screen-actions.channels")
         self.ids = count(42)
         self.telegram = []
@@ -219,13 +225,13 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
             return accepted
 
         sdk = FakeAiogram()
-        _register_handlers(sdk.dispatcher, sdk, incoming_message_processor=self.processor,
+        _register_handlers(sdk.dispatcher, sdk, incoming_message_processor=telegram_processor,
                            logger=self.logger, menu_update_handler=menu_update)
         self.router = sdk.dispatcher.included_router
         self.vk = ObservedVkClient()
         self.vk_menu = _create_vk_menu_update_handler(self.vk, logger=self.logger)
 
-    async def send(self, channel, text, *, chat="1001", menu=False, author=None):
+    async def send(self, channel, text, *, chat="1001", menu=False, author=None, message_id=1):
         """Передаёт сообщение реальному входному обработчику нужного канала."""
         author = author or chat
         if channel == "telegram":
@@ -234,11 +240,11 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
 
             await self.router.handler(SimpleNamespace(
                 chat=SimpleNamespace(id=int(chat)), from_user=SimpleNamespace(id=int(author)),
-                message_id=1, text=text, bot=self.bot, answer=answer,
+                message_id=message_id, text=text, bot=self.bot, answer=answer,
             ))
         else:
             _handle_update({"type": "message_new", "object": {"message": {
-                "peer_id": int(chat), "from_id": int(author), "id": 1, "text": text,
+                "peer_id": int(chat), "from_id": int(author), "id": message_id, "text": text,
                 "payload": '{"menu":true}' if menu else None,
             }}}, incoming_message_processor=self.processor, client=self.vk, logger=self.logger,
                 menu_update_handler=self.vk_menu)
@@ -625,6 +631,56 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
                     SQLiteUserCapabilityPreferenceRepository(connection).upsert(UserCapabilityPreference(user.id, "obsidian", False))
                 await self.press(channel, token, message_id, chat=chat, author="1001")
                 self.assertEqual(service.confirm.call_count, 2)
+
+    async def test_shopping_digest_between_telegram_and_vk(self):
+        """Два участника проходят путь от добавления товаров до нажатия полученной кнопки."""
+        processors = {channel: self.enterContext(create_channel_message_processor(
+            database_path=self.path, enabled_capabilities=("family",),
+        )) for channel in ("telegram", "vk")}
+        self.open_channels({}, processors=(processors["telegram"], processors["vk"]))
+        loop = asyncio.get_running_loop()
+
+        for sender, recipient, chat in (("telegram", "vk", "1001"), ("vk", "telegram", "1002")):
+            with self.subTest(sender=sender, recipient=recipient):
+                await self.send(sender, "/family", chat=chat)
+                await self.send(sender, "/family_create", chat=chat)
+                await self.send(sender, "Дом", chat=chat)
+                await self.send(sender, "/family_invite create", chat=chat)
+                invitation = re.search(r"Код: (?:<code>)?([A-Z2-9-]+)", self.last(sender)[0])
+                self.assertIsNotNone(invitation)
+                await self.send(recipient, "/family", chat=chat)
+                await self.send(recipient, "/family_join", chat=chat)
+                await self.send(recipient, invitation[1], chat=chat)
+                await self.send(recipient, "/settings", chat=chat)
+                await self.send(sender, "/family_shopping", chat=chat)
+                for first in (1, 11):
+                    names = "\n".join(f"Продукт {n:02}" for n in range(first, first + 10))
+                    await self.send(sender, f"/add {names}", chat=chat, message_id=10 + first)
+
+                def send_digest(address, response):
+                    self.assertEqual(address, ReplyAddress(recipient, chat))
+                    if recipient == "telegram":
+                        task = _send_telegram_notification(self.bot, aiogram, address, response)
+                        asyncio.run_coroutine_threadsafe(task, loop).result(timeout=5)
+                    else:
+                        _send_vk_notification(self.vk, address, response)
+
+                send_once = Mock(side_effect=send_digest)
+                due = datetime.now(UTC) + timedelta(minutes=3)
+                for channel in (sender, recipient, recipient):
+                    await asyncio.to_thread(processors[channel].dispatch_notifications, channel, send_once, now=due)
+                send_once.assert_called_once()
+                text, actions, message_id = self.last(recipient)
+                self.assertIn("Новых позиций: 20.", text)
+                self.assertIn("Продукт 01, Продукт 02, Продукт 03, Продукт 04, Продукт 05 и ещё 15", text)
+                self.assertEqual(text.count("Продукт"), 5)
+                token = dict(actions)["Открыть покупки"]
+                await self.send(recipient, "/help", chat=chat)
+                self.assertIn("/connect", self.last(recipient)[0])
+                await self.press(recipient, token, message_id, chat=chat)
+                self.assertIn("10. Продукт 10", self.last(recipient)[0])
+                await self.send(recipient, "/family_shopping page 2", chat=chat)
+                self.assertIn("20. Продукт 20", self.last(recipient)[0])
 
     async def test_family_buttons_help_and_membership_decisions_in_both_channels(self):
         """Проходит семью без команд, сохраняя исходные кнопки при открытии справки."""
