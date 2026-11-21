@@ -46,6 +46,7 @@
 | v4.0.0 | `119e36d2bdde0162b970c81cdc980d61dec0cc9c` | 4 мин 52,4 с | +129,2 с (+79,2 %) | `unknown` | — | `state=success`, `cleanup=completed` |
 | v4.0.1 | `f2da286c02efed55c2174e30aee2a1ad2af05e40` | 3 мин 6,4 с | −105,9 с (−36,2 %) | `unknown` | — | `state=success`, `cleanup=completed` |
 | v4.2.5 | `7aa730cd24ad71997a4097e43c47e68261522d15` | 3 мин 47,010 с | — | `unknown` | — | `state=success`, `cleanup=completed` |
+| v4.4.1 | `b9b78efab3f81f4ba40b835e4c988f4975ebd47c` | 2 мин 47,716 с | — | `unknown` | — | `state=success`, `cleanup=completed` |
 
 12 ноября 2026 года GitHub Actions запустил установку в 11:59:44.547 UTC
 и подтвердил Deployment в 12:02:27.665 UTC. Deployment `7736620585` получил
@@ -332,6 +333,25 @@ Release уже опубликован либо кандидат отвергну
 терминальный `failure` содержит прямую ссылку на принятую базу.
 [Продолжение попытки](OPERATIONS.md#возобновить-попытку-deployment-v2)
 
+## Проверить живой подписанный PATCH v4.4.1
+
+21 ноября 2026 года штатный PATCH поверх принятой `v4.4.0` завершился за **18 обращений к GitHub API**. Предыдущая попытка была в формате v2 без подписанного допуска, поэтому в замер вошла первая сверка базы на VPS. Runner публиковал новый Release. Повторных попыток не было. [Журнал Production release](https://github.com/karateka-git/compadre-assistant/actions/runs/44907760823/attempts/1)
+
+| Место и операция | REST GET | GraphQL | Записи | Всего API | Страниц в этих запросах | Ошибок | GET ZIP вне API |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Runner, получение допуска | 3 | 0 | 0 | 3 | 1 | 0 | 1 |
+| Runner, поиск и публикация Release | 0 | 1 | 3 | 4 | 0 | 0 | 0 |
+| Runner, Deployment и его статусы | 1 | 0 | 3 | 4 | 1 | 0 | 0 |
+| VPS, резервирование и сверка базы | 6 | 1 | 0 | 7 | 2 | 0 | 0 |
+| VPS, следующие шесть команд попытки | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **Выпуск** | **10** | **2** | **6** | **18** | **4** | **0** | **1** |
+
+Источник — семь отчётов VPS и один отчёт runner `deploy-http-metrics`. В журнале checkout виден `git fetch` точного SHA; setup-python выбрал CPython 3.12.16 из `/opt/hostedtoolcache`. Журнал не показывает REST fallback или поиск Python по API. Счётчик проекта охватывает HTTP его клиентов. Внутренний трафик платформы Actions не имеет отдельной транспортной трассы в production. На стенде независимый транспорт подтвердил тот же итог. [Стенд и его ограничения](#проверить-бюджет-подписанного-patch-на-стенде)
+
+Перед выпуском отдельный подписант выполнил **43 обращения к API** (42 REST GET, один GraphQL, в том числе пять страниц, без ошибок) и скачал один ZIP из хранилища. Это расход шага проверки и подписи. Общий транспорт всех jobs предшествующего CI отдельно не измерялся. [CI кандидата](https://github.com/karateka-git/compadre-assistant/actions/runs/44907237922/attempts/1) · [Журнал подписанта](https://github.com/karateka-git/compadre-assistant/actions/runs/44907675261/attempts/1)
+
+Время установки — **167,716 с** от начала `deploy` на VPS в 13:13:55.558998 UTC до итоговой строки runner в 13:16:43.274790 UTC. Контроллер измерил 141,851 с работы и **77,046 с простоя**. Весь workflow занял 216 с, job — 211 с, шаг выпуска — 199 с. Текущий статус Deployment `7963840757` — `success` (`22798648504`), журнал VPS закрыт, результат очистки `completed`. Сравнение времени с предыдущим выпуском требует замера с теми же границами. [Статусы Deployment](https://api.github.com/repos/karateka-git/compadre-assistant/deployments/7963840757/statuses)
+
 ## Измерить первый production-выпуск с Deployment v2
 
 19.11.2026 workflow `44560296240/1` выпустил `v4.2.5` поверх 16
@@ -339,7 +359,7 @@ Deployment v1. Журнал job `release` сохранил один отчёт r
 успешных отчётов SSH от VPS. Чтения GitHub — сумма REST GET и GraphQL,
 время HTTP — сумма длительностей запросов, включая переход в хранилище.
 [Журнал job](https://github.com/karateka-git/compadre-assistant/actions/runs/44560296240/job/135687411891) ·
-[Снимок VPS](PRODUCTION.md#последний-проверенный-снимок-19112026-1607-utc)
+[Снимок VPS](PRODUCTION.md#снимок-19112026-1607-utc)
 
 | Место | REST GET | GraphQL | Чтения GitHub | REST POST | Страницы | Ошибки | ZIP GET | HTTP, с |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
