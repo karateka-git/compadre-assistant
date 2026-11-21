@@ -112,6 +112,10 @@ class ChatCommand(StrEnum):
         "<code>",
         "привязать канал по полученному коду",
     )
+    NOTIFICATIONS = (
+        "/notifications", CommandSection.CHANNEL_LINKING, "<messenger>",
+        "выбрать связанный мессенджер для уведомлений",
+    )
 
     @property
     def usage(self) -> str:
@@ -128,7 +132,7 @@ class ChatCommand(StrEnum):
 # Профильные операции ядра доступны владельцу назначенного режима.
 PROFILE_COMMANDS = frozenset({
     ChatCommand.NAME, ChatCommand.STATUS, ChatCommand.CAPABILITIES, ChatCommand.ENABLE,
-    ChatCommand.DISABLE, ChatCommand.CONNECT, ChatCommand.LINK,
+    ChatCommand.DISABLE, ChatCommand.CONNECT, ChatCommand.LINK, ChatCommand.NOTIFICATIONS,
 })
 
 

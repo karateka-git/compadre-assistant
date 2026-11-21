@@ -20,7 +20,7 @@ from compadre_assistant.core.presentation.incoming.menu import (
 from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, CancellableAction, ConfirmationAction, BackgroundReply,
     CapabilityDescriptor, CapabilityMode, ChannelCompletionHandler,
-    HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort,
+    HandlerContext, IncomingResponse, ReplyDeliveryPort, IncomingCapabilityPort, NotificationEntryPort,
     PendingInputContinuationPort, PendingInputOutcome, PendingInputResult,
     PendingConfirmation, ConfirmationQueryResult, PendingConfirmationQueryPort, CommandMenu,
     CommandMenuUpdate, CommandMenuUpdateHandler, ReplyAction,
@@ -376,6 +376,28 @@ class IncomingMessageDispatcher:
             bound_actions=(), view=None, view_delivery=None,
         )
 
+    def notification_destination(self, event: IncomingEvent, token: str) -> tuple[str, str, str] | None:
+        """Проверяет личный чат, допуск и адресную ссылку до явного входа по уведомлению.
+
+        Returns:
+            ID возможности, зарегистрированная команда входа и команда её раздела.
+            Устаревшая или чужая ссылка возвращает None.
+        """
+        parts = token.split(".")
+        if len(parts) != 3 or parts[0] != "notice" or not self._profile_link_allowed(event):
+            return None
+        known = self._user_identity_service.find_known_private_chat(event.channel, event.chat_id)
+        if known is None or known[1].external_user_id != event.external_user_id:
+            return None
+        user = known[0]
+        capability = self._personal_registry(user, event).by_id(parts[1])
+        if not isinstance(capability, NotificationEntryPort):
+            return None
+        command = capability.notification_destination(user.id, event.reply_address, parts[2])
+        if not command or self._registry.mode_command_owner(command.split()[0]) != capability.descriptor:
+            return None
+        return parts[1], capability.descriptor.entry.name, command
+
     def select_action(self, event: IncomingEvent, token: str, store: ResponseActionStore,
                       completion_handler: ChannelCompletionHandler | None = None,
                       menu_update_handler: CommandMenuUpdateHandler | None = None) -> IncomingResponse:
@@ -658,7 +680,9 @@ class IncomingMessageDispatcher:
                 owner_changed = (previous_user.id if previous_user else None) != (current_user.id if current_user else None)
                 preferences_changed = (current_user is not None and
                     self._capability_preference_repository.get_for_user(current_user.id) != previous_preferences)
-                if owner_changed or preferences_changed:
+                notification_channel_changed = (previous_user is not None and current_user is not None
+                                                and previous_user.notification_channel != current_user.notification_channel)
+                if owner_changed or preferences_changed or notification_channel_changed:
                     # После переноса перечитываем обе стороны: старый снимок адресов
                     # нельзя использовать для доставки меню прежнего владельца.
                     affected = {user.id: user for user in (previous_user, current_user) if user is not None}
@@ -1063,6 +1087,15 @@ class IncomingMessageDispatcher:
         self, command: ChatCommand, arguments: str, user: AppUser, event: IncomingEvent, mode_id: str,
         personal: PersonalCapabilityRegistry,
     ) -> ProcessIncomingMessageResult | IncomingResponse:
+        if command is ChatCommand.NOTIFICATIONS:
+            if not self._profile_link_allowed(event):
+                return IncomingResponse(text_content("Для выбора мессенджера открой личный чат с ботом."))
+            if self._user_identity_service.select_notification_channel(user.id, arguments):
+                name = {"telegram": "Telegram", "vk": "VK"}[arguments]
+                notice = f"Уведомления будут приходить в {name}."
+            else:
+                notice = "Этот мессенджер не привязан к профилю. Выбери связанный мессенджер."
+            return self.resume_navigation(event, IncomingResponse(text_content(notice)))
         if command is ChatCommand.CAPABILITIES:
             if arguments:
                 return IncomingResponse(text_content('Открой список личных возможностей отдельным действием.'))
@@ -1752,7 +1785,7 @@ class IncomingMessageDispatcher:
             catalog = active_help or active.descriptor.help
             sections = tuple(replace(section, commands=commands) for section in catalog.sections
                              if (commands := tuple(item for item in section.commands
-                                                   if item.name not in {"/connect", "/link"})))
+                                                   if item.name not in {"/connect", "/link", "/notifications"})))
             active_help = replace(catalog, sections=sections)
         return personal, mode_id, pending, snapshot, active_help, section_actions
 

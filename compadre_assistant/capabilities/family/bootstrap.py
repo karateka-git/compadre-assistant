@@ -5,6 +5,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
+from compadre_assistant.capabilities.family.data.sqlite_shopping_batches import SQLiteShoppingBatchRepository
+from compadre_assistant.capabilities.family.domain.shopping_notifications import ShoppingBatchRepository
+from compadre_assistant.capabilities.family.presentation.notifications import ShoppingNotifications
 from compadre_assistant.capabilities.family.domain.invitations import ManageInvitations
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
 from compadre_assistant.capabilities.family.domain.shopping import ManageShopping
@@ -31,3 +34,13 @@ def create_family_capability(database_path: Path, display_names: MemberDisplayNa
             yield ManageFamily(repository), ManageInvitations(repository), ManageShopping(repository)
 
     return FamilyCapability(open_scenarios, display_names)
+
+
+def create_shopping_notifications(database_path: Path, names: MemberDisplayNames) -> ShoppingNotifications:
+    """Собирает источник сводок с отдельным соединением на цикл проверки."""
+    @contextmanager
+    def open_queue() -> Iterator[ShoppingBatchRepository]:
+        with connect_database(database_path) as connection:
+            yield SQLiteShoppingBatchRepository(connection)
+
+    return ShoppingNotifications(open_queue, names)

@@ -26,6 +26,9 @@ class AppUserRepository(Protocol):
     def delete(self, app_user_id: int) -> None:
         """Удаляет пользователя приложения по ID."""
 
+    def select_notification_channel(self, app_user_id: int, channel: str) -> bool:
+        """Выбирает поддерживаемый канал, если аккаунт принадлежит профилю."""
+
 
 class ExternalIdentityRepository(Protocol):
     """Описывает хранилище связей внутренних пользователей с внешними каналами."""

@@ -14,8 +14,9 @@ from compadre_assistant.capabilities.family.domain.membership import (
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
 )
 from compadre_assistant.capabilities.family.domain.shopping import (
-    InvalidShoppingNames, ItemNumbersExhausted, ManageShopping, ShoppingItem,
+    InvalidShoppingNames, ItemNumbersExhausted, ManageShopping, ShoppingAddMessage, ShoppingItem,
 )
+from compadre_assistant.capabilities.family.presentation.notifications import shopping_reference
 from compadre_assistant.capabilities.family.presentation.confirmations import MemberConfirmation, MemberConfirmations
 from compadre_assistant.capabilities.family.presentation.members import (
     CLOSE_COMMAND, LEAVE_COMMAND, MEMBERS_COMMAND, REMOVE_COMMAND, TRANSFER_COMMAND, MemberDisplayNames, MembersView,
@@ -36,7 +37,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, CapabilityCommand, CapabilityDescriptor, CapabilityHelp, CapabilityMode, CapabilityResult,
     CommandParameter, ConfirmationQueryResult,
     ContextualCommandQueryPort, HandlerContext, HelpSection,
-    IncomingCapabilityPort, IncomingResponse, PendingConfirmationQueryPort, PendingInputContinuationPort,
+    IncomingCapabilityPort, IncomingResponse, NotificationEntryPort, PendingConfirmationQueryPort, PendingInputContinuationPort,
     PendingInputOutcome, PendingInputResult, ReplyAction, ReplyActionRecoveryPort, ResponseView, SectionActionsQueryPort,
 )
 from compadre_assistant.core.presentation.message_content import code_span, compose_content, text_content
@@ -76,7 +77,7 @@ def _family_actions(family: Family | None) -> tuple[ReplyAction, ...]:
 
 
 class FamilyCapability(
-    IncomingCapabilityPort, ContextualCommandQueryPort, SectionActionsQueryPort,
+    IncomingCapabilityPort, NotificationEntryPort, ContextualCommandQueryPort, SectionActionsQueryPort,
     PendingInputContinuationPort, PendingConfirmationQueryPort, ReplyActionRecoveryPort,
 ):
     """Открывает семейный режим и обрабатывает команды зарегистрированного профиля."""
@@ -134,6 +135,21 @@ class FamilyCapability(
         self._shopping_sections = ShoppingSections()
         # Снимок шага справки привязан к ревизии режима и конкретному членству.
         self._help_screens: dict[tuple[int, ReplyAddress], tuple[int | None, int, datetime, str]] = {}
+
+    def notification_destination(self, app_user_id: int, address: ReplyAddress, reference: str) -> str | None:
+        """Проверяет, что адрес всё ещё принадлежит участнику указанного состава семьи."""
+        with self._open_scenarios() as (families, _, _):
+            family = families.find_for_member(app_user_id)
+            if family is None:
+                return None
+            try:
+                members = families.list_members(app_user_id, family.id)
+            except FamilyAccessEnded:
+                return None
+            member = next((member for member in members if member.app_user_id == app_user_id), None)
+            if member and reference == shopping_reference(family.id, app_user_id, member.joined_at, address):
+                return f"{SHOPPING_COMMAND} notice {reference}"
+        return None
 
     def enter(self, context: HandlerContext, event: IncomingEvent, arguments: str) -> CapabilityResult:
         """Открывает начальный экран или показывает текущую семью.
@@ -552,6 +568,10 @@ class FamilyCapability(
         try:
             actor = next(member for member in families.list_members(app_user_id, family.id)
                          if member.app_user_id == app_user_id)
+            if command == SHOPPING_COMMAND and parts[:1] == ["notice"]:
+                if parts != ["notice", shopping_reference(family.id, app_user_id, actor.joined_at, address)]:
+                    return self._family_access_ended()
+                parts = []
             if command == SHOPPING_COMMAND and (not parts or parts == ["open", str(family.id)]):
                 section = ShoppingSection(revision, family.id, actor.joined_at)
                 items = shopping.list_items(app_user_id, family.id, actor_joined_at=section.joined_at)
@@ -671,7 +691,10 @@ class FamilyCapability(
             if not arguments:
                 return self._begin_shopping_add(context, address, section)
             try:
-                items = shopping.add(app_user_id, family_id, arguments, actor_joined_at=section.joined_at)
+                items = shopping.add(
+                    app_user_id, family_id, arguments, actor_joined_at=section.joined_at,
+                    source=ShoppingAddMessage(event.channel, event.chat_id, event.message_id),
+                )
                 return self._show_shopping_list(context, address, section, items)
             except ItemNumbersExhausted:
                 return self._shopping_numbers_exhausted()
@@ -819,7 +842,10 @@ class FamilyCapability(
             return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
         with self._open_scenarios() as (_, _, shopping):
             try:
-                items = shopping.add(app_user_id, section.family_id, event.text, actor_joined_at=section.joined_at)
+                items = shopping.add(
+                    app_user_id, section.family_id, event.text, actor_joined_at=section.joined_at,
+                    source=ShoppingAddMessage(event.channel, event.chat_id, event.message_id),
+                )
             except FamilyAccessEnded:
                 return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
             except InvalidShoppingNames:

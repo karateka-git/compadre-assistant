@@ -15,11 +15,12 @@ from compadre_assistant.core.domain.users.entities import (
     IncomingIdentity,
     IdentityRebindConfirmation,
     IdentityRebindStatus,
+    NotificationChannel,
 )
 
 
 def app_user_from_dto(dto: AppUserDto) -> AppUser:
-    """Преобразует SQLite timestamp профиля в timezone-aware дату UTC."""
+    """Восстанавливает профиль, переводя время в UTC и распознавая канал уведомлений."""
     created_at = datetime.fromisoformat(dto.created_at) if dto.created_at is not None else None
     if created_at is not None:
         created_at = (
@@ -27,7 +28,13 @@ def app_user_from_dto(dto: AppUserDto) -> AppUser:
             if created_at.tzinfo is None
             else created_at.astimezone(UTC)
         )
-    return AppUser(dto.id, dto.display_name, created_at)
+    channel = None
+    if dto.notification_channel is not None:
+        try:
+            channel = NotificationChannel(dto.notification_channel)
+        except ValueError:
+            channel = NotificationChannel.UNKNOWN
+    return AppUser(dto.id, dto.display_name, created_at, channel)
 
 
 def incoming_identity_to_dto(identity: IncomingIdentity) -> IncomingIdentityDto:

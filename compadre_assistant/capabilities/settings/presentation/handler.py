@@ -61,7 +61,9 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         "settings", CapabilityCommand("/settings", (), "открыть настройки"),
         help=CapabilityHelp(sections=(
             HelpSection("Профиль", tuple(map(_command, (ChatCommand.STATUS, ChatCommand.NAME)))),
-            HelpSection("Мессенджеры", tuple(map(_command, (ChatCommand.CONNECT, ChatCommand.LINK)))),
+            HelpSection("Мессенджеры", tuple(map(_command, (
+                ChatCommand.CONNECT, ChatCommand.LINK, ChatCommand.NOTIFICATIONS,
+            )))),
             HelpSection("Личные возможности", tuple(map(_command, (
                 ChatCommand.CAPABILITIES, ChatCommand.ENABLE, ChatCommand.DISABLE,
             )))),
@@ -98,7 +100,8 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         """
         screen = self._current_screen(app_user, address, mode_revision)
         if screen is _SettingsScreen.MESSENGERS:
-            return frozenset((ChatCommand.CONNECT.value, ChatCommand.LINK.value, self.descriptor.entry.name))
+            return frozenset((ChatCommand.CONNECT.value, ChatCommand.LINK.value, ChatCommand.NOTIFICATIONS.value,
+                              self.descriptor.entry.name))
         if screen is _SettingsScreen.CAPABILITIES:
             return frozenset((ChatCommand.CAPABILITIES.value, ChatCommand.ENABLE.value, ChatCommand.DISABLE.value,
                               self.descriptor.entry.name))
@@ -114,7 +117,7 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         screen = self._current_screen(app_user, address, mode_revision)
         if screen is _SettingsScreen.MESSENGERS:
             linked = self._channels(app_user, address)
-            return self._messenger_actions(address.channel, linked)
+            return self._messenger_actions(address.channel, linked, app_user.notification_channel)
         if screen is _SettingsScreen.CAPABILITIES:
             return _PROFILE_CATALOG, _BACK_TO_SETTINGS, HELP_SECTION_ACTION
         return _PROFILE_ACTIONS
@@ -124,9 +127,14 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
             raise RuntimeError("Не подключено чтение связей профиля")
         return self._linked_channels(user.id) | {address.channel}
 
-    def _messenger_actions(self, current: str, linked: frozenset[str]) -> tuple[ReplyAction, ...]:
+    def _messenger_actions(
+        self, current: str, linked: frozenset[str], selected: str | None,
+    ) -> tuple[ReplyAction, ...]:
         actions = []
         for channel, url in self._dialogs.items():
+            if channel in linked and channel != selected:
+                actions.append(ReplyAction(f"Получать в {_MESSENGER_NAMES[channel]}", f"/notifications {channel}",
+                                           scope=ActionScope.SECTION))
             if channel == current:
                 continue
             if channel not in linked:
@@ -143,7 +151,8 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         if not is_private_chat_address(event.channel, event.external_user_id, event.chat_id):
             return IncomingResponse(compose_content("Для привязки профиля открой личный чат с ботом."))
         linked = self._channels(context.app_user, event.reply_address)
-        actions = self._messenger_actions(event.channel, linked)
+        selected = _MESSENGER_NAMES.get(context.app_user.notification_channel)
+        actions = self._messenger_actions(event.channel, linked, context.app_user.notification_channel)
         if target and target not in self._dialogs:
             return IncomingResponse(text_content("Этот мессенджер недоступен. Выбери другой из списка."),
                                     suggested_actions=actions)
@@ -157,6 +166,8 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
                         parts.extend((" Открыть бота: ", url))
                     if not url:
                         parts.append(" Адрес бота не указан.")
+            parts.append(f"\n\nУведомления приходят в {selected}." if selected else
+                         "\n\nВыбери мессенджер, чтобы получать уведомления.")
             return IncomingResponse(compose_content(*parts), suggested_actions=actions)
         url = self._dialogs[target]
         if target in linked:
@@ -215,7 +226,7 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
         """
         parsed = ParsedChatCommand.parse(event.text.strip())
         if parsed is not None and parsed.command in PROFILE_COMMANDS and context.profile_operation is not None:
-            if parsed.command in (ChatCommand.CONNECT, ChatCommand.LINK):
+            if parsed.command in (ChatCommand.CONNECT, ChatCommand.LINK, ChatCommand.NOTIFICATIONS):
                 screen = (_SettingsScreen.MESSENGERS
                           if is_private_chat_address(event.channel, event.external_user_id, event.chat_id)
                           else _SettingsScreen.PROFILE)
@@ -224,6 +235,19 @@ class SettingsCapability(IncomingCapabilityPort, PendingConfirmationQueryPort, S
             else:
                 screen = _SettingsScreen.PROFILE
             self._screens[(context.app_user.id, event.reply_address)] = (context.mode_revision or 0, screen)
+            if parsed.command is ChatCommand.NOTIFICATIONS:
+                target = parsed.arguments.strip().lower()
+                if screen is _SettingsScreen.PROFILE:
+                    return self._screen(context, event, IncomingResponse(
+                        text_content("Для выбора мессенджера открой личный чат с ботом.")
+                    ))
+                if target not in self._dialogs:
+                    return self._screen(context, event, IncomingResponse(
+                        text_content("Выбери доступный связанный мессенджер для уведомлений.")
+                    ))
+                response = context.profile_operation(parsed.command, target)
+                return CapabilityResult(replace(response, command_menu_delivery=SectionMenuDelivery.RECONCILE),
+                                        CapabilityMode.ACTIVE)
             if parsed.command is ChatCommand.CONNECT:
                 response = self._connect(context, event, parsed.arguments.strip().lower())
                 return CapabilityResult(replace(response, command_menu_delivery=SectionMenuDelivery.RECONCILE),
