@@ -2,7 +2,8 @@
 
 import asyncio
 from dataclasses import replace
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from itertools import count
 import json
 import logging
@@ -23,6 +24,8 @@ from compadre_assistant.capabilities.ai.domain.ocr import OcrResult
 from compadre_assistant.capabilities.ai.domain.use_cases.extract_image_text import ExtractImageText
 from compadre_assistant.capabilities.ai.domain.use_cases.ask_question import AskQuestion
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
+from compadre_assistant.capabilities.admin.domain.cost_report import CostSourceError, CostStatistics, GetGatewayCostReport
+from compadre_assistant.capabilities.admin.presentation.handler import AdminCapability
 from compadre_assistant.capabilities.obsidian.domain.pending import PendingOrigin
 from compadre_assistant.capabilities.obsidian.domain.reviews.confirmation import ObsidianConfirmationResult, ObsidianConfirmationStatus
 from compadre_assistant.capabilities.obsidian.domain.vaults.github_models import GitHubGatewayError
@@ -179,10 +182,10 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         self.owner = NeutralScreenCapability()
         self.open_channels({"telegram": "https://t.me/example_chat_bot", "vk": "https://vk.com/write-731"})
 
-    def open_channels(self, dialogs, *, capabilities=None):
+    def open_channels(self, dialogs, *, capabilities=None, profile_access=None):
         """Подключает два локальных клиента к процессору с публичными адресами установки."""
         self.processor = ChannelMessageProcessor(database_path=self.path, capabilities=capabilities or (self.owner,),
-                                                messenger_dialogs=dialogs)
+                                                messenger_dialogs=dialogs, profile_access=profile_access)
         self.addCleanup(self.processor.close_deferred_actions)
         self.logger = logging.getLogger("test.screen-actions.channels")
         self.ids = count(42)
@@ -298,6 +301,130 @@ class ScreenActionsChannelsTest(unittest.IsolatedAsyncioTestCase):
         actions = {button["action"]["label"]: button["action"] for row in keyboard["buttons"] for button in row}
         action = actions[label]
         return action.get("link") or json.loads(action["payload"])["token"], message_id
+
+    async def test_admin_timezone_help_retry_cancel_expiry_and_access_in_both_channels(self):
+        """Отчёт проходит ввод IANA, справку и возврат с повторной проверкой допуска."""
+        for channel in ("telegram", "vk"):
+            with self.subTest(channel=channel):
+                with connect_database(self.path) as connection:
+                    owner = create_user_identity_service(connection).find_known_private_chat(channel, "1001")[0]
+                allowed = {owner.id}
+                reader = Mock()
+                reader.read_period.return_value = CostStatistics(Decimal("0.10"))
+                reader.read_request_count.return_value = 2
+                report = GetGatewayCostReport(reader, currency="RUB", count_reader=reader,
+                                              clock=lambda: datetime(2026, 1, 2, 18, tzinfo=UTC))
+                self.open_channels({}, capabilities=(AdminCapability(report),), profile_access={"admin": allowed.__contains__})
+                now = datetime.now(UTC)
+                self.processor._pending_inputs._clock = lambda: now
+                address = ReplyAddress(channel, "1001")
+
+                async def choose(label):
+                    await self.choose_section(channel, label, "1001")
+
+                def report_text():
+                    """Находит отчёт перед техническим сообщением обновления нижнего меню VK."""
+                    values = list(self.vk.texts.values()) if channel == "vk" else [entry[1]["text"] for entry in self.telegram]
+                    return next(text for text in reversed(values) if "Расходы ИИ по статистике" in text)
+
+                def latest_text():
+                    """Читает содержательный ответ перед уведомлением нижнего меню."""
+                    values = list(self.vk.texts.values()) if channel == "vk" else [entry[1]["text"] for entry in self.telegram]
+                    return next(text for text in reversed(values) if text not in {"Что сделать дальше?", "Выбери действие."})
+
+                await self.send(channel, "/start")
+                await choose("Администрирование")
+                self.assertNotRegex(latest_text(), r"/(?:admin|llm_costs|llm_timezone|exit)\b")
+                await choose("Показать расходы ИИ")
+                await self.press(channel, *self.inline_action(channel, "Текущий месяц"))
+                self.assertNotIn("Сегодня —", report_text())
+                await choose("Часовой пояс")
+                pending = self.processor._pending_inputs.get(address)
+                self.assertEqual(pending.external_user_id, "1001")
+                await choose("Помощь")
+                help_text = latest_text()
+                self.assertIn("/llm_timezone", help_text)
+                self.assertNotIn("/llm_costs", help_text)
+                await self.send(channel, "/help")
+                self.assertEqual(help_text, latest_text())
+                self.assertIs(pending, self.processor._pending_inputs.get(address))
+                reader.reset_mock()
+                for value in ("неизвестно", "Europe/Moscow DAY", " "):
+                    await self.send(channel, value)
+                    self.assertIn("Ожидание продолжается", latest_text())
+                    self.assertNotIn("/llm_", latest_text())
+                    self.assertIs(pending, self.processor._pending_inputs.get(address))
+                reader.read_period.assert_not_called()
+                await self.send(channel, "Europe/Moscow")
+                self.assertIsNone(self.processor._pending_inputs.get(address))
+                self.assertIn("Europe/Moscow", report_text())
+                self.assertNotIn("Сегодня —", report_text())
+                self.assertEqual(reader.read_period.call_count, 1)
+                await self.press(channel, *self.inline_action(channel, "Сводка"))
+                self.assertIn("Сегодня —", report_text())
+                self.assertIn("Europe/Moscow", report_text())
+                await choose("Часовой пояс")
+                await choose("Отмена")
+                self.assertIsNone(self.processor._pending_inputs.get(address))
+                await choose("Вернуться" if channel == "telegram" else "Показать расходы ИИ")
+                self.assertIn("Europe/Moscow", report_text())
+                self.assertIn("Сегодня —", report_text())
+                await choose("Часовой пояс")
+                pending = self.processor._pending_inputs.get(address)
+                now = pending.expires_at + timedelta(seconds=1)
+                reader.reset_mock()
+                await self.send(channel, "Asia/Tokyo")
+                self.assertIn("Срок ожидания ввода истёк", latest_text())
+                reader.read_period.assert_not_called()
+                if channel == "telegram":
+                    await self.press(channel, *self.inline_action(channel, "Начать заново"))
+                else:
+                    await choose("Часовой пояс")
+                self.assertNotEqual(pending.request_id, self.processor._pending_inputs.get(address).request_id)
+                await self.send(channel, "Asia/Tokyo")
+                self.assertIn("Asia/Tokyo", report_text())
+                self.assertIn("Сегодня —", report_text())
+                await choose("Часовой пояс")
+                reader.reset_mock()
+                allowed.clear()
+                await self.send(channel, "Europe/Moscow")
+                self.assertIsNone(self.processor._pending_inputs.get(address))
+                self.assertIn("нет доступа", latest_text())
+                reader.read_period.assert_not_called()
+                for command in ("/admin", "/llm_timezone", "/llm_costs"):
+                    await self.send(channel, command, chat="1002")
+                    self.assertIn("нет доступа", latest_text())
+                await self.send(channel, "/help", chat="1002")
+                self.assertNotIn("/llm_timezone", latest_text())
+                allowed.add(owner.id)
+                group = "-1001" if channel == "telegram" else "2000000101"
+                for command in ("/admin", "/llm_timezone", "/llm_costs"):
+                    await self.send(channel, command, chat=group, author="1001")
+                    self.assertIn("Открой личный чат", latest_text())
+                self.assertIsNone(self.processor._pending_inputs.get(ReplyAddress(channel, group)))
+                reader.read_period.assert_not_called()
+
+    async def test_admin_report_failure_and_unconfigured_source_keep_navigation(self):
+        """Недоступная статистика оставляет повтор, пояс, помощь и выход без команд в тексте."""
+        for channel in ("telegram", "vk"):
+            for configured in (True, False):
+                with self.subTest(channel=channel, configured=configured):
+                    reader = Mock()
+                    reader.read_period.side_effect = CostSourceError("private-detail")
+                    report = GetGatewayCostReport(reader if configured else None, currency="RUB" if configured else None,
+                                                  clock=lambda: datetime(2026, 1, 2, 18, tzinfo=UTC))
+                    self.open_channels({}, capabilities=(AdminCapability(report),), profile_access={"admin": lambda _: True})
+                    await self.send(channel, "/admin")
+                    await self.choose_section(channel, "Показать расходы ИИ", "1001")
+                    self.assertIn("временно недоступна" if configured else "не настроена", self.last(channel)[0])
+                    self.assertNotIn("/llm_", self.last(channel)[0])
+                    self.assertNotIn("private-detail", self.last(channel)[0])
+                    await self.choose_section(channel, "Часовой пояс", "1001")
+                    self.assertIn("Europe/Moscow", self.last(channel)[0])
+                    await self.choose_section(channel, "Отмена", "1001")
+                    await self.choose_section(channel, "Вернуться" if channel == "telegram" else "Показать расходы ИИ", "1001")
+                    await self.choose_section(channel, "Помощь", "1001")
+                    self.assertIn("/llm_costs", self.last(channel)[0])
 
     def enable_obsidian(self, channel):
         """Включает тестовую возможность для обоих зарегистрированных профилей."""

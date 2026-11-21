@@ -172,8 +172,8 @@ class AdminChannelsTest(unittest.TestCase):
 
             self.vk(processor, "/llm_costs Europe/Moscow", client=vk, publish=publish)
             moscow = vk.messages[-1][1]
-            self.assertIn("/llm_costs DAY Europe/Moscow", moscow)
-            self.assertIn("Вместо DAY можно указать MONTH или YEAR.", moscow)
+            self.assertIn("Часовой пояс Europe/Moscow", moscow)
+            self.assertNotIn("/llm_costs", moscow)
             self.assertIn("Сегодня — Известная сумма 0,01 ₽. Интервалов без стоимости — 1. Запросов: 9.", moscow)
             self.assertEqual(len(requests), 12)
             periods = _vk_buttons(vk.keyboards[-1], inline=True)
@@ -182,7 +182,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertIn("Часовой пояс Europe/Moscow", today)
             self.assertIn("Запросов: 9.", today)
             self.assertNotIn("Текущий месяц —", today)
-            self.assertIn("Чтобы открыть сводку, введи /llm_costs Europe/Moscow.", today)
+            self.assertNotIn("/llm_costs", today)
             other_periods = _vk_buttons(vk.keyboards[-1], inline=True)
             self.assertEqual(set(other_periods), {"Текущий месяц", "Текущий год", "Сводка"})
             self.assertEqual(len(requests), 14)
@@ -199,13 +199,13 @@ class AdminChannelsTest(unittest.TestCase):
             self.assertEqual(len(requests), 20)
 
             self.vk(processor, "/llm_costs Europe/Moscow DAY", client=vk, publish=publish)
-            self.assertIn("/llm_costs DAY Europe/Moscow", vk.messages[-1][1])
+            self.assertIn("Не удалось распознать параметры отчёта", vk.messages[-1][1])
             self.assertIsNone(vk.keyboards[-1])
             self.assertEqual(len(vk.messages), 6)
             self.assertEqual(len(requests), 20)
             self.assertIn("Asia/Omsk", self.vk(processor, "/llm_costs").messages[-1][1])
             self.assertIn("Часовой пояс не найден", self.telegram(processor, "/llm_costs /invalid")[0])
-            self.assertIn("/llm_costs DAY Europe/Moscow", self.telegram(processor, "/llm_costs x y")[0])
+            self.assertIn("Не удалось распознать параметры отчёта", self.telegram(processor, "/llm_costs x y")[0])
             self.assertEqual(len(requests), 24)
             self.telegram(processor, "/exit")
             self.assertIn("Открой раздел", self.telegram(processor, "/llm_costs")[0])
@@ -339,6 +339,41 @@ class AdminChannelsTest(unittest.TestCase):
                 for command in ("/exit", "/register", "/name", "/capabilities", "/link", "/llm_costs", "/cancel", "/confirm"):
                     self.assertNotIn(command, text)
 
+    def test_timezone_and_period_are_isolated_between_linked_chats_and_mode_revisions(self) -> None:
+        """Связанные Telegram/VK меняют пояс независимо, новый вход сбрасывает выбор."""
+        self.configure(str(self.owner_id))
+
+        def report(_use_case, timezone=None, *, period=None):
+            """Возвращает только выбранные строки без внешнего API."""
+            return GatewayCostReport(timezone or "Asia/Omsk", "RUB", tuple(
+                CostReportRow(option, CostReportStatus.PERIOD_UNAVAILABLE)
+                for option in ((period,) if period is not None else tuple(ReportPeriod))
+            ))
+
+        with patch.object(GetGatewayCostReport, "execute", autospec=True, side_effect=report), \
+             create_channel_message_processor(database_path=self.path, enabled_capabilities=("admin",)) as processor:
+            self.telegram(processor, "/admin")
+            self.telegram(processor, "/llm_costs MONTH Europe/Moscow")
+            self.vk(processor, "/admin")
+            self.vk(processor, "/llm_timezone")
+            vk = self.vk(processor, "Asia/Tokyo").messages[-1][1]
+            self.assertIn("Asia/Tokyo", vk)
+            self.assertIn("Сегодня —", vk)
+            self.telegram(processor, "/llm_timezone")
+            telegram = self.telegram(processor, "Asia/Kathmandu")[0]
+            self.assertIn("Asia/Kathmandu", telegram)
+            self.assertIn("Текущий месяц —", telegram)
+            self.assertNotIn("Сегодня —", telegram)
+            direct = self.telegram(processor, "/llm_timezone Europe/Moscow")[0]
+            self.assertIn("Europe/Moscow", direct)
+            self.assertNotIn("Сегодня —", direct)
+            self.telegram(processor, "/exit")
+            self.telegram(processor, "/admin")
+            self.telegram(processor, "/llm_timezone")
+            renewed = self.telegram(processor, "Europe/Moscow")[0]
+            self.assertIn("Сегодня —", renewed)
+            self.assertIn("Текущий год —", renewed)
+
     def test_restart_revokes_existing_button_and_channel_menus(self) -> None:
         """Новая конфигурация блокирует сохранённый режим сразу после перезапуска."""
         self.configure(str(self.owner_id))
@@ -355,7 +390,7 @@ class AdminChannelsTest(unittest.TestCase):
             self.vk(processor, "/llm_costs DAY", client=vk_client, publish=publish)
             periods = _vk_buttons(vk_client.keyboards[-1], inline=True)
             payload = periods["Текущий месяц"]["payload"]
-            self.assert_channel_menus(processor, {"Показать расходы ИИ", "Выйти из режима", "Помощь"}, vk_client=vk_client)
+            self.assert_channel_menus(processor, {"Показать расходы ИИ", "Часовой пояс", "Выйти из режима", "Помощь"}, vk_client=vk_client)
             # Активность в группе не должна скрывать ранее сохранённый личный чат
             # от фоновой сверки меню нового процесса.
             self.telegram(processor, "/admin", chat=-404)

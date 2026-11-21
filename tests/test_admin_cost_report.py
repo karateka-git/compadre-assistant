@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfoNotFoundError
 from compadre_assistant.capabilities.admin.domain.cost_report import (
     CostReportRow, CostReportStatus, CostSourceError, CostStatistics, CostStatisticsReader,
     GatewayCostReport, GetGatewayCostReport, IncompleteCostPeriod,
-    InvalidReportTimezone, ReportPeriod, RequestCountReader,
+    InvalidReportTimezone, ReportPeriod, RequestCountReader, validate_report_timezone,
 )
 
 
@@ -40,6 +40,17 @@ class GatewayCostReportTest(unittest.TestCase):
         )))
         self.assertEqual(self.reader.read_period.call_args_list, [call(start, _NOW) for start in _OMSK_STARTS])
         clock.assert_called_once_with()
+
+    def test_timezone_input_validation_does_not_read_statistics_or_clock(self) -> None:
+        """Пошаговый ввод проверяет IANA до принятия долгого чтения статистики."""
+        with patch("compadre_assistant.capabilities.admin.domain.cost_report._utc_now") as clock:
+            self.assertEqual(validate_report_timezone(None), "Asia/Omsk")
+            self.assertEqual(validate_report_timezone("Europe/Moscow"), "Europe/Moscow")
+            for invalid in ("", "not-a-timezone", "Europe/Moscow DAY", "../Europe/Moscow"):
+                with self.subTest(value=invalid), self.assertRaises(InvalidReportTimezone):
+                    validate_report_timezone(invalid)
+            clock.assert_not_called()
+        self.reader.read_period.assert_not_called()
 
     def test_explicit_period_reads_only_requested_window(self) -> None:
         """Выбранный период использует начало месяца в указанном часовом поясе."""
