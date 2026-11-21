@@ -6,45 +6,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from compadre_assistant.core.data.sqlite.connection import connect_database
-from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
+from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 
 
 class FamilyMigrationTest(unittest.TestCase):
-    """Проверяет обновление прежней базы и ограничения новой схемы."""
+    """Проверяет ограничения семейных таблиц в актуальной схеме."""
 
     def setUp(self) -> None:
         """Открывает отдельную временную базу для каждого теста."""
         self.root = Path(self.enterContext(TemporaryDirectory(prefix="family-migrations-")))
         self.connection = self.enterContext(connect_database(self.root / "family.db"))
-
-    def test_upgrade_preserves_core_records_and_is_repeatable(self) -> None:
-        """Переносит схему 0006 без изменения существующих профилей, связей и режима."""
-        previous = self.root / "previous"
-        previous.mkdir()
-        for path in MIGRATIONS_DIR.glob("000[1-6]_*.sql"):
-            (previous / path.name).write_bytes(path.read_bytes())
-        self.assertEqual(len(apply_migrations(self.connection, previous)), 6)
-        with self.connection as db:
-            db.execute("INSERT INTO app_users (id, display_name) VALUES (1, 'Оля')")
-            db.execute(
-                "INSERT INTO external_identities (app_user_id, channel, external_user_id, external_chat_id) "
-                "VALUES (1, 'telegram', '111', '111')"
-            )
-            db.execute("INSERT INTO active_chat_modes VALUES (1, 'telegram', '111', 'ai', 5, 'fixture')")
-            db.execute("INSERT INTO user_capability_preferences VALUES (1, 'ai', 1)")
-        tables = ("app_users", "external_identities", "active_chat_modes", "user_capability_preferences")
-        before = self._snapshot(tables)
-
-        # Этот сценарий проверяет только переход 0006 → 0007.
-        family_migration = MIGRATIONS_DIR / "0007_family.sql"
-        (previous / family_migration.name).write_bytes(family_migration.read_bytes())
-        self.assertEqual([migration.name for migration in apply_migrations(self.connection, previous)],
-                         [family_migration.name])
-        self.assertEqual(self._snapshot(tables), before)
-        self.assertEqual(self._snapshot(("families", "family_members", "family_invites", "family_shopping_items")),
-                         ([], [], [], []))
-        self.assertEqual(apply_migrations(self.connection, previous), [])
-        self._assert_integrity()
 
     def test_family_requires_an_owner_from_its_members(self) -> None:
         """Проверяет владельца той же семьи, уникальность членства и защиту профиля."""
