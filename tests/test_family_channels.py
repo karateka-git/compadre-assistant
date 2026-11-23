@@ -196,6 +196,38 @@ class FamilyChannelsTest(unittest.TestCase):
             home = self._send(processor, self.owner_tg, "/family_expenses")
             self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
 
+    def test_find_expense_and_ask_question_in_both_messengers(self) -> None:
+        """Вопрос и кнопочный поиск совпадают, несколько товаров требуют выбора."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        purchase = ExpensePurchase(date(2026, 11, 3), ExpenseSource.TEXT,
+            (ExpenseItem("Продукты", "Молоко", 9500), ExpenseItem("Продукты", "Молоко сгущённое", 12000)))
+        with self._runtime("family") as processor, patch(
+                "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=purchase) as model:
+            self._joined_family(processor)
+            home = self._send(processor, self.owner_tg, "/family_expenses")
+            self._choose(processor, self.owner_tg, home, "Добавить расход")
+            draft = self._send(processor, self.owner_tg, "Молоко и сгущёнка")
+            self._choose(processor, self.owner_tg, draft, "Сохранить")
+            for who in (self.guest, self.owner_tg):
+                home = self._send(processor, who, "/family_expenses")
+                period = self._choose(processor, who, home, "Выбрать период")
+                self._choose(processor, who, period, "Другой месяц")
+                home = self._send(processor, who, "11.2026")
+                self._choose(processor, who, home, "Найти товар")
+                matches = self._send(processor, who, "МОЛОКО")
+                self.assertIn("Молоко сгущённое", response_text(matches))
+                chosen = self._choose(processor, who, matches, "2. Молоко · 95 ₽")
+                question = self._send(processor, who, "Сколько ушло на молоко за ноябрь?")
+                self.assertIn("215 ₽", response_text(question))
+                selected = self._choose(processor, who, question, "2. Молоко · 95 ₽")
+                self.assertEqual(response_text(selected), response_text(chosen))
+                empty = self._send(processor, who, "Сколько потратили на кофе за апрель 2025?")
+                self.assertIn("04.2025", response_text(empty))
+                self.assertIn("записей нет", response_text(empty))
+            model.assert_called_once()
+
     def test_stepwise_expense_with_provider_offline(self) -> None:
         """Пошаговый ввод работает из обычного входа и после ошибки LLM."""
         from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError

@@ -20,6 +20,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from .expense_browser import ExpenseBrowser, money as _money
+from ..domain.expense_questions import parse_expense_question
 
 
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
@@ -77,6 +78,29 @@ class ExpenseEntry:
         self._sessions[address] = session
         return session
 
+    def leave(self, address: ReplyAddress) -> None:
+        """Завершает навигацию расходов при переходе в другой раздел семьи."""
+        with self._lock:
+            self._sessions.pop(address, None)
+
+    def question(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess) -> IncomingResponse | None:
+        """Ищет покупки по вопросу в открытом разделе расходов."""
+        with self._lock:
+            session = self._current(event, context, access)
+            if not session or not session.browser or session.purchase or not event.text.strip().casefold().startswith("сколько"):
+                return None
+            with self._repository() as repo:
+                browser = session.browser
+                today = datetime.now(ZoneInfo(repo.timezone(access))).date()
+                params = parse_expense_question(event.text, browser.month, today)
+                if not params:
+                    return _reply("Напиши, например: «Сколько ушло на молоко за ноябрь?»", _action("Расходы"))
+                query, month = params
+                browser.select_month(month)
+                browser.find(repo, access, query)
+                session.deadline = self._clock() + _TTL
+                return browser.render(repo, access, session.token)
+
     def _current(self, event: IncomingEvent, context: HandlerContext, access: ExpenseAccess) -> _Session | None:
         session = self._sessions.get(event.reply_address)
         if (session and session.mode == context.mode_revision and session.access == access
@@ -118,6 +142,8 @@ class ExpenseEntry:
                     return self._expired()
                 target = browser.targets[int(args[3])]
                 session.deadline = self._clock() + _TTL
+                if target.kind == "search_input":
+                    return self._ask(context, event, session, target.kind, "Введи название товара или услуги.")
                 if target.kind in ("month_input", "zone_input"):
                     prompt = ("Введи месяц в формате ММ.ГГГГ." if target.kind == "month_input"
                               else "Введи часовой пояс IANA, например Asia/Omsk.")
@@ -278,6 +304,17 @@ class ExpenseEntry:
             if session is None or session.request != pending.request_id:
                 return PendingInputResult(self._expired(), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
+            if kind == "search_input" and session.browser:
+                query = event.text.strip()
+                if not 0 < len(query) <= 256:
+                    return PendingInputResult(_reply("Введи название до 256 символов.", CANCEL_SECTION_ACTION),
+                                              PendingInputOutcome.RETRY)
+                with self._repository() as repo:
+                    session.browser.find(repo, access, query)
+                    session.request = None
+                    session.deadline = self._clock() + _TTL
+                    response = session.browser.render(repo, access, session.token)
+                return PendingInputResult(response, PendingInputOutcome.COMPLETE)
             if kind in ("month_input", "zone_input") and session.browser:
                 try:
                     with self._repository() as repo:

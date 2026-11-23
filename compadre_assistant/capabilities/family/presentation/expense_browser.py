@@ -66,6 +66,15 @@ class ExpenseBrowser:
         else:
             self.stack.append(target)
 
+    def find(self, repo: ExpenseRepository, access: ExpenseAccess, query: str) -> None:
+        """Открывает покупки единственного совпадения либо список результатов."""
+        found = repo.search(access, self.period, query, 0, 1)
+        if found.count == 1:
+            item = found.rows[0]
+            self.navigate(ReportScreen("history", product=ProductSelection(item.id), title=item.name))
+        else:
+            self.navigate(ReportScreen("search", title=query))
+
     def render(self, repo: ExpenseRepository, access: ExpenseAccess, token: str) -> IncomingResponse:
         """Выдаёт адресные действия только для нового снимка экрана."""
         self.targets.clear()
@@ -102,6 +111,8 @@ class ExpenseBrowser:
             button("История покупок", ReportScreen("history"), 1)
             button("Выбрать период", ReportScreen("period"), 2)
             button("Часовой пояс", ReportScreen("zone"), 2)
+            button("Найти товар", ReportScreen("search_input"), 3)
+            lines.append("Можно спросить: «Сколько ушло на молоко за ноябрь?»")
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
         if screen.kind == "period":
@@ -137,6 +148,9 @@ class ExpenseBrowser:
             elif screen.kind == "products":
                 results = repo.products(access, self.period, screen.category, start, self.size)
                 title = screen.title
+            elif screen.kind == "search":
+                results = repo.search(access, self.period, screen.title, start, self.size)
+                title = f"Поиск · {screen.title}"
             else:
                 results = repo.history(access, self.period, start, self.size, screen.product)
                 title = screen.title or "История покупок"
@@ -144,7 +158,7 @@ class ExpenseBrowser:
             for index, item in enumerate(results.rows):
                 if screen.kind == "groups":
                     target = ReportScreen("products", category=item.id, title=item.name)
-                elif screen.kind == "products":
+                elif screen.kind in ("products", "search"):
                     target = ReportScreen("history", product=ProductSelection(item.id, screen.category), title=item.name)
                 else:
                     target = ReportScreen("card", purchase=item.id)
