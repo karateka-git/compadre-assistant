@@ -849,7 +849,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
                 self.assertEqual(self._visible_menu(), original_menu)
 
         self._single_reply(lambda: self._menu_press("Назад"), "Семья «Дом»",
-                           labels=["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"])
+                           labels=["Покупки", "Расходы", "Участники", "Пригласить", "Помощь", "Выйти из режима"])
 
     def test_shopping_without_inline_keyboard_keeps_text_commands(self) -> None:
         """VK сохраняет отдельное меню и подтверждает текстовый выбор по номеру."""
@@ -874,7 +874,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
     def test_family_menu_and_pending_add_use_one_reply(self) -> None:
         """Карточка, участники, приглашение, покупки, подтверждение и отмена не дублируют ответы."""
         no_family = ["Создать семью", "Вступить по коду", "Выйти из режима", "Помощь"]
-        home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
+        home = ["Покупки", "Расходы", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
         shopping = ["Добавить", "Назад", "Помощь"]
         self._single_reply(lambda: self._send("/family"), "Семья", labels=no_family)
         self._single_reply(lambda: self._menu_press("Создать семью"), "Пришли название семьи", labels=["Отмена", "Помощь"])
@@ -900,7 +900,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
 
     def test_shopping_to_invitation_and_members_keeps_inline_actions_with_new_bottom_menu(self) -> None:
         """VK возвращает нижнее меню семьи вместе с подтверждёнными кнопками нового экрана."""
-        home = ["Покупки", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
+        home = ["Покупки", "Расходы", "Участники", "Пригласить", "Помощь", "Выйти из режима"]
         self._send("/family")
         self._send("/family_create")
         self._send("Дом")

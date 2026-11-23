@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from compadre_assistant.core.data.sqlite.connection import connect_database
-from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
 
 
 class FamilyMigrationTest(unittest.TestCase):
@@ -72,6 +72,52 @@ class FamilyMigrationTest(unittest.TestCase):
             db.execute("DELETE FROM families WHERE id = ?", (first,))
         for table in ("family_members", "family_invites", "family_shopping_items"):
             self.assertEqual([row[0] for row in self.connection.execute(f"SELECT family_id FROM {table}")], [second])
+        self._assert_integrity()
+
+    def test_expenses_upgrade_preserves_existing_family_and_shopping(self) -> None:
+        """Обновление с 0010 даёт прежней семье пояс и сохраняет покупки."""
+        previous = self.root / "schema"
+        previous.mkdir()
+        for path in MIGRATIONS_DIR.glob("*.sql"):
+            if path.name[:4] <= "0010":
+                (previous / path.name).write_bytes(path.read_bytes())
+        apply_migrations(self.connection, previous)
+        with self.connection as db:
+            db.execute("INSERT INTO app_users (id) VALUES (1)")
+        family = self._create_family(1)
+        with self.connection as db:
+            db.execute("INSERT INTO family_shopping_items (family_id, number, name, status, created_at) "
+                       "VALUES (?, 1, 'Хлеб', 'needed', 'fixture')", (family,))
+        tables = ("family_members", "family_shopping_items")
+        snapshot = self._snapshot(tables)
+        apply_migrations(self.connection)
+        self.assertEqual(self._snapshot(tables), snapshot)
+        self.assertEqual(self.connection.execute("SELECT expense_timezone FROM families WHERE id=?",
+                                                (family,)).fetchone()[0], "Asia/Omsk")
+        self._assert_integrity()
+
+    def test_expense_lines_check_catalog_ownership_and_signed_difference(self) -> None:
+        """Схема принимает отрицательную разницу и отклоняет чужой каталог."""
+        self._apply_fresh_schema()
+        first, second = self._create_family(1), self._create_family(2)
+        with self.connection as db:
+            expense = db.execute("INSERT INTO family_expenses (family_id, operation_id, revision, purchase_date, "
+                                 "created_at, source) VALUES (?, 'fixture', 1, '2026-11-23', 'now', 'photo')",
+                                 (first,)).lastrowid
+            category = db.execute("INSERT INTO family_expense_categories(family_id, name, name_key) "
+                                  "VALUES (?, 'Транспорт', 'транспорт')", (second,)).lastrowid
+            product = db.execute("INSERT INTO family_expense_products(family_id, name, name_key) "
+                                 "VALUES (?, 'Такси', 'такси')", (second,)).lastrowid
+            own = db.execute("INSERT INTO family_expense_categories(family_id, name, name_key) "
+                             "VALUES (?, 'Транспорт', 'транспорт')", (first,)).lastrowid
+            insert = ("INSERT INTO family_expense_items(family_id, expense_id, position, amount, "
+                      "category_id, product_id) VALUES (?, ?, ?, ?, ?, ?)")
+            db.execute(insert, (first, expense, 1, -5900, None, None))
+        for value, cat, item in ((100, category, None), (100, own, product),
+                                 (-1, own, None), (100, None, None), (1.5, own, None)):
+            with self.subTest(value=value, category=cat, item=item):
+                with self.assertRaises(sqlite3.IntegrityError), self.connection as db:
+                    db.execute(insert, (first, expense, 2, value, cat, item))
         self._assert_integrity()
 
     def _apply_fresh_schema(self) -> None:

@@ -21,6 +21,7 @@ from compadre_assistant.capabilities.ai.bootstrap import create_ai_runtime
 from compadre_assistant.capabilities.ai.data.configuration import AiConfig, load_ai_config
 from compadre_assistant.capabilities.ai.presentation.handler import AiCapability
 from compadre_assistant.capabilities.family.bootstrap import create_family_capability, create_shopping_notifications
+from compadre_assistant.capabilities.family.data.expense_recognition import ReceiptRecognizer
 from compadre_assistant.capabilities.family.presentation.handler import FamilyCapability
 from compadre_assistant.capabilities.settings.presentation.handler import SettingsCapability
 from compadre_assistant.core.data.config import load_messenger_dialogs
@@ -813,7 +814,13 @@ def create_channel_message_processor(
                             if (profile := profiles.get_by_id(app_user_id)) is not None
                         }
 
-                capabilities += (create_family_capability(database_path, family_member_names),)
+                def receipt_settings() -> tuple[str, str, str, float]:
+                    """Загружает профиль только при запросе распознавания расхода."""
+                    profile = ai_config or load_ai_config()
+                    return profile.base_url, profile.api_key, profile.model, profile.timeout_seconds
+
+                capabilities += (create_family_capability(database_path, family_member_names,
+                                                          ReceiptRecognizer(receipt_settings)),)
                 sources = (("family", create_shopping_notifications(database_path, family_member_names)),)
             else:
                 disabled += (FamilyCapability.descriptor,)

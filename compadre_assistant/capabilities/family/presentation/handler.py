@@ -9,6 +9,8 @@ from compadre_assistant.capabilities.family.domain.invitations import (
     InvalidInvitation, InvitationExpired, InvitationUnavailable, InvitationUsed, ManageInvitations,
 )
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
+from compadre_assistant.capabilities.family.domain.expenses import ExpenseAccess
+from compadre_assistant.capabilities.family.presentation.expense_entry import EXPENSES, ExpenseEntry
 from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, InvalidFamilyName,
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
@@ -64,6 +66,7 @@ def _family_actions(family: Family | None) -> tuple[ReplyAction, ...]:
         )
     entries = (
         ("Покупки", SHOPPING_COMMAND, ScreenDestination("shopping-list", 1)),
+        ("Расходы", EXPENSES, ScreenDestination("family-expenses")),
         ("Участники", MEMBERS_COMMAND, ScreenDestination("family-members", 1)),
         ("Пригласить", _INVITE, ScreenDestination("family-invite")),
     )
@@ -90,6 +93,7 @@ class FamilyCapability(
             CapabilityCommand(_JOIN, (), "вступить по коду"),
             CapabilityCommand(_INVITE, (CommandParameter("action", "create", False),), "пригласить в семью"),
             CapabilityCommand(SHOPPING_COMMAND, (), "открыть покупки"),
+            CapabilityCommand(EXPENSES, (), "открыть расходы семьи"),
         )), HelpSection("Участники", (
             CapabilityCommand(MEMBERS_COMMAND, (CommandParameter("member", "<member>", False),), "посмотреть участников"),
             CapabilityCommand(LEAVE_COMMAND, (), "выйти из семьи"),
@@ -120,6 +124,7 @@ class FamilyCapability(
             menu_help_only=True,
         ))),
         enabled_by_default=True,
+        accepts_images=True,
         display_name="«Семья»",
         private_chat_hint="Открой личный чат с ботом, чтобы перейти в раздел «Семья».",
     )
@@ -127,9 +132,11 @@ class FamilyCapability(
     def __init__(
         self, open_scenarios: Callable[[], AbstractContextManager[tuple[ManageFamily, ManageInvitations, ManageShopping]]],
         display_names: MemberDisplayNames,
+        *, expense_entry: ExpenseEntry,
     ) -> None:
         """Принимает фабрику предметных сценариев на одно событие."""
         self._open_scenarios = open_scenarios
+        self._expense_entry = expense_entry
         self._members_view = MembersView(display_names)
         self._confirmations = MemberConfirmations()
         self._shopping_sections = ShoppingSections()
@@ -184,6 +191,8 @@ class FamilyCapability(
         """
         result = self._handle(context, event)
         response = result.response
+        if event.text.split()[:1] == [EXPENSES]:
+            return result
         if event.text.split()[:2] == [MEMBERS_COMMAND, "commands"]:
             return result
         actions = response.suggested_actions
@@ -203,6 +212,11 @@ class FamilyCapability(
             if family is not None:
                 members = families.list_members(app_user_id, family.id)
                 actor = next(member for member in members if member.app_user_id == app_user_id)
+                if command == EXPENSES:
+                    self._shopping_sections.close(app_user_id, event.reply_address)
+                    return CapabilityResult(self._expense_entry.handle(
+                        context, event, ExpenseAccess(family.id, app_user_id, actor.joined_at), arguments))
+                self._expense_entry.leave(event.reply_address)
                 screen = command if command in (_INVITE, MEMBERS_COMMAND) else ""
                 if command == MEMBERS_COMMAND and len(arguments.split()) == 1 and arguments != "commands":
                     screen = "member:" + arguments
@@ -265,7 +279,7 @@ class FamilyCapability(
                     if target is None or target.app_user_id == actor.app_user_id:
                         commands -= {REMOVE_COMMAND, TRANSFER_COMMAND}
                 return commands | {"/family"}
-            return frozenset((_INVITE, MEMBERS_COMMAND, SHOPPING_COMMAND))
+            return frozenset((_INVITE, MEMBERS_COMMAND, SHOPPING_COMMAND, EXPENSES))
 
     def section_actions(
         self, app_user: AppUser, address: ReplyAddress, mode_revision: int, pending: PendingInput | None,
@@ -485,6 +499,16 @@ class FamilyCapability(
         """
         app_user_id = context.app_user.id
         command = pending.input_kind
+        if command.startswith("expense:"):
+            with self._open_scenarios() as (families, _, _):
+                family = families.find_for_member(app_user_id)
+                if family is not None:
+                    members = families.list_members(app_user_id, family.id)
+                    actor = next((member for member in members if member.app_user_id == app_user_id), None)
+                    if actor is not None:
+                        access = ExpenseAccess(family.id, app_user_id, actor.joined_at)
+                        return self._expense_entry.continue_input(context, event, access, pending)
+            return PendingInputResult(self._family_access_ended(), PendingInputOutcome.COMPLETE)
         if command == ADD_COMMAND:
             return self._continue_shopping_add(context, pending, event)
         if command in (BUY_COMMAND, DELETE_COMMAND):
