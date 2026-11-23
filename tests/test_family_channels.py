@@ -161,6 +161,9 @@ class FamilyChannelsTest(unittest.TestCase):
             def choose(who, response, name):
                 return self._choose(processor, who, response, name)
             home = self._send(processor, self.owner_tg, "/family_expenses")
+            empty = choose(self.owner_tg, home, "Диаграмма")
+            self.assertIsNone(empty.png_image)
+            home = choose(self.owner_tg, empty, "Назад")
             choose(self.owner_tg, home, "Добавить расход")
             review = self._send(processor, self.owner_tg, "Пример")
             choose(self.owner_tg, review, "Сохранить")
@@ -170,6 +173,12 @@ class FamilyChannelsTest(unittest.TestCase):
                 choose(who, periods, "Другой месяц")
                 home = self._send(processor, who, "11.2026")
                 self.assertIn("689 ₽", response_text(home))
+                chart = choose(who, home, "Диаграмма")
+                self.assertTrue(chart.png_image.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertIn("Остальные · 0 ₽", response_text(chart))
+                home = choose(who, chart, "Назад")
+                self.assertIn("11.2026", response_text(home))
+                self.assertIn("Найти товар", [a.label for a in home.suggested_actions])
                 groups = choose(who, home, "По категориям")
                 stale = groups.suggested_actions[0].command
                 next_page = choose(who, groups, "Далее →")

@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
 from ..domain.expenses import ExpenseAccess, ExpenseRepository
+from .expense_chart import render_chart
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import text_content
 
@@ -98,20 +99,34 @@ class ExpenseBrowser:
             return f"Страница {screen.page + 1} из {last}"
 
         start = screen.page * self.size
-        if screen.kind == "home":
+        if screen.kind in ("home", "chart"):
             summary = repo.summary(access, self.period)
             lines = [f"Расходы семьи · {heading}", f"Всего · {money(summary.total)}"]
-            lines.extend(f"{item.name} · {money(item.amount)}" for item in summary.categories[:4])
+            rows = [(item.name, item.amount) for item in summary.categories[:4]]
             if len(summary.categories) > 4:
-                lines.append(f"Остальные · {money(sum(x.amount for x in summary.categories[4:]))}")
+                rows.append(("Остальные", sum(x.amount for x in summary.categories[4:])))
+            lines.extend(f"{name} · {money(amount)}" for name, amount in rows)
             if not summary.categories:
                 lines.append("За этот месяц расходов пока нет.")
+            if screen.kind == "chart":
+                png = None
+                if rows:
+                    try:
+                        png = render_chart(heading, money(summary.total), [
+                            (name, amount, money(amount)) for name, amount in rows
+                        ])
+                    except OSError:
+                        lines.append("Не удалось построить изображение.")
+                button("По категориям", ReportScreen("groups"), 0)
+                button("Назад", ReportScreen("back"), 1)
+                return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions), png_image=png)
             actions.append(ReplyAction("Добавить расход", f"/family_expenses add {token}", row=0))
             button("По категориям", ReportScreen("groups"), 1)
             button("История покупок", ReportScreen("history"), 1)
             button("Выбрать период", ReportScreen("period"), 2)
             button("Часовой пояс", ReportScreen("zone"), 2)
             button("Найти товар", ReportScreen("search_input"), 3)
+            button("Диаграмма", ReportScreen("chart"), 3)
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
         if screen.kind == "period":
