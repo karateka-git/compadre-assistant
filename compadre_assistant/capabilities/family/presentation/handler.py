@@ -10,7 +10,7 @@ from compadre_assistant.capabilities.family.domain.invitations import (
 )
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
 from compadre_assistant.capabilities.family.domain.expenses import ExpenseAccess
-from compadre_assistant.capabilities.family.presentation.expense_entry import EXPENSES, ExpenseEntry
+from compadre_assistant.capabilities.family.presentation.expense_entry import EXPENSES, ExpenseEntry, expenses_action
 from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, InvalidFamilyName,
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
@@ -64,16 +64,15 @@ def _family_actions(family: Family | None) -> tuple[ReplyAction, ...]:
             _EXIT_ACTION,
             HELP_SECTION_ACTION,
         )
-    entries = (
-        ("Покупки", SHOPPING_COMMAND, ScreenDestination("shopping-list", 1)),
-        ("Расходы", EXPENSES, ScreenDestination("family-expenses")),
-        ("Участники", MEMBERS_COMMAND, ScreenDestination("family-members", 1)),
-        ("Пригласить", _INVITE, ScreenDestination("family-invite")),
-    )
+    def entry(label: str, command: str, destination: ScreenDestination) -> ReplyAction:
+        return ReplyAction(label, f"{command} open {family.id}", scope=ActionScope.SECTION,
+                           purpose=ActionPurpose.NAVIGATION, destination=destination)
+
     return (
-        *(ReplyAction(label, f"{command} open {family.id}", scope=ActionScope.SECTION,
-                      purpose=ActionPurpose.NAVIGATION, destination=destination)
-          for label, command, destination in entries),
+        entry("Покупки", SHOPPING_COMMAND, ScreenDestination("shopping-list", 1)),
+        expenses_action(family.id),
+        entry("Участники", MEMBERS_COMMAND, ScreenDestination("family-members", 1)),
+        entry("Пригласить", _INVITE, ScreenDestination("family-invite")),
         ReplyAction("Помощь", "/help", scope=ActionScope.SECTION),
         _EXIT_ACTION,
     )

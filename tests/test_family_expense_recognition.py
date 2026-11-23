@@ -22,9 +22,28 @@ class ExpenseRecognitionTests(unittest.TestCase):
 
     def recognize(self, value, **result):
         """Подставляет один JSON-ответ в публичную операцию распознавания."""
-        choice = SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=json.dumps(result)))
+        return self._recognize_content(value, json.dumps(result))
+
+    def _recognize_content(self, value, content):
+        choice = SimpleNamespace(finish_reason="stop", message=SimpleNamespace(content=content))
         self.call.return_value = SimpleNamespace(choices=[choice])
         return self.recognizer.recognize(value, self.today)
+
+    def test_receipt_in_single_markdown_block(self):
+        payload = json.dumps({"items": [{"product": "Чай", "category": "Продукты", "amount": 5000}]})
+        for marker in ("```json", "```"):
+            with self.subTest(marker=marker):
+                result = self._recognize_content(b"\xff\xd8\xfffixture", f"\n{marker}\r\n{payload}\r\n```\n")
+                self.assertEqual(result.items[0].amount, 5000)
+
+    def test_rejects_extra_prose_incomplete_blocks_and_invalid_fenced_payloads(self):
+        payload = '{"items":[{"product":"Чай","category":"Продукты","amount":5000}]}'
+        block = f"```json\n{payload}\n```"
+        for content in (f"Чек:\n{block}", f"{block}\nГотово.", f"{block}\n{block}",
+                        f"```json\n{payload}", f"```python\n{payload}\n```",
+                        "```json\n{\n```", '```json\n{"items":[]}\n```'):
+            with self.subTest(content=content), self.assertRaises(ExpenseRecognitionError):
+                self._recognize_content("чай", content)
 
     def test_receipt_allocates_discount_exactly(self):
         item = dict(product="Молоко", category="Продукты", eligible=True, amount=100)
