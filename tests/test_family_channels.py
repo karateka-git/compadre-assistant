@@ -279,6 +279,42 @@ class FamilyChannelsTest(unittest.TestCase):
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT sum(amount) FROM family_expense_items").fetchone()[0], 90100)
 
+    def test_failed_receipt_returns_one_expenses_action_in_each_channel(self) -> None:
+        """Фоновый отказ оставляет один переход к расходам и доступный ручной ввод."""
+        from queue import Queue
+
+        import aiogram
+        from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError
+        from compadre_assistant.core.presentation.incoming.events import ImageAttachment
+        from compadre_assistant.presentation.telegram.bot import _serialize_telegram_inline_keyboard
+
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", side_effect=ExpenseRecognitionError,
+        ):
+            self._joined_family(processor)
+            for identity in (self.owner_tg, self.guest):
+                with self.subTest(channel=identity.channel):
+                    home = self._send(processor, identity, "/family_expenses")
+                    self._choose(processor, identity, home, "Добавить расход")
+                    event = replace(self._event(identity, "чек"), text="", images=(ImageAttachment(lambda: b"receipt"),))
+                    replies = Queue()
+                    ack = processor(event, replies.put)
+                    ack.after_delivery(True)
+                    failed = replies.get(timeout=5).response
+                    self.assertIn("Не удалось", response_text(failed))
+                    if identity.channel == "telegram":
+                        rows = _serialize_telegram_inline_keyboard(failed, aiogram).inline_keyboard
+                        labels = [button.text for row in rows for button in row]
+                        self.assertEqual(labels.count("Расходы"), 1)
+                        self.assertEqual(labels.count("Ввести пошагово"), 1)
+                        opened = self._choose(processor, identity, failed, "Расходы")
+                        self.assertIn("Расходы семьи", response_text(opened))
+                    else:
+                        section = processor.section_actions(event)
+                        self.assertEqual([action.label for action in section].count("Расходы"), 1)
+                        manual = self._choose(processor, identity, failed, "Ввести пошагово")
+                        self.assertIn("название", response_text(manual))
+
     def _runtime(self, *capabilities: str) -> AbstractContextManager[ChannelMessageProcessor]:
         return create_channel_message_processor(database_path=self.database_path, enabled_capabilities=capabilities)
 

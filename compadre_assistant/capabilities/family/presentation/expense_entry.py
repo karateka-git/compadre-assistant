@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 from ..domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
 from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer
+from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
 from compadre_assistant.core.presentation.incoming.events import ImageLoadError, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -31,7 +32,13 @@ def _reply(text: str, *actions: ReplyAction) -> IncomingResponse:
     return IncomingResponse(text_content(text), suggested_actions=actions)
 
 
-def _action(label: str, arguments: str = "") -> ReplyAction:
+def expenses_action(family_id: int) -> ReplyAction:
+    """Открывает расходы указанной семьи из меню или после завершения ввода."""
+    return ReplyAction("Расходы", f"{EXPENSES} open {family_id}", scope=ActionScope.SECTION,
+                       purpose=ActionPurpose.NAVIGATION, destination=ScreenDestination("family-expenses"))
+
+
+def _action(label: str, arguments: str) -> ReplyAction:
     return ReplyAction(label, (EXPENSES + " " + arguments).strip())
 
 
@@ -90,12 +97,12 @@ class ExpenseEntry:
         return None
 
     @staticmethod
-    def _expired() -> IncomingResponse:
-        return _reply("Этот экран уже закрыт. Открой расходы и начни ввод заново.", _action("Расходы"))
+    def _expired(access: ExpenseAccess) -> IncomingResponse:
+        return _reply("Этот экран уже закрыт. Открой расходы и начни ввод заново.", expenses_action(access.family_id))
 
     def _ask(self, context, event, session, kind: str, prompt: str, *, images=False):
         if context.pending_inputs is None:
-            return self._expired()
+            return self._expired(session.access)
         waiting = context.pending_inputs.begin(event.reply_address, "family", "expense:" + kind,
             app_user_id=context.app_user.id, required_mode="family", value_label=prompt, retry_command=EXPENSES,
             accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES)
@@ -115,12 +122,12 @@ class ExpenseEntry:
                     return session.browser.render(repo, access, session.token)
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
-                return self._expired()
+                return self._expired(access)
             if args[0] == "browse" and session.browser and session.purchase is None:
                 browser = session.browser
                 if (len(args) != 4 or args[2] != str(browser.revision) or not args[3].isascii()
                         or not args[3].isdigit() or len(args[3]) > 2 or int(args[3]) >= len(browser.targets)):
-                    return self._expired()
+                    return self._expired(access)
                 target = browser.targets[int(args[3])]
                 session.deadline = self._clock() + _TTL
                 if target.kind == "search_input":
@@ -139,7 +146,7 @@ class ExpenseEntry:
                     return browser.render(repo, access, session.token)
             if args[0] == "discard" and session.purchase is None:
                 self._sessions.pop(event.reply_address)
-                return _reply("Ввод расхода отменён.", _action("Расходы"))
+                return _reply("Ввод расхода отменён.", expenses_action(access.family_id))
             if args[0] == "manual" and session.purchase is None:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
                 with self._repository() as repo:
@@ -147,7 +154,7 @@ class ExpenseEntry:
                 return self._ask(context, event, session, "manual_name", "Введи название покупки или услуги.")
             if args[0] in ("categories", "choose") and session.manual_amount is not None and session.purchase is None:
                 if len(args) != 3 or not args[2].isascii() or not args[2].isdigit() or len(args[2]) > 2:
-                    return self._expired()
+                    return self._expired(access)
                 index = int(args[2])
                 if args[0] == "categories" and index * _PAGE < len(CATEGORIES):
                     return self._categories(session, index)
@@ -155,28 +162,28 @@ class ExpenseEntry:
                     purchase = ExpensePurchase(session.manual_date, ExpenseSource.MANUAL,
                         (ExpenseItem(CATEGORIES[index], session.manual_name, session.manual_amount),))
                     return self._update(session, purchase)
-                return self._expired()
+                return self._expired(access)
             if args[0] == "add" and session.purchase is None:
                 session.browser = None
                 return self._ask(context, event, session, "recognize",
                                  "Пришли одно фото чека или опиши покупку сообщением.", images=True)
             if session.purchase is None or len(args) < 3 or args[2] != str(session.revision):
-                return self._expired()
+                return self._expired(access)
             try:
                 return self._draft_action(context, event, session, args[0], args[3:])
             except (InvalidExpense, ValueError, IndexError):
-                return self._expired()
+                return self._expired(access)
 
     def _draft_action(self, context, event, session, verb, args):
         purchase = session.purchase
         if verb == "cancel":
             self._sessions.pop(event.reply_address)
-            return _reply("Ввод расхода отменён.", _action("Расходы"))
+            return _reply("Ввод расхода отменён.", expenses_action(session.access.family_id))
         if verb == "save":
             with self._repository() as repo:
                 repo.save(session.access, session.token, session.revision, purchase)
             self._sessions.pop(event.reply_address)
-            return _reply("Расход сохранён.", _action("Расходы"))
+            return _reply("Расход сохранён.", expenses_action(session.access.family_id))
         if verb == "view":
             return self._review(session, int(args[0]) if args else 0)
         if verb == "edit":
@@ -212,7 +219,7 @@ class ExpenseEntry:
                 if not 0 <= int(index) < len(purchase.items):
                     raise ValueError
             return self._ask(context, event, session, f"{verb}:{index}", prompts[verb])
-        return self._expired()
+        return self._expired(session.access)
 
     @staticmethod
     def _button(session, label, verb, argument=""):
@@ -283,7 +290,7 @@ class ExpenseEntry:
         with self._lock:
             session = self._current(event, context, access)
             if session is None or session.request != pending.request_id:
-                return PendingInputResult(self._expired(), PendingInputOutcome.COMPLETE)
+                return PendingInputResult(self._expired(access), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
             if kind == "search_input" and session.browser:
                 query = event.text.strip()
@@ -379,10 +386,10 @@ class ExpenseEntry:
             purchase = self._recognizer.recognize(value, today)
             with self._lock:
                 if cancelled() or self._sessions.get(event.reply_address) is not session:
-                    return self._expired()
+                    return self._expired(session.access)
                 with self._repository() as repo:
                     repo.timezone(session.access)
                 return self._update(session, purchase)
         except (ImageLoadError, ExpenseRecognitionError, FamilyAccessEnded, InvalidExpense):
             return _reply("Не удалось разобрать расход. Можно ввести его пошагово или повторить попытку.",
-                          _action("Ввести пошагово", "manual " + session.token), _action("Расходы"))
+                          _action("Ввести пошагово", "manual " + session.token), expenses_action(session.access.family_id))
