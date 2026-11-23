@@ -112,12 +112,13 @@ class ExpenseEntry:
     def _ask(self, context, event, session, kind: str, prompt: str, *, images=False):
         if context.pending_inputs is None:
             return self._expired(session.access)
+        menu_actions = (ReplyAction("Ввести пошагово", f"{EXPENSES} manual {session.token}",
+                                    scope=ActionScope.SECTION),) if images else ()
         waiting = context.pending_inputs.begin(event.reply_address, "family", "expense:" + kind,
             app_user_id=context.app_user.id, required_mode="family", value_label=prompt, retry_command=EXPENSES,
-            accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES)
+            accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES, menu_actions=menu_actions)
         session.request = waiting.request_id
-        actions = (_action("Ввести пошагово", "manual " + session.token),) if images else ()
-        return _reply(prompt, *actions, CANCEL_SECTION_ACTION, close_screen=True)
+        return _reply(prompt, *menu_actions, CANCEL_SECTION_ACTION, close_screen=True)
 
     def handle(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
                arguments: str) -> IncomingResponse:
@@ -175,7 +176,7 @@ class ExpenseEntry:
             if args[0] == "add" and session.purchase is None:
                 session.browser = None
                 return self._ask(context, event, session, "recognize",
-                                 "Пришли одно фото чека или опиши покупку сообщением.", images=True)
+                                 "Пришли одно фото чека или опиши покупку сообщением в течение 10 минут.", images=True)
             if session.purchase is None or len(args) < 3 or args[2] != str(session.revision):
                 return self._expired(access)
             try:

@@ -1673,8 +1673,11 @@ class IncomingMessageDispatcher:
                            for identifier, server, enabled, allowed in before.access)):
             raise RuntimeError("section action owner changed before query")
         if pending is not None and pending.cancel_only_menu:
-            return CANCEL_SECTION_ACTION, HELP_SECTION_ACTION
-        actions = active.section_actions(user, event.reply_address, before.mode_revision, pending)
+            if pending.owner_id != mode_id or not pending.menu_actions:
+                return CANCEL_SECTION_ACTION, HELP_SECTION_ACTION
+            actions = (*pending.menu_actions, CANCEL_SECTION_ACTION, HELP_SECTION_ACTION)
+        else:
+            actions = active.section_actions(user, event.reply_address, before.mode_revision, pending)
         if any(action.scope != ActionScope.SECTION for action in actions):
             raise ValueError("section action query returned an action belonging to a screen")
         if self.action_context(event) != before:

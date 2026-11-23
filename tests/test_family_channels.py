@@ -281,6 +281,8 @@ class FamilyChannelsTest(unittest.TestCase):
                     if identity.channel == "vk":
                         add = self._send(processor, identity, "Такси 450")
                         self.assertIn("Не удалось", response_text(add))
+                    else:
+                        self.assertEqual([a.label for a in add.bound_actions].count("Ввести пошагово"), 1)
                     self._choose(processor, identity, add, "Ввести пошагово")
                     amount = self._send(processor, identity, "Такси")
                     self.assertIn("рублях", response_text(amount))
