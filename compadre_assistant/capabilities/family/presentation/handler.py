@@ -9,6 +9,7 @@ from compadre_assistant.capabilities.family.domain.invitations import (
     InvalidInvitation, InvitationExpired, InvitationUnavailable, InvitationUsed, ManageInvitations,
 )
 from compadre_assistant.capabilities.family.domain.manage_family import ManageFamily
+from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognizer
 from compadre_assistant.capabilities.family.domain.membership import (
     AlreadyInFamily, Family, FamilyAccessEnded, FamilyHasOtherMembers, FamilyMember, InvalidFamilyName,
     OtherMemberRequired, OwnerCannotLeave, OwnerRequired,
@@ -127,9 +128,11 @@ class FamilyCapability(
     def __init__(
         self, open_scenarios: Callable[[], AbstractContextManager[tuple[ManageFamily, ManageInvitations, ManageShopping]]],
         display_names: MemberDisplayNames,
+        *, recognizer: ExpenseRecognizer | None = None,
     ) -> None:
         """Принимает фабрику предметных сценариев на одно событие."""
         self._open_scenarios = open_scenarios
+        self._recognizer = recognizer
         self._members_view = MembersView(display_names)
         self._confirmations = MemberConfirmations()
         self._shopping_sections = ShoppingSections()
