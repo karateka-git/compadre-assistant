@@ -10,9 +10,9 @@ from time import monotonic
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ..domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseRepository, InvalidExpense
+from ..domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
-from ..domain.recognition import ExpenseRecognitionError, ExpenseRecognizer
+from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer
 from compadre_assistant.core.presentation.incoming.events import ImageLoadError, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
 from compadre_assistant.core.presentation.incoming.ports import (
@@ -56,6 +56,9 @@ class _Session:
     purchase: ExpensePurchase | None = None
     deadline: float = 0
     request: str | None = None
+    manual_date: date | None = None
+    manual_name: str | None = None
+    manual_amount: int | None = None
 
 
 class ExpenseEntry:
@@ -96,7 +99,8 @@ class ExpenseEntry:
             app_user_id=context.app_user.id, required_mode="family", value_label=prompt, retry_command=EXPENSES,
             accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES)
         session.request = waiting.request_id
-        return _reply(prompt, CANCEL_SECTION_ACTION)
+        actions = (_action("Ввести пошагово", "manual " + session.token),) if images else ()
+        return _reply(prompt, *actions, CANCEL_SECTION_ACTION)
 
     def handle(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
                arguments: str) -> IncomingResponse:
@@ -108,6 +112,25 @@ class ExpenseEntry:
                 return _reply("Расходы семьи", _action("Добавить расход", "add " + session.token))
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
+                return self._expired()
+            if args[0] == "discard" and session.purchase is None:
+                self._sessions.pop(event.reply_address)
+                return _reply("Ввод расхода отменён.", _action("Расходы"))
+            if args[0] == "manual" and session.purchase is None:
+                session = self._fresh(event.reply_address, access, context.mode_revision)
+                with self._repository() as repo:
+                    session.manual_date = datetime.now(ZoneInfo(repo.timezone(access))).date()
+                return self._ask(context, event, session, "manual_name", "Введи название покупки или услуги.")
+            if args[0] in ("categories", "choose") and session.manual_amount is not None and session.purchase is None:
+                if len(args) != 3 or not args[2].isascii() or not args[2].isdigit() or len(args[2]) > 2:
+                    return self._expired()
+                index = int(args[2])
+                if args[0] == "categories" and index * _PAGE < len(CATEGORIES):
+                    return self._categories(session, index)
+                if args[0] == "choose" and index < len(CATEGORIES):
+                    purchase = ExpensePurchase(session.manual_date, ExpenseSource.MANUAL,
+                        (ExpenseItem(CATEGORIES[index], session.manual_name, session.manual_amount),))
+                    return self._update(session, purchase)
                 return self._expired()
             if args[0] == "add" and session.purchase is None:
                 return self._ask(context, event, session, "recognize",
@@ -210,6 +233,17 @@ class ExpenseEntry:
         return _reply("\n".join(lines), *nav, self._button(session, "Сохранить", "save"),
                       self._button(session, "Исправить", "edit"), self._button(session, "Отменить", "cancel"))
 
+    def _categories(self, session, page):
+        first = page * _PAGE
+        actions = [replace(_action(name, f"choose {session.token} {first + row}"), row=row)
+                   for row, name in enumerate(CATEGORIES[first:first + _PAGE])]
+        nav = len(actions)
+        for target, label in ((page - 1, "← Ранее"), (page + 1, "Далее →")):
+            if 0 <= target * _PAGE < len(CATEGORIES):
+                actions.append(replace(_action(label, f"categories {session.token} {target}"), row=nav))
+        actions.append(replace(_action("Отменить", "discard " + session.token), row=nav + 1))
+        return _reply(f"{session.manual_name} · {_money(session.manual_amount)}\nВыбери категорию.", *actions)
+
     def _update(self, session, purchase):
         purchase.reconciled_items()
         session.purchase = purchase
@@ -226,6 +260,24 @@ class ExpenseEntry:
             if session is None or session.request != pending.request_id:
                 return PendingInputResult(self._expired(), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
+            if kind == "manual_name":
+                name = event.text.strip()
+                if not name or len(name) > 256:
+                    return PendingInputResult(_reply("Введи название до 256 символов.", CANCEL_SECTION_ACTION),
+                                              PendingInputOutcome.RETRY)
+                session.manual_name = name
+                session.deadline = self._clock() + _TTL
+                response = self._ask(context, event, session, "manual_amount", "Введи сумму в рублях.")
+                return PendingInputResult(response, PendingInputOutcome.COMPLETE)
+            if kind == "manual_amount":
+                try:
+                    session.manual_amount = _cents(event.text)
+                except (ValueError, InvalidOperation):
+                    return PendingInputResult(_reply("Введи сумму в рублях, например 450,50.", CANCEL_SECTION_ACTION),
+                                              PendingInputOutcome.RETRY)
+                session.request = None
+                session.deadline = self._clock() + _TTL
+                return PendingInputResult(self._categories(session, 0), PendingInputOutcome.COMPLETE)
             if kind == "recognize":
                 if len(event.images) > 1 or not (event.images or event.text.strip()):
                     return PendingInputResult(_reply("Пришли одно фото или текст.", CANCEL_SECTION_ACTION),
@@ -278,4 +330,5 @@ class ExpenseEntry:
                     repo.timezone(session.access)
                 return self._update(session, purchase)
         except (ImageLoadError, ExpenseRecognitionError, FamilyAccessEnded, InvalidExpense):
-            return _reply("Не удалось разобрать расход. Начни ввод заново.", _action("Расходы"))
+            return _reply("Не удалось разобрать расход. Можно ввести его пошагово или повторить попытку.",
+                          _action("Ввести пошагово", "manual " + session.token), _action("Расходы"))

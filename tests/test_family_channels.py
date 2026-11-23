@@ -146,6 +146,35 @@ class FamilyChannelsTest(unittest.TestCase):
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 1)
 
+    def test_stepwise_expense_with_provider_offline(self) -> None:
+        """Пошаговый ввод работает из обычного входа и после ошибки LLM."""
+        from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError
+
+        with self._runtime("family") as processor, patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize",
+                                                         side_effect=ExpenseRecognitionError) as failed:
+            self._joined_family(processor)
+            for identity in (self.owner_tg, self.guest):
+                with self.subTest(channel=identity.channel):
+                    home = self._send(processor, identity, "/family_expenses")
+                    add = self._choose(processor, identity, home, "Добавить расход")
+                    if identity.channel == "vk":
+                        add = self._send(processor, identity, "Такси 450")
+                        self.assertIn("Не удалось", response_text(add))
+                    self._choose(processor, identity, add, "Ввести пошагово")
+                    amount = self._send(processor, identity, "Такси")
+                    self.assertIn("рублях", response_text(amount))
+                    self.assertIn("450,50", response_text(self._send(processor, identity, "четыре")))
+                    groups = self._send(processor, identity, "450,50")
+                    other = self._choose(processor, identity, groups, "Далее →")
+                    groups = self._choose(processor, identity, other, "← Ранее")
+                    review = self._choose(processor, identity, groups, "Транспорт")
+                    self.assertIn("450,50 ₽", response_text(review))
+                    self.assertIn("Такси", response_text(review))
+                    self._choose(processor, identity, review, "Сохранить")
+            failed.assert_called_once()
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT sum(amount) FROM family_expense_items").fetchone()[0], 90100)
+
     def _runtime(self, *capabilities: str) -> AbstractContextManager[ChannelMessageProcessor]:
         return create_channel_message_processor(database_path=self.database_path, enabled_capabilities=capabilities)
 
