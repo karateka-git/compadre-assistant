@@ -20,7 +20,6 @@ from compadre_assistant.core.presentation.incoming.ports import (
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from .expense_browser import ExpenseBrowser, money as _money
-from ..domain.expense_questions import parse_expense_question
 
 
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
@@ -82,24 +81,6 @@ class ExpenseEntry:
         """Завершает навигацию расходов при переходе в другой раздел семьи."""
         with self._lock:
             self._sessions.pop(address, None)
-
-    def question(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess) -> IncomingResponse | None:
-        """Ищет покупки по вопросу в открытом разделе расходов."""
-        with self._lock:
-            session = self._current(event, context, access)
-            if not session or not session.browser or session.purchase or not event.text.strip().casefold().startswith("сколько"):
-                return None
-            with self._repository() as repo:
-                browser = session.browser
-                today = datetime.now(ZoneInfo(repo.timezone(access))).date()
-                params = parse_expense_question(event.text, browser.month, today)
-                if not params:
-                    return _reply("Напиши, например: «Сколько ушло на молоко за ноябрь?»", _action("Расходы"))
-                query, month = params
-                browser.select_month(month)
-                browser.find(repo, access, query)
-                session.deadline = self._clock() + _TTL
-                return browser.render(repo, access, session.token)
 
     def _current(self, event: IncomingEvent, context: HandlerContext, access: ExpenseAccess) -> _Session | None:
         session = self._sessions.get(event.reply_address)

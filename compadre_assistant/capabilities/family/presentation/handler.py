@@ -191,10 +191,7 @@ class FamilyCapability(
         """
         result = self._handle(context, event)
         response = result.response
-        if event.text.split()[:1] == [EXPENSES] or (
-            response.suggested_actions and
-            all(action.command.split(maxsplit=1)[0] == EXPENSES for action in response.suggested_actions)
-        ):
+        if event.text.split()[:1] == [EXPENSES]:
             return result
         if event.text.split()[:2] == [MEMBERS_COMMAND, "commands"]:
             return result
@@ -219,11 +216,6 @@ class FamilyCapability(
                     self._shopping_sections.close(app_user_id, event.reply_address)
                     return CapabilityResult(self._expense_entry.handle(
                         context, event, ExpenseAccess(family.id, app_user_id, actor.joined_at), arguments))
-                if not command.startswith("/"):
-                    result = self._expense_entry.question(
-                        context, event, ExpenseAccess(family.id, app_user_id, actor.joined_at))
-                    if result is not None:
-                        return CapabilityResult(result)
                 self._expense_entry.leave(event.reply_address)
                 screen = command if command in (_INVITE, MEMBERS_COMMAND) else ""
                 if command == MEMBERS_COMMAND and len(arguments.split()) == 1 and arguments != "commands":

@@ -112,7 +112,6 @@ class ExpenseBrowser:
             button("Выбрать период", ReportScreen("period"), 2)
             button("Часовой пояс", ReportScreen("zone"), 2)
             button("Найти товар", ReportScreen("search_input"), 3)
-            lines.append("Можно спросить: «Сколько ушло на молоко за ноябрь?»")
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
         if screen.kind == "period":

@@ -196,8 +196,8 @@ class FamilyChannelsTest(unittest.TestCase):
             home = self._send(processor, self.owner_tg, "/family_expenses")
             self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
 
-    def test_find_expense_and_ask_question_in_both_messengers(self) -> None:
-        """Вопрос и кнопочный поиск совпадают, несколько товаров требуют выбора."""
+    def test_find_expense_only_after_search_action_in_both_messengers(self) -> None:
+        """Поиск требует явного действия и использует выбранный месяц в обоих каналах."""
         from datetime import date
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
 
@@ -219,12 +219,13 @@ class FamilyChannelsTest(unittest.TestCase):
                 matches = self._send(processor, who, "МОЛОКО")
                 self.assertIn("Молоко сгущённое", response_text(matches))
                 chosen = self._choose(processor, who, matches, "2. Молоко · 95 ₽")
+                self.assertIn("Всего · 95 ₽", response_text(chosen))
                 question = self._send(processor, who, "Сколько ушло на молоко за ноябрь?")
-                self.assertIn("215 ₽", response_text(question))
-                selected = self._choose(processor, who, question, "2. Молоко · 95 ₽")
-                self.assertEqual(response_text(selected), response_text(chosen))
-                empty = self._send(processor, who, "Сколько потратили на кофе за апрель 2025?")
-                self.assertIn("04.2025", response_text(empty))
+                self.assertIn("Расходы", [a.label for a in question.suggested_actions])
+                self.assertNotIn("₽", response_text(question))
+                home = self._send(processor, who, "/family_expenses")
+                self._choose(processor, who, home, "Найти товар")
+                empty = self._send(processor, who, "кофе")
                 self.assertIn("записей нет", response_text(empty))
             model.assert_called_once()
 
