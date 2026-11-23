@@ -151,7 +151,9 @@ class FamilyChannelsTest(unittest.TestCase):
         from datetime import date
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
 
-        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.TEXT, (
+        from compadre_assistant.core.presentation.incoming.events import ImageAttachment
+
+        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, (
             ExpenseItem("Продукты", "Молоко", 19000), ExpenseItem("Продукты", "Хлеб", 5900),
             ExpenseItem("Питомцы", "Корм", 44000),
             *(ExpenseItem(f"Группа {i}", f"Проба {i}", 0) for i in range(8))), "Лента")
@@ -165,16 +167,29 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIsNone(empty.png_image)
             home = choose(self.owner_tg, empty, "Назад")
             choose(self.owner_tg, home, "Добавить расход")
-            review = self._send(processor, self.owner_tg, "Пример")
+            review = processor(replace(self._event(self.owner_tg, "Фото"), text="",
+                                       images=(ImageAttachment(lambda: b"receipt"),)))
             choose(self.owner_tg, review, "Сохранить")
+            guest_home = self._send(processor, self.guest, "/family_expenses")
+            add = choose(self.guest, guest_home, "Добавить расход")
+            choose(self.guest, add, "Ввести пошагово")
+            self._send(processor, self.guest, "Такси")
+            categories = self._send(processor, self.guest, "450")
+            taxi = choose(self.guest, categories, "Транспорт")
+            edit = choose(self.guest, taxi, "Исправить")
+            choose(self.guest, edit, "Дата")
+            taxi = self._send(processor, self.guest, "23.11.2026")
+            choose(self.guest, taxi, "Сохранить")
             for who in (self.owner_tg, self.guest):
                 home = self._send(processor, who, "/family_expenses")
                 periods = choose(who, home, "Выбрать период")
                 choose(who, periods, "Другой месяц")
                 home = self._send(processor, who, "11.2026")
-                self.assertIn("689 ₽", response_text(home))
+                self.assertIn("Всего · 1139 ₽", response_text(home))
                 chart = choose(who, home, "Диаграмма")
                 self.assertTrue(chart.png_image.startswith(b"\x89PNG\r\n\x1a\n"))
+                self.assertIn("Всего · 1139 ₽", response_text(chart))
+                self.assertIn("Продукты · 249 ₽", response_text(chart))
                 self.assertIn("Остальные · 0 ₽", response_text(chart))
                 home = choose(who, chart, "Назад")
                 self.assertIn("11.2026", response_text(home))
@@ -188,7 +203,7 @@ class FamilyChannelsTest(unittest.TestCase):
                     self.assertEqual(len(json.loads(_serialize_vk_inline_keyboard(next_page))["buttons"]), 6)
                 self.assertIn("закрыт", response_text(self._send(processor, who, stale)))
                 groups = choose(who, next_page, "← Ранее")
-                products = choose(who, groups, "2. Продукты · 249 ₽")
+                products = choose(who, groups, "3. Продукты · 249 ₽")
                 history = choose(who, products, "1. Молоко · 190 ₽")
                 self.assertIn("Всего · 190 ₽", response_text(history))
                 card = choose(who, history, "1. 23.11 Лента · 190 ₽")
