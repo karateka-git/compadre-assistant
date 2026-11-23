@@ -15,6 +15,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit
 from urllib.request import Request, urlopen
 
+import httpx
+
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.action_contracts import (
     ActionLayoutLimits, ActionPurpose, ActionScope, SectionMenuDelivery,
@@ -387,6 +389,33 @@ class VkApiClient:
                     if len(self._inline_messages) > 512:
                         self._inline_messages.popitem(last=False)
         return result
+
+    def send_png(self, peer_id: int, image: bytes) -> None:
+        """Загружает PNG из памяти и публикует его в заданном диалоге.
+
+        Raises:
+            VkBotError: Один из шагов загрузки или отправки завершился ошибкой.
+        """
+        server = self._api_call("photos.getMessagesUploadServer", {"peer_id": str(peer_id)}).get("response")
+        try:
+            url = server["upload_url"]
+            if urlsplit(url).scheme != "https":
+                raise ValueError
+            uploaded = httpx.post(url, files={"photo": ("image.png", image, "image/png")}, timeout=20)
+            uploaded.raise_for_status()
+            values = uploaded.json()
+            saved = self._api_call("photos.saveMessagesPhoto", {
+                key: str(values[key]) for key in ("photo", "hash", "server")
+            })["response"][0]
+            attachment = f"photo{int(saved['owner_id'])}_{int(saved['id'])}"
+            if saved.get("access_key"):
+                attachment += "_" + saved["access_key"]
+        except (httpx.HTTPError, KeyError, IndexError, ValueError, AttributeError, TypeError):
+            raise VkBotError("VK photo upload failed") from None
+        result = self._send_message({"peer_id": str(peer_id), "attachment": attachment},
+                                    text="", random_id=None, keyboard=None)
+        if type(result) is not int or result <= 0:
+            raise VkBotError("VK photo delivery unconfirmed")
 
     def send_editable_message(
         self, *, peer_id: int, text: str, random_id: int, keyboard: str | None, format_data: str | None = None,
@@ -891,6 +920,12 @@ def _safe_send_vk_message(
         )
 
     try:
+        if response.png_image is not None:
+            try:
+                client.send_png(peer_id, response.png_image)
+            except VkBotError as error:
+                logger.warning("VK image delivery failed: %s", type(error).__name__)
+                response = response.image_unavailable()
         reconcile_menu = deliver_menu is not None and response.command_menu_delivery is SectionMenuDelivery.RECONCILE
         delivered = deliver_menu(send) if reconcile_menu else send(None)[0]
         if replacement_confirmed and response.retire_views_after_delivery is not None:

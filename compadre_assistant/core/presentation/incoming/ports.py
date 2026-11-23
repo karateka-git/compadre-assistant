@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Literal, Protocol, runtime_checkable
@@ -13,7 +13,7 @@ from compadre_assistant.core.presentation.incoming.commands import ChatCommand
 from compadre_assistant.core.presentation.incoming.events import IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput, PendingInputStore
 from compadre_assistant.core.domain.users.entities import AppUser
-from compadre_assistant.core.presentation.message_content import MessageContent
+from compadre_assistant.core.presentation.message_content import MessageContent, compose_content
 
 
 @dataclass(frozen=True, slots=True)
@@ -270,6 +270,14 @@ class IncomingResponse:
     command_menu_delivery: SectionMenuDelivery = SectionMenuDelivery.RECONCILE
     close_managed_views: bool = False  # Ответ заменяет отслеживаемый экран без редактирования.
     retire_views_after_delivery: Callable[[], tuple[str, ...]] | None = field(default=None, repr=False, compare=False)
+    # Изображение публикуется отдельно перед текстом, чтобы сохранить обычную навигацию.
+    png_image: bytes | None = field(default=None, repr=False)
+
+    def image_unavailable(self) -> IncomingResponse:
+        """Возвращает текст и исходные действия при сбое доставки изображения."""
+        return replace(self, png_image=None, content=compose_content(
+            self.content, "\nИзображение не удалось доставить.",
+        ))
 
 
 @dataclass(frozen=True, slots=True)

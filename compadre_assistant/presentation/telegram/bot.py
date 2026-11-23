@@ -721,6 +721,8 @@ async def send_telegram_reply(
         ValueError: Лимит не вмещает даже один символ с оформлением.
         Exception: Ошибка отправки готовой части через Telegram API.
     """
+    if response.png_image is not None:
+        await _send_telegram_png(message, response.png_image)
     chunks = render_telegram_content(response.content, limit=limit)
     for index, chunk in enumerate(chunks):
         keyboard = None
@@ -730,6 +732,12 @@ async def send_telegram_reply(
         if keyboard is not None:
             kwargs["reply_markup"] = keyboard
         await message.answer(chunk.text, **kwargs)
+
+
+async def _send_telegram_png(message: Any, image: bytes) -> None:
+    """Отправляет изображение в том же чате через клиент исходного события."""
+    photo = _load_aiogram().types.BufferedInputFile(image, filename="image.png")
+    await message.bot.send_photo(chat_id=message.chat.id, photo=photo)
 
 
 async def safe_send_telegram_reply(
@@ -764,6 +772,12 @@ async def safe_send_telegram_reply(
         include_bound_actions = TELEGRAM_INLINE_ACTIONS_ENABLED
     delivered = False
     try:
+        if response.png_image is not None:
+            try:
+                await _send_telegram_png(message, response.png_image)
+            except Exception as error:
+                logger.warning("Telegram image delivery failed: %s", type(error).__name__)
+                response = response.image_unavailable()
         send = _send_telegram_view if response.view_delivery is not None else _send_telegram_reply
         delivered = await send(
             message, response, logger=logger, limit=limit, sleeper=sleeper,

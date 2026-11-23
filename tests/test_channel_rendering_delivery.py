@@ -5,7 +5,7 @@ import json
 import logging
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs
 
 from compadre_assistant.core.presentation.incoming.dispatcher import CallbackReplyDelivery
@@ -156,6 +156,42 @@ class ChannelRenderingDeliveryTest(unittest.TestCase):
         _safe_send_vk_message(client, peer_id=42, response=response, logger=self.logger)
         self.assertEqual(client.messages, [(42, "😀Заголовок/help")])
         self.assertEqual(client.formats, [None])
+
+    def test_outgoing_png_keeps_text_and_buttons_after_image_failure(self) -> None:
+        """Выбор остаётся доступен при успехе и при ошибке передачи PNG."""
+        data = b"image data"
+        response = IncomingResponse(text_content("Итог"), png_image=data,
+            bound_actions=(BoundReplyAction("Назад", "a" * 32, "response"),))
+        for failure in (None, VkTransientError("offline")):
+            expected = "Итог" if failure is None else "Итог\nИзображение не удалось доставить."
+            msg = SimpleNamespace(bot=SimpleNamespace(send_photo=AsyncMock(side_effect=failure)),
+                                  chat=SimpleNamespace(id=42), answer=AsyncMock())
+            self.assertTrue(asyncio.run(safe_send_telegram_reply(msg, response, logger=self.logger)))
+            self.assertEqual(msg.bot.send_photo.await_args.kwargs["photo"].data, data)
+            self.assertEqual(msg.answer.await_args.args, (expected,))
+            self.assertIsNotNone(msg.answer.await_args.kwargs["reply_markup"])
+            vk = FakeVkClient()
+            vk.send_png = Mock(side_effect=failure)
+            self.assertTrue(_safe_send_vk_message(vk, peer_id=42, response=response, logger=self.logger))
+            vk.send_png.assert_called_once_with(42, data)
+            self.assertEqual(vk.messages, [(42, expected)])
+            self.assertEqual(json.loads(vk.keyboards[0])["buttons"][0][0]["action"]["label"], "Назад")
+
+    def test_vk_png_uses_message_upload_server_and_attachment(self) -> None:
+        """Адаптер передаёт реальные байты и использует ключ сохранённого фото."""
+        client = VkApiClient(token="test")
+        uploaded = Mock()
+        uploaded.json.return_value = {"server": 1, "photo": "saved", "hash": "h"}
+        with patch.object(client, "_api_call", side_effect=[
+            {"response": {"upload_url": "https://upload.example/test"}},
+            {"response": [{"id": 3, "owner_id": -2, "access_key": "key"}]},
+            {"response": 7},
+        ]) as api, patch("compadre_assistant.presentation.vk.bot.httpx.post", return_value=uploaded) as post:
+            client.send_png(42, b"png")
+        self.assertEqual(post.call_args.kwargs["files"]["photo"], ("image.png", b"png", "image/png"))
+        self.assertEqual([call.args[0] for call in api.call_args_list],
+                         ["photos.getMessagesUploadServer", "photos.saveMessagesPhoto", "messages.send"])
+        self.assertEqual(api.call_args.args[1]["attachment"], "photo-2_3_key")
 
     def test_vk_retry_keeps_chunk_format_and_id_without_replaying_previous_part(self) -> None:
         """Повторяется только сбойная часть с прежним JSON и random_id."""
