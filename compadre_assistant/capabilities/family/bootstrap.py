@@ -5,6 +5,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
+from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
+from compadre_assistant.capabilities.family.domain.expenses import ExpenseRepository
+from compadre_assistant.capabilities.family.presentation.expense_entry import ExpenseEntry
 from compadre_assistant.capabilities.family.data.sqlite_shopping_batches import SQLiteShoppingBatchRepository
 from compadre_assistant.capabilities.family.domain.shopping_notifications import ShoppingBatchRepository
 from compadre_assistant.capabilities.family.presentation.notifications import ShoppingNotifications
@@ -36,7 +39,12 @@ def create_family_capability(database_path: Path, display_names: MemberDisplayNa
             repository = SQLiteFamilyRepository(connection)
             yield ManageFamily(repository), ManageInvitations(repository), ManageShopping(repository)
 
-    return FamilyCapability(open_scenarios, display_names, recognizer=recognizer)
+    @contextmanager
+    def expenses() -> Iterator[ExpenseRepository]:
+        with connect_database(database_path) as connection:
+            yield SQLiteExpenseRepository(connection)
+
+    return FamilyCapability(open_scenarios, display_names, expense_entry=ExpenseEntry(expenses, recognizer))
 
 
 def create_shopping_notifications(database_path: Path, names: MemberDisplayNames) -> ShoppingNotifications:

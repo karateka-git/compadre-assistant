@@ -30,6 +30,60 @@ from tests.response_assertions import response_text
 class FamilyChannelsTest(unittest.TestCase):
     """У семейного членства один профиль и независимые режимы Telegram и VK."""
 
+    def test_expense_photo_and_text_review_edit_and_commit(self) -> None:
+        """Оба канала редактируют многострочный чек и сохраняют одну поправку."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.core.presentation.incoming.events import ImageAttachment
+
+        items = tuple(ExpenseItem("Продукты", f"Товар {i}", 10000) for i in range(6))
+        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, items, "Лента", 68900)
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed,
+        ) as recognize:
+            self._joined_family(processor)
+            for identity in (self.owner_tg, self.guest):
+                with self.subTest(channel=identity.channel):
+                    home = self._send(processor, identity, "/family_expenses")
+                    self._choose(processor, identity, home, "Добавить расход")
+                    event = self._event(identity, "Лента")
+                    if identity.channel == "telegram":
+                        event = replace(event, text="", images=(ImageAttachment(lambda: b"receipt"),))
+                    review = processor(event)
+                    self.assertIn("689 ₽", response_text(review))
+                    old_save = next(action.command for action in review.suggested_actions if action.label == "Сохранить")
+                    edit = self._choose(processor, identity, review, "Исправить")
+                    positions = self._choose(processor, identity, edit, "Позиции")
+                    if identity.channel == "vk":
+                        import json
+                        from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
+                        rows = json.loads(_serialize_vk_inline_keyboard(positions))["buttons"]
+                        self.assertEqual(len(rows), 6)
+                    more = self._choose(processor, identity, positions, "Далее →")
+                    row = self._choose(processor, identity, more, "5. Товар 4")
+                    self._choose(processor, identity, row, "Сумма")
+                    updated = self._send(processor, identity, "130")
+                    self.assertIn("59 ₽", response_text(updated))
+                    edit = self._choose(processor, identity, updated, "Исправить")
+                    positions = self._choose(processor, identity, edit, "Позиции")
+                    self._choose(processor, identity, positions, "Добавить позицию")
+                    retry = self._send(processor, identity, " | 10 | Продукты")
+                    self.assertIn("формат", response_text(retry))
+                    updated = self._send(processor, identity, "Ложка | 0 | Продукты")
+                    edit = self._choose(processor, identity, updated, "Исправить")
+                    positions = self._choose(processor, identity, edit, "Позиции")
+                    row = self._choose(processor, identity, positions, "1. Товар 0")
+                    self._choose(processor, identity, row, "Категория")
+                    updated = self._send(processor, identity, "Для дома")
+                    self.assertIn("Для дома", response_text(updated))
+                    self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
+                    self.assertIn("сохранён", response_text(self._choose(processor, identity, updated, "Сохранить")))
+            self.assertEqual([call.args[0] for call in recognize.call_args_list], [b"receipt", "Лента"])
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 2)
+                self.assertEqual(conn.execute("SELECT sum(amount) FROM family_expense_items "
+                                              "WHERE category_id IS NULL").fetchone()[0], 11800)
+
     def setUp(self) -> None:
         """Мигрирует временную базу и связывает два канала первого профиля."""
         directory = self.enterContext(TemporaryDirectory())
@@ -46,6 +100,51 @@ class FamilyChannelsTest(unittest.TestCase):
             identities.link(code=identities.create_link_code(owner.id, target_channel="vk").code, identity=self.owner_vk)
             identities.register_with_name(self.guest, display_name="Илья")
             identities.register_with_name(self.other, display_name="Аня")
+
+    def test_expense_expiry_mode_membership_and_restart(self) -> None:
+        """Срок, перезапуск и смена допуска делают старое подтверждение бесполезным."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.capabilities.family.presentation.expense_entry import ExpenseEntry
+
+        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.TEXT,
+                                   (ExpenseItem("Транспорт", "Такси", 45000),))
+        clock = [0]
+        original = ExpenseEntry.__init__
+        def with_clock(entry, repository, recognizer):
+            original(entry, repository, recognizer, lambda: clock[0])
+        with patch.object(ExpenseEntry, "__init__", with_clock), self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed,
+        ):
+            self._joined_family(processor)
+            def draft():
+                home = self._send(processor, self.guest, "/family_expenses")
+                self._choose(processor, self.guest, home, "Добавить расход")
+                return self._send(processor, self.guest, "Такси 450")
+            def save_command(review):
+                return next(a.command for a in review.suggested_actions if a.label == "Сохранить")
+            review = draft()
+            clock[0] += 599
+            edit = self._choose(processor, self.guest, review, "Исправить")
+            self._choose(processor, self.guest, edit, "Итог чека")
+            revised = self._send(processor, self.guest, "500")
+            clock[0] += 599
+            self.assertIn("сохранён", response_text(self._send(processor, self.guest, save_command(revised))))
+            stale = save_command(draft())
+            clock[0] += 600
+            self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            stale = save_command(draft())
+            self._rejoin_guest()
+            self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            stale = save_command(draft())
+            self._send(processor, self.guest, "/exit")
+            self._send(processor, self.guest, "/family")
+            self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            stale = save_command(draft())
+        with self._runtime("family") as fresh:
+            self.assertIn("закрыт", response_text(self._send(fresh, self.guest, stale)))
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 1)
 
     def _runtime(self, *capabilities: str) -> AbstractContextManager[ChannelMessageProcessor]:
         return create_channel_message_processor(database_path=self.database_path, enabled_capabilities=capabilities)

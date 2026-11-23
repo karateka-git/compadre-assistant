@@ -1,0 +1,281 @@
+"""Экраны проверки и исправления семейной покупки в исходном чате."""
+
+from collections.abc import Callable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass, replace
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from threading import RLock
+from time import monotonic
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+from ..domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseRepository, InvalidExpense
+from ..domain.membership import FamilyAccessEnded
+from ..domain.recognition import ExpenseRecognitionError, ExpenseRecognizer
+from compadre_assistant.core.presentation.incoming.events import ImageLoadError, IncomingEvent, ReplyAddress
+from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
+from compadre_assistant.core.presentation.incoming.ports import (
+    CANCEL_SECTION_ACTION, HandlerContext, IncomingResponse, PendingInputOutcome, PendingInputResult, ReplyAction,
+)
+from compadre_assistant.core.presentation.message_content import text_content
+
+
+EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
+_TTL = 600  # Десять минут после показа редакции.
+_PAGE = 4  # Читаемая страница черновика на телефоне.
+
+
+def _reply(text: str, *actions: ReplyAction) -> IncomingResponse:
+    return IncomingResponse(text_content(text), suggested_actions=actions)
+
+
+def _action(label: str, arguments: str = "") -> ReplyAction:
+    return ReplyAction(label, (EXPENSES + " " + arguments).strip())
+
+
+def _money(amount: int) -> str:
+    whole, cents = divmod(abs(amount), 100)
+    sign = "−" if amount < 0 else ""
+    return f"{sign}{whole},{cents:02} ₽" if cents else f"{sign}{whole} ₽"
+
+
+def _cents(value: str) -> int:
+    number = Decimal(value.strip().replace(",", "."))
+    if not number.is_finite() or number < 0 or number > 10**12 or number.as_tuple().exponent < -2:
+        raise ValueError
+    return int(number * 100)
+
+
+@dataclass(slots=True)
+class _Session:
+    access: ExpenseAccess
+    mode: int | None
+    token: str
+    revision: int = 1
+    purchase: ExpensePurchase | None = None
+    deadline: float = 0
+    request: str | None = None
+
+
+class ExpenseEntry:
+    """Ведёт подготовку покупки с проверкой текущего членства на каждом шаге."""
+
+    def __init__(self, repository: Callable[[], AbstractContextManager[ExpenseRepository]],
+                 recognizer: ExpenseRecognizer | None, clock: Callable[[], float] = monotonic) -> None:
+        """Принимает фабрику хранилища, распознаватель и часы срока ввода."""
+        self._repository = repository
+        self._recognizer = recognizer
+        self._clock = clock
+        self._lock = RLock()
+        self._sessions: dict[ReplyAddress, _Session] = {}
+
+    def _fresh(self, address: ReplyAddress, access: ExpenseAccess, mode: int | None) -> _Session:
+        for key, old in list(self._sessions.items()):
+            if old.deadline <= self._clock():
+                del self._sessions[key]
+        session = _Session(access, mode, uuid4().hex, deadline=self._clock() + _TTL)
+        self._sessions[address] = session
+        return session
+
+    def _current(self, event: IncomingEvent, context: HandlerContext, access: ExpenseAccess) -> _Session | None:
+        session = self._sessions.get(event.reply_address)
+        if (session and session.mode == context.mode_revision and session.access == access
+                and self._clock() < session.deadline):
+            return session
+        return None
+
+    @staticmethod
+    def _expired() -> IncomingResponse:
+        return _reply("Этот экран уже закрыт. Открой расходы и начни ввод заново.", _action("Расходы"))
+
+    def _ask(self, context, event, session, kind: str, prompt: str, *, images=False):
+        if context.pending_inputs is None:
+            return self._expired()
+        waiting = context.pending_inputs.begin(event.reply_address, "family", "expense:" + kind,
+            app_user_id=context.app_user.id, required_mode="family", value_label=prompt, retry_command=EXPENSES,
+            accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES)
+        session.request = waiting.request_id
+        return _reply(prompt, CANCEL_SECTION_ACTION)
+
+    def handle(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
+               arguments: str) -> IncomingResponse:
+        """Открывает раздел или выполняет действие показанной редакции."""
+        with self._lock:
+            args = arguments.split()
+            if not args or args == ["open", str(access.family_id)]:
+                session = self._fresh(event.reply_address, access, context.mode_revision)
+                return _reply("Расходы семьи", _action("Добавить расход", "add " + session.token))
+            session = self._current(event, context, access)
+            if session is None or len(args) < 2 or args[1] != session.token:
+                return self._expired()
+            if args[0] == "add" and session.purchase is None:
+                return self._ask(context, event, session, "recognize",
+                                 "Пришли одно фото чека или опиши покупку сообщением.", images=True)
+            if session.purchase is None or len(args) < 3 or args[2] != str(session.revision):
+                return self._expired()
+            try:
+                return self._draft_action(context, event, session, args[0], args[3:])
+            except (InvalidExpense, ValueError, IndexError):
+                return self._expired()
+
+    def _draft_action(self, context, event, session, verb, args):
+        purchase = session.purchase
+        if verb == "cancel":
+            self._sessions.pop(event.reply_address)
+            return _reply("Ввод расхода отменён.", _action("Расходы"))
+        if verb == "save":
+            with self._repository() as repo:
+                repo.save(session.access, session.token, session.revision, purchase)
+            self._sessions.pop(event.reply_address)
+            return _reply("Расход сохранён.", _action("Расходы"))
+        if verb == "view":
+            return self._review(session, int(args[0]) if args else 0)
+        if verb == "edit":
+            return _reply("Что исправить?", *[self._button(session, label, cmd) for label, cmd in (
+                ("Позиции", "positions"), ("Дата", "date"), ("Магазин", "shop"),
+                ("Итог чека", "total"), ("Назад", "view"))])
+        if verb == "positions":
+            return self._positions(session, int(args[0]) if args else 0)
+        if verb == "row":
+            index = int(args[0])
+            if not 0 <= index < len(purchase.items):
+                raise ValueError
+            item = purchase.items[index]
+            return _reply(f"{item.product or 'Без детализации'} · {_money(item.amount)} · {item.category}",
+                *(self._button(session, label, cmd, str(index)) for label, cmd in (
+                    ("Название", "name"), ("Сумма", "amount"), ("Категория", "category"),
+                    ("Удалить позицию", "delete"))), self._button(session, "Назад", "positions", str(index // _PAGE)))
+        if verb == "delete":
+            index = int(args[0])
+            if not 0 <= index < len(purchase.items):
+                raise ValueError
+            if len(purchase.items) == 1:
+                return _reply("В расходе должна остаться хотя бы одна позиция.", self._button(session, "Назад", "view"))
+            return self._update(session, replace(purchase, items=purchase.items[:index] + purchase.items[index + 1:]))
+        prompts = {"name": "Введи название позиции.", "amount": "Введи сумму позиции в рублях.",
+                   "category": "Введи категорию.", "date": "Введи дату в формате ДД.ММ.ГГГГ.",
+                   "shop": "Введи магазин или описание.", "total": "Введи итог чека в рублях.",
+                   "insert": "Введи название, сумму в рублях и категорию через |. Например: Хлеб | 59 | Продукты"}
+        if verb in prompts:
+            index = ""
+            if verb in ("name", "amount", "category"):
+                index = args[0]
+                if not 0 <= int(index) < len(purchase.items):
+                    raise ValueError
+            return self._ask(context, event, session, f"{verb}:{index}", prompts[verb])
+        return self._expired()
+
+    @staticmethod
+    def _button(session, label, verb, argument=""):
+        return _action(label, f"{verb} {session.token} {session.revision} {argument}".strip())
+
+    def _pages(self, session, page, verb):
+        count = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+        if not 0 <= page < count:
+            raise ValueError
+        actions = []
+        for target, label in ((page - 1, "← Ранее"), (page + 1, "Далее →")):
+            if 0 <= target < count:
+                actions.append(replace(self._button(session, label, verb, str(target)), row=0))
+        return session.purchase.items[page*_PAGE:(page+1)*_PAGE], actions, count
+
+    def _positions(self, session, page):
+        items, nav, pages = self._pages(session, page, "positions")
+        actions = [self._button(session, f"{i + 1}. {(item.product or 'Без детализации')[:24]}", "row", str(i))
+                   for i, item in enumerate(items, page * _PAGE)]
+        # В VK зарезервированы ряды для раздела навигации и возврата.
+        actions = [replace(action, row=i) for i, action in enumerate(actions)]
+        actions.extend(replace(action, row=len(items)) for action in nav)
+        actions.append(replace(self._button(session, "Добавить позицию", "insert"), row=len(items)+bool(nav)))
+        actions.append(replace(self._button(session, "Назад", "view"), row=len(items)+bool(nav)))
+        return _reply(f"Выбери позицию · {page + 1} из {pages}", *actions)
+
+    def _review(self, session, page=0):
+        purchase = session.purchase
+        items, nav, pages = self._pages(session, page, "view")
+        lines = [f"{purchase.description or 'Расход'} · {purchase.purchase_date:%d.%m.%Y}"]
+        for i, item in enumerate(items, page*_PAGE+1):
+            quantity = f"{item.quantity} {item.unit or 'шт.'} · " if item.quantity is not None else ""
+            lines.append(f"{i}. {item.product or 'Без детализации'} · {quantity}{_money(item.amount)} · {item.category}")
+        if pages > 1:
+            lines.append(f"Страница {page+1} из {pages}")
+        total = sum(item.amount for item in purchase.items)
+        lines.append(f"По позициям — {_money(total)}")
+        if purchase.receipt_total is not None:
+            delta = purchase.receipt_total - total
+            if delta:
+                lines.append(f"Без детализации — {_money(delta)}")
+            lines.append(f"Итог чека — {_money(purchase.receipt_total)}")
+        return _reply("\n".join(lines), *nav, self._button(session, "Сохранить", "save"),
+                      self._button(session, "Исправить", "edit"), self._button(session, "Отменить", "cancel"))
+
+    def _update(self, session, purchase):
+        purchase.reconciled_items()
+        session.purchase = purchase
+        session.revision += 1
+        session.deadline = self._clock() + _TTL
+        session.request = None
+        return self._review(session)
+
+    def continue_input(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
+                       pending: PendingInput) -> PendingInputResult:
+        """Принимает ответ на запрос или запускает распознавание вне блокировки."""
+        with self._lock:
+            session = self._current(event, context, access)
+            if session is None or session.request != pending.request_id:
+                return PendingInputResult(self._expired(), PendingInputOutcome.COMPLETE)
+            kind = pending.input_kind.removeprefix("expense:")
+            if kind == "recognize":
+                if len(event.images) > 1 or not (event.images or event.text.strip()):
+                    return PendingInputResult(_reply("Пришли одно фото или текст.", CANCEL_SECTION_ACTION),
+                                              PendingInputOutcome.RETRY)
+                with self._repository() as repo:
+                    today = datetime.now(ZoneInfo(repo.timezone(access))).date()
+                session.request = None
+                return PendingInputResult(_reply("Разбираю расход."), PendingInputOutcome.COMPLETE,
+                    cancellable_action=lambda cancelled: self._recognize(event, session, today, cancelled))
+            try:
+                result = self._edit(session, kind, event.text.strip())
+            except (ValueError, InvalidOperation, IndexError):
+                return PendingInputResult(_reply("Проверь формат и повтори ввод.", CANCEL_SECTION_ACTION),
+                                          PendingInputOutcome.RETRY)
+            return PendingInputResult(result, PendingInputOutcome.COMPLETE)
+
+    def _edit(self, session, kind, text):
+        field, index = kind.split(":")
+        purchase = session.purchase
+        if not text or len(text) > 256:
+            raise ValueError
+        if field == "date":
+            purchase = replace(purchase, purchase_date=datetime.strptime(text, "%d.%m.%Y").date())
+        elif field == "shop":
+            purchase = replace(purchase, description=text)
+        elif field == "total":
+            purchase = replace(purchase, receipt_total=_cents(text))
+        else:
+            items = list(purchase.items)
+            if field == "insert":
+                name, amount, category = (part.strip() for part in text.split("|"))
+                items.append(ExpenseItem(category, name, _cents(amount)))
+            else:
+                key = {"name": "product", "amount": "amount", "category": "category"}[field]
+                value = _cents(text) if field == "amount" else text
+                items[int(index)] = replace(items[int(index)], **{key: value})
+            purchase = replace(purchase, items=tuple(items))
+        return self._update(session, purchase)
+
+    def _recognize(self, event, session, today, cancelled):
+        try:
+            if self._recognizer is None or cancelled():
+                raise ExpenseRecognitionError
+            value = event.images[0].read_bytes() if event.images else event.text
+            purchase = self._recognizer.recognize(value, today)
+            with self._lock:
+                if cancelled() or self._sessions.get(event.reply_address) is not session:
+                    return self._expired()
+                with self._repository() as repo:
+                    repo.timezone(session.access)
+                return self._update(session, purchase)
+        except (ImageLoadError, ExpenseRecognitionError, FamilyAccessEnded, InvalidExpense):
+            return _reply("Не удалось разобрать расход. Начни ввод заново.", _action("Расходы"))
