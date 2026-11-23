@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpensePurchase, ExpenseRepository, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
 from .expense_dtos import ExpenseCardDto, ExpenseItemDto
+from ..domain.expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
+from .expense_report_queries import query_rows
 
 
 class SQLiteExpenseRepository(ExpenseRepository):
@@ -30,6 +32,32 @@ class SQLiteExpenseRepository(ExpenseRepository):
             if row is None or datetime.fromisoformat(row["joined_at"]) != actor.joined_at:
                 raise FamilyAccessEnded("Доступ к расходам семьи завершён")
             yield row["expense_timezone"]
+
+    def summary(self, access: ExpenseAccess, period: ExpensePeriod) -> ExpenseSummary:
+        """Читает все категории и знаковую разницу чеков одним запросом."""
+        with self._access(access):
+            return ExpenseSummary(query_rows(self._db, access.family_id, period, group="category").rows)
+
+    def products(self, access: ExpenseAccess, period: ExpensePeriod, category_id: int | None,
+                 offset: int, limit: int) -> ReportPage:
+        """Группирует товары выбранной категории внутри семейного периода."""
+        with self._access(access):
+            return query_rows(self._db, access.family_id, period, group="product",
+                              category_id=category_id, offset=offset, limit=limit)
+
+    def search(self, access: ExpenseAccess, period: ExpensePeriod, query: str,
+               offset: int, limit: int) -> ReportPage:
+        """Ищет подстроку русского или иного названия без учёта регистра."""
+        with self._access(access):
+            return query_rows(self._db, access.family_id, period, group="product",
+                              search=query, offset=offset, limit=limit)
+
+    def history(self, access: ExpenseAccess, period: ExpensePeriod, offset: int, limit: int,
+                product: ProductSelection | None = None) -> ReportPage:
+        """Выдаёт покупки или вклад выбранного товара в каждую покупку."""
+        with self._access(access):
+            return query_rows(self._db, access.family_id, period, group="purchase",
+                              product=product, offset=offset, limit=limit)
 
     def timezone(self, access: ExpenseAccess) -> str:
         """Читает текущий пояс при действующем членстве."""

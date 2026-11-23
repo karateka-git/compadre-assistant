@@ -16,6 +16,7 @@ from compadre_assistant.capabilities.family.domain.expenses import (
     ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
 )
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
+from compadre_assistant.capabilities.family.domain.expense_reports import ExpensePeriod, ProductSelection
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
 
@@ -98,6 +99,49 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
             key = self.repo.save(self.author, str(total), 1, replace(self.purchase, receipt_total=total))
             self.assertEqual(self.repo.card(self.owner, key).items, self.purchase.items)
         self.assertIsNotNone(self.repo.save(self.author, "a", 1, self.purchase))
+
+    def test_report_drilldown_counts_each_item_once_and_scopes_each_query(self) -> None:
+        """Сводка, поиск и страницы сохраняют знаки, даты, владельца и границы периода."""
+        period = ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1))
+        mixed = replace(self.purchase, items=(
+            ExpenseItem("Продукты", "Молоко", 9500), ExpenseItem("Продукты", "МОЛОКО", 9500),
+            ExpenseItem("Продукты", None, 5900), ExpenseItem("Питомцы", "Корм", 44000),
+        ), receipt_total=68000)
+        key = self.repo.save(self.author, "one", 1, mixed)
+        taxi = replace(mixed, items=(ExpenseItem("Транспорт", "Такси", 45000),), receipt_total=None)
+        key2 = self.repo.save(self.owner, "two", 1, taxi)
+        self.repo.save(self.author, "later", 1, replace(taxi, purchase_date=period.end))
+        self.repo.save(self.other, "theirs", 1, taxi)
+        summary = self.repo.summary(self.author, period)
+        self.assertEqual(summary.total, 113000)
+        self.assertEqual([(x.name, x.amount) for x in summary.categories], [
+            ("Транспорт", 45000), ("Питомцы", 44000), ("Продукты", 24900), ("Без детализации", -900)])
+        category = summary.categories[2].id
+        products = self.repo.products(self.author, period, category, 0, 1)
+        milk = products.rows[0].id
+        self.assertEqual((products.count, products.total, products.rows[0].amount), (2, 24900, 19000))
+        unknown = self.repo.products(self.author, period, category, 1, 1).rows[0]
+        self.assertEqual((unknown.id, unknown.name, unknown.amount), (None, "Без детализации", 5900))
+        self.assertEqual(self.repo.history(self.owner, period, 0, 1, ProductSelection(None, None)).total, -900)
+        self.assertEqual(self.repo.history(self.owner, period, 0, 1, ProductSelection(None, category)).total, 5900)
+        found = self.repo.search(self.owner, period, "  мОЛо  ", 0, 4)
+        self.assertEqual((found.rows[0].id, found.total), (milk, 19000))
+        self.assertFalse(self.repo.search(self.owner, period, "%", 0, 4).rows)
+        purchases = self.repo.history(self.author, period, 0, 4, ProductSelection(milk, category))
+        self.assertEqual([(x.id, x.amount) for x in purchases.rows], [(key, 19000)])
+        self.assertEqual([x.id for x in self.repo.history(self.owner, period, 0, 4).rows], [key2, key])
+        self.assertEqual(self.repo.history(self.owner, period, 5, 1).count, 2)
+        self.assertEqual(self.repo.summary(self.other, period).total, 45000)
+        self.assertFalse(self.repo.products(self.other, period, category, 0, 4).rows)
+        self.assertFalse(self.repo.search(self.other, period, "Молоко", 0, 4).rows)
+        self.assertFalse(self.repo.history(self.other, period, 0, 4, ProductSelection(milk)).rows)
+        self.members.leave(2, self.owner.family_id, actor_joined_at=self.author.joined_at)
+        for query in (lambda: self.repo.summary(self.author, period),
+                      lambda: self.repo.products(self.author, period, category, 0, 4),
+                      lambda: self.repo.search(self.author, period, "Молоко", 0, 4),
+                      lambda: self.repo.history(self.author, period, 0, 4)):
+            with self.assertRaises(FamilyAccessEnded):
+                query()
 
     def test_two_connections_confirm_once_and_independent_purchases_survive(self) -> None:
         """Параллельные подтверждения возвращают один ID, разные операции — разные."""

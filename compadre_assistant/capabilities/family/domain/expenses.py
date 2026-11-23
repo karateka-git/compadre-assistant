@@ -7,6 +7,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from .membership import FamilyError
+from .expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
 
 
 class ExpenseSource(StrEnum):
@@ -95,6 +96,25 @@ class ExpenseCard:
 
 class ExpenseRepository(Protocol):
     """Доступ к карточке, записи покупки и общему календарю семьи."""
+
+    def summary(self, access: ExpenseAccess, period: ExpensePeriod) -> ExpenseSummary:
+        """Читает все категории периода в порядке убывания суммы."""
+        ...
+
+    def products(self, access: ExpenseAccess, period: ExpensePeriod, category_id: int | None,
+                 offset: int, limit: int) -> ReportPage:
+        """Читает товары категории, включая группу без детализации."""
+        ...
+
+    def search(self, access: ExpenseAccess, period: ExpensePeriod, query: str,
+               offset: int, limit: int) -> ReportPage:
+        """Ищет товары по части нормализованного названия в заданном периоде."""
+        ...
+
+    def history(self, access: ExpenseAccess, period: ExpensePeriod, offset: int, limit: int,
+                product: ProductSelection | None = None) -> ReportPage:
+        """Читает покупки в обратной хронологии, при выборе товара суммирует его строки."""
+        ...
 
     def save(self, access: ExpenseAccess, operation_id: str, revision: int, purchase: ExpensePurchase) -> int:
         """Возвращает ID покупки, подтверждая одну редакцию операции атомарно."""
