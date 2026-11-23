@@ -675,6 +675,22 @@ class VkFamilyShoppingTest(unittest.TestCase):
         self.assertTrue(all(len(button["label"]) <= 40 for button in buttons))
         return {button["label"]: json.loads(button["payload"])["token"] for button in buttons}
 
+    def test_expense_entry_offers_stepwise_input_in_bottom_menu(self) -> None:
+        """VK доставляет запрос чека и выбор способа ввода одним сообщением."""
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        self._menu_press("Расходы")
+        home = next(params for method, params in reversed(self.calls) if method == "messages.send")
+        add = self._actions(home)["Добавить расход"]
+        self._single_reply(lambda: self._press(add, self.last_cmid), "одно фото чека",
+                           labels=["Ввести пошагово", "Отмена", "Помощь"])
+        payload = self._visible_menu()["Ввести пошагово"]
+        self._single_reply(lambda: self._menu_press("Ввести пошагово"), "название покупки",
+                           labels=["Отмена", "Помощь"])
+        self._single_reply(lambda: self._send("Ввести пошагово", payload=payload), "устарела")
+        self._single_reply(lambda: self._send("Такси"), "сумму в рублях")
+
     def test_long_titles_in_list_and_selection(self) -> None:
         """VK показывает сокращение в тексте и сохраняет выбор товара кнопкой."""
         self._send("/family")
