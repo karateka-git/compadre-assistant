@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import RLock
 from time import monotonic
@@ -19,6 +19,7 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, HandlerContext, IncomingResponse, PendingInputOutcome, PendingInputResult, ReplyAction,
 )
 from compadre_assistant.core.presentation.message_content import text_content
+from .expense_browser import ExpenseBrowser, money as _money
 
 
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
@@ -32,12 +33,6 @@ def _reply(text: str, *actions: ReplyAction) -> IncomingResponse:
 
 def _action(label: str, arguments: str = "") -> ReplyAction:
     return ReplyAction(label, (EXPENSES + " " + arguments).strip())
-
-
-def _money(amount: int) -> str:
-    whole, cents = divmod(abs(amount), 100)
-    sign = "−" if amount < 0 else ""
-    return f"{sign}{whole},{cents:02} ₽" if cents else f"{sign}{whole} ₽"
 
 
 def _cents(value: str) -> int:
@@ -59,6 +54,7 @@ class _Session:
     manual_date: date | None = None
     manual_name: str | None = None
     manual_amount: int | None = None
+    browser: ExpenseBrowser | None = None
 
 
 class ExpenseEntry:
@@ -109,10 +105,31 @@ class ExpenseEntry:
             args = arguments.split()
             if not args or args == ["open", str(access.family_id)]:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
-                return _reply("Расходы семьи", _action("Добавить расход", "add " + session.token))
+                with self._repository() as repo:
+                    session.browser = ExpenseBrowser.open(repo.timezone(access), event.reply_address.channel)
+                    return session.browser.render(repo, access, session.token)
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
                 return self._expired()
+            if args[0] == "browse" and session.browser and session.purchase is None:
+                browser = session.browser
+                if (len(args) != 4 or args[2] != str(browser.revision) or not args[3].isascii()
+                        or not args[3].isdigit() or len(args[3]) > 2 or int(args[3]) >= len(browser.targets)):
+                    return self._expired()
+                target = browser.targets[int(args[3])]
+                session.deadline = self._clock() + _TTL
+                if target.kind in ("month_input", "zone_input"):
+                    prompt = ("Введи месяц в формате ММ.ГГГГ." if target.kind == "month_input"
+                              else "Введи часовой пояс IANA, например Asia/Omsk.")
+                    return self._ask(context, event, session, target.kind, prompt)
+                with self._repository() as repo:
+                    if target.kind in ("current", "previous"):
+                        today = datetime.now(ZoneInfo(repo.timezone(access))).date()
+                        month = today if target.kind == "current" else today.replace(day=1) - timedelta(days=1)
+                        browser.select_month(month)
+                    else:
+                        browser.navigate(target)
+                    return browser.render(repo, access, session.token)
             if args[0] == "discard" and session.purchase is None:
                 self._sessions.pop(event.reply_address)
                 return _reply("Ввод расхода отменён.", _action("Расходы"))
@@ -133,6 +150,7 @@ class ExpenseEntry:
                     return self._update(session, purchase)
                 return self._expired()
             if args[0] == "add" and session.purchase is None:
+                session.browser = None
                 return self._ask(context, event, session, "recognize",
                                  "Пришли одно фото чека или опиши покупку сообщением.", images=True)
             if session.purchase is None or len(args) < 3 or args[2] != str(session.revision):
@@ -260,6 +278,24 @@ class ExpenseEntry:
             if session is None or session.request != pending.request_id:
                 return PendingInputResult(self._expired(), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
+            if kind in ("month_input", "zone_input") and session.browser:
+                try:
+                    with self._repository() as repo:
+                        if kind == "month_input":
+                            month = datetime.strptime(event.text.strip(), "%m.%Y").date()
+                            if month.year == 9999 and month.month == 12:
+                                raise ValueError
+                            session.browser.select_month(month)
+                        else:
+                            repo.set_timezone(access, event.text.strip())
+                            session.browser = ExpenseBrowser.open(repo.timezone(access), event.reply_address.channel)
+                        response = session.browser.render(repo, access, session.token)
+                except (ValueError, InvalidExpense):
+                    prompt = ("Введи месяц в формате ММ.ГГГГ." if kind == "month_input"
+                              else "Пояс не найден. Введи название IANA, например Asia/Omsk.")
+                    return PendingInputResult(_reply(prompt, CANCEL_SECTION_ACTION), PendingInputOutcome.RETRY)
+                session.request = None
+                return PendingInputResult(response, PendingInputOutcome.COMPLETE)
             if kind == "manual_name":
                 name = event.text.strip()
                 if not name or len(name) > 256:

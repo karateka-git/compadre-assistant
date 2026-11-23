@@ -146,6 +146,56 @@ class FamilyChannelsTest(unittest.TestCase):
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 1)
 
+    def test_expense_reports_on_both_channels_and_shared_timezone(self) -> None:
+        """Оба канала открывают чек из категории и видят общий пояс после смены."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.TEXT, (
+            ExpenseItem("Продукты", "Молоко", 19000), ExpenseItem("Продукты", "Хлеб", 5900),
+            ExpenseItem("Питомцы", "Корм", 44000),
+            *(ExpenseItem(f"Группа {i}", f"Проба {i}", 0) for i in range(8))), "Лента")
+        with self._runtime("family") as processor, patch(
+                "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed):
+            self._joined_family(processor)
+            def choose(who, response, name):
+                return self._choose(processor, who, response, name)
+            home = self._send(processor, self.owner_tg, "/family_expenses")
+            choose(self.owner_tg, home, "Добавить расход")
+            review = self._send(processor, self.owner_tg, "Пример")
+            choose(self.owner_tg, review, "Сохранить")
+            for who in (self.owner_tg, self.guest):
+                home = self._send(processor, who, "/family_expenses")
+                periods = choose(who, home, "Выбрать период")
+                choose(who, periods, "Другой месяц")
+                home = self._send(processor, who, "11.2026")
+                self.assertIn("689 ₽", response_text(home))
+                groups = choose(who, home, "По категориям")
+                stale = groups.suggested_actions[0].command
+                next_page = choose(who, groups, "Далее →")
+                if who.channel == "vk":
+                    import json
+                    from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
+                    self.assertEqual(len(json.loads(_serialize_vk_inline_keyboard(next_page))["buttons"]), 6)
+                self.assertIn("закрыт", response_text(self._send(processor, who, stale)))
+                groups = choose(who, next_page, "← Ранее")
+                products = choose(who, groups, "2. Продукты · 249 ₽")
+                history = choose(who, products, "1. Молоко · 190 ₽")
+                self.assertIn("Всего · 190 ₽", response_text(history))
+                card = choose(who, history, "1. 23.11 Лента · 190 ₽")
+                self.assertIn("Корм", response_text(card))
+                self.assertIn("Итого · 689 ₽", response_text(card))
+                last_page = choose(who, card, "Далее →")
+                card = choose(who, last_page, "← Ранее")
+                self.assertEqual(response_text(choose(who, card, "Назад")), response_text(history))
+            home = self._send(processor, self.guest, "/family_expenses")
+            zone = choose(self.guest, home, "Часовой пояс")
+            choose(self.guest, zone, "Изменить пояс")
+            self.assertIn("не найден", response_text(self._send(processor, self.guest, "Wrong/Town")))
+            self._send(processor, self.guest, "Europe/Moscow")
+            home = self._send(processor, self.owner_tg, "/family_expenses")
+            self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
+
     def test_stepwise_expense_with_provider_offline(self) -> None:
         """Пошаговый ввод работает из обычного входа и после ошибки LLM."""
         from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError
