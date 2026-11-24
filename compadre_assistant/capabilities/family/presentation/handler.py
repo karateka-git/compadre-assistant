@@ -302,13 +302,17 @@ class FamilyCapability(
             if family is None:
                 return _family_actions(None)
             section = self._shopping_sections.current(app_user_id, address, mode_revision, touch=False)
-            if section is None:
+            if section is None and address.channel != "vk":
                 return _family_actions(family)
             try:
                 actor = next(member for member in families.list_members(app_user_id, family.id)
                              if member.app_user_id == app_user_id)
             except FamilyAccessEnded:
                 return _family_actions(None)
+            if section is None:
+                draft = self._expense_entry.draft_menu(address, mode_revision,
+                                                       ExpenseAccess(family.id, app_user_id, actor.joined_at))
+                return draft or _family_actions(family)
             if not section.matches(family.id, actor.joined_at):
                 return _family_actions(family)
         return shopping_section_actions(section, from_selection=section.selection_shown.is_set())

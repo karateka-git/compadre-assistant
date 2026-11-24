@@ -55,6 +55,8 @@ class _Session:
     access: ExpenseAccess
     mode: int | None
     token: str
+    channel: str
+    review_page: int = 0
     revision: int = 1
     purchase: ExpensePurchase | None = None
     deadline: float = 0
@@ -89,7 +91,7 @@ class ExpenseEntry:
         for key, old in list(self._sessions.items()):
             if old.deadline <= self._clock():
                 del self._sessions[key]
-        session = _Session(access, mode, uuid4().hex, deadline=self._clock() + _TTL)
+        session = _Session(access, mode, uuid4().hex, address.channel, deadline=self._clock() + _TTL)
         self._sessions[address] = session
         return session
 
@@ -97,6 +99,15 @@ class ExpenseEntry:
         """Завершает навигацию расходов при переходе в другой раздел семьи."""
         with self._lock:
             self._sessions.pop(address, None)
+
+    def draft_menu(self, address: ReplyAddress, mode: int, access: ExpenseAccess) -> tuple[ReplyAction, ...]:
+        """Возвращает меню чека для текущего членства и действующей редакции в VK."""
+        with self._lock:
+            session = self._sessions.get(address)
+            if (address.channel != "vk" or session is None or session.purchase is None or session.request
+                    or session.access != access or session.mode != mode or self._clock() >= session.deadline):
+                return ()
+            return self._review_actions(session)
 
     def _current(self, event: IncomingEvent, context: HandlerContext, access: ExpenseAccess) -> _Session | None:
         session = self._sessions.get(event.reply_address)
@@ -263,6 +274,7 @@ class ExpenseEntry:
     def _review(self, session, page=0):
         purchase = session.purchase
         items, nav, pages = self._pages(session, page, "view")
+        session.review_page = page
         lines = [f"{purchase.description or 'Расход'} · {purchase.purchase_date:%d.%m.%Y}"]
         for i, item in enumerate(items, page*_PAGE+1):
             quantity = f"{item.quantity} {item.unit or 'шт.'} · " if item.quantity is not None else ""
@@ -276,8 +288,25 @@ class ExpenseEntry:
             if delta:
                 lines.append(f"Без детализации — {_money(delta)}")
             lines.append(f"Итог чека — {_money(purchase.receipt_total)}")
-        return _reply("\n".join(lines), *nav, self._button(session, "Сохранить", "save"),
-                      self._button(session, "Исправить", "edit"), self._button(session, "Отменить", "cancel"))
+        actions = self._review_actions(session)
+        if session.channel != "vk":
+            actions = (*nav, *actions)
+        return _reply("\n".join(lines), *actions)
+
+    def _review_actions(self, session):
+        actions = (self._button(session, "Сохранить", "save"), self._button(session, "Исправить", "edit"),
+                   self._button(session, "Отменить", "cancel"))
+        if session.channel != "vk":
+            return actions
+        pages = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+        if pages > 1:
+            # Одинаковая пара подписей листает по кругу без повторной публикации нижней клавиатуры.
+            previous = (session.review_page - 1) % pages
+            following = (session.review_page + 1) % pages
+            actions = (self._button(session, "← Ранее", "view", str(previous)),
+                       self._button(session, "Далее →", "view", str(following)), *actions)
+        revision = f"{session.token}.{session.revision}"
+        return tuple(replace(action, scope=ActionScope.SECTION, menu_revision=revision) for action in actions)
 
     def _categories(self, session, page):
         first = page * _PAGE
@@ -296,7 +325,8 @@ class ExpenseEntry:
         session.revision += 1
         session.deadline = self._clock() + _TTL
         session.request = None
-        return session.screen(self._review(session), update=update_screen)
+        # В VK обновлённую нижнюю клавиатуру доставляет новое сообщение с исправленным чеком.
+        return session.screen(self._review(session), update=update_screen and session.channel != "vk")
 
     def continue_input(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
                        pending: PendingInput) -> PendingInputResult:

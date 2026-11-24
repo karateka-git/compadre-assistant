@@ -806,7 +806,8 @@ class IncomingMessageDispatcher:
         except Exception:
             LOGGER.exception("Could not resolve command menu choice")
             return None
-        matches = tuple(action for action in (menu.section_actions or ()) if action.label == event.text)
+        matches = tuple(action for action in (menu.section_actions or ())
+                        if action.label == event.text and action.menu_revision == event.menu_revision)
         return matches[0].command if len(matches) == 1 and matches[0].command else None
 
     def _busy_response(self, event: IncomingEvent, *, allow_cancel: bool = True) -> IncomingResponse | None:

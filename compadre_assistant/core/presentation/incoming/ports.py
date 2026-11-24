@@ -100,6 +100,7 @@ class ReplyAction:
     purpose: ActionPurpose = ActionPurpose.ACTION
     destination: ScreenDestination | None = None
     url: str | None = None
+    menu_revision: str | None = None  # Привязка нижней кнопки к показанной редакции данных.
 
     def __post_init__(self) -> None:
         """Проверяет единственность цели и явный контекст нового перехода.
