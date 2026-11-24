@@ -42,7 +42,8 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         self.other = ExpenseAccess(other, 3, now)
         self.repo = SQLiteExpenseRepository(self.db)
         self.purchase = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, (
-            ExpenseItem("Продукты", "Яблоки", 7500, Decimal("0.375"), "кг", 20000),
+            ExpenseItem("Продукты", "Яблоки", 7500, Decimal("0.375"), "кг", 20000,
+                        amount_before_discount=8000),
             ExpenseItem("Питомцы", None, 10000),
         ), "Лента", 17000)
 
@@ -62,6 +63,15 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         with self.db:
             self.db.execute("UPDATE family_expenses SET source='future' WHERE id=?", (key,))
         self.assertEqual(self.repo.card(self.owner, key).source, ExpenseSource.UNKNOWN)
+
+    def test_package_size_belongs_to_the_item_not_the_product(self) -> None:
+        """Один товар с разной фасовкой сохраняет обе подписи и общую сумму отчёта."""
+        items = tuple(ExpenseItem("Продукты", "Печенье", 7199, package_size=size) for size in ("224 г", "400 г"))
+        purchase = replace(self.purchase, items=items, receipt_total=None)
+        key = self.repo.save(self.author, "pack", 1, purchase)
+        self.assertEqual(self.repo.card(self.owner, key).items, items)
+        products = self.repo.search(self.owner, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)), "Печенье", 0, 4)
+        self.assertEqual([(p.name, p.amount) for p in products.rows], [("Печенье", 14398)])
 
     def test_zone_and_all_operations_require_current_membership(self) -> None:
         """Выход и повторное вступление отзывают прежний доступ, сохраняя покупки."""
