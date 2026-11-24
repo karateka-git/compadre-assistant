@@ -30,6 +30,30 @@ from tests.response_assertions import response_text
 class FamilyChannelsTest(unittest.TestCase):
     """У семейного членства один профиль и независимые режимы Telegram и VK."""
 
+    def test_expense_model_timeout_is_independent_of_ask(self) -> None:
+        """Обычный ввод использует семейный таймаут для SDK и отклоняет некорректную настройку."""
+        import os
+
+        profile = {"ASK_BASE_URL": "https://example.invalid", "ASK_MODEL": "test",
+                   "ASK_API_KEY": "test", "ASK_TIMEOUT_SECONDS": "7"}
+        with self._runtime("family") as processor, patch.dict(os.environ, profile, clear=True), patch(
+            "compadre_assistant.capabilities.family.data.expense_recognition.OpenAI",
+        ) as sdk:
+            self._joined_family(processor)
+            for setting, expected in ((None, 120.0), ("88.5", 88.5), ("nan", None)):
+                with self.subTest(setting=setting):
+                    if setting is not None:
+                        os.environ["FAMILY_EXPENSE_TIMEOUT_SECONDS"] = setting
+                    home = self._send(processor, self.owner_tg, "/family_expenses")
+                    self._choose(processor, self.owner_tg, home, "Добавить расход")
+                    sdk.reset_mock()
+                    self._send(processor, self.owner_tg, "Такси 450")
+                    if expected is None:
+                        sdk.assert_not_called()
+                    else:
+                        sdk.assert_called_once_with(base_url=profile["ASK_BASE_URL"], api_key="test",
+                                                    timeout=expected, max_retries=0)
+
     def test_expense_photo_and_text_review_edit_and_commit(self) -> None:
         """Оба канала редактируют многострочный чек и сохраняют одну поправку."""
         from datetime import date
