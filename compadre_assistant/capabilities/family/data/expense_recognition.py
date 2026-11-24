@@ -1,6 +1,8 @@
 """Распознавание расхода через OpenAI-совместимый API без записи вложений."""
 
 import json
+import math
+import os
 from base64 import b64encode
 from collections.abc import Callable
 from datetime import date
@@ -10,6 +12,21 @@ from openai import OpenAI
 
 from ..domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
 from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer, allocate_discount
+
+
+def receipt_timeout_seconds() -> float:
+    """Возвращает таймаут сетевых операций при разборе семейного расхода.
+
+    Raises:
+        ValueError: Настройка не задаёт положительное конечное число секунд.
+    """
+    try:
+        timeout = float(os.environ.get("FAMILY_EXPENSE_TIMEOUT_SECONDS", "120"))
+    except ValueError:
+        raise ValueError("Некорректный FAMILY_EXPENSE_TIMEOUT_SECONDS") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Некорректный FAMILY_EXPENSE_TIMEOUT_SECONDS")
+    return timeout
 
 
 def _money(value: object) -> int:
