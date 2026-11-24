@@ -21,7 +21,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
     ResponseView,
 )
 from compadre_assistant.core.presentation.message_content import text_content
-from .expense_browser import ExpenseBrowser, money as _money
+from .expense_browser import ExpenseBrowser
+from .expense_receipt import item_details, money as _money, receipt_header
 
 
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
@@ -314,19 +315,13 @@ class ExpenseEntry:
         purchase = session.purchase
         items, nav, pages = self._pages(session, page, "view")
         session.review_page = page
-        lines = [f"{purchase.description or 'Расход'} · {purchase.purchase_date:%d.%m.%Y}"]
+        lines = receipt_header(purchase.description or "Расход", purchase.purchase_date,
+                               sum(item.amount for item in purchase.items), purchase.receipt_total, "К оплате")
         for i, item in enumerate(items, page*_PAGE+1):
-            quantity = f"{item.quantity} {item.unit or 'шт.'} · " if item.quantity is not None else ""
-            lines.append(f"{i}. {item.product or 'Без детализации'} · {quantity}{_money(item.amount)} · {item.category}")
+            lines.extend(("", f"{i}. {item.product or 'Без детализации'} — {_money(item.amount)}"))
+            lines.extend(item_details(item, show_category=True))
         if pages > 1:
             lines.append(f"Страница {page+1} из {pages}")
-        total = sum(item.amount for item in purchase.items)
-        lines.append(f"По позициям — {_money(total)}")
-        if purchase.receipt_total is not None:
-            delta = purchase.receipt_total - total
-            if delta:
-                lines.append(f"Без детализации — {_money(delta)}")
-            lines.append(f"Итог чека — {_money(purchase.receipt_total)}")
         actions = self._review_actions(session)
         if session.address.channel != "vk":
             actions = (*nav, *actions)
@@ -459,7 +454,10 @@ class ExpenseEntry:
             else:
                 key = {"name": "product", "amount": "amount", "category": "category"}[field]
                 value = _cents(text) if field == "amount" else text
-                items[int(index)] = replace(items[int(index)], **{key: value})
+                changes = {key: value}
+                if field == "amount" and value != items[int(index)].amount:
+                    changes["amount_before_discount"] = None
+                items[int(index)] = replace(items[int(index)], **changes)
             purchase = replace(purchase, items=tuple(items))
         return self._update(session, purchase)
 

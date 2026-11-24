@@ -75,8 +75,11 @@ def _purchase(content: str, today: date, source: ExpenseSource) -> ExpensePurcha
         amount = line.get("amount")
         if amount is None and quantity is not None and price is not None:
             amount = int((quantity * price).quantize(Decimal(1), rounding=ROUND_HALF_UP))
-        items.append(ExpenseItem(category if category in CATEGORIES else "Прочее", name, _money(amount),
-                                 quantity, _name(line.get("unit")), price))
+        amount = _money(amount)
+        before = line.get("amount_before_discount")
+        items.append(ExpenseItem(category if category in CATEGORIES else "Прочее", name, amount,
+                                 quantity, _name(line.get("unit")), price, _name(line.get("package_size")),
+                                 _money(before) if before is not None else None))
         if line.get("eligible") is True:
             eligible.append(index)
     receipt = dto.get("receipt_total")
@@ -102,6 +105,12 @@ discount (только общая скидка, ещё не учтённая в 
 скидка). Если у товара напечатан «Итог», перепиши его в amount. Для весового товара это сумма
 за купленный вес. Если скидки уже вошли в эти суммы, итоговая надпись «Скидка» показывает
 общую экономию: верни discount=0. В receipt_total перепиши итог к оплате.
+В description укажи короткое название магазина, если оно известно. В product оставь вид товара
+и важные отличия: «Овсяное печенье», «Губки для посуды», «Сгущённое молоко».
+Фасовку одной упаковки передай отдельно в package_size («224 г», «5 шт.») либо null.
+В quantity укажи число купленных упаковок или фактический вес весового товара.
+В amount_before_discount укажи сумму до скидки за всю купленную позицию только при явных
+данных о цене до скидки и количестве в источнике; при отсутствии скидки или данных верни null.
 Не придумывай отсутствующие позиции или суммы. Нечитаемый чек возвращай с пустым items.
 Допустимые категории: """ + ", ".join(CATEGORIES)
 

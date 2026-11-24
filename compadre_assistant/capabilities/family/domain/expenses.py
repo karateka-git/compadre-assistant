@@ -42,6 +42,8 @@ class ExpenseItem:
     quantity: Decimal | None = None
     unit: str | None = None
     unit_price: int | None = None
+    package_size: str | None = None
+    amount_before_discount: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +70,10 @@ class ExpensePurchase:
                 raise InvalidExpense("Проверь название и категорию")
             if type(item.amount) is not int or item.amount < 0:
                 raise InvalidExpense("Проверь сумму позиции")
+            if item.amount_before_discount is not None and (
+                type(item.amount_before_discount) is not int or item.amount_before_discount < item.amount
+            ):
+                raise InvalidExpense("Проверь сумму позиции до скидки")
             if item.unit_price is not None and (type(item.unit_price) is not int or item.unit_price < 0):
                 raise InvalidExpense("Проверь цену единицы")
             if item.quantity is not None and (not item.quantity.is_finite() or item.quantity <= 0):
