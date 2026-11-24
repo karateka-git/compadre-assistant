@@ -50,19 +50,35 @@ def _cents(value: str) -> int:
     return int(number * 100)
 
 
+@dataclass(frozen=True, slots=True)
+class _Draft:
+    access: ExpenseAccess
+    mode: int | None
+    operation_id: str
+    revision: int
+    purchase: ExpensePurchase
+    deadline: float
+
+
 @dataclass(slots=True)
 class _Session:
     access: ExpenseAccess
     mode: int | None
     token: str
-    revision: int = 1
-    purchase: ExpensePurchase | None = None
+    address: ReplyAddress
+    review_page: int = 0
+    draft: _Draft | None = None
     deadline: float = 0
     request: str | None = None
     manual_date: date | None = None
     manual_name: str | None = None
     manual_amount: int | None = None
     browser: ExpenseBrowser | None = None
+
+    @property
+    def purchase(self) -> ExpensePurchase | None:
+        """Возвращает покупку открытой редакции на экране проверки."""
+        return self.draft.purchase if self.draft else None
 
     def screen(self, response: IncomingResponse, *, update: bool = False) -> IncomingResponse:
         """Привязывает текст и кнопки к сообщению этой сессии расходов."""
@@ -84,12 +100,16 @@ class ExpenseEntry:
         self._clock = clock
         self._lock = RLock()
         self._sessions: dict[ReplyAddress, _Session] = {}
+        self._drafts: dict[ReplyAddress, _Draft] = {}
 
     def _fresh(self, address: ReplyAddress, access: ExpenseAccess, mode: int | None) -> _Session:
         for key, old in list(self._sessions.items()):
             if old.deadline <= self._clock():
                 del self._sessions[key]
-        session = _Session(access, mode, uuid4().hex, deadline=self._clock() + _TTL)
+        for key, draft in list(self._drafts.items()):
+            if draft.deadline <= self._clock():
+                del self._drafts[key]
+        session = _Session(access, mode, uuid4().hex, address, deadline=self._clock() + _TTL)
         self._sessions[address] = session
         return session
 
@@ -97,6 +117,26 @@ class ExpenseEntry:
         """Завершает навигацию расходов при переходе в другой раздел семьи."""
         with self._lock:
             self._sessions.pop(address, None)
+
+    def _available_draft(self, session: _Session) -> _Draft | None:
+        draft = self._drafts.get(session.address)
+        if draft and (draft.access != session.access or draft.mode != session.mode or self._clock() >= draft.deadline):
+            del self._drafts[session.address]
+            return None
+        return draft
+
+    def _report(self, session, repo):
+        return session.browser.render(repo, session.access, session.token,
+                                      can_resume=self._available_draft(session) is not None)
+
+    def draft_menu(self, address: ReplyAddress, mode: int, access: ExpenseAccess) -> tuple[ReplyAction, ...]:
+        """Возвращает меню чека для текущего членства и действующей редакции в VK."""
+        with self._lock:
+            session = self._sessions.get(address)
+            if (address.channel != "vk" or session is None or session.purchase is None or session.request
+                    or session.access != access or session.mode != mode or self._clock() >= session.deadline):
+                return ()
+            return self._review_actions(session)
 
     def _current(self, event: IncomingEvent, context: HandlerContext, access: ExpenseAccess) -> _Session | None:
         session = self._sessions.get(event.reply_address)
@@ -107,7 +147,7 @@ class ExpenseEntry:
 
     @staticmethod
     def _expired(access: ExpenseAccess) -> IncomingResponse:
-        return _reply("Этот экран уже закрыт. Открой расходы и начни ввод заново.", expenses_action(access.family_id))
+        return _reply("Этот экран уже закрыт. Открой «Расходы».", expenses_action(access.family_id))
 
     def _ask(self, context, event, session, kind: str, prompt: str, *, images=False):
         if context.pending_inputs is None:
@@ -129,7 +169,7 @@ class ExpenseEntry:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
                 with self._repository() as repo:
                     session.browser = ExpenseBrowser.open(repo.timezone(access), event.reply_address.channel)
-                    return session.screen(session.browser.render(repo, access, session.token))
+                    return session.screen(self._report(session, repo))
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
                 return self._expired(access)
@@ -139,6 +179,14 @@ class ExpenseEntry:
                         or not args[3].isdigit() or len(args[3]) > 2 or int(args[3]) >= len(browser.targets)):
                     return self._expired(access)
                 target = browser.targets[int(args[3])]
+                if target.kind == "resume":
+                    draft = self._available_draft(session)
+                    if draft is None:
+                        return self._expired(access)
+                    session.draft = draft
+                    session.deadline = draft.deadline
+                    session.browser = None
+                    return session.screen(self._review(session), update=session.address.channel != "vk")
                 session.deadline = self._clock() + _TTL
                 if target.kind == "search_input":
                     return self._ask(context, event, session, target.kind, "Введи название товара или услуги.")
@@ -153,7 +201,7 @@ class ExpenseEntry:
                         browser.select_month(month)
                     else:
                         browser.navigate(target)
-                    return session.screen(browser.render(repo, access, session.token), update=target.kind != "chart")
+                    return session.screen(self._report(session, repo), update=target.kind != "chart")
             if args[0] == "discard" and session.purchase is None:
                 self._sessions.pop(event.reply_address)
                 return _reply("Ввод расхода отменён.", expenses_action(access.family_id), close_screen=True)
@@ -173,11 +221,11 @@ class ExpenseEntry:
                         (ExpenseItem(CATEGORIES[index], session.manual_name, session.manual_amount),))
                     return self._update(session, purchase, update_screen=True)
                 return self._expired(access)
-            if args[0] == "add" and session.purchase is None:
-                session.browser = None
+            if args[0] == "add" and session.browser:
+                session = self._fresh(event.reply_address, access, context.mode_revision)
                 return self._ask(context, event, session, "recognize",
                                  "Пришли одно фото чека или опиши покупку сообщением в течение 10 минут.", images=True)
-            if session.purchase is None or len(args) < 3 or args[2] != str(session.revision):
+            if session.draft is None or len(args) < 3 or args[2] != str(session.draft.revision):
                 return self._expired(access)
             try:
                 return self._draft_action(context, event, session, args[0], args[3:])
@@ -187,11 +235,13 @@ class ExpenseEntry:
     def _draft_action(self, context, event, session, verb, args):
         purchase = session.purchase
         if verb == "cancel":
+            self._drafts.pop(event.reply_address)
             self._sessions.pop(event.reply_address)
             return _reply("Ввод расхода отменён.", expenses_action(session.access.family_id), close_screen=True)
         if verb == "save":
             with self._repository() as repo:
-                repo.save(session.access, session.token, session.revision, purchase)
+                repo.save(session.access, session.draft.operation_id, session.draft.revision, purchase)
+            self._drafts.pop(event.reply_address)
             self._sessions.pop(event.reply_address)
             return _reply("Расход сохранён.", expenses_action(session.access.family_id), close_screen=True)
         if verb == "view":
@@ -237,7 +287,7 @@ class ExpenseEntry:
 
     @staticmethod
     def _button(session, label, verb, argument=""):
-        return _action(label, f"{verb} {session.token} {session.revision} {argument}".strip())
+        return _action(label, f"{verb} {session.token} {session.draft.revision} {argument}".strip())
 
     def _pages(self, session, page, verb):
         count = (len(session.purchase.items) + _PAGE - 1) // _PAGE
@@ -263,6 +313,7 @@ class ExpenseEntry:
     def _review(self, session, page=0):
         purchase = session.purchase
         items, nav, pages = self._pages(session, page, "view")
+        session.review_page = page
         lines = [f"{purchase.description or 'Расход'} · {purchase.purchase_date:%d.%m.%Y}"]
         for i, item in enumerate(items, page*_PAGE+1):
             quantity = f"{item.quantity} {item.unit or 'шт.'} · " if item.quantity is not None else ""
@@ -276,8 +327,25 @@ class ExpenseEntry:
             if delta:
                 lines.append(f"Без детализации — {_money(delta)}")
             lines.append(f"Итог чека — {_money(purchase.receipt_total)}")
-        return _reply("\n".join(lines), *nav, self._button(session, "Сохранить", "save"),
-                      self._button(session, "Исправить", "edit"), self._button(session, "Отменить", "cancel"))
+        actions = self._review_actions(session)
+        if session.address.channel != "vk":
+            actions = (*nav, *actions)
+        return _reply("\n".join(lines), *actions)
+
+    def _review_actions(self, session):
+        actions = (self._button(session, "Сохранить", "save"), self._button(session, "Исправить", "edit"),
+                   self._button(session, "Отменить", "cancel"))
+        if session.address.channel != "vk":
+            return actions
+        pages = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+        if pages > 1:
+            # Одинаковая пара подписей листает по кругу без повторной публикации нижней клавиатуры.
+            previous = (session.review_page - 1) % pages
+            following = (session.review_page + 1) % pages
+            actions = (self._button(session, "← Ранее", "view", str(previous)),
+                       self._button(session, "Далее →", "view", str(following)), *actions)
+        revision = f"{session.token}.{session.draft.revision}"
+        return tuple(replace(action, scope=ActionScope.SECTION, menu_revision=revision) for action in actions)
 
     def _categories(self, session, page):
         first = page * _PAGE
@@ -292,11 +360,14 @@ class ExpenseEntry:
 
     def _update(self, session, purchase, *, update_screen=False):
         purchase.reconciled_items()
-        session.purchase = purchase
-        session.revision += 1
         session.deadline = self._clock() + _TTL
+        previous = session.draft
+        session.draft = _Draft(session.access, session.mode, previous.operation_id if previous else session.token,
+                               previous.revision + 1 if previous else 1, purchase, session.deadline)
+        self._drafts[session.address] = session.draft
         session.request = None
-        return session.screen(self._review(session), update=update_screen)
+        # В VK обновлённую нижнюю клавиатуру доставляет новое сообщение с исправленным чеком.
+        return session.screen(self._review(session), update=update_screen and session.address.channel != "vk")
 
     def continue_input(self, context: HandlerContext, event: IncomingEvent, access: ExpenseAccess,
                        pending: PendingInput) -> PendingInputResult:
@@ -315,7 +386,7 @@ class ExpenseEntry:
                     session.browser.find(repo, access, query)
                     session.request = None
                     session.deadline = self._clock() + _TTL
-                    response = session.browser.render(repo, access, session.token)
+                    response = self._report(session, repo)
                 return PendingInputResult(session.screen(response), PendingInputOutcome.COMPLETE)
             if kind in ("month_input", "zone_input") and session.browser:
                 try:
@@ -328,7 +399,7 @@ class ExpenseEntry:
                         else:
                             repo.set_timezone(access, event.text.strip())
                             session.browser = ExpenseBrowser.open(repo.timezone(access), event.reply_address.channel)
-                        response = session.browser.render(repo, access, session.token)
+                        response = self._report(session, repo)
                 except (ValueError, InvalidExpense):
                     prompt = ("Введи месяц в формате ММ.ГГГГ." if kind == "month_input"
                               else "Пояс не найден. Введи название IANA, например Asia/Omsk.")

@@ -645,6 +645,7 @@ def _handle_update(
             logger=logger,
         )
         return
+    menu_choice, menu_revision = _vk_menu_choice(message.get("payload"))
     incoming_message = IncomingEvent(
         channel="vk",
         chat_id=str(peer_id),
@@ -652,7 +653,8 @@ def _handle_update(
         text=text,
         external_user_id=str(from_id),
         images=images,
-        menu_choice=not images and _is_vk_menu_choice(message.get("payload")),
+        menu_choice=not images and menu_choice,
+        menu_revision=menu_revision,
         action_layout=VK_ACTION_LAYOUT if VK_INLINE_ACTIONS_ENABLED else ActionLayoutLimits(),
     )
     deliver_menu = _response_menu_delivery(incoming_message_processor, menu_update_handler)
@@ -681,14 +683,20 @@ def _handle_update(
     )
 
 
-def _is_vk_menu_choice(payload: object) -> bool:
-    """Распознаёт маркер текстовой кнопки, который не содержит команд."""
+def _vk_menu_choice(payload: object) -> tuple[bool, str | None]:
+    """Читает маркер нижней кнопки и необязательную редакцию показанного меню."""
     if isinstance(payload, str):
         try:
             payload = json.loads(payload)
         except ValueError:
-            return False
-    return isinstance(payload, dict) and set(payload) == {"menu"} and payload["menu"] is True
+            return False, None
+    if not isinstance(payload, dict) or payload.get("menu") is not True:
+        return False, None
+    if set(payload) == {"menu"}:
+        return True, None
+    if set(payload) == {"menu", "revision"} and isinstance(payload["revision"], str):
+        return True, payload["revision"]
+    return False, None
 
 
 def _handle_message_event(
@@ -800,7 +808,10 @@ def _serialize_vk_command_menu(update: CommandMenuUpdate) -> str:
             if item.url is not None:
                 row.append({"action": _vk_link_action(label, item.url)})
             else:
-                action = {"type": "text", "label": label, "payload": '{"menu":true}'}
+                payload = {"menu": True}
+                if item.menu_revision is not None:
+                    payload["revision"] = item.menu_revision
+                action = {"type": "text", "label": label, "payload": json.dumps(payload, separators=(",", ":"))}
                 row.append({"action": action, "color": "secondary"})
         rows.append(row)
     return json.dumps(

@@ -63,9 +63,14 @@ def _purchase(content: str, today: date, source: ExpenseSource) -> ExpensePurcha
         if line.get("eligible") is True:
             eligible.append(index)
     receipt = dto.get("receipt_total")
+    receipt_total = None if receipt is None else _money(receipt)
+    discount = _money(dto.get("discount", 0))
+    # Касса может повторить общую экономию под уже оплаченными суммами строк.
+    if receipt_total == sum(item.amount for item in items):
+        discount = 0
     purchase = ExpensePurchase(date.fromisoformat(dto["date"]) if dto.get("date") else today, source,
-                               allocate_discount(tuple(items), eligible, _money(dto.get("discount", 0))),
-                               _name(dto.get("description")), None if receipt is None else _money(receipt))
+                               allocate_discount(tuple(items), eligible, discount),
+                               _name(dto.get("description")), receipt_total)
     purchase.reconciled_items()
     return purchase
 
@@ -77,7 +82,10 @@ discount (только общая скидка, ещё не учтённая в 
 Все денежные поля — целые копейки. Строка содержит product (обычное название без марки, для одной
 категории без детализации null), category, quantity, unit, unit_price, amount (оплаченная сумма
 строки после построчных скидок; если даны только количество и цена, null), eligible (применима общая
-скидка). Не придумывай отсутствующие позиции или суммы. Нечитаемый чек возвращай с пустым items.
+скидка). Если у товара напечатан «Итог», перепиши его в amount. Для весового товара это сумма
+за купленный вес. Если скидки уже вошли в эти суммы, итоговая надпись «Скидка» показывает
+общую экономию: верни discount=0. В receipt_total перепиши итог к оплате.
+Не придумывай отсутствующие позиции или суммы. Нечитаемый чек возвращай с пустым items.
 Допустимые категории: """ + ", ".join(CATEGORIES)
 
 

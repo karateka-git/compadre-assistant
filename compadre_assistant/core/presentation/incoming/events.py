@@ -76,6 +76,7 @@ class IncomingEvent:
         menu_choice: Канал пометил текст как подпись кнопки нижнего меню.
             Ядро проверяет подпись по актуальному меню перед исполнением.
         action_layout: Ограничения адаптера для формирования страницы владельцем.
+        menu_revision: Редакция, с которой канал показал кнопку нижнего меню.
 
     Raises:
         ValueError: Если обязательное поле пусто.
@@ -92,6 +93,7 @@ class IncomingEvent:
     callback_message_id: str | None = None
     menu_choice: bool = False
     action_layout: ActionLayoutLimits = ActionLayoutLimits()
+    menu_revision: str | None = None
 
     @property
     def reply_address(self) -> ReplyAddress:
