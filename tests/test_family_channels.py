@@ -268,7 +268,7 @@ class FamilyChannelsTest(unittest.TestCase):
                 self.assertIn("Всего · 190 ₽", response_text(history))
                 card = choose(who, history, "1. 23.11 Лента · 190 ₽")
                 self.assertIn("Корм", response_text(card))
-                self.assertIn("Итого · 689 ₽", response_text(card))
+                self.assertIn("Всего 689 ₽", response_text(card))
                 last_page = choose(who, card, "Далее →")
                 card = choose(who, last_page, "← Ранее")
                 self.assertEqual(response_text(choose(who, card, "Назад")), response_text(history))
@@ -279,6 +279,78 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.guest, "Europe/Moscow")
             home = self._send(processor, self.owner_tg, "/family_expenses")
             self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
+
+    def test_receipt_layout_preserves_order_in_draft_and_groups_saved_items(self) -> None:
+        """Два канала показывают оплаченную сумму, фасовку, вес и подтверждённую скидку."""
+        from datetime import date
+        from decimal import Decimal
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        purchase = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, (
+            ExpenseItem("Продукты", "Печенье", 7199, Decimal(1), "шт.", 11399, "224 г", 11399),
+            ExpenseItem("Дом и быт", "Губки", 11599, Decimal(1), "шт.", 14999, "5 шт."),
+            ExpenseItem("Продукты", "Соль", 9999),
+            ExpenseItem("Продукты", "Бедро куриное", 26879, Decimal("0.768"), "кг", 34999),
+        ), "Магнит", 55676)
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=purchase,
+        ):
+            self._joined_family(processor)
+            for who in (self.owner_tg, self.guest):
+                with self.subTest(channel=who.channel):
+                    home = self._send(processor, who, "/family_expenses")
+                    self._choose(processor, who, home, "Добавить расход")
+                    draft = self._send(processor, who, "Чек")
+                    text = response_text(draft)
+                    self.assertIn("К оплате 556,76 ₽", text)
+                    self.assertEqual(text.count("556,76 ₽"), 1)
+                    self.assertIn("1. Печенье — 71,99 ₽\nПродукты · упаковка 224 г", text)
+                    self.assertIn("До скидки 113,99 ₽ · скидка 42 ₽", text)
+                    self.assertIn("2. Губки — 115,99 ₽\nДом и быт · упаковка 5 шт.", text)
+                    self.assertIn("Продукты · 768 г × 349,99 ₽/кг", text)
+                    self.assertNotIn("149,99", text)
+                    self._choose(processor, who, draft, "Сохранить")
+                    home = self._send(processor, who, "/family_expenses")
+                    period = self._choose(processor, who, home, "Выбрать период")
+                    self._choose(processor, who, period, "Другой месяц")
+                    home = self._send(processor, who, "11.2026")
+                    history = self._choose(processor, who, home, "История покупок")
+                    card = self._choose(processor, who, history, "1. 23.11 Магнит · 556,76 ₽")
+                    text = response_text(card)
+                    self.assertIn("Всего 556,76 ₽", text)
+                    self.assertIn("Продукты — 440,77 ₽\n  Печенье — 71,99 ₽", text)
+                    self.assertIn("Дом и быт — 115,99 ₽\n  Губки — 115,99 ₽", text)
+                    self.assertLess(text.index("Бедро куриное"), text.index("Дом и быт"))
+                    self.assertNotIn("Страница", text)
+
+    def test_category_continues_on_next_page_and_signed_difference_stays_in_header(self) -> None:
+        """Разница и полный итог категории сохраняются на обеих страницах чека."""
+        from datetime import date
+        from unittest.mock import Mock
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseCard, ExpenseItem, ExpenseSource
+        from compadre_assistant.capabilities.family.presentation.expense_browser import ExpenseBrowser, ReportScreen
+
+        repo, access = Mock(), Mock()
+        items = (ExpenseItem("Продукты", "Хлеб", 100), ExpenseItem("Дом", "Мыло", 50),
+                 *(ExpenseItem("Продукты", f"Товар {i}", 100) for i in range(5)))
+        for channel in ("telegram", "vk"):
+            browser = ExpenseBrowser.open("Asia/Omsk", channel)
+            for difference in (-17, 17):
+                card = ExpenseCard(1, 1, date(2026, 11, 23), ExpenseSource.TEXT,
+                                   items + (ExpenseItem(None, None, difference),), "Магнит", 650 + difference)
+                repo.card.return_value = card
+                messages = []
+                for page in range(2):
+                    browser.navigate(ReportScreen("card", purchase=1, page=page))
+                    text = response_text(browser.render(repo, access, "token", can_resume=False))
+                    self.assertIn("Продукты — 6 ₽", text)
+                    self.assertIn("По позициям — 6,50 ₽", text)
+                    self.assertIn("Без детализации — " + ("−" if difference < 0 else "") + "0,17 ₽", text)
+                    self.assertEqual(text.count("Без детализации"), 1)
+                    messages.append(text)
+                combined = "\n".join(messages)
+                for item in items:
+                    self.assertEqual(combined.count(item.product + " —"), 1)
 
     def test_find_expense_only_after_search_action_in_both_messengers(self) -> None:
         """Поиск требует явного действия и использует выбранный месяц в обоих каналах."""
