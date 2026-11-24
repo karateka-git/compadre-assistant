@@ -17,19 +17,21 @@ class ExpenseItemDto:
     quantity: str | None
     unit: str | None
     unit_price: int | None
+    package_size: str | None
+    amount_before_discount: int | None
 
     def to_domain(self) -> ExpenseItem:
         """Восстанавливает точное десятичное количество из SQLite TEXT."""
         return ExpenseItem(self.category, self.product, self.amount,
                            Decimal(self.quantity) if self.quantity is not None else None,
-                           self.unit, self.unit_price)
+                           self.unit, self.unit_price, self.package_size, self.amount_before_discount)
 
     @classmethod
     def from_domain(cls, item: ExpenseItem) -> "ExpenseItemDto":
         """Готовит точное количество и согласованные названия к записи."""
         return cls(item.category, item.product, item.amount,
                    str(item.quantity) if item.quantity is not None else None,
-                   item.unit, item.unit_price)
+                   item.unit, item.unit_price, item.package_size, item.amount_before_discount)
 
 
 @dataclass(frozen=True)

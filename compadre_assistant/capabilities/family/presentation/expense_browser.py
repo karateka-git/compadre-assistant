@@ -7,15 +7,9 @@ from zoneinfo import ZoneInfo
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
 from ..domain.expenses import ExpenseAccess, ExpenseRepository
 from .expense_chart import render_chart
+from .expense_receipt import item_details, money, receipt_header
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import text_content
-
-
-def money(amount: int) -> str:
-    """Форматирует целые копейки, включая отрицательную разницу."""
-    whole, cents = divmod(abs(amount), 100)
-    sign = "−" if amount < 0 else ""
-    return f"{sign}{whole},{cents:02} ₽" if cents else f"{sign}{whole} ₽"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,14 +141,25 @@ class ExpenseBrowser:
             if card is None:
                 lines = ["Покупка недоступна."]
             else:
-                lines = [f"{card.description or 'Покупка'} · {card.purchase_date:%d.%m.%Y}",
-                         f"Итого · {money(sum(i.amount for i in card.items))}"]
-                for i in card.items[start:start + self.size]:
-                    qty = f"{i.quantity} {i.unit or 'шт.'} · " if i.quantity is not None else ""
-                    price = f"{money(i.unit_price)} за ед. · " if i.unit_price is not None else ""
-                    lines.append(f"{i.product or 'Без детализации'} · {qty}{price}{money(i.amount)} · "
-                                 f"{i.category or 'Без детализации'}")
-                lines.append(pages(len(card.items), 0))
+                # Разницу до итога уже показывает шапка. Строка без товара внутри
+                # известной категории остаётся частью этой категории.
+                groups = {}
+                for item in card.items:
+                    if item.category is not None:
+                        groups.setdefault(item.category, []).append(item)
+                totals = {name: sum(item.amount for item in items) for name, items in groups.items()}
+                lines = receipt_header(card.description or "Покупка", card.purchase_date,
+                                       sum(totals.values()), card.receipt_total, "Всего")
+                grouped = [item for items in groups.values() for item in items]
+                category = None
+                for item in grouped[start:start + self.size]:
+                    if category != item.category:
+                        category = item.category
+                        lines.extend(("", f"{category} — {money(totals[category])}"))
+                    lines.append(f"  {item.product or 'Без детализации'} — {money(item.amount)}")
+                    lines.extend(f"  {detail}" for detail in item_details(item, show_category=False))
+                if len(grouped) > self.size:
+                    lines.extend(("", pages(len(grouped), 0)))
             button("Назад", ReportScreen("back"), int(bool(actions)))
         else:
             if screen.kind == "groups":

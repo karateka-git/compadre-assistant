@@ -62,13 +62,15 @@ class ExpenseRecognitionTests(unittest.TestCase):
     def test_receipt_summary_discount_already_in_line_totals(self):
         """Повтор скидки внизу чека не меняет оплаченные суммы или категории."""
         items = [
-            dict(product="Печенье", category="Продукты", amount=7199, eligible=True),
+            dict(product="Печенье", category="Продукты", amount=7199, eligible=True,
+                 package_size="224 г", amount_before_discount=11399),
             dict(product="Губка для посуды", category="Дом и быт", amount=11599, eligible=True),
             dict(product="Соль", category="Продукты", amount=9999),
             dict(product="Бедро куриное", category="Продукты", amount=26879),
         ]
         purchase = self.recognize(b"\xff\xd8\xfffixture", items=items, discount=7600, receipt_total=55676)
         self.assertEqual([line.amount for line in purchase.reconciled_items()], [7199, 11599, 9999, 26879])
+        self.assertEqual((purchase.items[0].package_size, purchase.items[0].amount_before_discount), ("224 г", 11399))
 
     def test_malformed_and_oversized_numbers(self):
         for item in ({"amount": 100}, {"product": "чай", "category": "Продукты", "amount": 10**99},

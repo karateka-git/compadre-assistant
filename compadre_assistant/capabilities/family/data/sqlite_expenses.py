@@ -114,10 +114,11 @@ class SQLiteExpenseRepository(ExpenseRepository):
                 product = self._catalog_id("family_expense_products", access.family_id, dto.product)
                 self._db.execute(
                     """INSERT INTO family_expense_items
-                       (family_id, expense_id, position, category_id, product_id, amount, quantity, unit, unit_price)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (family_id, expense_id, position, category_id, product_id, amount, quantity, unit,
+                        unit_price, package_size, amount_before_discount)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (access.family_id, expense_id, position, category, product, dto.amount,
-                     dto.quantity, dto.unit, dto.unit_price),
+                     dto.quantity, dto.unit, dto.unit_price, dto.package_size, dto.amount_before_discount),
                 )
             return expense_id
 
@@ -142,7 +143,8 @@ class SQLiteExpenseRepository(ExpenseRepository):
             if row is None:
                 return None
             lines = self._db.execute(
-                """SELECT c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price
+                """SELECT c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price,
+                          i.package_size, i.amount_before_discount
                    FROM family_expense_items i
                    LEFT JOIN family_expense_categories c ON i.category_id = c.id AND i.family_id = c.family_id
                    LEFT JOIN family_expense_products p ON i.product_id = p.id AND i.family_id = p.family_id
