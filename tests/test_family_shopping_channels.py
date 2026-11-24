@@ -690,6 +690,66 @@ class VkFamilyShoppingTest(unittest.TestCase):
                            labels=["Отмена", "Помощь"])
         self._single_reply(lambda: self._send("Ввести пошагово", payload=payload), "устарела")
         self._single_reply(lambda: self._send("Такси"), "сумму в рублях")
+        self._send("450")
+        categories = next(p for method, p in reversed(self.calls)
+                          if method == "messages.send" and "Выбери категорию" in p["message"])
+        category_id = next(cmid for cmid, msg in self.sent_messages.items() if msg["text"] == categories["message"])
+        self._single_reply(lambda: self._press(self._actions(categories)["Транспорт"], category_id), "Такси",
+                           labels=["Сохранить", "Исправить", "Отменить", "Помощь"])
+
+    def test_expense_review_uses_versioned_bottom_menu(self) -> None:
+        """Фоновый чек и меню приходят вместе; старая кнопка не сохраняет новый чек."""
+        from datetime import date
+        from threading import Event
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        items = tuple(ExpenseItem("Продукты", f"Товар {index}", 10000) for index in range(5))
+        receipt = ExpensePurchase(date(2026, 11, 24), ExpenseSource.TEXT, items)
+        self.enterContext(patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=receipt))
+        ready = Event()
+        deliver = self.processor.deliver_response_menu
+
+        def notify(*args, **kwargs):
+            result = deliver(*args, **kwargs)
+            if "Сохранить" in (self.delivered_menu or {}):
+                ready.set()
+            return result
+
+        self.enterContext(patch.object(self.processor, "deliver_response_menu", side_effect=notify))
+        self._send("/family")
+        self._send("/family_create")
+        self._send("Дом")
+        for attempt in range(2):
+            self._menu_press("Расходы")
+            home = next(params for method, params in reversed(self.calls) if method == "messages.send")
+            self._press(self._actions(home)["Добавить расход"], self.last_cmid)
+            before = len(self.calls)
+            ready.clear()
+            self._send("Магазин")
+            self.assertTrue(ready.wait(5))
+            sent = [p for m, p in self.calls[before:] if m == "messages.send"]
+            self.assertEqual(len(sent), 2)  # Статус распознавания и сам чек.
+            self.assertIn("Страница 1 из 2", sent[-1]["message"])
+            self.assertFalse(json.loads(sent[-1]["keyboard"])["inline"])
+            self.assertEqual(set(self._visible_menu()), {"Сохранить", "Исправить", "Отменить", "Помощь",
+                                                        "← Ранее", "Далее →"})
+            cmid = self.last_cmid
+            for button, page in (("Далее →", 2), ("← Ранее", 1)):
+                self._menu_press(button)
+                self.assertEqual(self.last_cmid, cmid)
+                self.assertIn(f"Страница {page} из 2", self.sent_messages[cmid]["text"])
+            if attempt == 0:
+                old_save = self._visible_menu()["Сохранить"]
+                self._menu_press("Исправить")
+                self.assertIn("Что исправить?", self.sent_messages[cmid]["text"])
+                self._single_reply(lambda: self._menu_press("Отменить"), "Ввод расхода отменён")
+            else:
+                self._single_reply(lambda: self._send("Сохранить", payload=old_save), "устарела")
+                self._single_reply(lambda: self._menu_press("Сохранить"), "Расход сохранён")
+            self.assertIn("Расходы", self._visible_menu())
+            self.assertNotIn("Сохранить", self._visible_menu())
+            with connect_database(self.database) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], attempt)
 
     def test_long_titles_in_list_and_selection(self) -> None:
         """VK показывает сокращение в тексте и сохраняет выбор товара кнопкой."""

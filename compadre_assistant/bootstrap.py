@@ -458,9 +458,9 @@ class ChannelMessageProcessor:
             return False
         old_actions, actions = published.menu.section_actions, current.menu.section_actions
         if current.address.channel == "vk":
-            # Подпись передаётся без команды; актуальная цель проверяется при нажатии.
-            return tuple((action.label, action.url) for action in (old_actions or ())) == tuple(
-                (action.label, action.url) for action in (actions or ())
+            # Новая редакция требует доставки даже при прежних подписях.
+            return tuple((action.label, action.url, action.menu_revision) for action in (old_actions or ())) == tuple(
+                (action.label, action.url, action.menu_revision) for action in (actions or ())
             )
         return published == current
 
