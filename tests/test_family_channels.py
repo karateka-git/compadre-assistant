@@ -33,6 +33,7 @@ class FamilyChannelsTest(unittest.TestCase):
     def test_expense_photo_and_text_review_edit_and_commit(self) -> None:
         """Оба канала редактируют многострочный чек и сохраняют одну поправку."""
         from datetime import date
+        from queue import Queue
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
         from compadre_assistant.core.presentation.incoming.events import ImageAttachment
 
@@ -49,8 +50,19 @@ class FamilyChannelsTest(unittest.TestCase):
                     event = self._event(identity, "Лента")
                     if identity.channel == "telegram":
                         event = replace(event, text="", images=(ImageAttachment(lambda: b"receipt"),))
-                    review = processor(event)
+                    replies = Queue()
+                    ack = processor(event, replies.put)
+                    ack.after_delivery(True)
+                    review = replies.get(timeout=5).response
                     self.assertIn("689 ₽", response_text(review))
+                    self.assertIsNone(review.view_delivery.target_message_id)
+                    page_two = self._choose(processor, identity, review, "Далее →")
+                    original_id = str(self._message_id)
+                    self.assertEqual(page_two.view_delivery.target_message_id, original_id)
+                    self.assertIn("Страница 2 из 2", response_text(page_two))
+                    review = self._choose(processor, identity, page_two, "← Ранее")
+                    self.assertEqual(review.view_delivery.target_message_id, original_id)
+                    self.assertIn("Страница 1 из 2", response_text(review))
                     old_save = next(action.command for action in review.suggested_actions if action.label == "Сохранить")
                     edit = self._choose(processor, identity, review, "Исправить")
                     positions = self._choose(processor, identity, edit, "Позиции")
@@ -60,6 +72,7 @@ class FamilyChannelsTest(unittest.TestCase):
                         rows = json.loads(_serialize_vk_inline_keyboard(positions))["buttons"]
                         self.assertEqual(len(rows), 6)
                     more = self._choose(processor, identity, positions, "Далее →")
+                    self.assertEqual(more.view_delivery.target_message_id, original_id)
                     row = self._choose(processor, identity, more, "5. Товар 4")
                     self._choose(processor, identity, row, "Сумма")
                     updated = self._send(processor, identity, "130")
@@ -77,7 +90,9 @@ class FamilyChannelsTest(unittest.TestCase):
                     updated = self._send(processor, identity, "Для дома")
                     self.assertIn("Для дома", response_text(updated))
                     self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
-                    self.assertIn("сохранён", response_text(self._choose(processor, identity, updated, "Сохранить")))
+                    saved = self._choose(processor, identity, updated, "Сохранить")
+                    self.assertIn("сохранён", response_text(saved))
+                    self.assertIn(str(self._message_id), saved.retire_views_after_delivery())
             self.assertEqual([call.args[0] for call in recognize.call_args_list], [b"receipt", "Лента"])
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 2)
@@ -197,6 +212,8 @@ class FamilyChannelsTest(unittest.TestCase):
                 groups = choose(who, home, "По категориям")
                 stale = groups.suggested_actions[0].command
                 next_page = choose(who, groups, "Далее →")
+                self.assertIsNotNone(groups.view_delivery.target_message_id)
+                self.assertEqual(next_page.view_delivery.target_message_id, groups.view_delivery.target_message_id)
                 if who.channel == "vk":
                     import json
                     from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
@@ -264,6 +281,8 @@ class FamilyChannelsTest(unittest.TestCase):
                     if identity.channel == "vk":
                         add = self._send(processor, identity, "Такси 450")
                         self.assertIn("Не удалось", response_text(add))
+                    else:
+                        self.assertEqual([a.label for a in add.bound_actions].count("Ввести пошагово"), 1)
                     self._choose(processor, identity, add, "Ввести пошагово")
                     amount = self._send(processor, identity, "Такси")
                     self.assertIn("рублях", response_text(amount))
@@ -271,6 +290,8 @@ class FamilyChannelsTest(unittest.TestCase):
                     groups = self._send(processor, identity, "450,50")
                     other = self._choose(processor, identity, groups, "Далее →")
                     groups = self._choose(processor, identity, other, "← Ранее")
+                    self.assertIsNotNone(other.view_delivery.target_message_id)
+                    self.assertEqual(groups.view_delivery.target_message_id, other.view_delivery.target_message_id)
                     review = self._choose(processor, identity, groups, "Транспорт")
                     self.assertIn("450,50 ₽", response_text(review))
                     self.assertIn("Такси", response_text(review))

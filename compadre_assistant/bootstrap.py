@@ -668,7 +668,7 @@ class ChannelMessageProcessor:
                                 response = background_dispatcher.resume_navigation(origin, response)
                                 response = background_dispatcher.bind_response_actions(
                                     origin, response, action_store, view_origin=completion_context,
-                                    expected_context=completion_context,
+                                    generation=generation, expected_context=completion_context,
                                 )
                     except Exception:
                         LOGGER.exception("Could not bind background response actions")
