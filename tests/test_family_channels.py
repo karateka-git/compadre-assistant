@@ -267,6 +267,47 @@ class FamilyChannelsTest(unittest.TestCase):
                 self.assertIn("записей нет", response_text(empty))
             model.assert_called_once()
 
+    def test_resume_edited_receipt_after_leaving_review_in_both_messengers(self) -> None:
+        """Сводка возвращает разобранное фото с правками без второго чтения и распознавания."""
+        from datetime import date
+        from unittest.mock import Mock
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.core.presentation.incoming.events import ImageAttachment
+
+        proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO,
+                                   (ExpenseItem("Продукты", "Хлеб", 5900),))
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed,
+        ) as recognize:
+            self._joined_family(processor)
+            for identity in (self.owner_tg, self.guest):
+                with self.subTest(channel=identity.channel):
+                    home = self._send(processor, identity, "/family_expenses")
+                    self.assertNotIn("Продолжить черновик", [a.label for a in home.bound_actions])
+                    self._choose(processor, identity, home, "Добавить расход")
+                    read_image = Mock(return_value=b"receipt")
+                    photo = replace(self._event(identity, "чек"), text="", images=(ImageAttachment(read_image),))
+                    review = processor(photo)
+                    edit = self._choose(processor, identity, review, "Исправить")
+                    self._choose(processor, identity, edit, "Магазин")
+                    updated = self._send(processor, identity, "Пекарня")
+                    old_save = next(a.command for a in updated.suggested_actions if a.label == "Сохранить")
+                    self._send(processor, identity, "Другое сообщение")
+                    home = self._send(processor, identity, "/family_expenses")
+                    groups = self._choose(processor, identity, home, "По категориям")
+                    home = self._choose(processor, identity, groups, "Назад")
+                    self.assertIn("Продолжить черновик", [a.label for a in home.bound_actions])
+                    period = self._choose(processor, identity, home, "Выбрать период")
+                    home = self._choose(processor, identity, period, "Предыдущий месяц")
+                    resumed = self._choose(processor, identity, home, "Продолжить черновик")
+                    self.assertEqual(response_text(resumed), response_text(updated))
+                    self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
+                    self.assertIn("сохранён", response_text(self._choose(processor, identity, resumed, "Сохранить")))
+                    home = self._send(processor, identity, "/family_expenses")
+                    self.assertNotIn("Продолжить черновик", [a.label for a in home.bound_actions])
+                    read_image.assert_called_once_with()
+            self.assertEqual(recognize.call_count, 2)
+
     def test_stepwise_expense_with_provider_offline(self) -> None:
         """Пошаговый ввод работает из обычного входа и после ошибки LLM."""
         from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError

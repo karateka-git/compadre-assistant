@@ -76,8 +76,8 @@ class ExpenseBrowser:
         else:
             self.navigate(ReportScreen("search", title=query))
 
-    def render(self, repo: ExpenseRepository, access: ExpenseAccess, token: str) -> IncomingResponse:
-        """Выдаёт адресные действия только для нового снимка экрана."""
+    def render(self, repo: ExpenseRepository, access: ExpenseAccess, token: str, *, can_resume: bool) -> IncomingResponse:
+        """Выдаёт действия нового снимка, включая возврат к доступному черновику в сводке."""
         self.targets.clear()
         self.revision += 1
         screen = self.stack[-1]
@@ -121,6 +121,8 @@ class ExpenseBrowser:
                 button("Назад", ReportScreen("back"), 1)
                 return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions), png_image=png)
             actions.append(ReplyAction("Добавить расход", f"/family_expenses add {token}", row=0))
+            if can_resume:
+                button("Продолжить черновик", ReportScreen("resume"), 0)
             button("По категориям", ReportScreen("groups"), 1)
             button("История покупок", ReportScreen("history"), 1)
             button("Выбрать период", ReportScreen("period"), 2)
