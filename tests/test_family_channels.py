@@ -145,19 +145,38 @@ class FamilyChannelsTest(unittest.TestCase):
             revised = self._send(processor, self.guest, "500")
             clock[0] += 599
             self.assertIn("сохранён", response_text(self._send(processor, self.guest, save_command(revised))))
-            stale = save_command(draft())
-            clock[0] += 600
+            draft()
+            self._send(processor, self.guest, "/family_shopping")
+            clock[0] += 599
+            home = self._send(processor, self.guest, "/family_expenses")
+            resumed = self._choose(processor, self.guest, home, "Продолжить черновик")
+            stale = save_command(resumed)
+            clock[0] += 1
             self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            def assert_no_draft(runtime, who):
+                home = self._send(runtime, who, "/family_expenses")
+                self.assertIn("Расходы семьи", response_text(home))
+                self.assertNotIn("Продолжить черновик", [a.label for a in home.bound_actions])
+            assert_no_draft(processor, self.guest)
+            draft()
+            clock[0] += 599
+            home = self._send(processor, self.guest, "/family_expenses")
+            clock[0] += 1
+            expired = self._choose(processor, self.guest, home, "Продолжить черновик")
+            self.assertIn("закрыт", response_text(expired))
             stale = save_command(draft())
             self._rejoin_guest()
             self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            assert_no_draft(processor, self.guest)
             stale = save_command(draft())
             self._send(processor, self.guest, "/exit")
             self._send(processor, self.guest, "/family")
             self.assertIn("закрыт", response_text(self._send(processor, self.guest, stale)))
+            assert_no_draft(processor, self.guest)
             stale = save_command(draft())
         with self._runtime("family") as fresh:
             self.assertIn("закрыт", response_text(self._send(fresh, self.guest, stale)))
+            assert_no_draft(fresh, self.guest)
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 1)
 
@@ -270,9 +289,13 @@ class FamilyChannelsTest(unittest.TestCase):
     def test_resume_edited_receipt_after_leaving_review_in_both_messengers(self) -> None:
         """Сводка возвращает разобранное фото с правками без второго чтения и распознавания."""
         from datetime import date
+        import json
         from unittest.mock import Mock
+        import aiogram
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
         from compadre_assistant.core.presentation.incoming.events import ImageAttachment
+        from compadre_assistant.presentation.telegram.bot import _serialize_telegram_inline_keyboard
+        from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
 
         proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO,
                                    (ExpenseItem("Продукты", "Хлеб", 5900),))
@@ -291,9 +314,20 @@ class FamilyChannelsTest(unittest.TestCase):
                     edit = self._choose(processor, identity, review, "Исправить")
                     self._choose(processor, identity, edit, "Магазин")
                     updated = self._send(processor, identity, "Пекарня")
-                    old_save = next(a.command for a in updated.suggested_actions if a.label == "Сохранить")
-                    self._send(processor, identity, "Другое сообщение")
-                    home = self._send(processor, identity, "/family_expenses")
+                    old_id = str(self._message_id)
+                    self._deliver(updated, old_id)
+                    old_save = next(a for a in updated.suggested_actions if a.label == "Сохранить")
+                    old_button = next(a for a in updated.bound_actions if a.label == "Сохранить")
+                    menu = self._send(processor, identity, "Другое сообщение")
+                    if identity.channel == "vk":
+                        home = processor(replace(self._event(identity, "Расходы"), menu_choice=True))
+                        rows = json.loads(_serialize_vk_inline_keyboard(home))["buttons"]
+                        labels = [button["action"]["label"] for button in rows[0]]
+                    else:
+                        home = self._choose(processor, identity, menu, "Расходы")
+                        rows = _serialize_telegram_inline_keyboard(home, aiogram).inline_keyboard
+                        labels = [button.text for button in rows[0]]
+                    self.assertEqual(labels, ["Добавить расход", "Продолжить черновик"])
                     groups = self._choose(processor, identity, home, "По категориям")
                     home = self._choose(processor, identity, groups, "Назад")
                     self.assertIn("Продолжить черновик", [a.label for a in home.bound_actions])
@@ -301,12 +335,28 @@ class FamilyChannelsTest(unittest.TestCase):
                     home = self._choose(processor, identity, period, "Предыдущий месяц")
                     resumed = self._choose(processor, identity, home, "Продолжить черновик")
                     self.assertEqual(response_text(resumed), response_text(updated))
-                    self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
-                    self.assertIn("сохранён", response_text(self._choose(processor, identity, resumed, "Сохранить")))
+                    self.assertIn("закрыт", response_text(self._send(processor, identity, old_save.command)))
+                    if identity.channel == "vk":
+                        current = next(a for a in processor.section_actions(self._event(identity, "меню"))
+                                       if a.label == "Сохранить")
+                        self.assertNotEqual(current.menu_revision, old_save.menu_revision)
+                        press = replace(self._event(identity, "Сохранить"), menu_choice=True)
+                        processor(replace(press, menu_revision=old_save.menu_revision))
+                        saved = processor(replace(self._event(identity, "Сохранить"), menu_choice=True,
+                                                  menu_revision=current.menu_revision))
+                    else:
+                        old_event = replace(self._event(identity, "callback"), callback_message_id=old_id)
+                        processor.select_action(old_event, old_button.token)
+                        saved = self._choose(processor, identity, resumed, "Сохранить")
+                    self.assertIn("сохранён", response_text(saved))
+                    save_again = next(a.command for a in resumed.suggested_actions if a.label == "Сохранить")
+                    self.assertIn("закрыт", response_text(self._send(processor, identity, save_again)))
                     home = self._send(processor, identity, "/family_expenses")
                     self.assertNotIn("Продолжить черновик", [a.label for a in home.bound_actions])
                     read_image.assert_called_once_with()
             self.assertEqual(recognize.call_count, 2)
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 2)
 
     def test_stepwise_expense_with_provider_offline(self) -> None:
         """Пошаговый ввод работает из обычного входа и после ошибки LLM."""
@@ -340,6 +390,88 @@ class FamilyChannelsTest(unittest.TestCase):
             failed.assert_called_once()
             with connect_database(self.database_path) as conn:
                 self.assertEqual(conn.execute("SELECT sum(amount) FROM family_expense_items").fetchone()[0], 90100)
+
+    def test_resume_reuses_confirmation_after_lost_save_result(self) -> None:
+        """Повтор после утраты результата записи передаёт тот же ключ и редакцию в SQLite."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
+        from compadre_assistant.capabilities.family.domain.expenses import (
+            ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
+        )
+
+        identity = self.owner_tg
+        purchase = ExpensePurchase(date(2026, 11, 23), ExpenseSource.TEXT, (ExpenseItem("Транспорт", "Такси", 45000),))
+        save = SQLiteExpenseRepository.save
+        def lose_result(repo, access, operation_id, revision, current):
+            save(repo, access, operation_id, revision, current)
+            raise InvalidExpense("Ответ хранилища потерян")
+
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=purchase,
+        ):
+            self._joined_family(processor)
+            home = self._send(processor, identity, "/family_expenses")
+            self._choose(processor, identity, home, "Добавить расход")
+            draft = self._send(processor, identity, "Такси 450")
+            with patch.object(SQLiteExpenseRepository, "save", lose_result):
+                self._choose(processor, identity, draft, "Сохранить")
+            home = self._send(processor, identity, "/family_expenses")
+            resumed = self._choose(processor, identity, home, "Продолжить черновик")
+            saved = self._choose(processor, identity, resumed, "Сохранить")
+            self.assertIn("сохранён", response_text(saved))
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 1)
+
+    def test_only_completed_new_input_replaces_draft_in_its_own_chat(self) -> None:
+        """Ошибка и отмена нового ввода сохраняют чек автора, готовый новый расход заменяет его."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.capabilities.family.domain.recognition import ExpenseRecognitionError
+
+        identity = self.owner_tg
+        initial = ExpensePurchase(date(2026, 11, 23), ExpenseSource.TEXT,
+                                  (ExpenseItem("Продукты", "Хлеб", 5900),))
+        with self._runtime("family") as processor, patch(
+            "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", side_effect=[initial, ExpenseRecognitionError],
+        ) as recognize:
+            self._joined_family(processor)
+            def home(who=identity):
+                return self._send(processor, who, "/family_expenses")
+            def add():
+                return self._choose(processor, identity, home(), "Добавить расход")
+            def resume():
+                return self._choose(processor, identity, home(), "Продолжить черновик")
+
+            add()
+            original = self._send(processor, identity, "Хлеб 59")
+            old_save = next(a.command for a in original.suggested_actions if a.label == "Сохранить")
+            self._send(processor, self.owner_vk, "/family")
+            for who in (self.owner_vk, self.guest):
+                summary = home(who)
+                self.assertIn("Расходы семьи", response_text(summary))
+                self.assertNotIn("Продолжить черновик", [a.label for a in summary.bound_actions])
+                self.assertIn("закрыт", response_text(self._send(processor, who, old_save)))
+            add()
+            failed = self._send(processor, identity, "Не удалось прочитать")
+            self.assertIn("Не удалось", response_text(failed))
+            self.assertEqual(response_text(resume()), response_text(original))
+            self._choose(processor, identity, add(), "Ввести пошагово")
+            self._send(processor, identity, "Такси")
+            self._send(processor, identity, "/cancel")
+            self.assertEqual(response_text(resume()), response_text(original))
+            self._choose(processor, identity, add(), "Ввести пошагово")
+            self._send(processor, identity, "Такси")
+            groups = self._send(processor, identity, "450")
+            replacement = self._choose(processor, identity, groups, "Транспорт")
+            resumed = resume()
+            self.assertIn("Такси", response_text(resumed))
+            self.assertEqual(response_text(resumed), response_text(replacement))
+            self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
+            self._choose(processor, identity, resumed, "Отменить")
+            self.assertNotIn("Продолжить черновик", [a.label for a in home().bound_actions])
+            self.assertEqual(recognize.call_count, 2)
+            with connect_database(self.database_path) as conn:
+                self.assertEqual(conn.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 0)
 
     def test_failed_receipt_returns_one_expenses_action_in_each_channel(self) -> None:
         """Фоновый отказ оставляет один переход к расходам и доступный ручной ввод."""
