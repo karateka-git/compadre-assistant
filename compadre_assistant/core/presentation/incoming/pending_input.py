@@ -5,9 +5,13 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from threading import RLock
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from compadre_assistant.core.presentation.incoming.events import ReplyAddress
+
+if TYPE_CHECKING:
+    from compadre_assistant.core.presentation.incoming.ports import ReplyAction
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,9 +29,10 @@ class PendingInput:
     required_mode: str | None = None  # Предметный ввод допустим только в указанном активном режиме.
     retry_command: str | None = None  # Команда владельца для нового ввода после истечения срока.
     accepts_images: bool = False  # Ожидание может принять событие с изображениями.
-    cancel_only_menu: bool = False  # Меню ожидания содержит только команду отмены.
+    cancel_only_menu: bool = False  # Ожидание заменяет обычное меню раздела.
     cancel_return_command: str | None = None  # Ручной переход после явной отмены ввода.
     external_user_id: str | None = None  # Автор ожидания, даже если профиля ещё нет.
+    menu_actions: tuple[ReplyAction, ...] = ()  # Альтернативы вводу на этом шаге.
 
 
 class PendingInputStore:
@@ -60,7 +65,7 @@ class PendingInputStore:
         app_user_id: int | None = None, required_mode: str | None = None,
         value_label: str = "значение", retry_command: str | None = None, accepts_images: bool = False,
         cancel_only_menu: bool = False, cancel_return_command: str | None = None,
-        external_user_id: str | None = None,
+        external_user_id: str | None = None, menu_actions: tuple[ReplyAction, ...] = (),
     ) -> PendingInput:
         """Заменяет ожидание новым ID и сроком ровно десять минут.
 
@@ -73,9 +78,10 @@ class PendingInputStore:
             required_mode: Обязательный активный режим; None не ограничивает режим.
             retry_command: Точная команда владельца для повторного начала ввода.
             accepts_images: Можно ли передать событие с изображениями владельцу.
-            cancel_only_menu: Оставить ли в меню только отмену.
+            cancel_only_menu: Заменить ли меню раздела действиями ожидания, отменой и справкой.
             cancel_return_command: Точная команда возврата после отмены ввода.
             external_user_id: Автор ожидания, если продолжение должен прислать именно он.
+            menu_actions: Действия владельца в меню на время этого ожидания.
 
         Returns:
             Новая неизменяемая запись.
@@ -93,7 +99,7 @@ class PendingInputStore:
                 pending = PendingInput(chat_key, owner_id, input_kind, uuid4().hex,
                                        now, now + timedelta(minutes=10), app_user_id, value_label, required_mode,
                                        retry_command, accepts_images, cancel_only_menu, cancel_return_command,
-                                       external_user_id)
+                                       external_user_id, menu_actions)
                 self._entries[chat_key] = pending
             return pending
 
