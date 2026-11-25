@@ -54,6 +54,43 @@ class FamilyChannelsTest(unittest.TestCase):
                         sdk.assert_called_once_with(base_url=profile["ASK_BASE_URL"], api_key="test",
                                                     timeout=expected, max_retries=0)
 
+    def test_category_confirmed_in_telegram_reaches_vk_recognition_and_reports(self) -> None:
+        """Категория подтверждённого ручного расхода попадает в запрос другой платформы и её сводку."""
+        import json
+        import os
+        from types import SimpleNamespace
+
+        env = {"ASK_BASE_URL": "https://example.invalid", "ASK_API_KEY": "test", "ASK_MODEL": "fixture"}
+        with self._runtime("family") as processor, patch.dict(os.environ, env), patch(
+                "compadre_assistant.capabilities.family.data.expense_recognition.OpenAI") as sdk:
+            self._joined_family(processor)
+            tg, vk = self.owner_tg, self.guest
+            home = self._send(processor, tg, "/family_expenses")
+            add = self._choose(processor, tg, home, "Добавить расход")
+            self._choose(processor, tg, add, "Ввести пошагово")
+            self._send(processor, tg, "Корм")
+            picker = self._send(processor, tg, "100")
+            self._choose(processor, tg, picker, "Создать категорию")
+            draft = self._send(processor, tg, "Для кота")
+            with connect_database(self.database_path) as db:
+                self.assertIsNone(db.execute("SELECT id FROM family_expense_categories WHERE name='Для кота'").fetchone())
+            self._choose(processor, tg, draft, "Сохранить")
+            sdk.assert_not_called()
+            call = sdk.return_value.__enter__.return_value.chat.completions.create
+            response = json.dumps({"items": [{"product": "Наполнитель", "category": "Для кота", "amount": 44000}]})
+            call.return_value = SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content=response))])
+            home = self._send(processor, vk, "/family_expenses")
+            self._choose(processor, vk, home, "Добавить расход")
+            draft = self._send(processor, vk, "Наполнитель 440")
+            self.assertIn("Для кота", json.loads(call.call_args.kwargs["messages"][1]["content"]))
+            self.assertIn("Для кота", response_text(draft))
+            self._choose(processor, vk, draft, "Сохранить")
+            for who in (tg, vk):
+                home = self._send(processor, who, "/family_expenses")
+                self.assertIn("Для кота — 540 ₽", response_text(home))
+            call.assert_called_once()
+
     def test_manage_shared_category_catalog_on_both_channels(self) -> None:
         """Участники листают справочник и разрешают конфликт изменения категории между каналами."""
         import json

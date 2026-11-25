@@ -26,7 +26,10 @@ class SQLiteExpenseRepository(ExpenseRepository):
     @contextmanager
     def _access(self, actor: ExpenseAccess, *, write: bool = False) -> Iterator[str]:
         with self._db:
-            self._db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            # Прежняя версия могла создать семью на обновлённой схеме в период отката.
+            initialize = self._db.execute("SELECT 1 FROM family_expense_catalogs WHERE family_id=?",
+                                          (actor.family_id,)).fetchone() is None
+            self._db.execute("BEGIN IMMEDIATE" if write or initialize else "BEGIN")
             row = self._db.execute(
                 """SELECT f.expense_timezone, m.joined_at
                    FROM families f JOIN family_members m ON m.family_id = f.id
@@ -34,6 +37,9 @@ class SQLiteExpenseRepository(ExpenseRepository):
             ).fetchone()
             if row is None or datetime.fromisoformat(row["joined_at"]) != actor.joined_at:
                 raise FamilyAccessEnded("Доступ к расходам семьи завершён")
+            if initialize:
+                self._db.execute("INSERT INTO family_expense_catalogs (family_id) VALUES (?) "
+                                 "ON CONFLICT(family_id) DO NOTHING", (actor.family_id,))
             yield row["expense_timezone"]
 
     def categories(self, access: ExpenseAccess, *, hidden: bool = False) -> tuple[ExpenseCategory, ...]:

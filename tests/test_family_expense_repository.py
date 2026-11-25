@@ -69,17 +69,19 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
             with db:
                 db.execute("INSERT INTO app_users (id) VALUES (1)")
             now = datetime.now(UTC)
-            family = SQLiteFamilyRepository(db).create(1, "Дом", now)
-            access = ExpenseAccess(family.id, 1, now)
             with db:
+                family_id = db.execute("INSERT INTO families (name,owner_app_user_id,created_at) VALUES ('Дом',1,?)",
+                                       (now.isoformat(),)).lastrowid
+                db.execute("INSERT INTO family_members VALUES (?,1,?)", (family_id, now.isoformat()))
+                access = ExpenseAccess(family_id, 1, now)
                 db.executemany("INSERT INTO family_expense_categories (id, family_id, name, name_key) "
-                               "VALUES (?, ?, ?, ?)", [(21, family.id, "продукты", "продукты"),
-                               (22, family.id, "Без детализации", "без детализации")])
+                               "VALUES (?, ?, ?, ?)", [(21, family_id, "продукты", "продукты"),
+                               (22, family_id, "Без детализации", "без детализации")])
                 db.execute("INSERT INTO family_expenses (id,family_id,author_id,operation_id,revision,purchase_date,"
                            "created_at,source,receipt_total) VALUES (1,?,1,'legacy',1,'2026-11-23',?,'manual',99)",
-                           (family.id, now.isoformat()))
+                           (family_id, now.isoformat()))
                 db.executemany("INSERT INTO family_expense_items (family_id,expense_id,position,category_id,amount) "
-                               "VALUES (?,1,?,?,?)", [(family.id, 1, 22, 100), (family.id, 2, None, -1)])
+                               "VALUES (?,1,?,?,?)", [(family_id, 1, 22, 100), (family_id, 2, None, -1)])
             apply_migrations(db)
             repo = SQLiteExpenseRepository(db)
             migrated = {category.name: category.id for category in repo.categories(access)}
@@ -87,6 +89,30 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
             summary = repo.summary(access, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)))
             self.assertEqual([(row.id, row.amount) for row in summary.categories], [(22, 100), (None, -1)])
             self.assertEqual(apply_migrations(db), [])
+
+    def test_family_created_during_rollback_initializes_catalog_once_on_return(self) -> None:
+        """Новый код дозаполняет созданную прежней версией семью, сохраняя её названия и ID."""
+        now = datetime.now(UTC)
+        with self.db:
+            self.db.execute("INSERT INTO app_users (id) VALUES (4)")
+            family_id = self.db.execute("INSERT INTO families (name,owner_app_user_id,created_at) VALUES ('Дом',4,?)",
+                                        (now.isoformat(),)).lastrowid
+            self.db.execute("INSERT INTO family_members VALUES (?,4,?)", (family_id, now.isoformat()))
+            product_id = self.db.execute("INSERT INTO family_expense_categories (family_id,name,name_key) "
+                                         "VALUES (?, 'продукты', 'продукты')", (family_id,)).lastrowid
+        access = ExpenseAccess(family_id, 4, now)
+        with self.assertRaises(FamilyAccessEnded):
+            self.repo.categories(replace(access, app_user_id=1))
+        self.assertIsNone(self.db.execute("SELECT * FROM family_expense_catalogs WHERE family_id=?", (family_id,)).fetchone())
+        catalog = self.repo.categories(access)
+        self.assertEqual(len(catalog), 11)
+        self.assertEqual(catalog[0].id, product_id)
+        renamed = self.repo.rename_category(access, catalog[0], "Еда")
+        self.repo.set_category_hidden(access, renamed, True)
+        with connect_database(self.path) as second:
+            fresh = SQLiteExpenseRepository(second).categories(access)
+            self.assertEqual(len(fresh), 10)
+            self.assertNotIn("Продукты", [category.name for category in fresh])
 
     def test_category_lifecycle_is_shared_and_preserves_history(self) -> None:
         """Член семьи управляет каталогом, не меняя ID, сумму или каталог другой семьи."""

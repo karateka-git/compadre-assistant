@@ -61,6 +61,7 @@ class SQLiteFamilyRepository(FamilyRepository, InvitationRepository, ShoppingRep
                 "INSERT INTO family_members (family_id, app_user_id, joined_at) VALUES (?, ?, ?)",
                 (row["id"], app_user_id, stamp),
             )
+            self._connection.execute("INSERT INTO family_expense_catalogs (family_id) VALUES (?)", (row["id"],))
             return family_from_dto(FamilyDto(**dict(row)))
 
     def find_for_member(self, app_user_id: int) -> Family | None:
