@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from ..domain.expenses import ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
+from ..domain.expense_categories import InvalidCategory, StaleCategory
 from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
 from compadre_assistant.core.presentation.incoming.events import ImageLoadError, IncomingEvent, ReplyAddress
@@ -20,8 +21,8 @@ from compadre_assistant.core.presentation.incoming.ports import (
     CANCEL_SECTION_ACTION, HandlerContext, IncomingResponse, PendingInputOutcome, PendingInputResult, ReplyAction,
     ResponseView,
 )
-from compadre_assistant.core.presentation.message_content import text_content
-from .expense_browser import ExpenseBrowser
+from compadre_assistant.core.presentation.message_content import compose_content, text_content
+from .expense_browser import ExpenseBrowser, ReportScreen
 from .expense_receipt import item_details, money as _money, receipt_header, receipt_pages
 
 
@@ -128,9 +129,12 @@ class ExpenseEntry:
             return None
         return draft
 
-    def _report(self, session, repo):
-        return session.browser.render(repo, session.access, session.token,
+    def _report(self, session, repo, notice=""):
+        response = session.browser.render(repo, session.access, session.token,
                                       can_resume=self._available_draft(session) is not None)
+        if notice:
+            return replace(response, content=compose_content(text_content(notice), response.content))
+        return response
 
     def draft_menu(self, address: ReplyAddress, mode: int, access: ExpenseAccess) -> tuple[ReplyAction, ...]:
         """Возвращает меню чека для текущего членства и действующей редакции в VK."""
@@ -152,14 +156,14 @@ class ExpenseEntry:
     def _expired(access: ExpenseAccess) -> IncomingResponse:
         return _reply("Этот экран уже закрыт. Открой «Расходы».", expenses_action(access.family_id))
 
-    def _ask(self, context, event, session, kind: str, prompt: str, *, images=False):
+    def _ask(self, context, event, session, kind: str, prompt: str, *, images=False, return_command=EXPENSES):
         if context.pending_inputs is None:
             return self._expired(session.access)
         menu_actions = (ReplyAction("Ввести пошагово", f"{EXPENSES} manual {session.token}",
                                     scope=ActionScope.SECTION),) if images else ()
         waiting = context.pending_inputs.begin(event.reply_address, "family", "expense:" + kind,
             app_user_id=context.app_user.id, required_mode="family", value_label=prompt, retry_command=EXPENSES,
-            accepts_images=images, cancel_only_menu=True, cancel_return_command=EXPENSES, menu_actions=menu_actions)
+            accepts_images=images, cancel_only_menu=True, cancel_return_command=return_command, menu_actions=menu_actions)
         session.request = waiting.request_id
         return _reply(prompt, *menu_actions, CANCEL_SECTION_ACTION, close_screen=True)
 
@@ -176,6 +180,10 @@ class ExpenseEntry:
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
                 return self._expired(access)
+            if args[0] == "catalog_return" and session.browser and args[2:] == [str(session.browser.revision)]:
+                session.request = None
+                with self._repository() as repo:
+                    return session.screen(self._report(session, repo))
             if args[0] == "browse" and session.browser and session.purchase is None:
                 browser = session.browser
                 if (len(args) != 4 or args[2] != str(browser.revision) or not args[3].isascii()
@@ -191,6 +199,12 @@ class ExpenseEntry:
                     session.browser = None
                     return session.screen(self._review(session), update=session.address.channel != "vk")
                 session.deadline = self._clock() + _TTL
+                if target.kind in ("create_category", "rename_category"):
+                    browser.targets.clear()
+                    prompt = ("Введи название новой категории." if target.kind == "create_category"
+                              else f"{target.selected_category.label}\n\nВведи новое название. Оно появится и в прошлых чеках.")
+                    return self._ask(context, event, session, target.kind, prompt,
+                                     return_command=f"{EXPENSES} catalog_return {session.token} {browser.revision}")
                 if target.kind == "search_input":
                     return self._ask(context, event, session, target.kind,
                                      "Введи название товара или его часть, например «молоко».")
@@ -199,6 +213,16 @@ class ExpenseEntry:
                               else "Введи часовой пояс IANA, например Asia/Omsk.")
                     return self._ask(context, event, session, target.kind, prompt)
                 with self._repository() as repo:
+                    if target.kind == "toggle_category":
+                        category = target.selected_category
+                        try:
+                            changed = repo.set_category_hidden(access, category, not category.hidden)
+                            notice = (f"«{changed.label}» скрыта. Прежние расходы остались в отчётах." if changed.hidden
+                                      else f"«{changed.label}» снова доступна для новых трат.")
+                        except InvalidCategory as error:
+                            notice = str(error)
+                        browser.navigate(ReportScreen("back"))
+                        return session.screen(self._report(session, repo, notice), update=True)
                     if target.kind in ("current", "previous"):
                         today = datetime.now(ZoneInfo(repo.timezone(access))).date()
                         month = today if target.kind == "current" else today.replace(day=1) - timedelta(days=1)
@@ -409,6 +433,26 @@ class ExpenseEntry:
             if session is None or session.request != pending.request_id:
                 return PendingInputResult(self._expired(access), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
+            if kind in ("create_category", "rename_category") and session.browser:
+                browser = session.browser
+                notice = ""
+                with self._repository() as repo:
+                    try:
+                        if kind == "create_category":
+                            category = repo.create_category(access, event.text)
+                        else:
+                            category = repo.rename_category(access, browser.stack[-1].selected_category, event.text)
+                        browser.navigate(ReportScreen("category_settings", selected_category=category))
+                    except StaleCategory as error:
+                        notice = str(error)
+                        browser.navigate(ReportScreen("back"))
+                    except InvalidCategory as error:
+                        return PendingInputResult(_reply(str(error) + "\nВведи другое название.", CANCEL_SECTION_ACTION),
+                                                  PendingInputOutcome.RETRY)
+                    response = self._report(session, repo, notice)
+                session.request = None
+                session.deadline = self._clock() + _TTL
+                return PendingInputResult(session.screen(response), PendingInputOutcome.COMPLETE)
             if kind == "search_input" and session.browser:
                 query = event.text.strip()
                 if not 0 < len(query) <= 256:

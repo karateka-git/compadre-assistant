@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
 from ..domain.expenses import ExpenseAccess, ExpenseRepository
+from ..domain.expense_categories import ExpenseCategory
 from .expense_chart import render_chart
 from .expense_receipt import day_label, item_details, money, receipt_header, receipt_pages
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
@@ -26,6 +27,7 @@ class ReportScreen:
     product: ProductSelection | None = None
     purchase: int | None = None
     title: str = ""
+    selected_category: ExpenseCategory | None = None
 
 
 @dataclass(slots=True)
@@ -128,9 +130,43 @@ class ExpenseBrowser:
             button("Часовой пояс", ReportScreen("zone"), 2)
             button("Найти товар", ReportScreen("search_input"), 3)
             button("Диаграмма", ReportScreen("chart"), 3)
+            button("Настроить категории", ReportScreen("catalog"), 4)
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
-        if screen.kind == "period":
+        if screen.kind in ("catalog", "hidden_catalog"):
+            hidden = screen.kind == "hidden_catalog"
+            catalog = repo.categories(access, hidden=hidden)
+            last = max(1, (len(catalog) + self.size - 1) // self.size)
+            if screen.page >= last:
+                screen = self.stack[-1] = replace(screen, page=last - 1)
+                start = screen.page * self.size
+            lines = ["Скрытые категории" if hidden else "Категории семьи", ""]
+            if not catalog:
+                lines.append("Скрытых категорий пока нет.")
+            for index, category in enumerate(catalog[start:start + self.size], start + 1):
+                label = f"{index}. {category.label}"
+                lines.append(label)
+                button(label, ReportScreen("category_settings", selected_category=category), index - start - 1)
+            row = len(actions)
+            if last > 1:
+                lines.extend(("", pages(last, row)))
+                row += 1
+            if not hidden:
+                button("Создать категорию", ReportScreen("create_category"), row)
+                button("Скрытые", ReportScreen("hidden_catalog"), row)
+            button("Назад", ReportScreen("back"), row)
+        elif screen.kind == "category_settings":
+            category = screen.selected_category
+            lines = [category.label]
+            if category.is_fallback:
+                lines.extend(("", "Бот выбирает эту категорию, если не может определить другую."))
+            else:
+                lines.append("Скрыта из списка для новых трат." if category.hidden else "Доступна для новых трат.")
+                button("Переименовать", ReportScreen("rename_category", selected_category=category), 0)
+                button("Вернуть" if category.hidden else "Скрыть", ReportScreen("toggle_category",
+                       selected_category=category), 1)
+            button("Назад", ReportScreen("back"), 2 if actions else 0)
+        elif screen.kind == "period":
             lines = ["Период отчёта", f"Сейчас выбран {heading}."]
             for row, (text, kind) in enumerate((("Текущий месяц", "current"), ("Предыдущий месяц", "previous"),
                                                 ("Другой месяц", "month_input"))):

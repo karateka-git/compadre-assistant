@@ -7,7 +7,7 @@ from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpenseCategoryUnavailable, ExpensePurchase, ExpenseRepository, InvalidExpense
-from ..domain.expense_categories import ExpenseCategory, InvalidCategory, category_name
+from ..domain.expense_categories import ExpenseCategory, InvalidCategory, StaleCategory, category_name
 from ..domain.membership import FamilyAccessEnded
 from .expense_dtos import ExpenseCardDto, ExpenseCategoryDto, ExpenseItemDto
 from ..domain.expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
@@ -63,7 +63,7 @@ class SQLiteExpenseRepository(ExpenseRepository):
                                "WHERE family_id=? AND id=? AND revision=?",
                                (family_id, category.id, category.revision)).fetchone()
         if row is None:
-            raise InvalidCategory("Категория изменилась. Открой список заново.")
+            raise StaleCategory("Категорию уже изменили. Выбери её заново.")
         return ExpenseCategoryDto(**row).to_domain()
 
     def rename_category(self, access: ExpenseAccess, category: ExpenseCategory, name: str) -> ExpenseCategory:

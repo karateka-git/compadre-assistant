@@ -54,6 +54,67 @@ class FamilyChannelsTest(unittest.TestCase):
                         sdk.assert_called_once_with(base_url=profile["ASK_BASE_URL"], api_key="test",
                                                     timeout=expected, max_retries=0)
 
+    def test_manage_shared_category_catalog_on_both_channels(self) -> None:
+        """Участники листают справочник и разрешают конфликт изменения категории между каналами."""
+        import json
+        from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+
+            def choose(who, screen, label):
+                return self._choose(processor, who, screen, label)
+
+            def catalog(who):
+                home = self._send(processor, who, "/family_expenses")
+                return choose(who, home, "Настроить категории")
+
+            def open_category(who, screen, name):
+                while True:
+                    label = next((a.label for a in screen.suggested_actions if a.label.endswith(". " + name)), None)
+                    if label:
+                        return choose(who, screen, label)
+                    screen = choose(who, screen, "Далее →")
+
+            tg, vk = self.owner_tg, self.guest
+            first = catalog(vk)
+            self.assertLessEqual(len(json.loads(_serialize_vk_inline_keyboard(first))["buttons"]), 6)
+            middle = choose(vk, first, "Далее →")
+            self.assertEqual(len(json.loads(_serialize_vk_inline_keyboard(middle))["buttons"]), 6)
+            self.assertEqual(middle.view_delivery.target_message_id, first.view_delivery.target_message_id)
+            choose(vk, middle, "Создать категорию")
+            created = self._send(processor, vk, "  Для  кота ")
+            self.assertIn("Для кота", response_text(created))
+            choose(vk, created, "Переименовать")
+            self.assertIn("уже есть", response_text(self._send(processor, vk, "продукты")))
+            renamed = self._send(processor, vk, "Зоотовары")
+            tg_settings = open_category(tg, catalog(tg), "Зоотовары")
+            choose(vk, renamed, "Переименовать")
+            active = choose(tg, tg_settings, "Скрыть")
+            self.assertIn("Прежние расходы", response_text(active))
+            self.assertIn("уже изменили", response_text(self._send(processor, vk, "Устарело")))
+            hidden = choose(tg, active, "Скрытые")
+            restore = open_category(tg, hidden, "Зоотовары")
+            empty = choose(tg, restore, "Вернуть")
+            self.assertIn("Скрытых категорий пока нет", response_text(empty))
+            again = open_category(vk, catalog(vk), "Зоотовары")
+            self.assertIn("Доступна для новых трат", response_text(again))
+            choose(vk, again, "Переименовать")
+            cancelled = self._send(processor, vk, "/cancel")
+            returned = choose(vk, cancelled, "Вернуться")
+            self.assertIn("Зоотовары", response_text(returned))
+            fallback = open_category(tg, catalog(tg), "Прочее")
+            self.assertEqual([a.label for a in fallback.suggested_actions], ["Назад"])
+            self._send(processor, self.other, "/family")
+            self._send(processor, self.other, "/family_create")
+            self._send(processor, self.other, "Другая семья")
+            other = catalog(self.other)
+            while True:
+                self.assertNotIn("Зоотовары", response_text(other))
+                if not any(a.label == "Далее →" for a in other.suggested_actions):
+                    break
+                other = choose(self.other, other, "Далее →")
+
     def test_catalog_change_during_recognition_preserves_draft_and_allows_correction(self) -> None:
         """Переименование обновляет подпись, скрытие просит выбрать другую категорию без повторного разбора."""
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource

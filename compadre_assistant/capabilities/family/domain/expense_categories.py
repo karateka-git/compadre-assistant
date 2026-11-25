@@ -13,6 +13,10 @@ class InvalidCategory(FamilyError):
     """Категория недоступна или её изменение нарушает правила справочника."""
 
 
+class StaleCategory(InvalidCategory):
+    """Правка адресована прежнему состоянию категории."""
+
+
 def category_name(value: str) -> str:
     """Возвращает название без лишних пробелов или сообщает о недопустимом имени."""
     title = " ".join(value.split())
@@ -33,6 +37,16 @@ class ExpenseCategory:
     revision: int
 
     @property
+    def label(self) -> str:
+        """Отличает прежнее пользовательское имя от служебной корректировки чека."""
+        return category_label(self.name)
+
+    @property
     def is_fallback(self) -> bool:
         """Возвращает признак постоянной запасной категории."""
         return self.name.casefold() == FALLBACK_CATEGORY.casefold()
+
+
+def category_label(name: str) -> str:
+    """Формирует однозначную подпись категории для участника семьи."""
+    return f"{name} (категория)" if name.casefold() == ADJUSTMENT_LABEL.casefold() else name
