@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpensePurchase, ExpenseRepository, InvalidExpense
+from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpenseCategoryUnavailable, ExpensePurchase, ExpenseRepository, InvalidExpense
 from ..domain.expense_categories import ExpenseCategory, InvalidCategory, category_name
 from ..domain.membership import FamilyAccessEnded
 from .expense_dtos import ExpenseCardDto, ExpenseCategoryDto, ExpenseItemDto
@@ -173,8 +173,17 @@ class SQLiteExpenseRepository(ExpenseRepository):
             assert expense_id is not None
             for position, item in enumerate(items, 1):
                 dto = ExpenseItemDto.from_domain(item)
-                category = self._catalog_id("family_expense_categories", access.family_id, dto.category)
-                product = self._catalog_id("family_expense_products", access.family_id, dto.product)
+                category = item.category_id
+                if category is not None:
+                    if self._db.execute("SELECT 1 FROM family_expense_categories WHERE id=? AND family_id=? AND hidden=0",
+                                        (category, access.family_id)).fetchone() is None:
+                        raise ExpenseCategoryUnavailable(position)
+                elif dto.category is not None:
+                    try:
+                        category = self._create_category(access.family_id, dto.category).id
+                    except InvalidCategory as error:
+                        raise ExpenseCategoryUnavailable(position) from error
+                product = self._product_id(access.family_id, dto.product)
                 self._db.execute(
                     """INSERT INTO family_expense_items
                        (family_id, expense_id, position, category_id, product_id, amount, quantity, unit,
@@ -185,15 +194,14 @@ class SQLiteExpenseRepository(ExpenseRepository):
                 )
             return expense_id
 
-    def _catalog_id(self, table: str, family_id: int, name: str | None) -> int | None:
+    def _product_id(self, family_id: int, name: str | None) -> int | None:
         if name is None:
             return None
         title = " ".join(name.split())
         key = title.casefold()
-        # Имена таблиц задаёт только save; ключи Unicode обрабатываются одинаково для обоих справочников.
-        self._db.execute(f"INSERT INTO {table} (family_id, name, name_key) VALUES (?, ?, ?) "
+        self._db.execute("INSERT INTO family_expense_products (family_id, name, name_key) VALUES (?, ?, ?) "
                          "ON CONFLICT(family_id, name_key) DO NOTHING", (family_id, title, key))
-        return self._db.execute(f"SELECT id FROM {table} WHERE family_id = ? AND name_key = ?",
+        return self._db.execute("SELECT id FROM family_expense_products WHERE family_id = ? AND name_key = ?",
                                 (family_id, key)).fetchone()[0]
 
     def card(self, access: ExpenseAccess, expense_id: int) -> ExpenseCard | None:

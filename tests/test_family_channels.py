@@ -54,6 +54,35 @@ class FamilyChannelsTest(unittest.TestCase):
                         sdk.assert_called_once_with(base_url=profile["ASK_BASE_URL"], api_key="test",
                                                     timeout=expected, max_retries=0)
 
+    def test_catalog_change_during_recognition_preserves_draft_and_allows_correction(self) -> None:
+        """Переименование обновляет подпись, скрытие просит выбрать другую категорию без повторного разбора."""
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        def recognize(value, today, categories):
+            food, transport = categories[0], categories[2]
+            with connect_database(self.database_path) as db, db:
+                db.execute("UPDATE family_expense_categories SET name='Еда',name_key='еда',revision=revision+1 "
+                           "WHERE id=?", (food.id,))
+                db.execute("UPDATE family_expense_categories SET hidden=1,revision=revision+1 WHERE id=?", (transport.id,))
+            return ExpensePurchase(today, ExpenseSource.TEXT, (
+                ExpenseItem(food.name, "Хлеб", 100, category_id=food.id),
+                ExpenseItem(transport.name, "Доставка", 100, category_id=transport.id)))
+
+        with self._runtime("family") as processor, patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize",
+                                                         side_effect=recognize) as model:
+            self._joined_family(processor)
+            who = self.owner_tg
+            home = self._send(processor, who, "/family_expenses")
+            self._choose(processor, who, home, "Добавить расход")
+            review = self._send(processor, who, "Хлеб и доставка")
+            self.assertIn("Еда", response_text(review))
+            conflict = self._choose(processor, who, review, "Сохранить")
+            self.assertIn("позиции 2", response_text(conflict))
+            self._choose(processor, who, conflict, "Исправить категорию")
+            review = self._send(processor, who, "Доставка")
+            self.assertIn("сохранён", response_text(self._choose(processor, who, review, "Сохранить")))
+            model.assert_called_once()
+
     def test_expense_photo_and_text_review_edit_and_commit(self) -> None:
         """Оба канала редактируют многострочный чек и сохраняют одну поправку."""
         from datetime import date

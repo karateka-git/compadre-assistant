@@ -24,6 +24,15 @@ class InvalidExpense(FamilyError):
     """Данные требуют исправления до подтверждения."""
 
 
+class ExpenseCategoryUnavailable(InvalidExpense):
+    """Сохранение требует повторного выбора категории у указанной строки."""
+
+    def __init__(self, position: int) -> None:
+        """Запоминает порядковый номер позиции от единицы."""
+        self.position = position
+        super().__init__(f"Категория позиции {position} недоступна. Выбери другую категорию.")
+
+
 @dataclass(frozen=True, slots=True)
 class ExpenseAccess:
     """Привязывает доступ профиля к конкретному вступлению в семью."""
@@ -45,6 +54,7 @@ class ExpenseItem:
     unit_price: int | None = None
     package_size: str | None = None
     amount_before_discount: int | None = None
+    category_id: int | None = None  # Выбранная категория сохраняет привязку при переименовании.
 
 
 @dataclass(frozen=True, slots=True)

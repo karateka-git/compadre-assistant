@@ -10,7 +10,7 @@ from time import monotonic
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ..domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
+from ..domain.expenses import ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
 from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
@@ -222,8 +222,13 @@ class ExpenseEntry:
                 if args[0] == "categories" and index * _PAGE < len(CATEGORIES):
                     return session.screen(self._categories(session, index), update=True)
                 if args[0] == "choose" and index < len(CATEGORIES):
+                    with self._repository() as repo:
+                        chosen = next((c for c in repo.categories(session.access)
+                                       if c.name.casefold() == CATEGORIES[index].casefold()), None)
+                    if chosen is None:
+                        return session.screen(self._categories(session, index // _PAGE), update=True)
                     purchase = ExpensePurchase(session.manual_date, ExpenseSource.MANUAL,
-                        (ExpenseItem(CATEGORIES[index], session.manual_name, session.manual_amount),))
+                        (ExpenseItem(chosen.name, session.manual_name, session.manual_amount, category_id=chosen.id),))
                     return self._update(session, purchase, update_screen=True)
                 return self._expired(access)
             if args[0] == "add" and session.browser:
@@ -244,8 +249,13 @@ class ExpenseEntry:
             self._sessions.pop(event.reply_address)
             return _reply("Ввод расхода отменён.", expenses_action(session.access.family_id), close_screen=True)
         if verb == "save":
-            with self._repository() as repo:
-                repo.save(session.access, session.draft.operation_id, session.draft.revision, purchase)
+            try:
+                with self._repository() as repo:
+                    repo.save(session.access, session.draft.operation_id, session.draft.revision, purchase)
+            except ExpenseCategoryUnavailable as error:
+                return session.screen(_reply(str(error),
+                    self._button(session, "Исправить категорию", "category", str(error.position - 1)),
+                    self._button(session, "Назад", "view")), update=True)
             self._drafts.pop(event.reply_address)
             self._sessions.pop(event.reply_address)
             total = purchase.receipt_total if purchase.receipt_total is not None else sum(i.amount for i in purchase.items)
@@ -478,28 +488,40 @@ class ExpenseEntry:
             items = list(purchase.items)
             if field == "insert":
                 name, amount, category = (part.strip() for part in text.split("|"))
-                items.append(ExpenseItem(category, name, _cents(amount)))
+                items.append(ExpenseItem(category, name, _cents(amount), category_id=self._category_id(session, category)))
             else:
                 key = {"name": "product", "amount": "amount", "category": "category"}[field]
                 value = _cents(text) if field == "amount" else text
                 changes = {key: value}
+                if field == "category":
+                    changes["category_id"] = self._category_id(session, text)
                 if field == "amount" and value != items[int(index)].amount:
                     changes["amount_before_discount"] = None
                 items[int(index)] = replace(items[int(index)], **changes)
             purchase = replace(purchase, items=tuple(items))
         return self._update(session, purchase)
 
+    def _category_id(self, session, name):
+        key = " ".join(name.split()).casefold()
+        with self._repository() as repo:
+            return next((c.id for c in repo.categories(session.access) if c.name.casefold() == key), None)
+
     def _recognize(self, event, session, today, cancelled):
         try:
             if self._recognizer is None or cancelled():
                 raise ExpenseRecognitionError
+            with self._repository() as repo:
+                categories = repo.categories(session.access)
             value = event.images[0].read_bytes() if event.images else event.text
-            purchase = self._recognizer.recognize(value, today)
+            purchase = self._recognizer.recognize(value, today, categories)
             with self._lock:
                 if cancelled() or self._sessions.get(event.reply_address) is not session:
                     return self._expired(session.access)
                 with self._repository() as repo:
-                    repo.timezone(session.access)
+                    current = {c.id: c.name for c in repo.categories(session.access)}
+                purchase = replace(purchase, items=tuple(
+                    replace(item, category=current[item.category_id]) if item.category_id in current else item
+                    for item in purchase.items))
                 return self._update(session, purchase)
         except (ImageLoadError, ExpenseRecognitionError, FamilyAccessEnded, InvalidExpense):
             return _reply("Не удалось разобрать расход.\n\n"

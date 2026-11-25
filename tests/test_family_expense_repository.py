@@ -14,7 +14,7 @@ from threading import Barrier
 from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.expenses import (
-    ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
+    ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
 )
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
 from compadre_assistant.capabilities.family.domain.expense_categories import InvalidCategory
@@ -107,6 +107,26 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         restored = self.repo.set_category_hidden(self.author, hidden, False)
         self.assertEqual((restored.id, restored.name, restored.hidden), (base[0].id, "Еда", False))
         self.assertEqual([c.name for c in self.repo.categories(self.other)], list(CATEGORIES))
+
+    def test_save_resolves_pending_names_and_stable_ids_atomically(self) -> None:
+        """Скрытая или чужая категория откатывает чек, переименование сохраняет прежнюю связь."""
+        selected = self.repo.categories(self.author)[0]
+        edited = self.repo.rename_category(self.owner, selected, "Еда")
+        proposed = replace(self.purchase, items=(ExpenseItem("Для кота", "Корм", 200),
+                                                 ExpenseItem(selected.name, "Хлеб", 100, category_id=selected.id)))
+        hidden = self.repo.set_category_hidden(self.owner, edited, True)
+        with self.assertRaises(ExpenseCategoryUnavailable) as error:
+            self.repo.save(self.author, "draft", 1, proposed)
+        self.assertEqual(error.exception.position, 2)
+        self.assertNotIn("Для кота", [c.name for c in self.repo.categories(self.owner)])
+        self.assertEqual(self.db.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 0)
+        self.repo.set_category_hidden(self.owner, hidden, False)
+        self.repo.create_category(self.owner, "ДЛЯ КОТА")
+        key = self.repo.save(self.author, "draft", 1, proposed)
+        self.assertEqual([i.category for i in self.repo.card(self.owner, key).items[:2]], ["ДЛЯ КОТА", "Еда"])
+        self.assertEqual(self.repo.save(self.author, "draft", 1, proposed), key)
+        with self.assertRaises(ExpenseCategoryUnavailable):
+            self.repo.save(self.other, "alien", 1, proposed)
 
     def test_category_protection_and_membership(self) -> None:
         """Отклоняет зарезервированные названия, утрату доступа и подмену запасной категории."""
