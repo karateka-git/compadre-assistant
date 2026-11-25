@@ -44,6 +44,12 @@ if TYPE_CHECKING:
 MAX_ARTIFACT = 64 * 1024 * 1024
 _AI_ID_MIGRATION = "0006_ai_capability_id.sql"
 _AI_ID_TABLES = frozenset({"active_chat_modes", "user_capability_preferences"})
+_CATALOG_MIGRATION = "0013_family_expense_categories.sql"
+# Ожидаемый результат миграции закреплён в контроллере независимо от SQL кандидата.
+_CATALOG_DEFAULTS = (
+    "Продукты", "Кафе и доставка еды", "Транспорт", "Дом и быт", "Здоровье", "Одежда",
+    "Дети", "Питомцы", "Досуг", "Связь и подписки", "Прочее",
+)
 
 
 class PredeployError(ValueError):
@@ -480,6 +486,26 @@ def require_copy_foreign_keys(connection: sqlite3.Connection) -> None:
         raise PredeployError("SAFE_COPY_FOREIGN_KEYS")
 
 
+def _verify_initial_categories(old: sqlite3.Connection, new: sqlite3.Connection) -> None:
+    """Сверяет исходные ID и точное дозаполнение справочника каждой семьи при переходе через 0013."""
+    rows = "SELECT id, family_id, name, name_key FROM family_expense_categories"
+    before = Counter(old.execute(rows))
+    after = Counter(new.execute(rows))
+    if not before <= after:
+        raise PredeployError("SAFE_COPY_DATA_LOSS")
+
+    families = {family for family, in old.execute("SELECT id FROM families")}
+    existing = {(family, key) for _, family, _, key in before}
+    expected = Counter((family, name, name.casefold()) for family in families for name in _CATALOG_DEFAULTS
+                       if (family, name.casefold()) not in existing)
+    # ID новых строк назначает SQLite. Уникальность ID и связи проверяет сама схема.
+    added = Counter((family, name, key) for _, family, name, key in (after - before).elements())
+    registered = {family for family, in new.execute("SELECT family_id FROM family_expense_catalogs")}
+    wrong_state = new.execute("SELECT 1 FROM family_expense_categories WHERE hidden IS NOT 0 OR revision IS NOT 1 LIMIT 1")
+    if added != expected or registered != families or wrong_state.fetchone() is not None:
+        raise PredeployError("SAFE_COPY_DATA_LOSS")
+
+
 def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
                          fingerprint: str) -> None:
     """Сравнивает отдельную SQLite-копию с исходным снимком и CI evidence.
@@ -503,6 +529,9 @@ def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
         renames_ai_id = _AI_ID_MIGRATION in expected and old.execute(
             "SELECT 1 FROM schema_migrations WHERE name = ?", (_AI_ID_MIGRATION,),
         ).fetchone() is None
+        initializes_catalog = _CATALOG_MIGRATION in expected and old.execute(
+            "SELECT 1 FROM schema_migrations WHERE name = ?", (_CATALOG_MIGRATION,),
+        ).fetchone() is None
         # Общие поля сравниваются как мультимножество: порядок строк не имеет смысла,
         # а multiplicity сохраняет доказательство отсутствия удаления дубликатов.
         tables = old.execute("SELECT name FROM sqlite_schema WHERE type='table'").fetchall()
@@ -515,6 +544,11 @@ def verify_migrated_copy(original: Path, candidate: Path, expected: list[str],
             common = sorted(left & right)
             if not common:
                 raise PredeployError("SAFE_COPY_TABLE_LOSS")
+            if initializes_catalog and name == "family_expense_categories":
+                if set(common) != left or left != {"id", "family_id", "name", "name_key"}:
+                    raise PredeployError("SAFE_COPY_TABLE_LOSS")
+                _verify_initial_categories(old, new)
+                continue
             columns = ",".join('"' + column.replace('"', '""') + '"' for column in common)
             query = f"SELECT {columns} FROM {quoted}"
             old_query = query

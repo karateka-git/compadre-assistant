@@ -459,6 +459,61 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CopyTests(unittest.TestCase):
+    def test_catalog_migration_allows_only_missing_defaults_per_family(self):
+        """Проверяет реальные SQL, сохранение исходных ID, расходов и границы допуска для 0013."""
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            historical = root / "historical"
+            historical.mkdir()
+            for path in MIGRATIONS_DIR.glob("*.sql"):
+                if path.name[:4] <= "0012":
+                    shutil.copyfile(path, historical / path.name)
+            source, migrated, probe = (root / name for name in ("old.db", "migrated.db", "probe.db"))
+            with closing(sqlite3.connect(source)) as old, closing(sqlite3.connect(migrated)) as good:
+                apply_migrations(old, historical)
+                for family in (1, 2):
+                    old.execute("INSERT INTO app_users(id) VALUES (?)", (family,))
+                    old.execute("INSERT INTO families(id, name, owner_app_user_id, created_at) VALUES (?, 'Дом', ?, 't')",
+                                (family, family))
+                    old.execute("INSERT INTO family_members VALUES (?, ?, 't')", (family, family))
+                old.executemany("INSERT INTO family_expense_categories VALUES (?, 1, ?, ?)",
+                                [(40, "ПРОДУКТЫ", "продукты"), (41, "Сад", "сад")])
+                old.execute("INSERT INTO family_expenses(id, family_id, operation_id, revision, purchase_date, "
+                            "created_at, source) VALUES (1,1,'op',1,'2026-11-25','t','manual')")
+                old.execute("INSERT INTO family_expense_items(family_id,expense_id,position,category_id,amount) "
+                            "VALUES(1,1,1,40,6000)")
+                old.commit()
+                old.backup(good)
+                apply_migrations(good)
+                expected = [row[0] for row in good.execute("SELECT name FROM schema_migrations ORDER BY version")]
+                fingerprint = gate.schema_fingerprint(good)
+                gate.verify_migrated_copy(source, migrated, expected, fingerprint)
+                corruptions = (
+                    "DELETE FROM family_expense_categories WHERE id=41",
+                    "UPDATE family_expense_categories SET id=3 WHERE id=41",
+                    "UPDATE family_expense_categories SET name='Продукты' WHERE id=40",
+                    "INSERT INTO family_expense_categories(family_id,name,name_key) VALUES(2,'Сад','сад')",
+                    "DELETE FROM family_expense_categories WHERE family_id=2 AND name_key='продукты'",
+                    "UPDATE family_expense_categories SET hidden=1 WHERE family_id=1 AND name_key='одежда'",
+                    "UPDATE family_expense_categories SET revision=2 WHERE id=41",
+                    "DELETE FROM family_expense_catalogs WHERE family_id=2",
+                    "UPDATE family_expense_items SET amount=5999",
+                )
+                for sql in corruptions:
+                    with self.subTest(sql=sql), closing(sqlite3.connect(probe)) as changed:
+                        good.backup(changed)
+                        changed.execute(sql)
+                        changed.commit()
+                        with self.assertRaisesRegex(gate.PredeployError, "SAFE_COPY_DATA_LOSS"):
+                            gate.verify_migrated_copy(source, probe, expected, fingerprint)
+                # После регистрации 0013 последующие проверки снова требуют полного совпадения строк.
+                with closing(sqlite3.connect(probe)) as changed:
+                    good.backup(changed)
+                    changed.execute("UPDATE family_expense_categories SET hidden=1 WHERE id=41")
+                    changed.commit()
+                with self.assertRaisesRegex(gate.PredeployError, "SAFE_COPY_DATA_LOSS"):
+                    gate.verify_migrated_copy(migrated, probe, expected, fingerprint)
+
     def test_only_exact_ai_id_rename_is_allowed_when_0006_is_pending(self) -> None:
         """Сравнение сохраняет личный выбор, ревизию и все значения вне замены ID."""
         migration = "0006_ai_capability_id.sql"
