@@ -54,6 +54,162 @@ class FamilyChannelsTest(unittest.TestCase):
                         sdk.assert_called_once_with(base_url=profile["ASK_BASE_URL"], api_key="test",
                                                     timeout=expected, max_retries=0)
 
+    def test_category_confirmed_in_telegram_reaches_vk_recognition_and_reports(self) -> None:
+        """Категория подтверждённого ручного расхода попадает в запрос другой платформы и её сводку."""
+        import json
+        import os
+        from types import SimpleNamespace
+
+        env = {"ASK_BASE_URL": "https://example.invalid", "ASK_API_KEY": "test", "ASK_MODEL": "fixture"}
+        with self._runtime("family") as processor, patch.dict(os.environ, env), patch(
+                "compadre_assistant.capabilities.family.data.expense_recognition.OpenAI") as sdk:
+            self._joined_family(processor)
+            tg, vk = self.owner_tg, self.guest
+            home = self._send(processor, tg, "/family_expenses")
+            add = self._choose(processor, tg, home, "Добавить расход")
+            self._choose(processor, tg, add, "Ввести пошагово")
+            self._send(processor, tg, "Корм")
+            picker = self._send(processor, tg, "100")
+            self._choose(processor, tg, picker, "Создать категорию")
+            draft = self._send(processor, tg, "Для кота")
+            with connect_database(self.database_path) as db:
+                self.assertIsNone(db.execute("SELECT id FROM family_expense_categories WHERE name='Для кота'").fetchone())
+            self._choose(processor, tg, draft, "Сохранить")
+            sdk.assert_not_called()
+            call = sdk.return_value.__enter__.return_value.chat.completions.create
+            response = json.dumps({"items": [{"product": "Наполнитель", "category": "Для кота", "amount": 44000}]})
+            call.return_value = SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason="stop", message=SimpleNamespace(content=response))])
+            home = self._send(processor, vk, "/family_expenses")
+            self._choose(processor, vk, home, "Добавить расход")
+            draft = self._send(processor, vk, "Наполнитель 440")
+            self.assertIn("Для кота", json.loads(call.call_args.kwargs["messages"][1]["content"]))
+            self.assertIn("Для кота", response_text(draft))
+            self._choose(processor, vk, draft, "Сохранить")
+            for who in (tg, vk):
+                home = self._send(processor, who, "/family_expenses")
+                self.assertIn("Для кота — 540 ₽", response_text(home))
+            call.assert_called_once()
+
+    def test_manage_shared_category_catalog_on_both_channels(self) -> None:
+        """Участники листают справочник и разрешают конфликт изменения категории между каналами."""
+        import json
+        from compadre_assistant.presentation.vk.bot import _serialize_vk_inline_keyboard
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+
+            def choose(who, screen, label):
+                return self._choose(processor, who, screen, label)
+
+            def catalog(who):
+                home = self._send(processor, who, "/family_expenses")
+                return choose(who, home, "Настроить категории")
+
+            def open_category(who, screen, name):
+                while True:
+                    label = next((a.label for a in screen.suggested_actions if a.label.endswith(". " + name)), None)
+                    if label:
+                        return choose(who, screen, label)
+                    screen = choose(who, screen, "Далее →")
+
+            tg, vk = self.owner_tg, self.guest
+            first = catalog(vk)
+            self.assertLessEqual(len(json.loads(_serialize_vk_inline_keyboard(first))["buttons"]), 6)
+            middle = choose(vk, first, "Далее →")
+            self.assertEqual(len(json.loads(_serialize_vk_inline_keyboard(middle))["buttons"]), 6)
+            self.assertEqual(middle.view_delivery.target_message_id, first.view_delivery.target_message_id)
+            choose(vk, middle, "Создать категорию")
+            created = self._send(processor, vk, "  Для  кота ")
+            self.assertIn("Для кота", response_text(created))
+            choose(vk, created, "Переименовать")
+            self.assertIn("уже есть", response_text(self._send(processor, vk, "продукты")))
+            renamed = self._send(processor, vk, "Зоотовары")
+            tg_settings = open_category(tg, catalog(tg), "Зоотовары")
+            choose(vk, renamed, "Переименовать")
+            active = choose(tg, tg_settings, "Скрыть")
+            self.assertIn("Прежние расходы", response_text(active))
+            self.assertIn("уже изменили", response_text(self._send(processor, vk, "Устарело")))
+            hidden = choose(tg, active, "Скрытые")
+            restore = open_category(tg, hidden, "Зоотовары")
+            empty = choose(tg, restore, "Вернуть")
+            self.assertIn("Скрытых категорий пока нет", response_text(empty))
+            again = open_category(vk, catalog(vk), "Зоотовары")
+            self.assertIn("Доступна для новых трат", response_text(again))
+            choose(vk, again, "Переименовать")
+            cancelled = self._send(processor, vk, "/cancel")
+            returned = choose(vk, cancelled, "Вернуться")
+            self.assertIn("Зоотовары", response_text(returned))
+            fallback = open_category(tg, catalog(tg), "Прочее")
+            self.assertEqual([a.label for a in fallback.suggested_actions], ["Назад"])
+            self._send(processor, self.other, "/family")
+            self._send(processor, self.other, "/family_create")
+            self._send(processor, self.other, "Другая семья")
+            other = catalog(self.other)
+            while True:
+                self.assertNotIn("Зоотовары", response_text(other))
+                if not any(a.label == "Далее →" for a in other.suggested_actions):
+                    break
+                other = choose(self.other, other, "Далее →")
+
+    def test_pick_category_survives_catalog_change_and_creation_waits_for_save(self) -> None:
+        """Оба канала проверяют ID кнопки, скрытое имя и отмену добавления категории с расходом."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            for who in (self.owner_tg, self.guest):
+                with self.subTest(channel=who.channel):
+                    choose = lambda screen, label: self._choose(processor, who, screen, label)
+                    home = self._send(processor, who, "/family_expenses")
+                    choose(choose(home, "Добавить расход"), "Ввести пошагово")
+                    self._send(processor, who, "Наполнитель")
+                    picker = self._send(processor, who, "440")
+                    stale = next(a.command for a in picker.suggested_actions if a.label == "Транспорт")
+                    with connect_database(self.database_path) as db, db:
+                        db.execute("UPDATE family_expense_categories SET hidden=1,revision=revision+1 "
+                                   "WHERE name='Транспорт'")
+                    refreshed = choose(picker, "Транспорт")
+                    self.assertIn("Категорию скрыли", response_text(refreshed))
+                    self.assertNotIn("Транспорт", [a.label for a in refreshed.suggested_actions])
+                    self.assertIn("закрыт", response_text(self._send(processor, who, stale)))
+                    choose(refreshed, "Создать категорию")
+                    self.assertIn("скрыта", response_text(self._send(processor, who, "Транспорт")))
+                    review = self._send(processor, who, " Для кота ")
+                    self.assertIn("Для кота", response_text(review))
+                    choose(review, "Отменить")
+                    with connect_database(self.database_path) as db, db:
+                        self.assertFalse(db.execute("SELECT 1 FROM family_expense_categories WHERE name='Для кота'").fetchone())
+                        db.execute("UPDATE family_expense_categories SET hidden=0,revision=revision+1 "
+                                   "WHERE name='Транспорт'")
+
+    def test_catalog_change_during_recognition_preserves_draft_and_allows_correction(self) -> None:
+        """Переименование обновляет подпись, скрытие просит выбрать другую категорию без повторного разбора."""
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
+
+        def recognize(value, today, categories):
+            food, transport = categories[0], categories[2]
+            with connect_database(self.database_path) as db, db:
+                db.execute("UPDATE family_expense_categories SET name='Еда',name_key='еда',revision=revision+1 "
+                           "WHERE id=?", (food.id,))
+                db.execute("UPDATE family_expense_categories SET hidden=1,revision=revision+1 WHERE id=?", (transport.id,))
+            return ExpensePurchase(today, ExpenseSource.TEXT, (
+                ExpenseItem(food.name, "Хлеб", 100, category_id=food.id),
+                ExpenseItem(transport.name, "Доставка", 100, category_id=transport.id)))
+
+        with self._runtime("family") as processor, patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize",
+                                                         side_effect=recognize) as model:
+            self._joined_family(processor)
+            who = self.owner_tg
+            home = self._send(processor, who, "/family_expenses")
+            self._choose(processor, who, home, "Добавить расход")
+            review = self._send(processor, who, "Хлеб и доставка")
+            self.assertIn("Еда", response_text(review))
+            conflict = self._choose(processor, who, review, "Сохранить")
+            self.assertIn("позиции 2", response_text(conflict))
+            self._choose(processor, who, conflict, "Создать категорию")
+            review = self._send(processor, who, "Доставка")
+            self.assertIn("сохранён", response_text(self._choose(processor, who, review, "Сохранить")))
+            model.assert_called_once()
+
     def test_expense_photo_and_text_review_edit_and_commit(self) -> None:
         """Оба канала редактируют многострочный чек и сохраняют одну поправку."""
         from datetime import date
@@ -62,6 +218,7 @@ class FamilyChannelsTest(unittest.TestCase):
         from compadre_assistant.core.presentation.incoming.events import ImageAttachment
 
         items = tuple(ExpenseItem("Продукты", f"Товар {i}", 10000) for i in range(6))
+        items += (ExpenseItem("Подарки", "Открытка", 0), ExpenseItem("Подарки", "Наклейка", 0))
         proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, items, "Лента", 68900)
         with self._runtime("family") as processor, patch(
             "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed,
@@ -79,11 +236,14 @@ class FamilyChannelsTest(unittest.TestCase):
                     ack.after_delivery(True)
                     review = replies.get(timeout=5).response
                     self.assertIn("689 ₽", response_text(review))
+                    self.assertIn("7. Открытка", response_text(review))
+                    self.assertNotIn("8. Наклейка", response_text(review))
                     self.assertIsNone(review.view_delivery.target_message_id)
                     page_two = self._choose(processor, identity, review, "Далее →")
                     original_id = str(self._message_id)
                     self.assertEqual(page_two.view_delivery.target_message_id, original_id)
                     self.assertIn("Страница 2 из 2", response_text(page_two))
+                    self.assertIn("8. Наклейка", response_text(page_two))
                     review = self._choose(processor, identity, page_two, "← Ранее")
                     self.assertEqual(review.view_delivery.target_message_id, original_id)
                     self.assertIn("Страница 1 из 2", response_text(review))
@@ -104,18 +264,20 @@ class FamilyChannelsTest(unittest.TestCase):
                     edit = self._choose(processor, identity, updated, "Исправить")
                     positions = self._choose(processor, identity, edit, "Позиции")
                     self._choose(processor, identity, positions, "Добавить позицию")
-                    retry = self._send(processor, identity, " | 10 | Продукты")
-                    self.assertIn("формат", response_text(retry))
-                    updated = self._send(processor, identity, "Ложка | 0 | Продукты")
+                    retry = self._send(processor, identity, " | 10")
+                    self.assertIn("Хлеб | 59", response_text(retry))
+                    picker = self._send(processor, identity, "Ложка | 0")
+                    updated = self._choose(processor, identity, picker, "Продукты")
                     edit = self._choose(processor, identity, updated, "Исправить")
                     positions = self._choose(processor, identity, edit, "Позиции")
                     row = self._choose(processor, identity, positions, "1. Товар 0")
-                    self._choose(processor, identity, row, "Категория")
+                    picker = self._choose(processor, identity, row, "Категория")
+                    self._choose(processor, identity, picker, "Создать категорию")
                     updated = self._send(processor, identity, "Для дома")
                     self.assertIn("Для дома", response_text(updated))
                     self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))
                     saved = self._choose(processor, identity, updated, "Сохранить")
-                    self.assertIn("сохранён", response_text(saved))
+                    self.assertIn("Расход сохранён.\nЛента — 689 ₽", response_text(saved))
                     self.assertIn(str(self._message_id), saved.retire_views_after_delivery())
             self.assertEqual([call.args[0] for call in recognize.call_args_list], [b"receipt", "Лента"])
             with connect_database(self.database_path) as conn:
@@ -223,6 +385,7 @@ class FamilyChannelsTest(unittest.TestCase):
             home = self._send(processor, self.owner_tg, "/family_expenses")
             empty = choose(self.owner_tg, home, "Диаграмма")
             self.assertIsNone(empty.png_image)
+            self.assertIn("За этот месяц расходов пока нет.", response_text(empty))
             home = choose(self.owner_tg, empty, "Назад")
             choose(self.owner_tg, home, "Добавить расход")
             review = processor(replace(self._event(self.owner_tg, "Фото"), text="",
@@ -243,18 +406,19 @@ class FamilyChannelsTest(unittest.TestCase):
                 periods = choose(who, home, "Выбрать период")
                 choose(who, periods, "Другой месяц")
                 home = self._send(processor, who, "11.2026")
-                self.assertIn("Всего · 1139 ₽", response_text(home))
+                self.assertIn("Расходы семьи · ноябрь 2026\nВсего 1139 ₽\n\n", response_text(home))
                 chart = choose(who, home, "Диаграмма")
                 self.assertTrue(chart.png_image.startswith(b"\x89PNG\r\n\x1a\n"))
-                self.assertIn("Всего · 1139 ₽", response_text(chart))
-                self.assertIn("Продукты · 249 ₽", response_text(chart))
-                self.assertIn("Остальные · 0 ₽", response_text(chart))
+                self.assertIn("Всего 1139 ₽", response_text(chart))
+                self.assertIn("Продукты — 249 ₽", response_text(chart))
+                self.assertIn("Остальные — 0 ₽", response_text(chart))
                 home = choose(who, chart, "Назад")
-                self.assertIn("11.2026", response_text(home))
+                self.assertIn("ноябрь 2026", response_text(home))
                 self.assertIn("Найти товар", [a.label for a in home.suggested_actions])
                 groups = choose(who, home, "По категориям")
                 stale = groups.suggested_actions[0].command
                 next_page = choose(who, groups, "Далее →")
+                self.assertIn("Страница 2 из", response_text(next_page))
                 self.assertIsNotNone(groups.view_delivery.target_message_id)
                 self.assertEqual(next_page.view_delivery.target_message_id, groups.view_delivery.target_message_id)
                 if who.channel == "vk":
@@ -264,12 +428,16 @@ class FamilyChannelsTest(unittest.TestCase):
                 self.assertIn("закрыт", response_text(self._send(processor, who, stale)))
                 groups = choose(who, next_page, "← Ранее")
                 products = choose(who, groups, "3. Продукты · 249 ₽")
+                self.assertIn("В категории 249 ₽", response_text(products))
                 history = choose(who, products, "1. Молоко · 190 ₽")
-                self.assertIn("Всего · 190 ₽", response_text(history))
+                self.assertIn("По этой позиции 190 ₽\n\n1. 23 ноября · Лента — 190 ₽", response_text(history))
+                self.assertNotIn("Страница", response_text(history))
                 card = choose(who, history, "1. 23.11 Лента · 190 ₽")
                 self.assertIn("Корм", response_text(card))
                 self.assertIn("Всего 689 ₽", response_text(card))
+                self.assertEqual(response_text(card).count("\n  "), 7)
                 last_page = choose(who, card, "Далее →")
+                self.assertEqual(response_text(last_page).count("\n  "), 4)
                 card = choose(who, last_page, "← Ранее")
                 self.assertEqual(response_text(choose(who, card, "Назад")), response_text(history))
             home = self._send(processor, self.guest, "/family_expenses")
@@ -279,6 +447,29 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.guest, "Europe/Moscow")
             home = self._send(processor, self.owner_tg, "/family_expenses")
             self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
+
+    def test_long_receipt_rows_fit_channel_messages(self) -> None:
+        """Длинные строки переходят целиком с заголовком группы; обе версии помещаются в канал."""
+        from compadre_assistant.capabilities.family.presentation.expense_receipt import receipt_pages
+        from compadre_assistant.core.presentation.message_content import text_content
+        from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+        from compadre_assistant.presentation.vk.rendering import render_vk_content
+
+        header = ["Магазин", "Всего 7 ₽"]
+        products = [f"{i}. " + "Чай <&>🍋" * 30 + " — 1 ₽" for i in range(1, 8)]
+        for group in (None, "Продукты — 7 ₽"):
+            with self.subTest(group=group):
+                pages = receipt_pages(header, ((group, product) for product in products))
+                self.assertGreater(len(pages), 1)
+                visible = []
+                for number, page in enumerate(pages, 1):
+                    if group:
+                        self.assertIn(group, page)
+                    visible.extend(line for line in page.splitlines() if line in products)
+                    content = text_content(f"{page}\nСтраница {number} из {len(pages)}")
+                    self.assertEqual(len(render_telegram_content(content)), 1)
+                    self.assertEqual(len(render_vk_content(content)), 1)
+                self.assertEqual(visible, products)
 
     def test_receipt_layout_preserves_order_in_draft_and_groups_saved_items(self) -> None:
         """Два канала показывают оплаченную сумму, фасовку, вес и подтверждённую скидку."""
@@ -323,6 +514,61 @@ class FamilyChannelsTest(unittest.TestCase):
                     self.assertLess(text.index("Бедро куриное"), text.index("Дом и быт"))
                     self.assertNotIn("Страница", text)
 
+    def test_reclassify_saved_receipt_from_last_product_history_page(self) -> None:
+        """Оба канала переносят одну строку и возвращаются на существующую страницу отчёта."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.capabilities.family.domain.expense_reports import ExpensePeriod
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            with connect_database(self.database_path) as db:
+                member = db.execute("SELECT * FROM family_members ORDER BY app_user_id LIMIT 1").fetchone()
+                access = ExpenseAccess(member["family_id"], member["app_user_id"], datetime.fromisoformat(member["joined_at"]))
+                repo = SQLiteExpenseRepository(db)
+                for number in range(6):
+                    repo.save(access, str(number), 1, ExpensePurchase(date(2026, 11, 23), ExpenseSource.MANUAL,
+                              (ExpenseItem("Продукты", "Соль", 100), ExpenseItem("Дом и быт", "Наполнитель", 44000)),
+                              f"Магазин {number}", 44110))
+            for index, who in enumerate((self.owner_tg, self.guest), 1):
+                def choose(screen, label):
+                    return self._choose(processor, who, screen, label)
+                home = self._send(processor, who, "/family_expenses")
+                choose(choose(home, "Выбрать период"), "Другой месяц")
+                home = self._send(processor, who, "11.2026")
+                groups = choose(home, "По категориям")
+                products = choose(groups, next(a.label for a in groups.suggested_actions if ". Дом и быт" in a.label))
+                history = choose(products, next(a.label for a in products.suggested_actions if ". Наполнитель" in a.label))
+                last = choose(history, "Далее →")
+                card = choose(last, next(a.label for a in last.suggested_actions if "Магазин" in a.label))
+                positions = choose(card, "Изменить категорию")
+                self.assertFalse(any("Без детализации" in a.label for a in positions.suggested_actions))
+                categories = choose(positions, "2. Наполнитель")
+                more = choose(categories, "Далее →")
+                card = choose(more, next(a.label for a in more.suggested_actions if ". Питомцы" in a.label))
+                self.assertIn("Питомцы — 440 ₽", response_text(card))
+                self.assertIn("Без детализации — 0,10 ₽", response_text(card))
+                returned = choose(card, "Назад")
+                self.assertNotIn("Страница", response_text(returned))
+                self.assertIn(f"По этой позиции {(6 - index) * 440} ₽", response_text(returned))
+                with connect_database(self.database_path) as db:
+                    repo = SQLiteExpenseRepository(db)
+                    report = repo.summary(access, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)))
+                    self.assertEqual(report.total, 6 * 44110)
+                    self.assertEqual(next(c.amount for c in report.categories if c.name == "Питомцы"), index * 44000)
+                    if index == 2:
+                        source = next(c for c in repo.categories(access) if c.name == "Дом и быт")
+                        repo.rename_category(access, source, "Дом")
+                products = choose(returned, "Назад")
+                if index == 2:
+                    self.assertIn("Дом · ноябрь 2026", response_text(products))
+                groups = choose(products, "Назад")
+                home = choose(groups, "Назад")
+                chart = choose(home, "Диаграмма")
+                self.assertIn(f"Питомцы — {index * 440} ₽", response_text(chart))
+                self.assertTrue(chart.png_image.startswith(b"\x89PNG"))
+
     def test_category_continues_on_next_page_and_signed_difference_stays_in_header(self) -> None:
         """Разница и полный итог категории сохраняются на обеих страницах чека."""
         from datetime import date
@@ -332,19 +578,19 @@ class FamilyChannelsTest(unittest.TestCase):
 
         repo, access = Mock(), Mock()
         items = (ExpenseItem("Продукты", "Хлеб", 100), ExpenseItem("Дом", "Мыло", 50),
-                 *(ExpenseItem("Продукты", f"Товар {i}", 100) for i in range(5)))
+                 *(ExpenseItem("Продукты", f"Товар {i}", 100) for i in range(7)))
         for channel in ("telegram", "vk"):
             browser = ExpenseBrowser.open("Asia/Omsk", channel)
             for difference in (-17, 17):
                 card = ExpenseCard(1, 1, date(2026, 11, 23), ExpenseSource.TEXT,
-                                   items + (ExpenseItem(None, None, difference),), "Магнит", 650 + difference)
+                                   items + (ExpenseItem(None, None, difference),), "Магнит", 850 + difference)
                 repo.card.return_value = card
                 messages = []
                 for page in range(2):
                     browser.navigate(ReportScreen("card", purchase=1, page=page))
                     text = response_text(browser.render(repo, access, "token", can_resume=False))
-                    self.assertIn("Продукты — 6 ₽", text)
-                    self.assertIn("По позициям — 6,50 ₽", text)
+                    self.assertIn("Продукты — 8 ₽", text)
+                    self.assertIn("По позициям — 8,50 ₽", text)
                     self.assertIn("Без детализации — " + ("−" if difference < 0 else "") + "0,17 ₽", text)
                     self.assertEqual(text.count("Без детализации"), 1)
                     messages.append(text)
@@ -375,11 +621,13 @@ class FamilyChannelsTest(unittest.TestCase):
                 matches = self._send(processor, who, "МОЛОКО")
                 self.assertIn("Молоко сгущённое", response_text(matches))
                 chosen = self._choose(processor, who, matches, "2. Молоко · 95 ₽")
-                self.assertIn("Всего · 95 ₽", response_text(chosen))
+                self.assertIn("По этой позиции 95 ₽", response_text(chosen))
                 home = self._send(processor, who, "/family_expenses")
                 self._choose(processor, who, home, "Найти товар")
                 empty = self._send(processor, who, "кофе")
-                self.assertIn("записей нет", response_text(empty))
+                self.assertIn("Поиск «кофе»", response_text(empty))
+                self.assertIn("Товаров с таким названием за этот месяц нет.", response_text(empty))
+                self.assertNotIn("Страница", response_text(empty))
             model.assert_called_once()
 
     def test_resume_edited_receipt_after_leaving_review_in_both_messengers(self) -> None:
@@ -472,10 +720,11 @@ class FamilyChannelsTest(unittest.TestCase):
                         self.assertEqual([a.label for a in add.bound_actions].count("Ввести пошагово"), 1)
                     self._choose(processor, identity, add, "Ввести пошагово")
                     amount = self._send(processor, identity, "Такси")
-                    self.assertIn("рублях", response_text(amount))
+                    self.assertIn("Такси\n\nВведи сумму в рублях", response_text(amount))
                     self.assertIn("450,50", response_text(self._send(processor, identity, "четыре")))
                     groups = self._send(processor, identity, "450,50")
                     other = self._choose(processor, identity, groups, "Далее →")
+                    self.assertIn("Страница 2 из", response_text(other))
                     groups = self._choose(processor, identity, other, "← Ранее")
                     self.assertIsNotNone(other.view_delivery.target_message_id)
                     self.assertEqual(groups.view_delivery.target_message_id, other.view_delivery.target_message_id)

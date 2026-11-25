@@ -8,6 +8,7 @@ from typing import Protocol
 
 from .membership import FamilyError
 from .expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
+from .expense_categories import ExpenseCategory
 
 
 class ExpenseSource(StrEnum):
@@ -23,6 +24,15 @@ class InvalidExpense(FamilyError):
     """Данные требуют исправления до подтверждения."""
 
 
+class ExpenseCategoryUnavailable(InvalidExpense):
+    """Сохранение требует повторного выбора категории у указанной строки."""
+
+    def __init__(self, position: int) -> None:
+        """Запоминает порядковый номер позиции от единицы."""
+        self.position = position
+        super().__init__(f"Категория позиции {position} недоступна. Выбери другую категорию.")
+
+
 @dataclass(frozen=True, slots=True)
 class ExpenseAccess:
     """Привязывает доступ профиля к конкретному вступлению в семью."""
@@ -30,6 +40,15 @@ class ExpenseAccess:
     family_id: int
     app_user_id: int
     joined_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class ExpenseLineRef:
+    """Адрес и ожидаемая редакция строки сохранённой покупки."""
+
+    purchase_id: int
+    position: int
+    revision: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +63,8 @@ class ExpenseItem:
     unit_price: int | None = None
     package_size: str | None = None
     amount_before_discount: int | None = None
+    category_id: int | None = None  # Выбранная категория сохраняет привязку при переименовании.
+    saved_line: ExpenseLineRef | None = None  # Адрес появляется у редактируемой позиции после сохранения.
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +124,22 @@ class ExpenseCard:
 class ExpenseRepository(Protocol):
     """Доступ к карточке, записи покупки и общему календарю семьи."""
 
+    def categories(self, access: ExpenseAccess, *, hidden: bool = False) -> tuple[ExpenseCategory, ...]:
+        """Возвращает активные либо скрытые категории указанной семьи."""
+        ...
+
+    def create_category(self, access: ExpenseAccess, name: str) -> ExpenseCategory:
+        """Создаёт категорию или возвращает активную категорию с тем же названием."""
+        ...
+
+    def rename_category(self, access: ExpenseAccess, category: ExpenseCategory, name: str) -> ExpenseCategory:
+        """Меняет название категории при совпадении редакции."""
+        ...
+
+    def set_category_hidden(self, access: ExpenseAccess, category: ExpenseCategory, hidden: bool) -> ExpenseCategory:
+        """Скрывает или возвращает категорию её текущей редакции."""
+        ...
+
     def summary(self, access: ExpenseAccess, period: ExpensePeriod) -> ExpenseSummary:
         """Читает все категории периода в порядке убывания суммы."""
         ...
@@ -128,6 +165,10 @@ class ExpenseRepository(Protocol):
 
     def card(self, access: ExpenseAccess, expense_id: int) -> ExpenseCard | None:
         """Возвращает карточку своей семьи или None для отсутствующей покупки."""
+        ...
+
+    def set_item_category(self, access: ExpenseAccess, line: ExpenseLineRef, category_id: int) -> None:
+        """Меняет категорию строки текущей редакции на активную категорию той же семьи."""
         ...
 
     def timezone(self, access: ExpenseAccess) -> str:

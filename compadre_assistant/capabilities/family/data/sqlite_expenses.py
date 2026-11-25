@@ -6,9 +6,12 @@ from datetime import UTC, datetime
 from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpensePurchase, ExpenseRepository, InvalidExpense
+from ..domain.expenses import (
+    ExpenseAccess, ExpenseCard, ExpenseCategoryUnavailable, ExpenseLineRef, ExpensePurchase, ExpenseRepository, InvalidExpense,
+)
+from ..domain.expense_categories import ExpenseCategory, InvalidCategory, StaleCategory, category_name
 from ..domain.membership import FamilyAccessEnded
-from .expense_dtos import ExpenseCardDto, ExpenseItemDto
+from .expense_dtos import ExpenseCardDto, ExpenseCategoryDto, ExpenseItemDto
 from ..domain.expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
 from .expense_report_queries import query_rows
 
@@ -23,7 +26,10 @@ class SQLiteExpenseRepository(ExpenseRepository):
     @contextmanager
     def _access(self, actor: ExpenseAccess, *, write: bool = False) -> Iterator[str]:
         with self._db:
-            self._db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+            # Прежняя версия могла создать семью на обновлённой схеме в период отката.
+            initialize = self._db.execute("SELECT 1 FROM family_expense_catalogs WHERE family_id=?",
+                                          (actor.family_id,)).fetchone() is None
+            self._db.execute("BEGIN IMMEDIATE" if write or initialize else "BEGIN")
             row = self._db.execute(
                 """SELECT f.expense_timezone, m.joined_at
                    FROM families f JOIN family_members m ON m.family_id = f.id
@@ -31,7 +37,72 @@ class SQLiteExpenseRepository(ExpenseRepository):
             ).fetchone()
             if row is None or datetime.fromisoformat(row["joined_at"]) != actor.joined_at:
                 raise FamilyAccessEnded("Доступ к расходам семьи завершён")
+            if initialize:
+                self._db.execute("INSERT INTO family_expense_catalogs (family_id) VALUES (?) "
+                                 "ON CONFLICT(family_id) DO NOTHING", (actor.family_id,))
             yield row["expense_timezone"]
+
+    def categories(self, access: ExpenseAccess, *, hidden: bool = False) -> tuple[ExpenseCategory, ...]:
+        """Читает видимую или скрытую часть каталога в порядке добавления."""
+        with self._access(access):
+            rows = self._db.execute("SELECT id, name, hidden, revision FROM family_expense_categories "
+                                    "WHERE family_id=? AND hidden=? ORDER BY id", (access.family_id, hidden))
+            return tuple(ExpenseCategoryDto(**row).to_domain() for row in rows)
+
+    def create_category(self, access: ExpenseAccess, name: str) -> ExpenseCategory:
+        """Создаёт категорию внутри семьи с защитой от дубля и возврата скрытой категории."""
+        with self._access(access, write=True):
+            return self._create_category(access.family_id, name)
+
+    def _create_category(self, family_id: int, name: str) -> ExpenseCategory:
+        title = category_name(name)
+        key = title.casefold()
+        self._db.execute("INSERT INTO family_expense_categories (family_id,name,name_key) VALUES (?,?,?) "
+                         "ON CONFLICT(family_id,name_key) DO NOTHING", (family_id, title, key))
+        row = self._db.execute("SELECT id, name, hidden, revision FROM family_expense_categories "
+                               "WHERE family_id=? AND name_key=?", (family_id, key)).fetchone()
+        category = ExpenseCategoryDto(**row).to_domain()
+        if category.hidden:
+            raise InvalidCategory("Категория уже есть в скрытых. Её можно вернуть в настройках.")
+        return category
+
+    def _current_category(self, family_id: int, category: ExpenseCategory) -> ExpenseCategory:
+        row = self._db.execute("SELECT id, name, hidden, revision FROM family_expense_categories "
+                               "WHERE family_id=? AND id=? AND revision=?",
+                               (family_id, category.id, category.revision)).fetchone()
+        if row is None:
+            raise StaleCategory("Категорию уже изменили. Выбери её заново.")
+        return ExpenseCategoryDto(**row).to_domain()
+
+    def rename_category(self, access: ExpenseAccess, category: ExpenseCategory, name: str) -> ExpenseCategory:
+        """Обновляет одно название, сохраняя ссылки в чеках; конфликт откатывает операцию."""
+        with self._access(access, write=True):
+            current = self._current_category(access.family_id, category)
+            title = category_name(name)
+            if current.name == title:
+                return current
+            if current.is_fallback:
+                raise InvalidCategory("«Прочее» используется при распознавании и сохраняет своё название.")
+            try:
+                row = self._db.execute("UPDATE family_expense_categories SET name=?, name_key=?, revision=revision+1 "
+                                       "WHERE family_id=? AND id=? RETURNING id, name, hidden, revision",
+                                       (title, title.casefold(), access.family_id, current.id)).fetchone()
+            except sqlite3.IntegrityError as error:
+                raise InvalidCategory("В семье уже есть категория с таким названием.") from error
+            return ExpenseCategoryDto(**row).to_domain()
+
+    def set_category_hidden(self, access: ExpenseAccess, category: ExpenseCategory, hidden: bool) -> ExpenseCategory:
+        """Меняет видимость текущей редакции категории, сохраняя исторические покупки."""
+        with self._access(access, write=True):
+            current = self._current_category(access.family_id, category)
+            if hidden == current.hidden:
+                return current
+            if current.is_fallback:
+                raise InvalidCategory("«Прочее» всегда доступно при вводе расходов.")
+            row = self._db.execute("UPDATE family_expense_categories SET hidden=?, revision=revision+1 "
+                                   "WHERE family_id=? AND id=? RETURNING id, name, hidden, revision",
+                                   (hidden, access.family_id, current.id)).fetchone()
+            return ExpenseCategoryDto(**row).to_domain()
 
     def summary(self, access: ExpenseAccess, period: ExpensePeriod) -> ExpenseSummary:
         """Читает все категории и знаковую разницу чеков одним запросом."""
@@ -110,8 +181,17 @@ class SQLiteExpenseRepository(ExpenseRepository):
             assert expense_id is not None
             for position, item in enumerate(items, 1):
                 dto = ExpenseItemDto.from_domain(item)
-                category = self._catalog_id("family_expense_categories", access.family_id, dto.category)
-                product = self._catalog_id("family_expense_products", access.family_id, dto.product)
+                category = item.category_id
+                if category is not None:
+                    if self._db.execute("SELECT 1 FROM family_expense_categories WHERE id=? AND family_id=? AND hidden=0",
+                                        (category, access.family_id)).fetchone() is None:
+                        raise ExpenseCategoryUnavailable(position)
+                elif dto.category is not None:
+                    try:
+                        category = self._create_category(access.family_id, dto.category).id
+                    except InvalidCategory as error:
+                        raise ExpenseCategoryUnavailable(position) from error
+                product = self._product_id(access.family_id, dto.product)
                 self._db.execute(
                     """INSERT INTO family_expense_items
                        (family_id, expense_id, position, category_id, product_id, amount, quantity, unit,
@@ -122,15 +202,14 @@ class SQLiteExpenseRepository(ExpenseRepository):
                 )
             return expense_id
 
-    def _catalog_id(self, table: str, family_id: int, name: str | None) -> int | None:
+    def _product_id(self, family_id: int, name: str | None) -> int | None:
         if name is None:
             return None
         title = " ".join(name.split())
         key = title.casefold()
-        # Имена таблиц задаёт только save; ключи Unicode обрабатываются одинаково для обоих справочников.
-        self._db.execute(f"INSERT INTO {table} (family_id, name, name_key) VALUES (?, ?, ?) "
+        self._db.execute("INSERT INTO family_expense_products (family_id, name, name_key) VALUES (?, ?, ?) "
                          "ON CONFLICT(family_id, name_key) DO NOTHING", (family_id, title, key))
-        return self._db.execute(f"SELECT id FROM {table} WHERE family_id = ? AND name_key = ?",
+        return self._db.execute("SELECT id FROM family_expense_products WHERE family_id = ? AND name_key = ?",
                                 (family_id, key)).fetchone()[0]
 
     def card(self, access: ExpenseAccess, expense_id: int) -> ExpenseCard | None:
@@ -143,7 +222,8 @@ class SQLiteExpenseRepository(ExpenseRepository):
             if row is None:
                 return None
             lines = self._db.execute(
-                """SELECT c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price,
+                """SELECT i.expense_id, i.position, i.category_revision, i.category_id,
+                          c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price,
                           i.package_size, i.amount_before_discount
                    FROM family_expense_items i
                    LEFT JOIN family_expense_categories c ON i.category_id = c.id AND i.family_id = c.family_id
@@ -151,3 +231,27 @@ class SQLiteExpenseRepository(ExpenseRepository):
                    WHERE i.family_id = ? AND i.expense_id = ? ORDER BY i.position""", (access.family_id, expense_id),
             )
             return ExpenseCardDto(**row).to_domain(tuple(ExpenseItemDto(**line).to_domain() for line in lines))
+
+    def set_item_category(self, access: ExpenseAccess, line: ExpenseLineRef, category_id: int) -> None:
+        """Переносит одну позицию под блокировкой записи без изменения финансовых полей.
+
+        Raises:
+            InvalidCategory: Выбранная категория скрыта или принадлежит другой семье.
+            StaleCategory: Строка недоступна или успела измениться.
+            FamilyAccessEnded: Пользователь утратил исходное членство.
+        """
+        with self._access(access, write=True):
+            active = self._db.execute("SELECT 1 FROM family_expense_categories WHERE family_id=? AND id=? AND hidden=0",
+                                      (access.family_id, category_id)).fetchone()
+            if active is None:
+                raise InvalidCategory("Категория недоступна. Выбери другую.")
+            key = (access.family_id, line.purchase_id, line.position)
+            row = self._db.execute("SELECT category_id, category_revision FROM family_expense_items "
+                                   "WHERE family_id=? AND expense_id=? AND position=? AND category_id IS NOT NULL",
+                                   key).fetchone()
+            if row and row["category_id"] == category_id and row["category_revision"] in (line.revision, line.revision + 1):
+                return
+            if row is None or row["category_revision"] != line.revision:
+                raise StaleCategory("Позиция уже изменилась. Проверь чек и выбери её заново.")
+            self._db.execute("UPDATE family_expense_items SET category_id=?, category_revision=category_revision+1 "
+                             "WHERE family_id=? AND expense_id=? AND position=?", (category_id, *key))

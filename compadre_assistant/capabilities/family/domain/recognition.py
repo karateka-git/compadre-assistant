@@ -5,12 +5,7 @@ from datetime import date
 from typing import Protocol
 
 from .expenses import ExpenseItem, ExpensePurchase, InvalidExpense
-
-CATEGORIES = (
-    "Продукты", "Кафе и доставка еды", "Транспорт", "Дом и быт", "Здоровье",
-    "Одежда", "Дети", "Питомцы", "Досуг", "Связь и подписки", "Прочее",
-)  # Начальные категории для распознавания и пошагового выбора.
-
+from .expense_categories import ExpenseCategory
 
 class ExpenseRecognitionError(Exception):
     """Сервис недоступен или результат требует нового ввода."""
@@ -19,8 +14,8 @@ class ExpenseRecognitionError(Exception):
 class ExpenseRecognizer(Protocol):
     """Предлагает один черновик по сообщению или байтам чека."""
 
-    def recognize(self, value: str | bytes, today: date) -> ExpensePurchase:
-        """Возвращает распознанную покупку с датой по календарю семьи.
+    def recognize(self, value: str | bytes, today: date, categories: tuple[ExpenseCategory, ...]) -> ExpensePurchase:
+        """Возвращает покупку с датой по календарю семьи и категориями из переданного снимка.
 
         Raises:
             ExpenseRecognitionError: Ошибка входа, провайдера или структуры ответа.

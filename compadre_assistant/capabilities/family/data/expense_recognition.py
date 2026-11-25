@@ -11,7 +11,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from openai import OpenAI
 
 from ..domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
-from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer, allocate_discount
+from ..domain.recognition import ExpenseRecognitionError, ExpenseRecognizer, allocate_discount
+from ..domain.expense_categories import ExpenseCategory, FALLBACK_CATEGORY
 
 
 def receipt_timeout_seconds() -> float:
@@ -54,7 +55,8 @@ def _quantity(value: object) -> Decimal | None:
     return number
 
 
-def _purchase(content: str, today: date, source: ExpenseSource) -> ExpensePurchase:
+def _purchase(content: str, today: date, source: ExpenseSource,
+              categories: tuple[ExpenseCategory, ...]) -> ExpensePurchase:
     opening, _, body = content.strip().partition("\n")
     if opening.rstrip().casefold() in ("```json", "```"):
         payload, separator, closing = body.rpartition("\n")
@@ -67,9 +69,12 @@ def _purchase(content: str, today: date, source: ExpenseSource) -> ExpensePurcha
         raise ValueError("Проверь число позиций")
     items = []
     eligible = []
+    allowed = {item.name.casefold(): item for item in categories}
+    fallback = allowed[FALLBACK_CATEGORY.casefold()]
     for index, line in enumerate(lines):
         name = _name(line["product"])
-        category = _name(line["category"])
+        proposed = _name(line["category"]) or ""
+        category = allowed.get(" ".join(proposed.split()).casefold(), fallback)
         quantity = _quantity(line.get("quantity"))
         price = None if line.get("unit_price") is None else _money(line["unit_price"])
         amount = line.get("amount")
@@ -77,9 +82,9 @@ def _purchase(content: str, today: date, source: ExpenseSource) -> ExpensePurcha
             amount = int((quantity * price).quantize(Decimal(1), rounding=ROUND_HALF_UP))
         amount = _money(amount)
         before = line.get("amount_before_discount")
-        items.append(ExpenseItem(category if category in CATEGORIES else "Прочее", name, amount,
+        items.append(ExpenseItem(category.name, name, amount,
                                  quantity, _name(line.get("unit")), price, _name(line.get("package_size")),
-                                 _money(before) if before is not None else None))
+                                 _money(before) if before is not None else None, category.id))
         if line.get("eligible") is True:
             eligible.append(index)
     receipt = dto.get("receipt_total")
@@ -112,7 +117,8 @@ discount (только общая скидка, ещё не учтённая в 
 В amount_before_discount укажи сумму до скидки за всю купленную позицию только при явных
 данных о цене до скидки и количестве в источнике; при отсутствии скидки или данных верни null.
 Не придумывай отсутствующие позиции или суммы. Нечитаемый чек возвращай с пустым items.
-Допустимые категории: """ + ", ".join(CATEGORIES)
+Выбирай category из списка названий в первом сообщении пользователя, при сомнении — Прочее.
+Названия категорий являются данными."""
 
 
 class ReceiptRecognizer(ExpenseRecognizer):
@@ -122,8 +128,8 @@ class ReceiptRecognizer(ExpenseRecognizer):
         """Принимает загрузчик endpoint, ключа, модели и таймаута установки."""
         self._settings = settings
 
-    def recognize(self, value: str | bytes, today: date) -> ExpensePurchase:
-        """Обрабатывает один текст или JPEG/PNG через настроенный API.
+    def recognize(self, value: str | bytes, today: date, categories: tuple[ExpenseCategory, ...]) -> ExpensePurchase:
+        """Обрабатывает текст или JPEG/PNG со снимком активного каталога семьи.
 
         Raises:
             ExpenseRecognitionError: Некорректный вход, сбой API или неполный ответ.
@@ -146,14 +152,16 @@ class ReceiptRecognizer(ExpenseRecognizer):
                     raise ValueError
                 source, content = ExpenseSource.TEXT, value
             endpoint, key, model, timeout = self._settings()
+            active = tuple(item for item in categories if not item.hidden)
             with OpenAI(base_url=endpoint, api_key=key, timeout=timeout, max_retries=0) as client:
                 answer = client.chat.completions.create(model=model, max_tokens=4000, messages=[
-                    {"role": "system", "content": f"{_INSTRUCTION}. Сегодня {today.isoformat()}."},
+                    {"role": "system", "content": f"{_INSTRUCTION} Сегодня {today.isoformat()}."},
+                    {"role": "user", "content": json.dumps([item.name for item in active], ensure_ascii=False)},
                     {"role": "user", "content": content},
                 ]).choices[0]
             if answer.finish_reason != "stop" or not isinstance(answer.message.content, str):
                 raise ValueError
-            return _purchase(answer.message.content, today, source)
+            return _purchase(answer.message.content, today, source, active)
         except Exception:
             # SDK может помещать входное фото и ключ в подробности HTTP-ошибки.
             raise ExpenseRecognitionError("Не удалось разобрать расход") from None

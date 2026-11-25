@@ -696,6 +696,24 @@ class VkFamilyShoppingTest(unittest.TestCase):
         category_id = next(cmid for cmid, msg in self.sent_messages.items() if msg["text"] == categories["message"])
         self._single_reply(lambda: self._press(self._actions(categories)["Транспорт"], category_id), "Такси",
                            labels=["Сохранить", "Исправить", "Отменить", "Помощь"])
+        old_save = self._visible_menu()["Сохранить"]
+        with connect_database(self.database) as db, db:
+            db.execute("UPDATE family_expense_categories SET hidden=1, revision=revision+1 WHERE name='Транспорт'")
+        before = len(self.calls)
+        self._menu_press("Сохранить")
+        conflict = next(p for method, p in self.calls[before:] if method in ("messages.send", "messages.edit")
+                        and "Категория позиции 1 недоступна" in p.get("message", ""))
+        conflict_id = next(cmid for cmid, msg in self.sent_messages.items() if msg["text"] == conflict["message"])
+        self.assertNotIn("Транспорт", self._actions(conflict))
+        self._send("Сохранить", payload=old_save)
+        with connect_database(self.database) as db:
+            self.assertEqual(db.execute("SELECT count(*) FROM family_expenses").fetchone()[0], 0)
+        self._press(self._actions(conflict)["Дом и быт"], conflict_id)
+        self._menu_press("Сохранить")
+        with connect_database(self.database) as db:
+            self.assertEqual(db.execute("SELECT c.name, i.amount FROM family_expense_items i JOIN "
+                                        "family_expense_categories c ON c.id=i.category_id").fetchone()[:],
+                             ("Дом и быт", 45000))
 
     def test_expense_review_uses_versioned_bottom_menu(self) -> None:
         """Фоновый чек и меню приходят вместе; старая кнопка не сохраняет новый чек."""
@@ -703,7 +721,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         from threading import Event
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
 
-        items = tuple(ExpenseItem("Продукты", f"Товар {index}", 10000) for index in range(5))
+        items = tuple(ExpenseItem("Продукты", f"Товар {index}", 10000) for index in range(8))
         receipt = ExpensePurchase(date(2026, 11, 24), ExpenseSource.TEXT, items)
         self.enterContext(patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=receipt))
         ready = Event()

@@ -5,11 +5,16 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
-from ..domain.expenses import ExpenseAccess, ExpenseRepository
+from ..domain.expenses import ExpenseAccess, ExpenseLineRef, ExpenseRepository
+from ..domain.expense_categories import ExpenseCategory, category_label
 from .expense_chart import render_chart
-from .expense_receipt import item_details, money, receipt_header
+from .expense_receipt import day_label, item_details, money, receipt_header, receipt_pages
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import text_content
+
+
+_MONTH_TITLES = ("январь", "февраль", "март", "апрель", "май", "июнь",
+                 "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +27,8 @@ class ReportScreen:
     product: ProductSelection | None = None
     purchase: int | None = None
     title: str = ""
+    selected_category: ExpenseCategory | None = None
+    line: ExpenseLineRef | None = None
 
 
 @dataclass(slots=True)
@@ -75,7 +82,7 @@ class ExpenseBrowser:
         self.targets.clear()
         self.revision += 1
         screen = self.stack[-1]
-        heading = f"{self.month:%m.%Y}"
+        heading = f"{_MONTH_TITLES[self.month.month - 1]} {self.month.year}"
         actions: list[ReplyAction] = []
 
         def button(label: str, target: ReportScreen, row: int) -> None:
@@ -84,8 +91,7 @@ class ExpenseBrowser:
             cmd = f"/family_expenses browse {token} {self.revision} {index}"
             actions.append(ReplyAction(label[:40], cmd, row=row))
 
-        def pages(count: int, row: int) -> str:
-            last = max(1, (count + self.size - 1) // self.size)
+        def pages(last: int, row: int) -> str:
             for delta, label in ((-1, "← Ранее"), (1, "Далее →")):
                 page = screen.page + delta
                 if 0 <= page < last:
@@ -95,13 +101,16 @@ class ExpenseBrowser:
         start = screen.page * self.size
         if screen.kind in ("home", "chart"):
             summary = repo.summary(access, self.period)
-            lines = [f"Расходы семьи · {heading}", f"Всего · {money(summary.total)}"]
-            rows = [(item.name, item.amount) for item in summary.categories[:4]]
+            lines = [f"Расходы семьи · {heading}"]
+            rows = [(category_label(item.name) if item.id is not None else item.name, item.amount)
+                    for item in summary.categories[:4]]
             if len(summary.categories) > 4:
                 rows.append(("Остальные", sum(x.amount for x in summary.categories[4:])))
-            lines.extend(f"{name} · {money(amount)}" for name, amount in rows)
-            if not summary.categories:
-                lines.append("За этот месяц расходов пока нет.")
+            if rows:
+                lines.extend((f"Всего {money(summary.total)}", ""))
+                lines.extend(f"{name} — {money(amount)}" for name, amount in rows)
+            else:
+                lines.extend(("", "За этот месяц расходов пока нет."))
             if screen.kind == "chart":
                 png = None
                 if rows:
@@ -123,19 +132,80 @@ class ExpenseBrowser:
             button("Часовой пояс", ReportScreen("zone"), 2)
             button("Найти товар", ReportScreen("search_input"), 3)
             button("Диаграмма", ReportScreen("chart"), 3)
+            button("Настроить категории", ReportScreen("catalog"), 4)
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
-        if screen.kind == "period":
-            lines = [f"Период отчёта · {heading}"]
+        if screen.kind in ("catalog", "hidden_catalog"):
+            hidden = screen.kind == "hidden_catalog"
+            catalog = repo.categories(access, hidden=hidden)
+            last = max(1, (len(catalog) + self.size - 1) // self.size)
+            if screen.page >= last:
+                screen = self.stack[-1] = replace(screen, page=last - 1)
+                start = screen.page * self.size
+            lines = ["Скрытые категории" if hidden else "Категории семьи", ""]
+            if not catalog:
+                lines.append("Скрытых категорий пока нет.")
+            for index, category in enumerate(catalog[start:start + self.size], start + 1):
+                label = f"{index}. {category.label}"
+                lines.append(label)
+                button(label, ReportScreen("category_settings", selected_category=category), index - start - 1)
+            row = len(actions)
+            if last > 1:
+                lines.extend(("", pages(last, row)))
+                row += 1
+            if not hidden:
+                button("Создать категорию", ReportScreen("create_category"), row)
+                button("Скрытые", ReportScreen("hidden_catalog"), row)
+            button("Назад", ReportScreen("back"), row)
+        elif screen.kind == "category_settings":
+            category = screen.selected_category
+            lines = [category.label]
+            if category.is_fallback:
+                lines.extend(("", "Бот выбирает эту категорию, если не может определить другую."))
+            else:
+                lines.append("Скрыта из списка для новых трат." if category.hidden else "Доступна для новых трат.")
+                button("Переименовать", ReportScreen("rename_category", selected_category=category), 0)
+                button("Вернуть" if category.hidden else "Скрыть", ReportScreen("toggle_category",
+                       selected_category=category), 1)
+            button("Назад", ReportScreen("back"), 2 if actions else 0)
+        elif screen.kind == "period":
+            lines = ["Период отчёта", f"Сейчас выбран {heading}."]
             for row, (text, kind) in enumerate((("Текущий месяц", "current"), ("Предыдущий месяц", "previous"),
                                                 ("Другой месяц", "month_input"))):
                 button(text, ReportScreen(kind), row)
             button("Назад", ReportScreen("back"), 3)
         elif screen.kind == "zone":
-            lines = [f"Часовой пояс семьи · {repo.timezone(access)}",
-                     "Выбранный пояс действует для всех участников."]
+            lines = ["Часовой пояс семьи", repo.timezone(access), "",
+                     "Этот пояс действует для всех участников семьи."]
             button("Изменить пояс", ReportScreen("zone_input"), 0)
             button("Назад", ReportScreen("back"), 1)
+        elif screen.kind in ("saved_positions", "saved_categories"):
+            if screen.kind == "saved_positions":
+                card = repo.card(access, screen.purchase)
+                items = [item for item in card.items if item.saved_line is not None] if card else []
+                lines = ["Выбери позицию для смены категории.", ""]
+                for row, item in enumerate(items[start:start + self.size]):
+                    label = f"{item.saved_line.position}. {item.product or 'Без детализации'}"
+                    lines.append(f"{label} — {money(item.amount)} · {category_label(item.category)}")
+                    button(label, ReportScreen("saved_categories", line=item.saved_line, title=label), row)
+                count = len(items)
+            else:
+                categories = repo.categories(access)
+                lines = [screen.title, "", "Выбери новую категорию."]
+                for row, category in enumerate(categories[start:start + self.size]):
+                    label = f"{start + row + 1}. {category.label}"
+                    lines.append(label)
+                    button(label, ReportScreen("apply_saved_category", line=screen.line, selected_category=category), row)
+                count = len(categories)
+            last = max(1, (count + self.size - 1) // self.size)
+            if screen.page >= last:
+                self.stack[-1] = replace(screen, page=last - 1)
+                return self.render(repo, access, token, can_resume=can_resume)
+            row = len(actions)
+            if last > 1:
+                lines.extend(("", pages(last, row)))
+                row += 1
+            button("Назад", ReportScreen("back"), row)
         elif screen.kind == "card":
             card = repo.card(access, screen.purchase)
             if card is None:
@@ -148,20 +218,27 @@ class ExpenseBrowser:
                     if item.category is not None:
                         groups.setdefault(item.category, []).append(item)
                 totals = {name: sum(item.amount for item in items) for name, items in groups.items()}
-                lines = receipt_header(card.description or "Покупка", card.purchase_date,
-                                       sum(totals.values()), card.receipt_total, "Всего")
-                grouped = [item for items in groups.values() for item in items]
-                category = None
-                for item in grouped[start:start + self.size]:
-                    if category != item.category:
-                        category = item.category
-                        lines.extend(("", f"{category} — {money(totals[category])}"))
-                    lines.append(f"  {item.product or 'Без детализации'} — {money(item.amount)}")
-                    lines.extend(f"  {detail}" for detail in item_details(item, show_category=False))
-                if len(grouped) > self.size:
-                    lines.extend(("", pages(len(grouped), 0)))
-            button("Назад", ReportScreen("back"), int(bool(actions)))
+                header = receipt_header(card.description or "Покупка", card.purchase_date,
+                                        sum(totals.values()), card.receipt_total, "Всего")
+                rows = []
+                for category, items in groups.items():
+                    group = f"{category_label(category)} — {money(totals[category])}"
+                    for item in items:
+                        body = [f"  {item.product or 'Без детализации'} — {money(item.amount)}"]
+                        body.extend(f"  {detail}" for detail in item_details(item, show_category=False))
+                        rows.append((group, "\n".join(body)))
+                card_pages = receipt_pages(header, rows)
+                if screen.page >= len(card_pages):
+                    screen = self.stack[-1] = replace(screen, page=len(card_pages) - 1)
+                lines = [card_pages[screen.page]]
+                if len(card_pages) > 1:
+                    lines.extend(("", pages(len(card_pages), 0)))
+            row = int(bool(actions))
+            if card and any(item.saved_line is not None for item in card.items):
+                button("Изменить категорию", ReportScreen("saved_positions", purchase=card.id), row)
+            button("Назад", ReportScreen("back"), row)
         else:
+            total_label = "Всего"
             if screen.kind == "groups":
                 summary = repo.summary(access, self.period)
                 results = ReportPage(summary.categories[start:start + self.size], len(summary.categories), summary.total)
@@ -169,27 +246,51 @@ class ExpenseBrowser:
             elif screen.kind == "products":
                 results = repo.products(access, self.period, screen.category, start, self.size)
                 title = screen.title
+                if screen.category is not None:
+                    catalog = repo.categories(access)
+                    category = next((c for c in catalog if c.id == screen.category), None)
+                    if category is None:
+                        category = next((c for c in repo.categories(access, hidden=True) if c.id == screen.category), None)
+                    if category:
+                        title = category.label
+                total_label = "В категории"
             elif screen.kind == "search":
                 results = repo.search(access, self.period, screen.title, start, self.size)
-                title = f"Поиск · {screen.title}"
+                title = f"Поиск «{screen.title}»"
+                total_label = "По найденным товарам"
             else:
                 results = repo.history(access, self.period, start, self.size, screen.product)
                 title = screen.title or "История покупок"
-            lines = [f"{title} · {heading}", f"Всего · {money(results.total)}"]
+                if screen.product is not None:
+                    total_label = "По этой позиции"
+            last = max(1, (results.count + self.size - 1) // self.size)
+            if screen.page >= last:
+                self.stack[-1] = replace(screen, page=last - 1)
+                return self.render(repo, access, token, can_resume=can_resume)
+            lines = [f"{title} · {heading}"]
+            if results.count:
+                lines.extend((f"{total_label} {money(results.total)}", ""))
             for index, item in enumerate(results.rows):
+                name = item.name
                 if screen.kind == "groups":
-                    target = ReportScreen("products", category=item.id, title=item.name)
+                    if item.id is not None:
+                        name = category_label(name)
+                    target = ReportScreen("products", category=item.id, title=name)
                 elif screen.kind in ("products", "search"):
                     target = ReportScreen("history", product=ProductSelection(item.id, screen.category), title=item.name)
                 else:
                     target = ReportScreen("card", purchase=item.id)
                 prefix = f"{item.purchase_date:%d.%m} " if item.purchase_date else ""
-                label = f"{prefix}{item.name} · {money(item.amount)}"
-                lines.append(f"{start + index + 1}. {label}")
+                label = f"{prefix}{name} · {money(item.amount)}"
+                day = f"{day_label(item.purchase_date)} · " if item.purchase_date else ""
+                lines.append(f"{start + index + 1}. {day}{name} — {money(item.amount)}")
                 button(f"{start + index + 1}. {label}", target, index)
             if not results.count:
-                lines.append("За выбранный период записей нет.")
+                empty = ("Товаров с таким названием за этот месяц нет."
+                         if screen.kind == "search" else "За этот месяц покупок нет.")
+                lines.extend(("", empty))
             nav = len(actions)
-            lines.append(pages(results.count, nav))
+            if results.count > self.size:
+                lines.extend(("", pages((results.count + self.size - 1) // self.size, nav)))
             button("Назад", ReportScreen("back"), nav + int(len(actions) > nav))
         return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
