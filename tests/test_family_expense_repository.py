@@ -18,10 +18,13 @@ from compadre_assistant.capabilities.family.domain.expenses import (
 )
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
 from compadre_assistant.capabilities.family.domain.expense_categories import InvalidCategory
-from compadre_assistant.capabilities.family.domain.recognition import CATEGORIES
 from compadre_assistant.capabilities.family.domain.expense_reports import ExpensePeriod, ProductSelection
 from compadre_assistant.core.data.sqlite.connection import connect_database
 from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
+
+
+_INITIAL_CATEGORIES = ["Продукты", "Кафе и доставка еды", "Транспорт", "Дом и быт", "Здоровье",
+                       "Одежда", "Дети", "Питомцы", "Досуг", "Связь и подписки", "Прочее"]
 
 
 class FamilyExpenseRepositoryTest(unittest.TestCase):
@@ -84,7 +87,7 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
     def test_category_lifecycle_is_shared_and_preserves_history(self) -> None:
         """Член семьи управляет каталогом, не меняя ID, сумму или каталог другой семьи."""
         base = self.repo.categories(self.owner)
-        self.assertEqual([c.name for c in base], list(CATEGORIES))
+        self.assertEqual([c.name for c in base], _INITIAL_CATEGORIES)
         added = self.repo.create_category(self.author, " Для   кота ")
         self.assertEqual(self.repo.create_category(self.owner, "для КОТА"), added)
         self.assertNotIn(added, self.repo.categories(self.other))
@@ -106,7 +109,7 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         self.assertEqual(self.repo.categories(self.owner, hidden=True), (hidden,))
         restored = self.repo.set_category_hidden(self.author, hidden, False)
         self.assertEqual((restored.id, restored.name, restored.hidden), (base[0].id, "Еда", False))
-        self.assertEqual([c.name for c in self.repo.categories(self.other)], list(CATEGORIES))
+        self.assertEqual([c.name for c in self.repo.categories(self.other)], _INITIAL_CATEGORIES)
 
     def test_save_resolves_pending_names_and_stable_ids_atomically(self) -> None:
         """Скрытая или чужая категория откатывает чек, переименование сохраняет прежнюю связь."""
@@ -220,7 +223,7 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             custom = replace(self.purchase.items[0], category="Новая категория")
             self.repo.save(self.author, "a", 1, replace(self.purchase, items=(custom, self.purchase.items[1])))
-        self.assertEqual([c.name for c in self.repo.categories(self.owner)], list(CATEGORIES))
+        self.assertEqual([c.name for c in self.repo.categories(self.owner)], _INITIAL_CATEGORIES)
         for table in ("family_expenses", "family_expense_products", "family_expense_items"):
             self.assertEqual(self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
         self.db.execute("DROP TRIGGER fail_second")

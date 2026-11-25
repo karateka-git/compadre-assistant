@@ -7,12 +7,6 @@ from typing import Protocol
 from .expenses import ExpenseItem, ExpensePurchase, InvalidExpense
 from .expense_categories import ExpenseCategory
 
-CATEGORIES = (
-    "Продукты", "Кафе и доставка еды", "Транспорт", "Дом и быт", "Здоровье",
-    "Одежда", "Дети", "Питомцы", "Досуг", "Связь и подписки", "Прочее",
-)  # Начальные категории для распознавания и пошагового выбора.
-
-
 class ExpenseRecognitionError(Exception):
     """Сервис недоступен или результат требует нового ввода."""
 

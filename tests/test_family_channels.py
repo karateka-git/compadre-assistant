@@ -115,6 +115,35 @@ class FamilyChannelsTest(unittest.TestCase):
                     break
                 other = choose(self.other, other, "Далее →")
 
+    def test_pick_category_survives_catalog_change_and_creation_waits_for_save(self) -> None:
+        """Оба канала проверяют ID кнопки, скрытое имя и отмену добавления категории с расходом."""
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            for who in (self.owner_tg, self.guest):
+                with self.subTest(channel=who.channel):
+                    choose = lambda screen, label: self._choose(processor, who, screen, label)
+                    home = self._send(processor, who, "/family_expenses")
+                    choose(choose(home, "Добавить расход"), "Ввести пошагово")
+                    self._send(processor, who, "Наполнитель")
+                    picker = self._send(processor, who, "440")
+                    stale = next(a.command for a in picker.suggested_actions if a.label == "Транспорт")
+                    with connect_database(self.database_path) as db, db:
+                        db.execute("UPDATE family_expense_categories SET hidden=1,revision=revision+1 "
+                                   "WHERE name='Транспорт'")
+                    refreshed = choose(picker, "Транспорт")
+                    self.assertIn("Категорию скрыли", response_text(refreshed))
+                    self.assertNotIn("Транспорт", [a.label for a in refreshed.suggested_actions])
+                    self.assertIn("закрыт", response_text(self._send(processor, who, stale)))
+                    choose(refreshed, "Создать категорию")
+                    self.assertIn("скрыта", response_text(self._send(processor, who, "Транспорт")))
+                    review = self._send(processor, who, " Для кота ")
+                    self.assertIn("Для кота", response_text(review))
+                    choose(review, "Отменить")
+                    with connect_database(self.database_path) as db, db:
+                        self.assertFalse(db.execute("SELECT 1 FROM family_expense_categories WHERE name='Для кота'").fetchone())
+                        db.execute("UPDATE family_expense_categories SET hidden=0,revision=revision+1 "
+                                   "WHERE name='Транспорт'")
+
     def test_catalog_change_during_recognition_preserves_draft_and_allows_correction(self) -> None:
         """Переименование обновляет подпись, скрытие просит выбрать другую категорию без повторного разбора."""
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
@@ -139,7 +168,7 @@ class FamilyChannelsTest(unittest.TestCase):
             self.assertIn("Еда", response_text(review))
             conflict = self._choose(processor, who, review, "Сохранить")
             self.assertIn("позиции 2", response_text(conflict))
-            self._choose(processor, who, conflict, "Исправить категорию")
+            self._choose(processor, who, conflict, "Создать категорию")
             review = self._send(processor, who, "Доставка")
             self.assertIn("сохранён", response_text(self._choose(processor, who, review, "Сохранить")))
             model.assert_called_once()
@@ -198,13 +227,15 @@ class FamilyChannelsTest(unittest.TestCase):
                     edit = self._choose(processor, identity, updated, "Исправить")
                     positions = self._choose(processor, identity, edit, "Позиции")
                     self._choose(processor, identity, positions, "Добавить позицию")
-                    retry = self._send(processor, identity, " | 10 | Продукты")
-                    self.assertIn("Хлеб | 59 | Продукты", response_text(retry))
-                    updated = self._send(processor, identity, "Ложка | 0 | Продукты")
+                    retry = self._send(processor, identity, " | 10")
+                    self.assertIn("Хлеб | 59", response_text(retry))
+                    picker = self._send(processor, identity, "Ложка | 0")
+                    updated = self._choose(processor, identity, picker, "Продукты")
                     edit = self._choose(processor, identity, updated, "Исправить")
                     positions = self._choose(processor, identity, edit, "Позиции")
                     row = self._choose(processor, identity, positions, "1. Товар 0")
-                    self._choose(processor, identity, row, "Категория")
+                    picker = self._choose(processor, identity, row, "Категория")
+                    self._choose(processor, identity, picker, "Создать категорию")
                     updated = self._send(processor, identity, "Для дома")
                     self.assertIn("Для дома", response_text(updated))
                     self.assertIn("закрыт", response_text(self._send(processor, identity, old_save)))

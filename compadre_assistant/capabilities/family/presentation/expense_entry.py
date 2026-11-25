@@ -12,8 +12,8 @@ from zoneinfo import ZoneInfo
 
 from ..domain.expenses import ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpensePurchase, ExpenseRepository, ExpenseSource, InvalidExpense
 from ..domain.membership import FamilyAccessEnded
-from ..domain.expense_categories import InvalidCategory, StaleCategory
-from ..domain.recognition import CATEGORIES, ExpenseRecognitionError, ExpenseRecognizer
+from ..domain.expense_categories import InvalidCategory, StaleCategory, category_name
+from ..domain.recognition import ExpenseRecognitionError, ExpenseRecognizer
 from compadre_assistant.core.presentation.incoming.action_contracts import ActionPurpose, ActionScope, ScreenDestination
 from compadre_assistant.core.presentation.incoming.events import ImageLoadError, IncomingEvent, ReplyAddress
 from compadre_assistant.core.presentation.incoming.pending_input import PendingInput
@@ -64,6 +64,15 @@ class _Draft:
 
 
 @dataclass(slots=True)
+class _CategoryPicker:
+    item: ExpenseItem
+    position: int
+    page: int = 0
+    revision: str = ""
+    allowed: tuple[str, ...] = ()
+
+
+@dataclass(slots=True)
 class _Session:
     access: ExpenseAccess
     mode: int | None
@@ -76,8 +85,8 @@ class _Session:
     request: str | None = None
     manual_date: date | None = None
     manual_name: str | None = None
-    manual_amount: int | None = None
     browser: ExpenseBrowser | None = None
+    picker: _CategoryPicker | None = None
 
     @property
     def purchase(self) -> ExpensePurchase | None:
@@ -140,7 +149,7 @@ class ExpenseEntry:
         """Возвращает меню чека для текущего членства и действующей редакции в VK."""
         with self._lock:
             session = self._sessions.get(address)
-            if (address.channel != "vk" or session is None or session.purchase is None or session.request
+            if (address.channel != "vk" or session is None or session.purchase is None or session.request or session.picker
                     or session.access != access or session.mode != mode or self._clock() >= session.deadline):
                 return ()
             return self._review_actions(session)
@@ -180,6 +189,11 @@ class ExpenseEntry:
             session = self._current(event, context, access)
             if session is None or len(args) < 2 or args[1] != session.token:
                 return self._expired(access)
+            if session.picker is not None:
+                if (args[0] != "pick" or len(args) != 4 or args[2] != session.picker.revision
+                        or args[3] not in session.picker.allowed):
+                    return self._expired(access)
+                return self._picker_action(context, event, session, args[3])
             if args[0] == "catalog_return" and session.browser and args[2:] == [str(session.browser.revision)]:
                 session.request = None
                 with self._repository() as repo:
@@ -230,31 +244,12 @@ class ExpenseEntry:
                     else:
                         browser.navigate(target)
                     return session.screen(self._report(session, repo), update=target.kind != "chart")
-            if args[0] == "discard" and session.purchase is None:
-                self._sessions.pop(event.reply_address)
-                return _reply("Ввод расхода отменён.", expenses_action(access.family_id), close_screen=True)
             if args[0] == "manual" and session.purchase is None:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
                 with self._repository() as repo:
                     session.manual_date = datetime.now(ZoneInfo(repo.timezone(access))).date()
                 return self._ask(context, event, session, "manual_name",
                                  "Введи название покупки или услуги, например «Такси домой».")
-            if args[0] in ("categories", "choose") and session.manual_amount is not None and session.purchase is None:
-                if len(args) != 3 or not args[2].isascii() or not args[2].isdigit() or len(args[2]) > 2:
-                    return self._expired(access)
-                index = int(args[2])
-                if args[0] == "categories" and index * _PAGE < len(CATEGORIES):
-                    return session.screen(self._categories(session, index), update=True)
-                if args[0] == "choose" and index < len(CATEGORIES):
-                    with self._repository() as repo:
-                        chosen = next((c for c in repo.categories(session.access)
-                                       if c.name.casefold() == CATEGORIES[index].casefold()), None)
-                    if chosen is None:
-                        return session.screen(self._categories(session, index // _PAGE), update=True)
-                    purchase = ExpensePurchase(session.manual_date, ExpenseSource.MANUAL,
-                        (ExpenseItem(chosen.name, session.manual_name, session.manual_amount, category_id=chosen.id),))
-                    return self._update(session, purchase, update_screen=True)
-                return self._expired(access)
             if args[0] == "add" and session.browser:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
                 return self._ask(context, event, session, "recognize",
@@ -277,9 +272,9 @@ class ExpenseEntry:
                 with self._repository() as repo:
                     repo.save(session.access, session.draft.operation_id, session.draft.revision, purchase)
             except ExpenseCategoryUnavailable as error:
-                return session.screen(_reply(str(error),
-                    self._button(session, "Исправить категорию", "category", str(error.position - 1)),
-                    self._button(session, "Назад", "view")), update=True)
+                position = error.position - 1
+                session.picker = _CategoryPicker(purchase.items[position], position)
+                return self._categories(session, notice=str(error), update=True)
             self._drafts.pop(event.reply_address)
             self._sessions.pop(event.reply_address)
             total = purchase.receipt_total if purchase.receipt_total is not None else sum(i.amount for i in purchase.items)
@@ -318,16 +313,21 @@ class ExpenseEntry:
                 return session.screen(details, update=True)
             return self._update(session, replace(purchase, items=purchase.items[:index] + purchase.items[index + 1:]),
                                 update_screen=True)
+        if verb == "category":
+            index = int(args[0])
+            if not 0 <= index < len(purchase.items):
+                raise ValueError
+            session.picker = _CategoryPicker(purchase.items[index], index)
+            return self._categories(session, update=True)
         prompts = {"name": "Введи новое название позиции (до 256 символов).",
                    "amount": "Введи сумму за всю позицию в рублях, например 71,99.",
-                   "category": "Введи название категории, например «Продукты».",
                    "date": "Введи дату покупки цифрами, например 23.11.2026.",
                    "shop": "Введи магазин или описание покупки (до 256 символов).",
                    "total": "Введи итог к оплате в рублях, например 556,76.",
-                   "insert": "Введи название, сумму в рублях и категорию через вертикальную черту.\nХлеб | 59 | Продукты"}
+                   "insert": "Введи название и сумму в рублях через вертикальную черту.\nХлеб | 59"}
         if verb in prompts:
             index = ""
-            if verb in ("name", "amount", "category"):
+            if verb in ("name", "amount"):
                 index = args[0]
                 if not 0 <= int(index) < len(purchase.items):
                     raise ValueError
@@ -400,19 +400,72 @@ class ExpenseEntry:
         revision = f"{session.token}.{session.draft.revision}"
         return tuple(replace(action, scope=ActionScope.SECTION, menu_revision=revision) for action in actions)
 
-    def _categories(self, session, page):
-        first = page * _PAGE
-        actions = [replace(_action(name, f"choose {session.token} {first + row}"), row=row)
-                   for row, name in enumerate(CATEGORIES[first:first + _PAGE])]
-        nav = len(actions)
-        for target, label in ((page - 1, "← Ранее"), (page + 1, "Далее →")):
-            if 0 <= target * _PAGE < len(CATEGORIES):
-                actions.append(replace(_action(label, f"categories {session.token} {target}"), row=nav))
-        actions.append(replace(_action("Отменить", "discard " + session.token), row=nav + 1))
-        lines = [f"{session.manual_name} — {_money(session.manual_amount)}", "", "Выбери категорию."]
-        if len(CATEGORIES) > _PAGE:
-            lines.append(f"Страница {page + 1} из {(len(CATEGORIES) + _PAGE - 1) // _PAGE}")
-        return _reply("\n".join(lines), *actions)
+    def _categories(self, session, *, notice="", update=False):
+        picker = session.picker
+        with self._repository() as repo:
+            categories = repo.categories(session.access)
+        pages = max(1, (len(categories) + _PAGE - 1) // _PAGE)
+        picker.page = min(picker.page, pages - 1)
+        picker.revision = uuid4().hex
+        first = picker.page * _PAGE
+        lines = [f"{picker.item.product or 'Без детализации'} — {_money(picker.item.amount)}", "",
+                 notice or "Выбери категорию."]
+        buttons = []
+        for row, category in enumerate(categories[first:first + _PAGE]):
+            label = category.label
+            if len(label) > 40 or label in ("← Ранее", "Далее →", "Создать категорию", "Назад", "Отменить"):
+                label = f"{first + row + 1}. {label}"
+                lines.append(label)
+            buttons.append((label[:40], str(category.id), row))
+        nav = len(buttons)
+        if picker.page:
+            buttons.append(("← Ранее", "previous", nav))
+        if picker.page < pages - 1:
+            buttons.append(("Далее →", "next", nav))
+        if pages > 1:
+            lines.append(f"Страница {picker.page + 1} из {pages}")
+            nav += 1
+        buttons.extend((("Создать категорию", "new", nav),
+                        ("Назад" if session.purchase else "Отменить", "back", nav)))
+        picker.allowed = tuple(action for _, action, _ in buttons)
+        actions = tuple(ReplyAction(label, f"{EXPENSES} pick {session.token} {picker.revision} {action}", row=row)
+                        for label, action, row in buttons)
+        return session.screen(_reply("\n".join(lines), *actions), update=update)
+
+    def _picker_action(self, context, event, session, operation):
+        picker = session.picker
+        if operation == "new":
+            picker.allowed = ("return",)
+            return self._ask(context, event, session, "new_draft_category",
+                             "Введи название категории. Семья увидит её после сохранения расхода.",
+                             return_command=f"{EXPENSES} pick {session.token} {picker.revision} return")
+        if operation == "back":
+            session.picker = None
+            if session.purchase:
+                return session.screen(self._review(session, session.review_page), update=session.address.channel != "vk")
+            self._sessions.pop(session.address)
+            return _reply("Ввод расхода отменён.", expenses_action(session.access.family_id), close_screen=True)
+        if operation in ("previous", "next", "return"):
+            session.request = None
+            picker.page += int(operation == "next") - int(operation == "previous")
+            return self._categories(session, update=operation != "return")
+        with self._repository() as repo:
+            category = next((c for c in repo.categories(session.access) if str(c.id) == operation), None)
+        if category is None:
+            return self._categories(session, notice="Категорию скрыли. Выбери другую.", update=True)
+        return self._apply_category(session, category.name, category.id, update=True)
+
+    def _apply_category(self, session, name, category_id, *, update):
+        picker = session.picker
+        item = replace(picker.item, category=name, category_id=category_id)
+        if session.purchase is None:
+            purchase = ExpensePurchase(session.manual_date, ExpenseSource.MANUAL, (item,))
+        else:
+            items = list(session.purchase.items)
+            items[picker.position:picker.position + 1] = [item]
+            purchase = replace(session.purchase, items=tuple(items))
+        session.picker = None
+        return self._update(session, purchase, update_screen=update)
 
     def _update(self, session, purchase, *, update_screen=False):
         purchase.reconciled_items()
@@ -433,6 +486,18 @@ class ExpenseEntry:
             if session is None or session.request != pending.request_id:
                 return PendingInputResult(self._expired(access), PendingInputOutcome.COMPLETE)
             kind = pending.input_kind.removeprefix("expense:")
+            if kind == "new_draft_category" and session.picker:
+                try:
+                    name = category_name(event.text)
+                    with self._repository() as repo:
+                        matched = next((c for c in repo.categories(access) if c.name.casefold() == name.casefold()), None)
+                        if not matched and any(c.name.casefold() == name.casefold() for c in repo.categories(access, hidden=True)):
+                            raise InvalidCategory("Эта категория скрыта. Введи другое название или верни её в настройках.")
+                except InvalidCategory as error:
+                    return PendingInputResult(_reply(str(error), CANCEL_SECTION_ACTION), PendingInputOutcome.RETRY)
+                response = self._apply_category(session, matched.name if matched else name, matched.id if matched else None,
+                                                update=False)
+                return PendingInputResult(response, PendingInputOutcome.COMPLETE)
             if kind in ("create_category", "rename_category") and session.browser:
                 browser = session.browser
                 notice = ""
@@ -494,13 +559,14 @@ class ExpenseEntry:
                 return PendingInputResult(response, PendingInputOutcome.COMPLETE)
             if kind == "manual_amount":
                 try:
-                    session.manual_amount = _cents(event.text)
+                    amount = _cents(event.text)
                 except (ValueError, InvalidOperation):
                     return PendingInputResult(_reply(pending.value_label, CANCEL_SECTION_ACTION),
                                               PendingInputOutcome.RETRY)
                 session.request = None
                 session.deadline = self._clock() + _TTL
-                return PendingInputResult(session.screen(self._categories(session, 0)), PendingInputOutcome.COMPLETE)
+                session.picker = _CategoryPicker(ExpenseItem(None, session.manual_name, amount), 0)
+                return PendingInputResult(self._categories(session), PendingInputOutcome.COMPLETE)
             if kind == "recognize":
                 if len(event.images) > 1 or not (event.images or event.text.strip()):
                     return PendingInputResult(_reply("Пришли одно фото или текст.", CANCEL_SECTION_ACTION),
@@ -531,24 +597,21 @@ class ExpenseEntry:
         else:
             items = list(purchase.items)
             if field == "insert":
-                name, amount, category = (part.strip() for part in text.split("|"))
-                items.append(ExpenseItem(category, name, _cents(amount), category_id=self._category_id(session, category)))
+                name, amount = (part.strip() for part in text.split("|"))
+                if not name:
+                    raise ValueError
+                session.picker = _CategoryPicker(ExpenseItem(None, name, _cents(amount)), len(items))
+                session.request = None
+                return self._categories(session)
             else:
-                key = {"name": "product", "amount": "amount", "category": "category"}[field]
+                key = {"name": "product", "amount": "amount"}[field]
                 value = _cents(text) if field == "amount" else text
                 changes = {key: value}
-                if field == "category":
-                    changes["category_id"] = self._category_id(session, text)
                 if field == "amount" and value != items[int(index)].amount:
                     changes["amount_before_discount"] = None
                 items[int(index)] = replace(items[int(index)], **changes)
             purchase = replace(purchase, items=tuple(items))
         return self._update(session, purchase)
-
-    def _category_id(self, session, name):
-        key = " ".join(name.split()).casefold()
-        with self._repository() as repo:
-            return next((c.id for c in repo.categories(session.access) if c.name.casefold() == key), None)
 
     def _recognize(self, event, session, today, cancelled):
         try:
