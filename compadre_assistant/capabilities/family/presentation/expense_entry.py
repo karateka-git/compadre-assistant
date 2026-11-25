@@ -28,6 +28,7 @@ from .expense_receipt import item_details, money as _money, receipt_header
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
 _TTL = 600  # Десять минут после показа редакции.
 _PAGE = 4  # Читаемая страница черновика на телефоне.
+_MONTH_PROMPT = "Введи месяц и год цифрами, например 11.2026."
 
 
 def _reply(text: str, *actions: ReplyAction, close_screen: bool = False) -> IncomingResponse:
@@ -190,9 +191,10 @@ class ExpenseEntry:
                     return session.screen(self._review(session), update=session.address.channel != "vk")
                 session.deadline = self._clock() + _TTL
                 if target.kind == "search_input":
-                    return self._ask(context, event, session, target.kind, "Введи название товара или услуги.")
+                    return self._ask(context, event, session, target.kind,
+                                     "Введи название товара или его часть, например «молоко».")
                 if target.kind in ("month_input", "zone_input"):
-                    prompt = ("Введи месяц в формате ММ.ГГГГ." if target.kind == "month_input"
+                    prompt = (_MONTH_PROMPT if target.kind == "month_input"
                               else "Введи часовой пояс IANA, например Asia/Omsk.")
                     return self._ask(context, event, session, target.kind, prompt)
                 with self._repository() as repo:
@@ -210,7 +212,8 @@ class ExpenseEntry:
                 session = self._fresh(event.reply_address, access, context.mode_revision)
                 with self._repository() as repo:
                     session.manual_date = datetime.now(ZoneInfo(repo.timezone(access))).date()
-                return self._ask(context, event, session, "manual_name", "Введи название покупки или услуги.")
+                return self._ask(context, event, session, "manual_name",
+                                 "Введи название покупки или услуги, например «Такси домой».")
             if args[0] in ("categories", "choose") and session.manual_amount is not None and session.purchase is None:
                 if len(args) != 3 or not args[2].isascii() or not args[2].isdigit() or len(args[2]) > 2:
                     return self._expired(access)
@@ -244,14 +247,19 @@ class ExpenseEntry:
                 repo.save(session.access, session.draft.operation_id, session.draft.revision, purchase)
             self._drafts.pop(event.reply_address)
             self._sessions.pop(event.reply_address)
-            return _reply("Расход сохранён.", expenses_action(session.access.family_id), close_screen=True)
+            total = purchase.receipt_total if purchase.receipt_total is not None else sum(i.amount for i in purchase.items)
+            name = purchase.description or (purchase.items[0].product if len(purchase.items) == 1 else None)
+            summary = f"{name} — {_money(total)}" if name else f"Всего {_money(total)}"
+            return _reply(f"Расход сохранён.\n{summary}", expenses_action(session.access.family_id), close_screen=True)
         if verb == "view":
             return session.screen(self._review(session, int(args[0]) if args else 0), update=True)
         if verb == "edit":
             options = [self._button(session, label, cmd) for label, cmd in (
                 ("Позиции", "positions"), ("Дата", "date"), ("Магазин", "shop"),
                 ("Итог чека", "total"), ("Назад", "view"))]
-            return session.screen(_reply("Что исправить?", *options), update=True)
+            header = receipt_header(purchase.description or "Расход", purchase.purchase_date,
+                                    sum(i.amount for i in purchase.items), purchase.receipt_total, "К оплате")
+            return session.screen(_reply("\n".join((*header, "", "Что исправить?")), *options), update=True)
         if verb == "positions":
             return session.screen(self._positions(session, int(args[0]) if args else 0), update=True)
         if verb == "row":
@@ -259,7 +267,9 @@ class ExpenseEntry:
             if not 0 <= index < len(purchase.items):
                 raise ValueError
             item = purchase.items[index]
-            details = _reply(f"{item.product or 'Без детализации'} · {_money(item.amount)} · {item.category}",
+            lines = [f"{index + 1}. {item.product or 'Без детализации'} — {_money(item.amount)}",
+                     *item_details(item, show_category=True)]
+            details = _reply("\n".join(lines),
                 *(self._button(session, label, cmd, str(index)) for label, cmd in (
                     ("Название", "name"), ("Сумма", "amount"), ("Категория", "category"),
                     ("Удалить позицию", "delete"))), self._button(session, "Назад", "positions", str(index // _PAGE)))
@@ -273,10 +283,13 @@ class ExpenseEntry:
                 return session.screen(details, update=True)
             return self._update(session, replace(purchase, items=purchase.items[:index] + purchase.items[index + 1:]),
                                 update_screen=True)
-        prompts = {"name": "Введи название позиции.", "amount": "Введи сумму позиции в рублях.",
-                   "category": "Введи категорию.", "date": "Введи дату в формате ДД.ММ.ГГГГ.",
-                   "shop": "Введи магазин или описание.", "total": "Введи итог чека в рублях.",
-                   "insert": "Введи название, сумму в рублях и категорию через |. Например: Хлеб | 59 | Продукты"}
+        prompts = {"name": "Введи новое название позиции (до 256 символов).",
+                   "amount": "Введи сумму за всю позицию в рублях, например 71,99.",
+                   "category": "Введи название категории, например «Продукты».",
+                   "date": "Введи дату покупки цифрами, например 23.11.2026.",
+                   "shop": "Введи магазин или описание покупки (до 256 символов).",
+                   "total": "Введи итог к оплате в рублях, например 556,76.",
+                   "insert": "Введи название, сумму в рублях и категорию через вертикальную черту.\nХлеб | 59 | Продукты"}
         if verb in prompts:
             index = ""
             if verb in ("name", "amount", "category"):
@@ -309,7 +322,12 @@ class ExpenseEntry:
         actions.extend(replace(action, row=len(items)) for action in nav)
         actions.append(replace(self._button(session, "Добавить позицию", "insert"), row=len(items)+bool(nav)))
         actions.append(replace(self._button(session, "Назад", "view"), row=len(items)+bool(nav)))
-        return _reply(f"Выбери позицию · {page + 1} из {pages}", *actions)
+        lines = ["Выбери позицию для исправления.", ""]
+        lines.extend(f"{i}. {item.product or 'Без детализации'} — {_money(item.amount)}"
+                     for i, item in enumerate(items, page * _PAGE + 1))
+        if pages > 1:
+            lines.extend(("", f"Страница {page + 1} из {pages}"))
+        return _reply("\n".join(lines), *actions)
 
     def _review(self, session, page=0):
         purchase = session.purchase
@@ -351,7 +369,10 @@ class ExpenseEntry:
             if 0 <= target * _PAGE < len(CATEGORIES):
                 actions.append(replace(_action(label, f"categories {session.token} {target}"), row=nav))
         actions.append(replace(_action("Отменить", "discard " + session.token), row=nav + 1))
-        return _reply(f"{session.manual_name} · {_money(session.manual_amount)}\nВыбери категорию.", *actions)
+        lines = [f"{session.manual_name} — {_money(session.manual_amount)}", "", "Выбери категорию."]
+        if len(CATEGORIES) > _PAGE:
+            lines.append(f"Страница {page + 1} из {(len(CATEGORIES) + _PAGE - 1) // _PAGE}")
+        return _reply("\n".join(lines), *actions)
 
     def _update(self, session, purchase, *, update_screen=False):
         purchase.reconciled_items()
@@ -396,7 +417,7 @@ class ExpenseEntry:
                             session.browser = ExpenseBrowser.open(repo.timezone(access), event.reply_address.channel)
                         response = self._report(session, repo)
                 except (ValueError, InvalidExpense):
-                    prompt = ("Введи месяц в формате ММ.ГГГГ." if kind == "month_input"
+                    prompt = (_MONTH_PROMPT if kind == "month_input"
                               else "Пояс не найден. Введи название IANA, например Asia/Omsk.")
                     return PendingInputResult(_reply(prompt, CANCEL_SECTION_ACTION), PendingInputOutcome.RETRY)
                 session.request = None
@@ -408,13 +429,14 @@ class ExpenseEntry:
                                               PendingInputOutcome.RETRY)
                 session.manual_name = name
                 session.deadline = self._clock() + _TTL
-                response = self._ask(context, event, session, "manual_amount", "Введи сумму в рублях.")
+                response = self._ask(context, event, session, "manual_amount",
+                                     f"{name}\n\nВведи сумму в рублях, например 450,50.")
                 return PendingInputResult(response, PendingInputOutcome.COMPLETE)
             if kind == "manual_amount":
                 try:
                     session.manual_amount = _cents(event.text)
                 except (ValueError, InvalidOperation):
-                    return PendingInputResult(_reply("Введи сумму в рублях, например 450,50.", CANCEL_SECTION_ACTION),
+                    return PendingInputResult(_reply(pending.value_label, CANCEL_SECTION_ACTION),
                                               PendingInputOutcome.RETRY)
                 session.request = None
                 session.deadline = self._clock() + _TTL
@@ -430,8 +452,8 @@ class ExpenseEntry:
                     cancellable_action=lambda cancelled: self._recognize(event, session, today, cancelled))
             try:
                 result = self._edit(session, kind, event.text.strip())
-            except (ValueError, InvalidOperation, IndexError):
-                return PendingInputResult(_reply("Проверь формат и повтори ввод.", CANCEL_SECTION_ACTION),
+            except (InvalidExpense, ValueError, InvalidOperation, IndexError):
+                return PendingInputResult(_reply(pending.value_label, CANCEL_SECTION_ACTION),
                                           PendingInputOutcome.RETRY)
             return PendingInputResult(result, PendingInputOutcome.COMPLETE)
 
@@ -474,5 +496,6 @@ class ExpenseEntry:
                     repo.timezone(session.access)
                 return self._update(session, purchase)
         except (ImageLoadError, ExpenseRecognitionError, FamilyAccessEnded, InvalidExpense):
-            return _reply("Не удалось разобрать расход. Можно ввести его пошагово или повторить попытку.",
+            return _reply("Не удалось разобрать расход.\n\n"
+                          "Выбери «Ввести пошагово» или открой «Расходы» → «Добавить расход», чтобы отправить его ещё раз.",
                           _action("Ввести пошагово", "manual " + session.token), expenses_action(session.access.family_id))

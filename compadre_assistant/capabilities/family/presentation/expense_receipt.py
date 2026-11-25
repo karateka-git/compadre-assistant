@@ -10,6 +10,11 @@ _MONTHS = ("января", "февраля", "марта", "апреля", "ма
            "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
 
+def day_label(day: date) -> str:
+    """Возвращает день и месяц покупки словами для чека и истории."""
+    return f"{day.day} {_MONTHS[day.month - 1]}"
+
+
 def money(amount: int) -> str:
     """Форматирует целые копейки, включая отрицательную разницу."""
     whole, cents = divmod(abs(amount), 100)
@@ -19,7 +24,7 @@ def money(amount: int) -> str:
 
 def receipt_header(title: str, day: date, subtotal: int, total: int | None, label: str) -> list[str]:
     """Показывает итог один раз и раскрывает сверку при расхождении."""
-    lines = [f"{title} · {day.day} {_MONTHS[day.month - 1]} {day.year}"]
+    lines = [f"{title} · {day_label(day)} {day.year}"]
     if total is None or subtotal == total:
         lines.append(f"{label} {money(subtotal)}")
     else:

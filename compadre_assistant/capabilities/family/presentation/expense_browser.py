@@ -7,9 +7,13 @@ from zoneinfo import ZoneInfo
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
 from ..domain.expenses import ExpenseAccess, ExpenseRepository
 from .expense_chart import render_chart
-from .expense_receipt import item_details, money, receipt_header
+from .expense_receipt import day_label, item_details, money, receipt_header
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import text_content
+
+
+_MONTH_TITLES = ("январь", "февраль", "март", "апрель", "май", "июнь",
+                 "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь")
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +79,7 @@ class ExpenseBrowser:
         self.targets.clear()
         self.revision += 1
         screen = self.stack[-1]
-        heading = f"{self.month:%m.%Y}"
+        heading = f"{_MONTH_TITLES[self.month.month - 1]} {self.month.year}"
         actions: list[ReplyAction] = []
 
         def button(label: str, target: ReportScreen, row: int) -> None:
@@ -95,13 +99,15 @@ class ExpenseBrowser:
         start = screen.page * self.size
         if screen.kind in ("home", "chart"):
             summary = repo.summary(access, self.period)
-            lines = [f"Расходы семьи · {heading}", f"Всего · {money(summary.total)}"]
+            lines = [f"Расходы семьи · {heading}"]
             rows = [(item.name, item.amount) for item in summary.categories[:4]]
             if len(summary.categories) > 4:
                 rows.append(("Остальные", sum(x.amount for x in summary.categories[4:])))
-            lines.extend(f"{name} · {money(amount)}" for name, amount in rows)
-            if not summary.categories:
-                lines.append("За этот месяц расходов пока нет.")
+            if rows:
+                lines.extend((f"Всего {money(summary.total)}", ""))
+                lines.extend(f"{name} — {money(amount)}" for name, amount in rows)
+            else:
+                lines.extend(("", "За этот месяц расходов пока нет."))
             if screen.kind == "chart":
                 png = None
                 if rows:
@@ -126,14 +132,14 @@ class ExpenseBrowser:
             return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
 
         if screen.kind == "period":
-            lines = [f"Период отчёта · {heading}"]
+            lines = ["Период отчёта", f"Сейчас выбран {heading}."]
             for row, (text, kind) in enumerate((("Текущий месяц", "current"), ("Предыдущий месяц", "previous"),
                                                 ("Другой месяц", "month_input"))):
                 button(text, ReportScreen(kind), row)
             button("Назад", ReportScreen("back"), 3)
         elif screen.kind == "zone":
-            lines = [f"Часовой пояс семьи · {repo.timezone(access)}",
-                     "Выбранный пояс действует для всех участников."]
+            lines = ["Часовой пояс семьи", repo.timezone(access), "",
+                     "Этот пояс действует для всех участников семьи."]
             button("Изменить пояс", ReportScreen("zone_input"), 0)
             button("Назад", ReportScreen("back"), 1)
         elif screen.kind == "card":
@@ -162,6 +168,7 @@ class ExpenseBrowser:
                     lines.extend(("", pages(len(grouped), 0)))
             button("Назад", ReportScreen("back"), int(bool(actions)))
         else:
+            total_label = "Всего"
             if screen.kind == "groups":
                 summary = repo.summary(access, self.period)
                 results = ReportPage(summary.categories[start:start + self.size], len(summary.categories), summary.total)
@@ -169,13 +176,19 @@ class ExpenseBrowser:
             elif screen.kind == "products":
                 results = repo.products(access, self.period, screen.category, start, self.size)
                 title = screen.title
+                total_label = "В категории"
             elif screen.kind == "search":
                 results = repo.search(access, self.period, screen.title, start, self.size)
-                title = f"Поиск · {screen.title}"
+                title = f"Поиск «{screen.title}»"
+                total_label = "По найденным товарам"
             else:
                 results = repo.history(access, self.period, start, self.size, screen.product)
                 title = screen.title or "История покупок"
-            lines = [f"{title} · {heading}", f"Всего · {money(results.total)}"]
+                if screen.product is not None:
+                    total_label = "По этой позиции"
+            lines = [f"{title} · {heading}"]
+            if results.count:
+                lines.extend((f"{total_label} {money(results.total)}", ""))
             for index, item in enumerate(results.rows):
                 if screen.kind == "groups":
                     target = ReportScreen("products", category=item.id, title=item.name)
@@ -185,11 +198,15 @@ class ExpenseBrowser:
                     target = ReportScreen("card", purchase=item.id)
                 prefix = f"{item.purchase_date:%d.%m} " if item.purchase_date else ""
                 label = f"{prefix}{item.name} · {money(item.amount)}"
-                lines.append(f"{start + index + 1}. {label}")
+                day = f"{day_label(item.purchase_date)} · " if item.purchase_date else ""
+                lines.append(f"{start + index + 1}. {day}{item.name} — {money(item.amount)}")
                 button(f"{start + index + 1}. {label}", target, index)
             if not results.count:
-                lines.append("За выбранный период записей нет.")
+                empty = ("Товаров с таким названием за этот месяц нет."
+                         if screen.kind == "search" else "За этот месяц покупок нет.")
+                lines.extend(("", empty))
             nav = len(actions)
-            lines.append(pages(results.count, nav))
+            if results.count > self.size:
+                lines.extend(("", pages(results.count, nav)))
             button("Назад", ReportScreen("back"), nav + int(len(actions) > nav))
         return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))
