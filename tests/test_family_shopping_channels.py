@@ -703,7 +703,7 @@ class VkFamilyShoppingTest(unittest.TestCase):
         from threading import Event
         from compadre_assistant.capabilities.family.domain.expenses import ExpenseItem, ExpensePurchase, ExpenseSource
 
-        items = tuple(ExpenseItem("Продукты", f"Товар {index}", 10000) for index in range(5))
+        items = tuple(ExpenseItem("Продукты", f"Товар {index}", 10000) for index in range(8))
         receipt = ExpensePurchase(date(2026, 11, 24), ExpenseSource.TEXT, items)
         self.enterContext(patch("compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=receipt))
         ready = Event()

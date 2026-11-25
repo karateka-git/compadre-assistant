@@ -22,12 +22,12 @@ from compadre_assistant.core.presentation.incoming.ports import (
 )
 from compadre_assistant.core.presentation.message_content import text_content
 from .expense_browser import ExpenseBrowser
-from .expense_receipt import item_details, money as _money, receipt_header
+from .expense_receipt import item_details, money as _money, receipt_header, receipt_pages
 
 
 EXPENSES = "/family_expenses"  # Один вход и адресные действия раздела.
 _TTL = 600  # Десять минут после показа редакции.
-_PAGE = 4  # Читаемая страница черновика на телефоне.
+_PAGE = 4  # Страница выбора с отдельной кнопкой для каждого варианта.
 _MONTH_PROMPT = "Введи месяц и год цифрами, например 11.2026."
 
 
@@ -69,6 +69,7 @@ class _Session:
     token: str
     address: ReplyAddress
     review_page: int = 0
+    review_page_count: int = 1
     draft: _Draft | None = None
     deadline: float = 0
     request: str | None = None
@@ -303,18 +304,19 @@ class ExpenseEntry:
     def _button(session, label, verb, argument=""):
         return _action(label, f"{verb} {session.token} {session.draft.revision} {argument}".strip())
 
-    def _pages(self, session, page, verb):
-        count = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+    def _page_buttons(self, session, page, count, verb):
         if not 0 <= page < count:
             raise ValueError
         actions = []
         for target, label in ((page - 1, "← Ранее"), (page + 1, "Далее →")):
             if 0 <= target < count:
                 actions.append(replace(self._button(session, label, verb, str(target)), row=0))
-        return session.purchase.items[page*_PAGE:(page+1)*_PAGE], actions, count
+        return actions
 
     def _positions(self, session, page):
-        items, nav, pages = self._pages(session, page, "positions")
+        pages = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+        nav = self._page_buttons(session, page, pages, "positions")
+        items = session.purchase.items[page * _PAGE:(page + 1) * _PAGE]
         actions = [self._button(session, f"{i + 1}. {(item.product or 'Без детализации')[:24]}", "row", str(i))
                    for i, item in enumerate(items, page * _PAGE)]
         # В VK зарезервированы ряды для раздела навигации и возврата.
@@ -331,26 +333,30 @@ class ExpenseEntry:
 
     def _review(self, session, page=0):
         purchase = session.purchase
-        items, nav, pages = self._pages(session, page, "view")
-        session.review_page = page
-        lines = receipt_header(purchase.description or "Расход", purchase.purchase_date,
+        header = receipt_header(purchase.description or "Расход", purchase.purchase_date,
                                sum(item.amount for item in purchase.items), purchase.receipt_total, "К оплате")
-        for i, item in enumerate(items, page*_PAGE+1):
-            lines.extend(("", f"{i}. {item.product or 'Без детализации'} — {_money(item.amount)}"))
-            lines.extend(item_details(item, show_category=True))
-        if pages > 1:
-            lines.append(f"Страница {page+1} из {pages}")
+        rows = []
+        for i, item in enumerate(purchase.items, 1):
+            title = f"{i}. {item.product or 'Без детализации'} — {_money(item.amount)}"
+            rows.append((None, "\n".join(("", title, *item_details(item, show_category=True)))))
+        pages = receipt_pages(header, rows)
+        nav = self._page_buttons(session, page, len(pages), "view")
+        session.review_page = page
+        session.review_page_count = len(pages)
+        text = pages[page]
+        if len(pages) > 1:
+            text += f"\nСтраница {page + 1} из {len(pages)}"
         actions = self._review_actions(session)
         if session.address.channel != "vk":
             actions = (*nav, *actions)
-        return _reply("\n".join(lines), *actions)
+        return _reply(text, *actions)
 
     def _review_actions(self, session):
         actions = (self._button(session, "Сохранить", "save"), self._button(session, "Исправить", "edit"),
                    self._button(session, "Отменить", "cancel"))
         if session.address.channel != "vk":
             return actions
-        pages = (len(session.purchase.items) + _PAGE - 1) // _PAGE
+        pages = session.review_page_count
         if pages > 1:
             # Одинаковая пара подписей листает по кругу без повторной публикации нижней клавиатуры.
             previous = (session.review_page - 1) % pages

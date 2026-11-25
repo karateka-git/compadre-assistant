@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 from ..domain.expense_reports import ExpensePeriod, ProductSelection, ReportPage
 from ..domain.expenses import ExpenseAccess, ExpenseRepository
 from .expense_chart import render_chart
-from .expense_receipt import day_label, item_details, money, receipt_header
+from .expense_receipt import day_label, item_details, money, receipt_header, receipt_pages
 from compadre_assistant.core.presentation.incoming.ports import ReplyAction, IncomingResponse
 from compadre_assistant.core.presentation.message_content import text_content
 
@@ -88,8 +88,7 @@ class ExpenseBrowser:
             cmd = f"/family_expenses browse {token} {self.revision} {index}"
             actions.append(ReplyAction(label[:40], cmd, row=row))
 
-        def pages(count: int, row: int) -> str:
-            last = max(1, (count + self.size - 1) // self.size)
+        def pages(last: int, row: int) -> str:
             for delta, label in ((-1, "← Ранее"), (1, "Далее →")):
                 page = screen.page + delta
                 if 0 <= page < last:
@@ -154,18 +153,19 @@ class ExpenseBrowser:
                     if item.category is not None:
                         groups.setdefault(item.category, []).append(item)
                 totals = {name: sum(item.amount for item in items) for name, items in groups.items()}
-                lines = receipt_header(card.description or "Покупка", card.purchase_date,
-                                       sum(totals.values()), card.receipt_total, "Всего")
-                grouped = [item for items in groups.values() for item in items]
-                category = None
-                for item in grouped[start:start + self.size]:
-                    if category != item.category:
-                        category = item.category
-                        lines.extend(("", f"{category} — {money(totals[category])}"))
-                    lines.append(f"  {item.product or 'Без детализации'} — {money(item.amount)}")
-                    lines.extend(f"  {detail}" for detail in item_details(item, show_category=False))
-                if len(grouped) > self.size:
-                    lines.extend(("", pages(len(grouped), 0)))
+                header = receipt_header(card.description or "Покупка", card.purchase_date,
+                                        sum(totals.values()), card.receipt_total, "Всего")
+                rows = []
+                for category, items in groups.items():
+                    group = f"{category} — {money(totals[category])}"
+                    for item in items:
+                        body = [f"  {item.product or 'Без детализации'} — {money(item.amount)}"]
+                        body.extend(f"  {detail}" for detail in item_details(item, show_category=False))
+                        rows.append((group, "\n".join(body)))
+                card_pages = receipt_pages(header, rows)
+                lines = [card_pages[screen.page]]
+                if len(card_pages) > 1:
+                    lines.extend(("", pages(len(card_pages), 0)))
             button("Назад", ReportScreen("back"), int(bool(actions)))
         else:
             total_label = "Всего"
@@ -207,6 +207,6 @@ class ExpenseBrowser:
                 lines.extend(("", empty))
             nav = len(actions)
             if results.count > self.size:
-                lines.extend(("", pages(results.count, nav)))
+                lines.extend(("", pages((results.count + self.size - 1) // self.size, nav)))
             button("Назад", ReportScreen("back"), nav + int(len(actions) > nav))
         return IncomingResponse(text_content("\n".join(lines)), suggested_actions=tuple(actions))

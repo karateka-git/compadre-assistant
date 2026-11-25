@@ -62,6 +62,7 @@ class FamilyChannelsTest(unittest.TestCase):
         from compadre_assistant.core.presentation.incoming.events import ImageAttachment
 
         items = tuple(ExpenseItem("Продукты", f"Товар {i}", 10000) for i in range(6))
+        items += (ExpenseItem("Подарки", "Открытка", 0), ExpenseItem("Подарки", "Наклейка", 0))
         proposed = ExpensePurchase(date(2026, 11, 23), ExpenseSource.PHOTO, items, "Лента", 68900)
         with self._runtime("family") as processor, patch(
             "compadre_assistant.bootstrap.ReceiptRecognizer.recognize", return_value=proposed,
@@ -79,11 +80,14 @@ class FamilyChannelsTest(unittest.TestCase):
                     ack.after_delivery(True)
                     review = replies.get(timeout=5).response
                     self.assertIn("689 ₽", response_text(review))
+                    self.assertIn("7. Открытка", response_text(review))
+                    self.assertNotIn("8. Наклейка", response_text(review))
                     self.assertIsNone(review.view_delivery.target_message_id)
                     page_two = self._choose(processor, identity, review, "Далее →")
                     original_id = str(self._message_id)
                     self.assertEqual(page_two.view_delivery.target_message_id, original_id)
                     self.assertIn("Страница 2 из 2", response_text(page_two))
+                    self.assertIn("8. Наклейка", response_text(page_two))
                     review = self._choose(processor, identity, page_two, "← Ранее")
                     self.assertEqual(review.view_delivery.target_message_id, original_id)
                     self.assertIn("Страница 1 из 2", response_text(review))
@@ -273,7 +277,9 @@ class FamilyChannelsTest(unittest.TestCase):
                 card = choose(who, history, "1. 23.11 Лента · 190 ₽")
                 self.assertIn("Корм", response_text(card))
                 self.assertIn("Всего 689 ₽", response_text(card))
+                self.assertEqual(response_text(card).count("\n  "), 7)
                 last_page = choose(who, card, "Далее →")
+                self.assertEqual(response_text(last_page).count("\n  "), 4)
                 card = choose(who, last_page, "← Ранее")
                 self.assertEqual(response_text(choose(who, card, "Назад")), response_text(history))
             home = self._send(processor, self.guest, "/family_expenses")
@@ -283,6 +289,29 @@ class FamilyChannelsTest(unittest.TestCase):
             self._send(processor, self.guest, "Europe/Moscow")
             home = self._send(processor, self.owner_tg, "/family_expenses")
             self.assertIn("Europe/Moscow", response_text(choose(self.owner_tg, home, "Часовой пояс")))
+
+    def test_long_receipt_rows_fit_channel_messages(self) -> None:
+        """Длинные строки переходят целиком с заголовком группы; обе версии помещаются в канал."""
+        from compadre_assistant.capabilities.family.presentation.expense_receipt import receipt_pages
+        from compadre_assistant.core.presentation.message_content import text_content
+        from compadre_assistant.presentation.telegram.rendering import render_telegram_content
+        from compadre_assistant.presentation.vk.rendering import render_vk_content
+
+        header = ["Магазин", "Всего 7 ₽"]
+        products = [f"{i}. " + "Чай <&>🍋" * 30 + " — 1 ₽" for i in range(1, 8)]
+        for group in (None, "Продукты — 7 ₽"):
+            with self.subTest(group=group):
+                pages = receipt_pages(header, ((group, product) for product in products))
+                self.assertGreater(len(pages), 1)
+                visible = []
+                for number, page in enumerate(pages, 1):
+                    if group:
+                        self.assertIn(group, page)
+                    visible.extend(line for line in page.splitlines() if line in products)
+                    content = text_content(f"{page}\nСтраница {number} из {len(pages)}")
+                    self.assertEqual(len(render_telegram_content(content)), 1)
+                    self.assertEqual(len(render_vk_content(content)), 1)
+                self.assertEqual(visible, products)
 
     def test_receipt_layout_preserves_order_in_draft_and_groups_saved_items(self) -> None:
         """Два канала показывают оплаченную сумму, фасовку, вес и подтверждённую скидку."""
@@ -336,19 +365,19 @@ class FamilyChannelsTest(unittest.TestCase):
 
         repo, access = Mock(), Mock()
         items = (ExpenseItem("Продукты", "Хлеб", 100), ExpenseItem("Дом", "Мыло", 50),
-                 *(ExpenseItem("Продукты", f"Товар {i}", 100) for i in range(5)))
+                 *(ExpenseItem("Продукты", f"Товар {i}", 100) for i in range(7)))
         for channel in ("telegram", "vk"):
             browser = ExpenseBrowser.open("Asia/Omsk", channel)
             for difference in (-17, 17):
                 card = ExpenseCard(1, 1, date(2026, 11, 23), ExpenseSource.TEXT,
-                                   items + (ExpenseItem(None, None, difference),), "Магнит", 650 + difference)
+                                   items + (ExpenseItem(None, None, difference),), "Магнит", 850 + difference)
                 repo.card.return_value = card
                 messages = []
                 for page in range(2):
                     browser.navigate(ReportScreen("card", purchase=1, page=page))
                     text = response_text(browser.render(repo, access, "token", can_resume=False))
-                    self.assertIn("Продукты — 6 ₽", text)
-                    self.assertIn("По позициям — 6,50 ₽", text)
+                    self.assertIn("Продукты — 8 ₽", text)
+                    self.assertIn("По позициям — 8,50 ₽", text)
                     self.assertIn("Без детализации — " + ("−" if difference < 0 else "") + "0,17 ₽", text)
                     self.assertEqual(text.count("Без детализации"), 1)
                     messages.append(text)

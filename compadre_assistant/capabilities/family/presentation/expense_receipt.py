@@ -1,13 +1,17 @@
 """Форматирование сумм, заголовка и пояснений к строке семейного чека."""
 
+from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+from html import escape
 
 from ..domain.expenses import ExpenseItem
 
 
 _MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня",
            "июля", "августа", "сентября", "октября", "ноября", "декабря")
+_ITEMS_PER_PAGE = 7  # Верхняя граница при просмотре чека.
+_PAGE_TEXT_LIMIT = 3400  # Запас под номер страницы до порога VK в 3500 единиц UTF-16.
 
 
 def day_label(day: date) -> str:
@@ -31,6 +35,33 @@ def receipt_header(title: str, day: date, subtotal: int, total: int | None, labe
         lines.extend((f"По позициям — {money(subtotal)}", f"Без детализации — {money(total - subtotal)}",
                       f"Итог чека — {money(total)}"))
     return lines
+
+
+def receipt_pages(header: list[str], rows: Iterable[tuple[str | None, str]]) -> list[str]:
+    """Собирает страницы до семи позиций с запасом для номера страницы.
+
+    Каждая строка содержит необязательный заголовок категории и текст позиции.
+    Заголовок категории повторяется, если группа продолжается на новой странице.
+    """
+    heading = "\n".join(header)
+    pages = []
+    page = heading
+    previous_group = None
+    count = 0
+    for group, body in rows:
+        prefix = f"\n\n{group}" if group and group != previous_group else ""
+        candidate = f"{page}{prefix}\n{body}"
+        # Экранирование и UTF-16 учитывают фактическую длину разметки и эмодзи.
+        if count and (count >= _ITEMS_PER_PAGE or len(escape(candidate).encode("utf-16-le")) // 2 > _PAGE_TEXT_LIMIT):
+            pages.append(page)
+            prefix = f"\n\n{group}" if group else ""
+            candidate = f"{heading}{prefix}\n{body}"
+            count = 0
+        page = candidate
+        previous_group = group
+        count += 1
+    pages.append(page)
+    return pages
 
 
 def item_details(item: ExpenseItem, *, show_category: bool) -> list[str]:
