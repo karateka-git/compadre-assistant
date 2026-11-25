@@ -14,7 +14,7 @@ from threading import Barrier
 from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
 from compadre_assistant.capabilities.family.data.sqlite_family_repository import SQLiteFamilyRepository
 from compadre_assistant.capabilities.family.domain.expenses import (
-    ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
+    ExpenseAccess, ExpenseCategoryUnavailable, ExpenseItem, ExpenseLineRef, ExpensePurchase, ExpenseSource, InvalidExpense,
 )
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
 from compadre_assistant.capabilities.family.domain.expense_categories import InvalidCategory
@@ -25,6 +25,10 @@ from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR,
 
 _INITIAL_CATEGORIES = ["Продукты", "Кафе и доставка еды", "Транспорт", "Дом и быт", "Здоровье",
                        "Одежда", "Дети", "Питомцы", "Досуг", "Связь и подписки", "Прочее"]
+
+
+def _purchase_values(items):
+    return tuple(replace(item, category_id=None, saved_line=None) for item in items)
 
 
 class FamilyExpenseRepositoryTest(unittest.TestCase):
@@ -171,7 +175,7 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         """Карточка содержит вес, категорию без товара и единственную разницу."""
         key = self.repo.save(self.author, "a", 1, self.purchase)
         card = self.repo.card(self.owner, key)
-        self.assertEqual(card.items, (*self.purchase.items, ExpenseItem(None, None, -500)))
+        self.assertEqual(_purchase_values(card.items), (*self.purchase.items, ExpenseItem(None, None, -500)))
         self.assertEqual((card.purchase_date, card.source, card.receipt_total, card.author_id, card.description),
                          (self.purchase.purchase_date, ExpenseSource.PHOTO, 17000, 2, "Лента"))
         self.assertIsNone(self.repo.card(self.other, key))
@@ -179,7 +183,8 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
             replace(self.purchase.items[0], category="продукты", product="ЯБЛОКИ"), self.purchase.items[1],
         ))
         key2 = self.repo.save(self.author, "b", 1, second)
-        self.assertEqual(self.repo.card(self.author, key2).items, (*self.purchase.items, ExpenseItem(None, None, 500)))
+        self.assertEqual(_purchase_values(self.repo.card(self.author, key2).items),
+                         (*self.purchase.items, ExpenseItem(None, None, 500)))
         with self.db:
             self.db.execute("UPDATE family_expenses SET source='future' WHERE id=?", (key,))
         self.assertEqual(self.repo.card(self.owner, key).source, ExpenseSource.UNKNOWN)
@@ -189,7 +194,7 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         items = tuple(ExpenseItem("Продукты", "Печенье", 7199, package_size=size) for size in ("224 г", "400 г"))
         purchase = replace(self.purchase, items=items, receipt_total=None)
         key = self.repo.save(self.author, "pack", 1, purchase)
-        self.assertEqual(self.repo.card(self.owner, key).items, items)
+        self.assertEqual(_purchase_values(self.repo.card(self.owner, key).items), items)
         products = self.repo.search(self.owner, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)), "Печенье", 0, 4)
         self.assertEqual([(p.name, p.amount) for p in products.rows], [("Печенье", 14398)])
 
@@ -229,8 +234,65 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         self.db.execute("DROP TRIGGER fail_second")
         for total in (None, 17500):
             key = self.repo.save(self.author, str(total), 1, replace(self.purchase, receipt_total=total))
-            self.assertEqual(self.repo.card(self.owner, key).items, self.purchase.items)
+            self.assertEqual(_purchase_values(self.repo.card(self.owner, key).items), self.purchase.items)
         self.assertIsNotNone(self.repo.save(self.author, "a", 1, self.purchase))
+
+    def test_reclassify_only_one_original_position_and_reject_stale_or_foreign_changes(self) -> None:
+        """Переносит позицию без товара, различает разницу чека и защищает от устаревшей редакции."""
+        key = self.repo.save(self.author, "one", 1, self.purchase)
+        own = {c.name: c for c in self.repo.categories(self.owner)}
+        before = self.repo.card(self.author, key)
+        first, line, adjustment = before.items
+        self.assertEqual(line.saved_line, ExpenseLineRef(key, 2, 1))
+        self.assertIsNone(line.product)
+        self.assertIsNone(adjustment.saved_line)
+        self.repo.set_item_category(self.owner, line.saved_line, own["Дом и быт"].id)
+        self.repo.set_item_category(self.author, line.saved_line, own["Дом и быт"].id)
+        updated = self.repo.card(self.author, key)
+        self.assertEqual(updated.items[0], first)
+        self.assertEqual(updated.items[2], adjustment)
+        self.assertEqual(updated.receipt_total, before.receipt_total)
+        self.assertEqual((updated.items[1].amount, updated.items[1].category), (10000, "Дом и быт"))
+        with self.assertRaises(InvalidCategory):
+            self.repo.set_item_category(self.author, line.saved_line, own["Прочее"].id)
+        fresh = updated.items[1].saved_line
+        foreign = self.repo.categories(self.other)[0]
+        self.repo.set_category_hidden(self.owner, own["Транспорт"], True)
+        for actor, ref, category in ((self.other, fresh, foreign.id), (self.author, fresh, foreign.id),
+                                     (self.owner, fresh, own["Транспорт"].id),
+                                     (self.owner, ExpenseLineRef(key, 3, 1), own["Прочее"].id)):
+            with self.assertRaises(InvalidCategory):
+                self.repo.set_item_category(actor, ref, category)
+        self.assertEqual(self.repo.card(self.author, key), updated)
+        self.repo.set_item_category(self.owner, fresh, own["Питомцы"].id)
+        with self.assertRaises(InvalidCategory):
+            self.repo.set_item_category(self.owner, line.saved_line, own["Прочее"].id)
+        self.members.leave(2, self.author.family_id, actor_joined_at=self.author.joined_at)
+        with self.assertRaises(FamilyAccessEnded):
+            self.repo.set_item_category(self.author, fresh, own["Прочее"].id)
+
+    def test_concurrent_reclassification_accepts_one_of_two_new_categories(self) -> None:
+        """Независимые соединения изменяют одну исходную редакцию ровно один раз."""
+        key = self.repo.save(self.author, "one", 1, self.purchase)
+        ref = self.repo.card(self.author, key).items[0].saved_line
+        targets = [c for c in self.repo.categories(self.owner) if c.name in ("Питомцы", "Прочее")]
+        barrier = Barrier(2)
+
+        def transfer(category):
+            with connect_database(self.path) as db:
+                barrier.wait(timeout=5)
+                try:
+                    SQLiteExpenseRepository(db).set_item_category(self.owner, ref, category.id)
+                except InvalidCategory:
+                    return None
+                return category.id
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(transfer, targets))
+        self.assertEqual(results.count(None), 1)
+        current = self.repo.card(self.author, key).items[0]
+        self.assertIn(current.category_id, results)
+        self.assertEqual(current.saved_line.revision, ref.revision + 1)
 
     def test_report_drilldown_counts_each_item_once_and_scopes_each_query(self) -> None:
         """Сводка, поиск и страницы сохраняют знаки, даты, владельца и границы периода."""

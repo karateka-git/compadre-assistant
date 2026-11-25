@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from typing import Iterator
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ..domain.expenses import ExpenseAccess, ExpenseCard, ExpenseCategoryUnavailable, ExpensePurchase, ExpenseRepository, InvalidExpense
+from ..domain.expenses import (
+    ExpenseAccess, ExpenseCard, ExpenseCategoryUnavailable, ExpenseLineRef, ExpensePurchase, ExpenseRepository, InvalidExpense,
+)
 from ..domain.expense_categories import ExpenseCategory, InvalidCategory, StaleCategory, category_name
 from ..domain.membership import FamilyAccessEnded
 from .expense_dtos import ExpenseCardDto, ExpenseCategoryDto, ExpenseItemDto
@@ -214,7 +216,8 @@ class SQLiteExpenseRepository(ExpenseRepository):
             if row is None:
                 return None
             lines = self._db.execute(
-                """SELECT c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price,
+                """SELECT i.expense_id, i.position, i.category_revision, i.category_id,
+                          c.name AS category, p.name AS product, i.amount, i.quantity, i.unit, i.unit_price,
                           i.package_size, i.amount_before_discount
                    FROM family_expense_items i
                    LEFT JOIN family_expense_categories c ON i.category_id = c.id AND i.family_id = c.family_id
@@ -222,3 +225,27 @@ class SQLiteExpenseRepository(ExpenseRepository):
                    WHERE i.family_id = ? AND i.expense_id = ? ORDER BY i.position""", (access.family_id, expense_id),
             )
             return ExpenseCardDto(**row).to_domain(tuple(ExpenseItemDto(**line).to_domain() for line in lines))
+
+    def set_item_category(self, access: ExpenseAccess, line: ExpenseLineRef, category_id: int) -> None:
+        """Переносит одну позицию под блокировкой записи без изменения финансовых полей.
+
+        Raises:
+            InvalidCategory: Выбранная категория скрыта или принадлежит другой семье.
+            StaleCategory: Строка недоступна или успела измениться.
+            FamilyAccessEnded: Пользователь утратил исходное членство.
+        """
+        with self._access(access, write=True):
+            active = self._db.execute("SELECT 1 FROM family_expense_categories WHERE family_id=? AND id=? AND hidden=0",
+                                      (access.family_id, category_id)).fetchone()
+            if active is None:
+                raise InvalidCategory("Категория недоступна. Выбери другую.")
+            key = (access.family_id, line.purchase_id, line.position)
+            row = self._db.execute("SELECT category_id, category_revision FROM family_expense_items "
+                                   "WHERE family_id=? AND expense_id=? AND position=? AND category_id IS NOT NULL",
+                                   key).fetchone()
+            if row and row["category_id"] == category_id and row["category_revision"] in (line.revision, line.revision + 1):
+                return
+            if row is None or row["category_revision"] != line.revision:
+                raise StaleCategory("Позиция уже изменилась. Проверь чек и выбери её заново.")
+            self._db.execute("UPDATE family_expense_items SET category_id=?, category_revision=category_revision+1 "
+                             "WHERE family_id=? AND expense_id=? AND position=?", (category_id, *key))

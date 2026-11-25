@@ -477,6 +477,61 @@ class FamilyChannelsTest(unittest.TestCase):
                     self.assertLess(text.index("Бедро куриное"), text.index("Дом и быт"))
                     self.assertNotIn("Страница", text)
 
+    def test_reclassify_saved_receipt_from_last_product_history_page(self) -> None:
+        """Оба канала переносят одну строку и возвращаются на существующую страницу отчёта."""
+        from datetime import date
+        from compadre_assistant.capabilities.family.data.sqlite_expenses import SQLiteExpenseRepository
+        from compadre_assistant.capabilities.family.domain.expenses import ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseSource
+        from compadre_assistant.capabilities.family.domain.expense_reports import ExpensePeriod
+
+        with self._runtime("family") as processor:
+            self._joined_family(processor)
+            with connect_database(self.database_path) as db:
+                member = db.execute("SELECT * FROM family_members ORDER BY app_user_id LIMIT 1").fetchone()
+                access = ExpenseAccess(member["family_id"], member["app_user_id"], datetime.fromisoformat(member["joined_at"]))
+                repo = SQLiteExpenseRepository(db)
+                for number in range(6):
+                    repo.save(access, str(number), 1, ExpensePurchase(date(2026, 11, 23), ExpenseSource.MANUAL,
+                              (ExpenseItem("Продукты", "Соль", 100), ExpenseItem("Дом и быт", "Наполнитель", 44000)),
+                              f"Магазин {number}", 44110))
+            for index, who in enumerate((self.owner_tg, self.guest), 1):
+                def choose(screen, label):
+                    return self._choose(processor, who, screen, label)
+                home = self._send(processor, who, "/family_expenses")
+                choose(choose(home, "Выбрать период"), "Другой месяц")
+                home = self._send(processor, who, "11.2026")
+                groups = choose(home, "По категориям")
+                products = choose(groups, next(a.label for a in groups.suggested_actions if ". Дом и быт" in a.label))
+                history = choose(products, next(a.label for a in products.suggested_actions if ". Наполнитель" in a.label))
+                last = choose(history, "Далее →")
+                card = choose(last, next(a.label for a in last.suggested_actions if "Магазин" in a.label))
+                positions = choose(card, "Изменить категорию")
+                self.assertFalse(any("Без детализации" in a.label for a in positions.suggested_actions))
+                categories = choose(positions, "2. Наполнитель")
+                more = choose(categories, "Далее →")
+                card = choose(more, next(a.label for a in more.suggested_actions if ". Питомцы" in a.label))
+                self.assertIn("Питомцы — 440 ₽", response_text(card))
+                self.assertIn("Без детализации — 0,10 ₽", response_text(card))
+                returned = choose(card, "Назад")
+                self.assertNotIn("Страница", response_text(returned))
+                self.assertIn(f"По этой позиции {(6 - index) * 440} ₽", response_text(returned))
+                with connect_database(self.database_path) as db:
+                    repo = SQLiteExpenseRepository(db)
+                    report = repo.summary(access, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)))
+                    self.assertEqual(report.total, 6 * 44110)
+                    self.assertEqual(next(c.amount for c in report.categories if c.name == "Питомцы"), index * 44000)
+                    if index == 2:
+                        source = next(c for c in repo.categories(access) if c.name == "Дом и быт")
+                        repo.rename_category(access, source, "Дом")
+                products = choose(returned, "Назад")
+                if index == 2:
+                    self.assertIn("Дом · ноябрь 2026", response_text(products))
+                groups = choose(products, "Назад")
+                home = choose(groups, "Назад")
+                chart = choose(home, "Диаграмма")
+                self.assertIn(f"Питомцы — {index * 440} ₽", response_text(chart))
+                self.assertTrue(chart.png_image.startswith(b"\x89PNG"))
+
     def test_category_continues_on_next_page_and_signed_difference_stays_in_header(self) -> None:
         """Разница и полный итог категории сохраняются на обеих страницах чека."""
         from datetime import date

@@ -227,6 +227,17 @@ class ExpenseEntry:
                               else "Введи часовой пояс IANA, например Asia/Omsk.")
                     return self._ask(context, event, session, target.kind, prompt)
                 with self._repository() as repo:
+                    if target.kind == "apply_saved_category":
+                        try:
+                            repo.set_item_category(access, target.line, target.selected_category.id)
+                            notice = "Категория позиции сохранена."
+                        except StaleCategory as error:
+                            notice = str(error)
+                        except InvalidCategory as error:
+                            return session.screen(self._report(session, repo, str(error)), update=True)
+                        browser.navigate(ReportScreen("back"))
+                        browser.navigate(ReportScreen("back"))
+                        return session.screen(self._report(session, repo, notice), update=True)
                     if target.kind == "toggle_category":
                         category = target.selected_category
                         try:

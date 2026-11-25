@@ -43,6 +43,15 @@ class ExpenseAccess:
 
 
 @dataclass(frozen=True, slots=True)
+class ExpenseLineRef:
+    """Адрес и ожидаемая редакция строки сохранённой покупки."""
+
+    purchase_id: int
+    position: int
+    revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class ExpenseItem:
     """Оплаченная позиция в копейках или разница до итога без категории."""
 
@@ -55,6 +64,7 @@ class ExpenseItem:
     package_size: str | None = None
     amount_before_discount: int | None = None
     category_id: int | None = None  # Выбранная категория сохраняет привязку при переименовании.
+    saved_line: ExpenseLineRef | None = None  # Адрес появляется у редактируемой позиции после сохранения.
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +165,10 @@ class ExpenseRepository(Protocol):
 
     def card(self, access: ExpenseAccess, expense_id: int) -> ExpenseCard | None:
         """Возвращает карточку своей семьи или None для отсутствующей покупки."""
+        ...
+
+    def set_item_category(self, access: ExpenseAccess, line: ExpenseLineRef, category_id: int) -> None:
+        """Меняет категорию строки текущей редакции на активную категорию той же семьи."""
         ...
 
     def timezone(self, access: ExpenseAccess) -> str:
