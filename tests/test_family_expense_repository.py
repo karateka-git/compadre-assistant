@@ -1,6 +1,7 @@
 """Контроль записи покупок и настроек семьи на временной SQLite."""
 
 import sqlite3
+import shutil
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -16,9 +17,11 @@ from compadre_assistant.capabilities.family.domain.expenses import (
     ExpenseAccess, ExpenseItem, ExpensePurchase, ExpenseSource, InvalidExpense,
 )
 from compadre_assistant.capabilities.family.domain.membership import FamilyAccessEnded
+from compadre_assistant.capabilities.family.domain.expense_categories import InvalidCategory
+from compadre_assistant.capabilities.family.domain.recognition import CATEGORIES
 from compadre_assistant.capabilities.family.domain.expense_reports import ExpensePeriod, ProductSelection
 from compadre_assistant.core.data.sqlite.connection import connect_database
-from compadre_assistant.core.data.sqlite.migration_runner import apply_migrations
+from compadre_assistant.core.data.sqlite.migration_runner import MIGRATIONS_DIR, apply_migrations
 
 
 class FamilyExpenseRepositoryTest(unittest.TestCase):
@@ -46,6 +49,100 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
                         amount_before_discount=8000),
             ExpenseItem("Питомцы", None, 10000),
         ), "Лента", 17000)
+
+    def test_upgrade_category_catalog_preserves_custom_names_keys_and_history(self) -> None:
+        """Добавляет отсутствующие стартовые категории прежней семье без замены ссылок в чеке."""
+        previous = self.path.parent / "old-sql"
+        previous.mkdir()
+        for migration in MIGRATIONS_DIR.glob("*.sql"):
+            if migration.name[:4] <= "0012":
+                shutil.copyfile(migration, previous / migration.name)
+        with connect_database(self.path.parent / "old.db") as db:
+            apply_migrations(db, previous)
+            with db:
+                db.execute("INSERT INTO app_users (id) VALUES (1)")
+            now = datetime.now(UTC)
+            family = SQLiteFamilyRepository(db).create(1, "Дом", now)
+            access = ExpenseAccess(family.id, 1, now)
+            with db:
+                db.executemany("INSERT INTO family_expense_categories (id, family_id, name, name_key) "
+                               "VALUES (?, ?, ?, ?)", [(21, family.id, "продукты", "продукты"),
+                               (22, family.id, "Без детализации", "без детализации")])
+                db.execute("INSERT INTO family_expenses (id,family_id,author_id,operation_id,revision,purchase_date,"
+                           "created_at,source,receipt_total) VALUES (1,?,1,'legacy',1,'2026-11-23',?,'manual',99)",
+                           (family.id, now.isoformat()))
+                db.executemany("INSERT INTO family_expense_items (family_id,expense_id,position,category_id,amount) "
+                               "VALUES (?,1,?,?,?)", [(family.id, 1, 22, 100), (family.id, 2, None, -1)])
+            apply_migrations(db)
+            repo = SQLiteExpenseRepository(db)
+            migrated = {category.name: category.id for category in repo.categories(access)}
+            self.assertEqual((len(migrated), migrated["продукты"], migrated["Без детализации"]), (12, 21, 22))
+            summary = repo.summary(access, ExpensePeriod(date(2026, 11, 1), date(2026, 12, 1)))
+            self.assertEqual([(row.id, row.amount) for row in summary.categories], [(22, 100), (None, -1)])
+            self.assertEqual(apply_migrations(db), [])
+
+    def test_category_lifecycle_is_shared_and_preserves_history(self) -> None:
+        """Член семьи управляет каталогом, не меняя ID, сумму или каталог другой семьи."""
+        base = self.repo.categories(self.owner)
+        self.assertEqual([c.name for c in base], list(CATEGORIES))
+        added = self.repo.create_category(self.author, " Для   кота ")
+        self.assertEqual(self.repo.create_category(self.owner, "для КОТА"), added)
+        self.assertNotIn(added, self.repo.categories(self.other))
+        purchase_id = self.repo.save(self.owner, "food", 1, self.purchase)
+        changed = self.repo.rename_category(self.author, base[0], "Еда")
+        self.assertEqual(self.repo.card(self.owner, purchase_id).items[0].category, "Еда")
+        self.assertEqual(changed.id, base[0].id)
+        hidden = self.repo.set_category_hidden(self.owner, changed, True)
+        self.assertEqual(self.repo.categories(self.author, hidden=True), (hidden,))
+        self.assertNotIn(hidden, self.repo.categories(self.author))
+        self.assertNotIn("Продукты", [c.name for c in self.repo.categories(self.author)])
+        for operation in (lambda: self.repo.create_category(self.author, "еда"),
+                          lambda: self.repo.rename_category(self.author, added, "еда"),
+                          lambda: self.repo.rename_category(self.author, base[0], "Устарело"),
+                          lambda: self.repo.set_category_hidden(self.other, hidden, False),
+                          lambda: self.repo.rename_category(self.other, hidden, "Чужая")):
+            with self.assertRaises(InvalidCategory):
+                operation()
+        self.assertEqual(self.repo.categories(self.owner, hidden=True), (hidden,))
+        restored = self.repo.set_category_hidden(self.author, hidden, False)
+        self.assertEqual((restored.id, restored.name, restored.hidden), (base[0].id, "Еда", False))
+        self.assertEqual([c.name for c in self.repo.categories(self.other)], list(CATEGORIES))
+
+    def test_category_protection_and_membership(self) -> None:
+        """Отклоняет зарезервированные названия, утрату доступа и подмену запасной категории."""
+        fallback = next(c for c in self.repo.categories(self.owner) if c.is_fallback)
+        for operation in (lambda: self.repo.create_category(self.owner, "без  ДЕТАЛИЗАЦИИ"),
+                          lambda: self.repo.create_category(self.owner, "  "),
+                          lambda: self.repo.rename_category(self.owner, replace(fallback, name="Чужая"), "Другая"),
+                          lambda: self.repo.set_category_hidden(self.owner, fallback, True)):
+            with self.assertRaises(InvalidCategory):
+                operation()
+        self.members.leave(2, self.author.family_id, actor_joined_at=self.author.joined_at)
+        for operation in (lambda: self.repo.categories(self.author),
+                          lambda: self.repo.create_category(self.author, "Еда"),
+                          lambda: self.repo.rename_category(self.author, fallback, "Новое"),
+                          lambda: self.repo.set_category_hidden(self.author, fallback, False)):
+            with self.assertRaises(FamilyAccessEnded):
+                operation()
+
+    def test_concurrent_category_edits_only_accept_one_revision(self) -> None:
+        """Два соединения создают одну категорию и принимают одну из конкурирующих правок."""
+        barrier = Barrier(2)
+
+        def edit(name):
+            with connect_database(self.path) as db:
+                repo = SQLiteExpenseRepository(db)
+                category = repo.create_category(self.author, "Для дома")
+                barrier.wait(timeout=5)
+                try:
+                    return repo.rename_category(self.author, category, name)
+                except InvalidCategory:
+                    return None
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            result = list(pool.map(edit, ["Ремонт", "Мебель"]))
+        self.assertEqual(result.count(None), 1)
+        self.assertEqual(len(self.repo.categories(self.owner)), 12)
 
     def test_card_shares_items_only_inside_family_and_preserves_date(self) -> None:
         """Карточка содержит вес, категорию без товара и единственную разницу."""
@@ -101,8 +198,10 @@ class FamilyExpenseRepositoryTest(unittest.TestCase):
         self.db.execute("CREATE TRIGGER fail_second BEFORE INSERT ON family_expense_items "
                         "WHEN NEW.position=2 BEGIN SELECT RAISE(ABORT,'test'); END")
         with self.assertRaises(sqlite3.IntegrityError):
-            self.repo.save(self.author, "a", 1, self.purchase)
-        for table in ("family_expenses", "family_expense_products", "family_expense_categories", "family_expense_items"):
+            custom = replace(self.purchase.items[0], category="Новая категория")
+            self.repo.save(self.author, "a", 1, replace(self.purchase, items=(custom, self.purchase.items[1])))
+        self.assertEqual([c.name for c in self.repo.categories(self.owner)], list(CATEGORIES))
+        for table in ("family_expenses", "family_expense_products", "family_expense_items"):
             self.assertEqual(self.db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
         self.db.execute("DROP TRIGGER fail_second")
         for total in (None, 17500):

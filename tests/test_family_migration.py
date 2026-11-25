@@ -104,12 +104,12 @@ class FamilyMigrationTest(unittest.TestCase):
             expense = db.execute("INSERT INTO family_expenses (family_id, operation_id, revision, purchase_date, "
                                  "created_at, source) VALUES (?, 'fixture', 1, '2026-11-23', 'now', 'photo')",
                                  (first,)).lastrowid
-            category = db.execute("INSERT INTO family_expense_categories(family_id, name, name_key) "
-                                  "VALUES (?, 'Транспорт', 'транспорт')", (second,)).lastrowid
+            category = db.execute("SELECT id FROM family_expense_categories WHERE family_id=? AND name_key='транспорт'",
+                                  (second,)).fetchone()[0]
             product = db.execute("INSERT INTO family_expense_products(family_id, name, name_key) "
                                  "VALUES (?, 'Такси', 'такси')", (second,)).lastrowid
-            own = db.execute("INSERT INTO family_expense_categories(family_id, name, name_key) "
-                             "VALUES (?, 'Транспорт', 'транспорт')", (first,)).lastrowid
+            own = db.execute("SELECT id FROM family_expense_categories WHERE family_id=? AND name_key='транспорт'",
+                             (first,)).fetchone()[0]
             insert = ("INSERT INTO family_expense_items(family_id, expense_id, position, amount, "
                       "category_id, product_id) VALUES (?, ?, ?, ?, ?, ?)")
             db.execute(insert, (first, expense, 1, -5900, None, None))

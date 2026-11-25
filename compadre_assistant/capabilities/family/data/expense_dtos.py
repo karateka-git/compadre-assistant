@@ -5,6 +5,21 @@ from datetime import date
 from decimal import Decimal
 
 from ..domain.expenses import ExpenseCard, ExpenseItem, ExpenseSource
+from ..domain.expense_categories import ExpenseCategory
+
+
+@dataclass(frozen=True)
+class ExpenseCategoryDto:
+    """Снимок категории и её редакции из SQLite."""
+
+    id: int
+    name: str
+    hidden: int
+    revision: int
+
+    def to_domain(self) -> ExpenseCategory:
+        """Преобразует состояние видимости в предметное значение."""
+        return ExpenseCategory(self.id, self.name, bool(self.hidden), self.revision)
 
 
 @dataclass(frozen=True)

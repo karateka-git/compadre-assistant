@@ -8,6 +8,7 @@ from typing import Protocol
 
 from .membership import FamilyError
 from .expense_reports import ExpensePeriod, ExpenseSummary, ProductSelection, ReportPage
+from .expense_categories import ExpenseCategory
 
 
 class ExpenseSource(StrEnum):
@@ -102,6 +103,22 @@ class ExpenseCard:
 
 class ExpenseRepository(Protocol):
     """Доступ к карточке, записи покупки и общему календарю семьи."""
+
+    def categories(self, access: ExpenseAccess, *, hidden: bool = False) -> tuple[ExpenseCategory, ...]:
+        """Возвращает активные либо скрытые категории указанной семьи."""
+        ...
+
+    def create_category(self, access: ExpenseAccess, name: str) -> ExpenseCategory:
+        """Создаёт категорию или возвращает активную категорию с тем же названием."""
+        ...
+
+    def rename_category(self, access: ExpenseAccess, category: ExpenseCategory, name: str) -> ExpenseCategory:
+        """Меняет название категории при совпадении редакции."""
+        ...
+
+    def set_category_hidden(self, access: ExpenseAccess, category: ExpenseCategory, hidden: bool) -> ExpenseCategory:
+        """Скрывает или возвращает категорию её текущей редакции."""
+        ...
 
     def summary(self, access: ExpenseAccess, period: ExpensePeriod) -> ExpenseSummary:
         """Читает все категории периода в порядке убывания суммы."""
